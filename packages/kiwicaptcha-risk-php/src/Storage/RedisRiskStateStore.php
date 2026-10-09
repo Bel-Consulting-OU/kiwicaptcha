@@ -435,7 +435,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         }
         // KEYS[2] is the event-id dedupe marker on the same slot; with
         // dedupe disabled the script never touches it. The marker is
-        // scoped to THIS mark (dimension + id), so a reused event id on
+        // scoped to this mark (dimension + id), so a reused event id on
         // another dimension can never suppress a different mark. The
         // event id itself must be a safe key component. The marker TTL
         // is the script's retry horizon (24 h), not the mark's long

@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.8-ai-agents",
+  "attackClass": "D3.8 AI agents",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T00:24:54Z",
+  "duration_s": 1,
+  "exit": 1,
+  "result": "FAIL",
+  "detail": "1 failed assertions",
+  "metrics": {
+    "raw": "",
+    "sha16_solve_us": null
+  },
+  "economic": ""
+}

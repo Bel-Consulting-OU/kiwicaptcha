@@ -1,6 +1,6 @@
 <?php
 
-declare(strict_types=1);
+declare (strict_types=1);
 
 namespace KiwiCaptcha\Risk\Storage;
 
@@ -9,7 +9,7 @@ namespace KiwiCaptcha\Risk\Storage;
  * (one per (principal, network-bucket) pair, SET NX) — mirror of the
  * Rust `PrincipalNetworkTagStore` trait.
  *
- * The record marks a network bucket as ESTABLISHED for the principal
+ * The record marks a network bucket as established for the principal
  * (written when the session credit is granted — a completed step-up from
  * that network), so a bare password check never vouches for the network
  * and a retried stuffed login stays novel until the victim really proves
@@ -27,7 +27,7 @@ interface PrincipalNetworkTagStoreInterface
      *
      * @throws RiskStoreException when the state backend fails
      */
-    public function principalNetworkSeen(string $principalId, string $network): ?bool;
+    public function principalNetworkSeen (string $principalId, string $network): ?bool;
 
     /**
      * Records the first-seen network tag for the (principal, network)
@@ -37,7 +37,7 @@ interface PrincipalNetworkTagStoreInterface
      *
      * @throws RiskStoreException when the state backend fails
      */
-    public function recordPrincipalNetworkTag(string $principalId, string $network): bool;
+    public function recordPrincipalNetworkTag (string $principalId, string $network): bool;
 
     /**
      * Whether the account carries ANY established network: the "no
@@ -47,5 +47,5 @@ interface PrincipalNetworkTagStoreInterface
      *
      * @throws RiskStoreException when the state backend fails
      */
-    public function principalHasTrustedNetwork(string $principalId): ?bool;
+    public function principalHasTrustedNetwork (string $principalId): ?bool;
 }

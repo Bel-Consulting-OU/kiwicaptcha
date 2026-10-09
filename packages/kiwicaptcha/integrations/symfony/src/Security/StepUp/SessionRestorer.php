@@ -45,7 +45,7 @@ final class SessionRestorer
             if ($token instanceof StepUpPendingToken) {
                 // The pending token's principal must be the one that
                 // completed the step-up: a stolen ticket for another
-                // account can never upgrade THIS session.
+                // account can never upgrade this session.
                 // The token carries the raw user identifier; the
                 // challenge carries the 32-hex principal pseudonym.
                 // Compare like with like or every restore fails.

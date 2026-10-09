@@ -548,7 +548,7 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     /**
      * The window key of an identity: the normalized target pseudonym
      * under the principal purpose. Both the success and the failure
-     * lanes key on THIS, so the login field and the user identifier
+     * lanes key on this, so the login field and the user identifier
      * never diverge into two windows.
      */
     private function principalWindowKey(string $raw): ?string

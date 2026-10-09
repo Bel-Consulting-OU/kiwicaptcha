@@ -347,4 +347,47 @@ final class BootstrapAdversarialTest extends TestCase
         self::assertStringContainsString('attestationObject', $combined);
         self::assertStringContainsString('authenticatorData', $combined);
     }
+
+    /**
+     * Full-chain (finding 5): the bootstrap flag decodes STRICTLY.
+     * Exactly the integer 0 or 1; a stringly-typed "1", "1abc" or
+     * true is malformed and refused like every other field.
+     */
+    public function testTheBootstrapFlagDecodesStrictly(): void
+    {
+        $base = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::WebAuthn,
+            'aabbccddeeff00112233445566778899',
+            null,
+            'login',
+            null,
+            'enroll',
+            1700000000,
+            300,
+            5,
+            'hash',
+            'creation',
+            'sess-00000000000000000000000001',
+            false,
+            true,
+        )->toArray();
+        // The integer 1 is accepted.
+        self::assertTrue(StepUpChallenge::fromArray($base)->bootstrapAuthorized);
+        // The integer 0 is accepted and false.
+        $off = $base;
+        $off['bootstrap'] = 0;
+        self::assertFalse(StepUpChallenge::fromArray($off)->bootstrapAuthorized);
+        // Stringly-typed and boolean forms are malformed.
+        foreach (['1', '1abc', true, 'true', 2, -1, null] as $bad) {
+            $wire = $base;
+            $wire['bootstrap'] = $bad;
+            try {
+                StepUpChallenge::fromArray($wire);
+                self::fail('bootstrap=' . var_export($bad, true) . ' must be refused');
+            } catch (\BelConsulting\KiwiCaptchaBundle\Security\StepUp\MalformedStepUpChallengeException $e) {
+                self::assertStringContainsString('bootstrap', $e->getMessage());
+            }
+        }
+    }
 }

@@ -1140,7 +1140,7 @@ impl RedisRiskStateStore {
             // this path, never written beyond the marker slot).
             invocation.key(key.as_str());
         } else {
-            // The marker is scoped to THIS mark (dimension + id), so a
+            // The marker is scoped to this mark (dimension + id), so a
             // reused event id on another dimension can never suppress a
             // different mark (cross-dimension transplant / suppression).
             // The event id itself must be a safe key component: it is

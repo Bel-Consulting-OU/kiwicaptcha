@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.17-cross-sdk-parity",
+  "attackClass": "D3.17 cross-SDK parity attack",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T00:37:59Z",
+  "duration_s": 10,
+  "exit": 1,
+  "result": "FAIL",
+  "detail": "3 failed assertions",
+  "metrics": {
+    "raw": "sdks=7 adversarial_vectors=2",
+    "sha16_solve_us": null
+  },
+  "economic": "weakest_link=none rejection_divergences=0"
+}

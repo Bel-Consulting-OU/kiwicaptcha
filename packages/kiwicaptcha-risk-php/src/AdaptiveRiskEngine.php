@@ -661,7 +661,7 @@ final class AdaptiveRiskEngine
 
     /**
      * The first-attempt prevention evidence (P0-1) of one assessment:
-     * the signals that stop a VALID stolen credential before any failure
+     * the signals that stop a valid stolen credential before any failure
      * has accumulated anywhere (Rust mirror:
      * RiskEngine::first_attempt_evidence).
      *
@@ -911,7 +911,7 @@ final class AdaptiveRiskEngine
 
     /**
      * The spread elements one outcome report contributes to the target
-     * dimension's HLLs: a NON-ROTATING element scoped to the target.
+     * dimension's HLLs: a non-rotating element scoped to the target.
      *
      * The source element is HMAC(spread_key, target_id || '/' ||
      * /64-or-IPv4) (the full IPv4 address, or the IPv6 /64) and the ASN

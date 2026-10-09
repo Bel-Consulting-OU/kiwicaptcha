@@ -126,7 +126,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
                 $this->replaceToken($event, new StepUpPendingToken($token));
             }
         } catch (\Throwable $e) {
-            // Fail CLOSED: a gate error must never hand out a full
+            // Fail Closed: a gate error must never hand out a full
             // session. The pending token is the conservative outcome.
             $this->logger?->error('kiwi first-attempt gate failed closed on an unexpected error: {message}', [
                 'message' => $e->getMessage(),

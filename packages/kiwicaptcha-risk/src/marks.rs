@@ -241,7 +241,7 @@ pub struct MarksRequest {
 }
 
 /// The first-attempt prevention evidence (D3.5 P0-1): the signals that
-/// must stop a VALID stolen credential on its very first attempt, before
+/// must stop a valid stolen credential on its very first attempt, before
 /// any failure has accumulated anywhere. Each flag is independent
 /// evidence for the interactive step-up (never a deny — the legitimate
 /// owner must always be able to finish the login):
@@ -446,7 +446,7 @@ pub fn apply(
         stage_reasons.push(RiskReason::TargetUnderAttack);
     }
 
-    // Rule 4: first-attempt prevention (P0-1). A VALID credential on its
+    // Rule 4: first-attempt prevention (P0-1). A valid credential on its
     // very first attempt carries no marks and no target history, so rules
     // 1-3 stay silent — exactly the D3.5 hole. Any of the three signals
     // (novel network with no prior trusted network, a known-breached

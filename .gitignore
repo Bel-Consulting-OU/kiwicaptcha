@@ -26,3 +26,7 @@ _build/
 sqlite3_nif.so
 packages/kiwicaptcha-elixir/deps/
 .DS_Store
+
+# Generated per-run evidence: a fresh timestamp on every run.
+tools/redteam/engine/runs/agent-loop-evidence.json
+tools/redteam/engine/runs/agent-loop.err

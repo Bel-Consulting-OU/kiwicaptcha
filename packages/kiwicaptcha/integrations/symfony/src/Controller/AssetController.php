@@ -49,6 +49,11 @@ final class AssetController
         'risk' => ['file' => 'widget-risk.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'telemetry' => ['file' => 'widget-telemetry.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'locales' => ['file' => 'widget-locales.js', 'content_type' => 'application/javascript; charset=UTF-8'],
+        // The combined WebAuthn ceremony script: one file that branches
+        // on doc.ceremony (create vs get), so a strict-CSP deployment
+        // without per-request nonces can serve it as the external
+        // scriptSrc instead of copying the constant by hand.
+        'ceremony' => ['file' => 'webauthn-ceremony.js', 'content_type' => 'application/javascript; charset=UTF-8'],
     ];
 
     /**

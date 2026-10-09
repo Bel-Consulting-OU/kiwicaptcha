@@ -123,7 +123,7 @@ namespace KiwiCaptcha;
  * operand-derived envelopes — which are deterministic functions of the
  * operands that ship with the program and are published in this class.
  * A full-knowledge forger who reads the source reimplements those five
- * functions and emits passing traces WITHOUT any browser (the white-box
+ * functions and emits passing traces without any browser (the white-box
  * forger, WhiteBoxEnvelopeForger, measures a 100 percent pass rate).
  * Version 6 therefore costs an attacker one reading of the source, the
  * same class as versions 1-5. It is supplementary evidence, NOT a

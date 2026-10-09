@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.2-stealth-headless",
+  "attackClass": "D3.2 stealth headless",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T00:24:30Z",
+  "duration_s": 8,
+  "exit": 1,
+  "result": "FAIL",
+  "detail": "1 failed assertions",
+  "metrics": {
+    "raw": "",
+    "sha16_solve_us": null
+  },
+  "economic": ""
+}

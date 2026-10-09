@@ -17,12 +17,12 @@ use Symfony\Component\HttpFoundation\Request;
  *    network bucket). This is the primary ladder: it locks exactly the
  *    failing context, never the owner's other sessions. An attacker
  *    failing from their own session burns their own budget only.
- *  - the PRINCIPAL key — the account-wide backstop. It escalates on
+ *  - the principal key — the account-wide backstop. It escalates on
  *    the same ladder with its thresholds multiplied by
  *    ACCOUNT_BACKSTOP_MULTIPLIER (5 by default), so it arms only under
  *    a sustained cross-context campaign, never under a handful of
  *    typos.
- *  - the TARGET key — the shared target budget, on the same
+ *  - the target key — the shared target budget, on the same
  *    high-threshold ladder as the account-wide backstop (a shared key
  *    must never be cheap to arm against the owner).
  *

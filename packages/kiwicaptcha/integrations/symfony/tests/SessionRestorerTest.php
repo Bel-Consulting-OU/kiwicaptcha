@@ -73,7 +73,7 @@ final class SessionRestorerTest extends TestCase
     /**
      * The pending token's principal must be the one that completed the
      * step-up: a stolen ticket for another account can never upgrade
-     * THIS session, and nothing is recorded.
+     * this session, and nothing is recorded.
      */
     public function testTheRestoreRefusesAStolenTicketForAnotherAccount(): void
     {
