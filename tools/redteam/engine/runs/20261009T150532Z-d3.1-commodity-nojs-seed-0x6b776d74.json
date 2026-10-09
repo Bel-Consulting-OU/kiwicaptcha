@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.1-commodity-nojs",
+  "attackClass": "D3.1 commodity no-JS bots",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T15:05:30Z",
+  "duration_s": 2,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "metrics": {
+    "raw": "attempts=600 downscaled_from=100000",
+    "sha16_solve_us": null
+  },
+  "economic": "cost_per_accepted_abuse=unbounded accepted=0"
+}

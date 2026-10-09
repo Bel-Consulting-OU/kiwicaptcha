@@ -26,23 +26,18 @@ use Symfony\Component\Security\Core\Authorization\Voter\AuthenticatedVoter;
 use Symfony\Component\Security\Core\User\InMemoryUser;
 
 /**
- * The full-journey gate test. It covers findings 1, 2, 4 and 6 in one
- * walk: novel login, then a pending token, then begin step-up, then
- * complete step-up, then a restored session. The second login from the
- * same ASN needs no step-up.
+ * The full-journey gate test. Everything under the security plane is
+ * real. The container wires the real FirstAttemptLoginGuard. It uses
+ * the real RiskGateway and engine. Novelty enforcement is set to
+ * enforce. The real StepUpController and email handler are used. A
+ * real StepUpPendingToken wraps a real UsernamePasswordToken in a
+ * real TokenStorage. The real SessionRestorer is wired. The default
+ * affirmative AccessDecisionManager is used.
  *
- * Everything under the security plane is real: the container's
- * FirstAttemptLoginGuard (the real LoginDecisionGate / RiskGateway and
- * the real engine pipeline behind it), the container's StepUpController
- * and email handler, the real StepUpPendingToken wrapping a real
- * UsernamePasswordToken in a real TokenStorage, the real SessionRestorer
- * on the completion credit, real RememberMeToken / PasswordCredentials
- * authenticator shapes, and the default affirmative
- * AccessDecisionManager. A full firewall kernel would need
- * symfony/security-bundle (not a dependency of this package), so the
- * firewall's part, holding the token the guard produced in the token
- * storage, is driven directly against the same real storage the
- * services read.
+ * The journey: a novel login yields a pending token. Begin step-up.
+ * A cross-session complete with a planted secret is refused. An
+ * in-session complete succeeds. The session is restored. The second
+ * login from the same ASN needs no step-up.
  */
 final class StepUpFullJourneyKernelTest extends TestCase
 {
@@ -118,7 +113,7 @@ final class StepUpFullJourneyKernelTest extends TestCase
         $ticket = (string) $document['challenge'];
         self::assertArrayNotHasKey('client_secret', $document, 'a session-bound begin mints no client secret (exactly one binding)');
 
-        // (4) A stolen ticket completed under ANOTHER session is
+        // (4) A stolen ticket completed under another session is
         // refused even with the code and a planted secret (finding 6).
         $code = (string) $sender->lastCode();
         $foreignSession = $this->session('journey-session-00000000000002');

@@ -15,14 +15,10 @@ use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
 use KiwiCaptcha\Risk\Storage\TargetStateStoreInterface;
 
 /**
- * The journey's in-memory risk surface: every capability the engine's
- * real pipeline may consult (state, outcome marks, principal network
- * tags, session tags, bucket trust, target state) over one shared
- * store, so the full-journey kernel test runs the real engine, real
- * policy and real marks/first-attempt escalation against a state
- * backend that needs no Redis. The principal network tags double as the
- * step-up session restore's record — the same instance is the
- * kiwi_captcha.risk.principal_networks seam.
+ * The journey in-memory risk surface. It carries every capability the
+ * engine pipeline may consult. That covers state, outcome marks,
+ * principal network tags, session tags, bucket trust, and target
+ * state. All of them share one in-memory map.
  */
 final class JourneyRiskStore implements
     RiskStateStoreInterface,

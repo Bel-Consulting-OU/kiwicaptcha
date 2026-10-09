@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.15-multi-tenant",
+  "attackClass": "D3.15 multi-tenant",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T14:42:21Z",
+  "duration_s": 2,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "metrics": {
+    "raw": "tenants=2 namespace_corpus=8 cross_reads=3 replay_legs=3 shared_secret=yes",
+    "sha16_solve_us": null
+  },
+  "economic": "cross_tenant_reads_accepted=0 cross_tenant_replays_accepted=0 cost_per_accepted_cross_tenant_abuse=unbounded"
+}
