@@ -267,20 +267,25 @@ elif [ -f "$D35_SUMMARY" ]; then
 import json, sys
 
 doc = json.load(open(sys.argv[1]))
+compromised = int(doc.get("compromised_valid", doc.get("corpus_residual_compromised", -1)))
 ok = (doc["lockouts"] == 0
       and doc["victims_stepped_up"] == doc["hot_victims"]
       and doc["max_spread_failures_before_step_up"] is not None
       and doc["max_spread_failures_before_step_up"] <= 5
-      and doc["denied_within_n"] is True
-      and doc["blocked_valid"] >= doc["breached_valid_total"]
+      and doc.get("escalated_within_n", doc.get("denied_within_n")) is True
+      and compromised == 0
+      and int(doc.get("valid_rows", 0)) > 0
       and doc["blocked_valid"] > 0)
 print(("GREEN" if ok else "RED")
       + f" lockouts={doc['lockouts']} stepped_up={doc['victims_stepped_up']}/{doc['hot_victims']}"
-      + f" max_spread={doc['max_spread_failures_before_step_up']} denied_within_n={str(doc['denied_within_n']).lower()}"
-      + f" blocked_valid={doc['blocked_valid']} corpus_residual={doc['corpus_residual_compromised']}"
+      + f" max_spread={doc['max_spread_failures_before_step_up']} escalated_within_n={str(doc.get('escalated_within_n', doc.get('denied_within_n'))).lower()}"
+      + f" blocked_valid={doc['blocked_valid']} compromised_valid={compromised}"
+      + f" valid_rows={doc.get('valid_rows', '?')}"
       + f" scale=rows:{doc.get('rows', '?')} (spec list 1000000, stated downscale) sha16_us:{doc.get('sha16_us', '?')}"
       + f" spend_usd={doc.get('spend_usd', '?')} attacker_sessions={doc.get('attacker_sessions', '?')}"
-      + f" (corpus_residual is the measured compromise count; 0 means the first-attempt novel-network gate blocked every fresh breach)")
+      + f" engine={doc.get('engine_path', 'unknown')}"
+      + f" breach_checker={doc.get('breached_credential_checker', 'unknown')}"
+      + " (compromised_valid is the measured engine-Allow count on stolen logins; the bar is 0)")
 PYD35
     verdict=$(cat "$GATE_DIR/d35-verdict.txt")
     record d3.5-targets d3.5 "${verdict%% *}" "${verdict#* }"

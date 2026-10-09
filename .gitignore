@@ -30,3 +30,17 @@ packages/kiwicaptcha-elixir/deps/
 # Generated per-run evidence: a fresh timestamp on every run.
 tools/redteam/engine/runs/agent-loop-evidence.json
 tools/redteam/engine/runs/agent-loop.err
+
+# Red-team run documents are per-invocation evidence. CI artifacts,
+# not source: each battery stamps a new timestamp and each code commit
+# makes every older document STALE. A tagged release force-adds the
+# one battery that ships with it (git add -f tools/redteam/engine/runs/<ts>-*).
+tools/redteam/engine/runs/*.json
+tools/redteam/engine/runs/*.log
+# Cumulative engine state the gate reads, and the directory marker.
+!tools/redteam/engine/runs/escalations.json
+!tools/redteam/engine/runs/README.md
+
+# Fuzz build and campaign logs are generated output, never source.
+tools/redteam/fuzz/build.log
+tools/redteam/fuzz/*.log

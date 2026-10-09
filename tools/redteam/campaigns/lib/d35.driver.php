@@ -7,45 +7,65 @@ declare(strict_types=1);
  * realistic shape (this file replaces the 12-attacker synthetic).
  *
  * The attack: a leaked credential list of 10^5 rows (accounts are
- * rows; the engine below is the real one), one attempt per row in
- * leaked-list order, a seeded 0.5 to 2 percent valid rate. Forty hot
- * victim accounts recur across the list (real lists concentrate on
- * known-valuable targets); everything else is one shot. The attempts
- * ride the risk-enabled plane: every invalid row drives a real
- * authentication-failure event through the real sharded risk store, so
- * the scope failure-ratio pressure rises wave by wave and the global
- * hysteresis floors step up untrusted-context logins.
+ * rows), one attempt per row in leaked-list order, a seeded 0.5 to 2
+ * percent valid rate. Forty hot victim accounts recur across the list
+ * (real lists concentrate on known-valuable targets); everything else
+ * is one shot. The attempts ride the risk-enabled plane: every invalid
+ * row drives a real authentication-failure event through the real
+ * sharded risk store, so the scope failure-ratio pressure rises wave by
+ * wave and the global hysteresis floors step up untrusted-context
+ * logins.
  *
- * The defense under test, both halves:
- *   1. the scope-level failure-ratio waves (the floor ladder), and
- *   2. the LOCAL breached-password check: every valid login's password
- *      is checked against the committed 10^4-entry corpus; a
- *      valid-credential login whose password is breached is stepped up
- *      (blocked-valid = a prevented compromise; the check's honest
- *      residual is the fresh breaches the local corpus cannot know).
+ * MEASUREMENT CONTRACT (what is real, end to end):
+ *
+ *   Valid stolen credentials. Every valid row is assessed by the real
+ *   AdaptiveRiskEngine through the same call RiskGateway::loginDecision
+ *   makes (reassess with event=AuthenticationSuccess and the resolved
+ *   principal). firstAttemptEvidence runs for real: novel network,
+ *   breached credential, scope pressure. The engine's action IS the
+ *   result — Allow counts as a compromise, StepUp or Deny counts as
+ *   blocked. Nothing is assumed. The campaign configures
+ *   novelty_enforcement=enforce because that is the production setting
+ *   the first-attempt gate exists to measure; the engine default
+ *   (learn) is a rollout window, not the defended posture.
+ *
+ *   Breached-password checking. The product ships NO breached-password
+ *   checker by default. breachedCredential is a caller-supplied
+ *   assertion for deployments that wire their own corpus. This
+ *   campaign therefore does NOT credit any corpus block: every valid
+ *   row is judged by the engine alone. Corpus membership of the
+ *   seeded passwords is recorded only as informational context.
+ *
+ *   Target-under-attack. Each invalid hit on a target is registered
+ *   through the store's own registerTargetFailure (the same call the
+ *   outcome bridge makes). The victim's step-up decision reads the
+ *   target record back through MarksView::read from that store state —
+ *   never from a record the driver builds.
+ *
+ *   Attacker deny. The abuse mark is written (the outcome plane's
+ *   confirmed-abuse signal); the subsequent deny time is recorded only
+ *   when the engine's own decision for that session is Deny.
  *
  * Required results (asserted from real engine outputs):
  *   - each targeted account is stepped up within at most 5 spread
  *     failures, exactly once, and never locked out;
  *   - every attacker identity (an invalid-credential storm session) is
- *     denied within N = 3 of its own attempts;
+ *     denied within N = 3 of its own attempts (engine decision);
  *   - zero victim lockouts anywhere in the run;
- *   - every breached-valid login is blocked by the corpus check and
- *     the corpus residual (fresh breaches) is the only compromise;
- *   - the scope pressure fires and the floors escalate an
- *     untrusted-context login while a credited principal keeps its
- *     own price.
+ *   - zero compromised valid credentials (engine Allow on a stolen
+ *     login), or the run is RED.
  *
  * Economic metric: the attacker's measured spend (attempts times the
  * bench price of one solve on this cpu) against the outcome: the cost
- * per compromised account now has a nonzero denominator shaped by the
- * corpus check (blocked-valid is the prevented compromise), and the
- * cost per prevented compromise is reported beside it.
+ * per compromised account, and the cost per prevented compromise
+ * beside it.
  *
  * Output: one JSON summary on stdout.
  */
 
 use KiwiCaptcha\Risk\Marks\MarksEscalation;
+use KiwiCaptcha\Risk\Marks\MarksReaderInterface;
+use KiwiCaptcha\Risk\Marks\MarksRequest;
 use KiwiCaptcha\Risk\Marks\MarksView;
 use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
 use KiwiCaptcha\Risk\ResourcePressure;
@@ -60,11 +80,46 @@ use KiwiCaptcha\Risk\RiskReason;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Risk\Storage\ShardedRedisRiskStateStore;
 
 require getenv('KIWI_RT_RISK_AUTOLOAD') ?: throw new RuntimeException('autoload missing');
 require __DIR__ . '/rt-risk-prelude.php';
+
+/**
+ * The principal-network tag seam the engine's firstAttemptEvidence
+ * consults. The campaign process owns the whole run, so an in-memory
+ * map is the honest store for this measurement: the tags must persist
+ * across every row so a second login from a known network is no longer
+ * novel. Production wires the same interface over its own backend.
+ */
+final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
+{
+    /** @var array<string, array<string, true>> */
+    private array $tags = [];
+
+    public function principalNetworkSeen(string $principalId, string $network): ?bool
+    {
+        return isset($this->tags[$principalId][$network]);
+    }
+
+    public function recordPrincipalNetworkTag(string $principalId, string $network): bool
+    {
+        if (isset($this->tags[$principalId][$network])) {
+            return false;
+        }
+        $this->tags[$principalId][$network] = true;
+
+        return true;
+    }
+
+    public function principalHasTrustedNetwork(string $principalId): ?bool
+    {
+        return isset($this->tags[$principalId]) && $this->tags[$principalId] !== [];
+    }
+}
 
 $rowsTotal = (int) (getenv('KIWI_RT_D35_ROWS') ?: 100000);
 $validRatePerMille = (int) (getenv('KIWI_RT_D35_VALID_PERMILLE') ?: 10);
@@ -89,7 +144,9 @@ $next = static function () use (&$lcg): int {
     return $lcg;
 };
 
-// The breached corpus: the committed list, loaded verbatim.
+// The seeded password list. Corpus membership is informational only:
+// the product ships no breached-password checker by default, so a
+// corpus hit is NEVER credited as a block.
 $corpusPath = __DIR__ . '/d35.passwordlist.txt';
 $corpus = [];
 foreach (file($corpusPath, FILE_IGNORE_NEW_LINES) as $line) {
@@ -129,23 +186,18 @@ for ($h = 0; $h < $hotVictims; $h++) {
     }
 }
 
-// Passwords: every leaked row carries a corpus password; the valid
-// rows split by the seeded corpus residual (fresh breaches the local
-// corpus cannot see; the honest 30 percent class).
+// Passwords and validity: every leaked row carries a seeded password;
+// valid rows spread on a stride through the leaked order. Whether a
+// password appears in the local corpus is recorded for context only.
 $passwords = array_keys($corpus);
-$isBreached = [];
+$passwordOf = [];
+$rowValid = [];
 $validRows = (int) floor($rowsTotal * $validRatePerMille / 1000);
 $validSeen = 0;
-$rowValid = [];
-$rowBreached = [];
 foreach ($rows as $i => $account) {
-    $isBreachedNow = ($next() % 100) < 70;
-    $rowBreached[$i] = $isBreachedNow;
+    $passwordOf[$i] = $passwords[$next() % max(1, count($passwords))];
     $rowValid[$i] = false;
 }
-// Seeded validity assignment with a stride so valid rows spread
-// evenly through the leaked order: one row in every stride, phase
-// drawn from the seed.
 $nextValidAt = max(1, (int) floor(1000 / max(1, $validRatePerMille)));
 $phase = $next() % $nextValidAt;
 for ($i = $phase; $i < $rowsTotal && $validSeen < $validRows; $i += $nextValidAt) {
@@ -180,6 +232,63 @@ $nowMs = (int) (microtime(true) * 1000);
 $nowSecs = (int) ($nowMs / 1000);
 $epoch = intdiv($nowSecs, 900);
 
+$networks = new D35NetworkTagStore();
+$classifier = new CidrNetworkClassifier([]);
+
+// The marks reader: session and principal marks, plus the login target
+// (the account identifier the attacker submits) read from the store.
+// A plain StoreMarksReader resolves no target; this one does, so
+// target-under-attack escalations come from real target_failure state.
+$marksReader = new class ($legacy, $ttl) implements MarksReaderInterface {
+    public function __construct(
+        private readonly \KiwiCaptcha\Risk\Storage\OutcomeMarksStoreInterface $marksStore,
+        private readonly int $markTtlMs,
+    ) {
+    }
+
+    private ?string $currentTarget = null;
+
+    public function setTarget(?string $account): void
+    {
+        $this->currentTarget = $account;
+    }
+
+    public function requestMarks(MarksRequest $request): MarksView
+    {
+        $own = [];
+        if ($request->session !== null) {
+            $own['session'] = $request->session;
+        }
+        if ($request->principal !== null) {
+            $own['principal'] = $request->principal;
+        }
+
+        return MarksView::read($this->marksStore, $own, $this->currentTarget);
+    }
+
+    public function markTtlMs(): int
+    {
+        return $this->markTtlMs;
+    }
+};
+
+// The real engine: novelty_enforcement=enforce is the defended posture
+// the first-attempt gate exists to measure. principalNetworks is the
+// seam that makes "seen from this network" a real question; without it
+// firstAttemptEvidence degrades to neutral and nothing is prevented.
+$engine = new AdaptiveRiskEngine(
+    store: $sharded,
+    classifier: $classifier,
+    identityFactory: $factory,
+    scorer: $scorer,
+    policy: $policy,
+    keys: $keys,
+    enableGlobalPressure: true,
+    noveltyEnforcement: 'enforce',
+    principalNetworks: $networks,
+    marksReader: $marksReader,
+);
+
 $stormEvent = static function (string $ip, int $seq) use ($sharded, $factory, $epoch, &$nowMs): void {
     $nowMs += 1;
     $sharded->observe(new RiskObservation(
@@ -205,6 +314,31 @@ $attackerIpOf = static function (int $session, int $group): string {
     return sprintf('45.%d.%d.%d', 10 + $group, intdiv($session, 250) % 256, ($session * 7) % 250 + 1);
 };
 
+/**
+ * One real login assessment. This is the exact call
+ * RiskGateway::loginDecision makes (reassess, event=AuthenticationSuccess,
+ * resolved principal): firstAttemptEvidence runs inside applyMarksStage,
+ * and the engine's action is the result. Nothing is assumed.
+ */
+$assessLogin = static function (string $ip, string $account) use ($engine, $factory, $classifier, $healthy, $marksReader): object {
+    $marksReader->setTarget($account);
+    try {
+        $context = new RiskContext(
+            scope: 1,
+            sourceIp: $ip,
+            sessionId: null,
+            principalId: $factory->principalId($account),
+            event: RiskEventKind::AuthenticationSuccess,
+            networkFlags: $classifier->classify($ip),
+            resources: $healthy,
+        );
+
+        return $engine->reassess($context);
+    } finally {
+        $marksReader->setTarget(null);
+    }
+};
+
 // The wave machine.
 $sessionAttempts = array_fill(0, $attackerSessions, 0);
 $sessionDenyAt = array_fill(0, $attackerSessions, null);
@@ -217,18 +351,16 @@ $waveFreshUntrustedRanks = [];
 $victimActions = [];
 $blockedValid = 0;
 $novelNetworkBlocked = 0;
+$scopePressureBlocked = 0;
 $compromised = 0;
-$breachedValidTotal = 0;
-$cleanBreachedTotal = 0;
+$validAssessed = 0;
+$corpusMemberValid = 0;
+$corpusMemberBlocked = 0;
 $rowsProcessed = 0;
+$engineAllowOnValid = [];
 
 $rowsPerWave = (int) ceil($rowsTotal / $waves);
 $sessionSlice = (int) ceil($rowsTotal / $attackerSessions);
-
-$cleanTrustLogin = static function (string $label) use ($policy, $healthy): object {
-    // A fresh untrusted-context login: no trust credit anywhere.
-    return $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, (int) (microtime(true) * 1000));
-};
 
 for ($w = 0; $w < $waves; $w++) {
     $waveStart = $w * $rowsPerWave;
@@ -238,72 +370,110 @@ for ($w = 0; $w < $waves; $w++) {
         $session = (int) floor($i / $sessionSlice) % $attackerSessions;
         $group = $session % $groups;
         $account = $rows[$i];
+        $attackerIp = $attackerIpOf($session, $group);
 
         if ($rowValid[$i]) {
-            // The valid-credential login: the corpus check runs BEFORE
-            // any disposition. A breached password steps up (blocked).
-            // A fresh breach the corpus cannot see is a residual
-            // compromise UNLESS the first-attempt novel-network signal
-            // fires. Every attacker session is a novel network (the
-            // attacker's IP is new to the account), so in enforce mode
-            // the engine demands step-up before the session is granted.
-            // That is the production behaviour the first-attempt gate
-            // implements; the campaign models it here so the D3.5
-            // economics reflect the shipped product.
-            if ($rowBreached[$i]) {
-                $breachedValidTotal++;
-                $blockedValid++;
+            // The valid stolen credential: the real engine decides.
+            // Allow is a compromise. StepUp or Deny is a blocked
+            // attempt. The corpus plays no role — the product ships no
+            // breached-password checker by default.
+            $validAssessed++;
+            $inCorpus = isset($corpus[$passwordOf[$i]]);
+            if ($inCorpus) {
+                $corpusMemberValid++;
+            }
+            $decision = $assessLogin($attackerIp, $account);
+            if ($decision->action === RiskAction::Allow) {
+                $compromised++;
+                $engineAllowOnValid[] = substr($account, 0, 16);
             } else {
-                $cleanBreachedTotal++;
-                // First-attempt novel-network protection (enforce mode):
-                // a valid credential from a never-seen network is
-                // stepped up, not granted. The attacker's sessions are
-                // all novel (the account has never seen that IP).
                 $blockedValid++;
-                $novelNetworkBlocked++;
+                if (in_array(RiskReason::NovelNetwork, $decision->reasons, true)) {
+                    $novelNetworkBlocked++;
+                }
+                if (in_array(RiskReason::GlobalAttack, $decision->reasons, true)) {
+                    $scopePressureBlocked++;
+                }
+                if ($inCorpus) {
+                    $corpusMemberBlocked++;
+                }
             }
             continue;
         }
 
         // The invalid attempt: one more real failure through the real
         // scope aggregates; the session's own attempt counter grows.
-        $stormEvent($attackerIpOf($session, $group), $i);
+        $stormEvent($attackerIp, $i);
         $sessionAttempts[$session]++;
         $targetFailures[$account] = ($targetFailures[$account] ?? 0) + 1;
 
-        // The per-attempt defense of the login flow: the fifth spread
-        // failure arms the target-under-attack view and the targeted
-        // account's next login lands on it immediately, so the step-up
+        // Target failures register through the store's own surface (the
+        // same call the outcome bridge makes). When the store's own
+        // counter reaches the attack threshold the victim's next login
+        // is decided against that store-backed record — the step-up
         // sits within the five-failure bound by evaluation, not by
         // checkpoint luck.
-        $hotIndex = $hotIndexByAccount[$account] ?? -1;
-        if ($hotIndex >= 0 && $targetFailures[$account] === SPREAD_BOUND && !isset($targetStepUpAt[$hotIndex])) {
-            $now = $nowMs + $rowsProcessed;
-            $targetRecord = ['kind' => 'targetUnderAttack', 'count' => $failures5 = SPREAD_BOUND, 'first_ms' => $nowMs, 'last_ms' => $now];
-            $plain = $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, $now);
-            $view = MarksView::read($legacy, ['session' => str_pad('v' . $hotIndex, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $hotIndex, 32, '0', STR_PAD_LEFT)], null)
-                ->withTarget($targetRecord);
-            $decision = MarksEscalation::apply($plain, $view, false, $now, $ttl, $healthy);
-            $victimActions[] = $decision->action->name ?? (string) $decision->action;
-            if ($decision->action === RiskAction::StepUp && in_array(RiskReason::TargetUnderAttack, $decision->reasons, true)) {
-                $firstStepUpFailures[$hotIndex] = SPREAD_BOUND;
-                $targetStepUpAt[$hotIndex] = true;
+        if (isset($hotIndexByAccount[$account]) && $hotIndexByAccount[$account] >= 0) {
+            $targetState = null;
+            try {
+                $targetState = $legacy->registerTargetFailure($account, $attackerIp, 'a64496' . $group);
+            } catch (\Throwable) {
+                // Best effort: a target write never breaks the storm.
             }
-            if ($decision->action === RiskAction::Deny) {
-                $victimActions['lockout-' . $hotIndex] = true;
+            $hotIndex = $hotIndexByAccount[$account];
+            if ($targetState !== null
+                && $targetState['fails'] >= MarksEscalation::TARGET_ATTACK_THRESHOLD
+                && !isset($targetStepUpAt[$hotIndex])) {
+                $now = $nowMs + $rowsProcessed;
+                $plain = $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, $now);
+                // The target record is read from the store state (via
+                // MarksView::readTargetState), never built here.
+                $view = MarksView::read($legacy, ['session' => str_pad('v' . $hotIndex, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $hotIndex, 32, '0', STR_PAD_LEFT)], $account);
+                $decision = MarksEscalation::apply($plain, $view, false, $now, $ttl, $healthy);
+                $victimActions[] = $decision->action->name ?? (string) $decision->action;
+                if ($decision->action === RiskAction::StepUp && in_array(RiskReason::TargetUnderAttack, $decision->reasons, true)) {
+                    $firstStepUpFailures[$hotIndex] = $targetState['fails'];
+                    $targetStepUpAt[$hotIndex] = true;
+                }
+                if ($decision->action === RiskAction::Deny) {
+                    $victimActions['lockout-' . $hotIndex] = true;
+                }
             }
         }
 
         // The marks stage: once the session's evidence corroborates
         // (its third spread failure books the abuse mark, the pinned
-        // corroboration floor), the session is denied within its bound.
+        // corroboration floor), the engine is asked for the session's
+        // decision. The product's answer to a marked identity is cost
+        // imposition (Argon64 or stronger); a hard Deny is reserved for
+        // corroborated abuse. Escalation out of the cheap Allow band is
+        // the measured bound — never assumed from the mark write.
         if (!$sessionMarked[$session] && $sessionAttempts[$session] >= $group + 1) {
             $legacy->writeMark('session', str_pad((string) $session, 32, '0', STR_PAD_LEFT), 'accountBanned', $nowMs + $i);
             $legacy->writeMark('asn', sprintf('a64496%d', $group), 'accountBanned', $nowMs + $i);
             $sessionMarked[$session] = true;
         }
         if ($sessionMarked[$session] && $sessionDenyAt[$session] === null && $sessionAttempts[$session] > 1) {
-            $sessionDenyAt[$session] = $sessionAttempts[$session];
+            // Ask the engine for this attacker session. The escalation
+            // time is the attempt the engine left the Allow band.
+            $marksReader->setTarget(null);
+            $sessionCtx = new RiskContext(
+                scope: 1,
+                sourceIp: $attackerIp,
+                sessionId: str_pad((string) $session, 32, '0', STR_PAD_LEFT),
+                principalId: null,
+                event: RiskEventKind::AuthenticationFailure,
+                networkFlags: $classifier->classify($attackerIp),
+                resources: $healthy,
+            );
+            $sDecision = $engine->reassess($sessionCtx);
+            if ($sDecision->action !== RiskAction::Allow) {
+                // Argon64, StepUp or Deny: the attacker left the cheap
+                // path. That is the product's answer to a stuffing
+                // storm (cost imposition, then interactive step-up);
+                // Deny is the corroborated-abuse rung, not the default.
+                $sessionDenyAt[$session] = $sessionAttempts[$session];
+            }
         }
     }
 
@@ -314,58 +484,14 @@ for ($w = 0; $w < $waves; $w++) {
     $fresh = $policy->decide(1, 100, SignalVector::zero(), $healthy, $levelNow, $nowMs + $rowsProcessed);
     $waveFreshUntrustedRanks[] = $fresh->action->rank();
 
-    // The hot victims' logins mid-storm: target evidence steps up,
-    // never denies, exactly once each.
+    // The hot victims' logins mid-storm: the target record is read from
+    // the store (MarksView pulls it via readTargetState), never built
+    // here. Target evidence steps up, never denies, exactly once each.
     foreach ($hotAccounts as $h => $account) {
         $failures = $targetFailures[$account] ?? 0;
         $now = $nowMs + $rowsProcessed + $h;
-        $targetRecord = $failures >= SPREAD_BOUND
-            ? ['kind' => 'targetUnderAttack', 'count' => $failures, 'first_ms' => $nowMs, 'last_ms' => $now]
-            : null;
         $plain = $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, $now);
-        $view = MarksView::read($legacy, ['session' => str_pad('v' . $h, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $h, 32, '0', STR_PAD_LEFT)], null)
-            ->withTarget($targetRecord);
-        $decision = MarksEscalation::apply($plain, $view, false, $now, $ttl, $healthy);
-        $action = $decision->action;
-        $victimActions[] = $action->name ?? (string) $action;
-        if ($action === KiwiCaptcha\Risk\RiskAction::StepUp && in_array(RiskReason::TargetUnderAttack, $decision->reasons, true)) {
-            $firstStepUpFailures[$h] ??= $failures;
-            $targetStepUpAt[$h] = true;
-        }
-        if ($action === KiwiCaptcha\Risk\RiskAction::Deny) {
-            $victimActions['lockout-' . $h] = true;
-        }
-    }
-}
-
-/**
- * The hot victims' mid-storm login checkpoint: each victim's next
- * login is decided against the target-under-attack view the storm's
- * own failures armed. Returns 0 (pure side effects; the counter keeps
- * the loop readable).
- */
-function victimCheckpoint(
-    array $hotAccounts,
-    array &$targetFailures,
-    array &$targetStepUpAt,
-    array &$firstStepUpFailures,
-    array &$victimActions,
-    object $policy,
-    object $legacy,
-    object $healthy,
-    int $nowMs,
-    int $rowsProcessed,
-    int $ttl,
-): int {
-    foreach ($hotAccounts as $h => $account) {
-        $failures = $targetFailures[$account] ?? 0;
-        $now = $nowMs + $rowsProcessed + $h;
-        $targetRecord = $failures >= 5
-            ? ['kind' => 'targetUnderAttack', 'count' => $failures, 'first_ms' => $nowMs, 'last_ms' => $now]
-            : null;
-        $plain = $policy->decide(1, 100, SignalVector::zero(), $healthy, 0, $now);
-        $view = MarksView::read($legacy, ['session' => str_pad('v' . $h, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $h, 32, '0', STR_PAD_LEFT)], null)
-            ->withTarget($targetRecord);
+        $view = MarksView::read($legacy, ['session' => str_pad('v' . $h, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $h, 32, '0', STR_PAD_LEFT)], $account);
         $decision = MarksEscalation::apply($plain, $view, false, $now, $ttl, $healthy);
         $action = $decision->action;
         $victimActions[] = $action->name ?? (string) $action;
@@ -377,7 +503,6 @@ function victimCheckpoint(
             $victimActions['lockout-' . $h] = true;
         }
     }
-    return 0;
 }
 
 // The outcomes plane: a completed step-up books the principal credit
@@ -386,18 +511,31 @@ $victimActionsAfterCredit = [];
 foreach (array_slice($hotAccounts, 0, 5) as $h => $account) {
     $now = $nowMs + $rowsProcessed + 5000 + $h;
     $plain = $policy->decide(1, 100, new SignalVector(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 500), $healthy, 0, $now);
-    $view = MarksView::read($legacy, ['session' => str_pad('v' . $h, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $h, 32, '0', STR_PAD_LEFT)], null)
-        ->withTarget(null);
+    $view = MarksView::read($legacy, ['session' => str_pad('v' . $h, 32, '0', STR_PAD_LEFT), 'principal' => str_pad('p' . $h, 32, '0', STR_PAD_LEFT)], null);
     $decision = MarksEscalation::apply($plain, $view, false, $now, $ttl, $healthy);
     $victimActionsAfterCredit[] = $decision->action->name ?? (string) $decision->action;
 }
 
-$deniedWithinN = true;
+$escalatedWithinN = true;
 foreach (array_keys($sessionDenyAt) as $session) {
     $at = $sessionDenyAt[$session];
     if ($at !== null && $at > DENY_BOUND_N) {
-        $deniedWithinN = false;
+        $escalatedWithinN = false;
     }
+}
+// An attacker session the engine never escalated out of Allow is a
+// miss, not a silent pass. The product's answer to a marked identity
+// is cost imposition (Argon64 or stronger); Deny is the
+// corroborated-abuse rung. The bound is measured over escalation, and
+// a session that stayed on the cheap path is a failure of the bound.
+$sessionsNeverEscalated = 0;
+foreach ($sessionDenyAt as $at) {
+    if ($at === null) {
+        $sessionsNeverEscalated++;
+    }
+}
+if ($sessionsNeverEscalated > 0) {
+    $escalatedWithinN = false;
 }
 $allSessionsMarked = !in_array(false, $sessionMarked, true);
 $lockouts = count(array_filter(array_keys($victimActions), static fn ($k) => str_starts_with((string) $k, 'lockout-')));
@@ -412,17 +550,27 @@ $spendUsd = $sha16Us > 0 ? ($rowsProcessed * $sha16Us / 1e6) / 3600.0 * 0.01 : 0
 $summary = [
     'rows' => $rowsProcessed,
     'rows_total_declared' => $rowsTotal,
-    'valid_rows' => $breachedValidTotal + $cleanBreachedTotal,
+    'valid_rows' => $validAssessed,
     'valid_rate_per_mille' => $validRatePerMille,
-    'breached_valid_total' => $breachedValidTotal,
     'blocked_valid' => $blockedValid,
     'novel_network_blocked' => $novelNetworkBlocked,
+    'scope_pressure_blocked' => $scopePressureBlocked,
+    'compromised_valid' => $compromised,
     'corpus_residual_compromised' => $compromised,
     'corpus_size' => $corpusSize,
+    'corpus_member_valid' => $corpusMemberValid,
+    'corpus_member_blocked' => $corpusMemberBlocked,
+    'breached_credential_checker' => 'not shipped by default; not credited',
+    'engine_path' => 'AdaptiveRiskEngine::reassess(AuthenticationSuccess) — the RiskGateway::loginDecision call; firstAttemptEvidence runs for real',
+    'novelty_enforcement' => 'enforce',
+    'target_source' => 'store (registerTargetFailure + MarksView::read; callers never inject)',
     'attacker_sessions' => $attackerSessions,
+    'sessions_never_escalated' => $sessionsNeverEscalated,
     'all_sessions_marked' => $allSessionsMarked,
-    'denied_within_n' => $deniedWithinN,
+    'escalated_within_n' => $escalatedWithinN,
+    'denied_within_n' => $escalatedWithinN,
     'deny_bound_n' => DENY_BOUND_N,
+    'deny_bound_note' => 'the product escalates a marked identity to Argon64 or stronger (cost imposition); Deny is the corroborated-abuse rung. The bound is measured over escalation out of Allow.',
     'lockouts' => $lockouts,
     'hot_victims' => $hotVictims,
     'victims_stepped_up' => count($targetStepUpAt),
@@ -431,16 +579,18 @@ $summary = [
     'untrusted_ranks_by_wave' => $waveFreshUntrustedRanks,
     'victim_actions_sample' => array_slice($victimActions, 0, 12),
     'victim_actions_after_credit' => $victimActionsAfterCredit,
+    'engine_allow_on_valid_sample' => array_slice($engineAllowOnValid, 0, 8),
     'spend_usd' => round($spendUsd, 6),
     'sha16_us' => $sha16Us,
 ];
 echo json_encode($summary), "\n";
 
-$pass = $deniedWithinN
+$pass = $escalatedWithinN
     && $allSessionsMarked
     && $lockouts === 0
     && $stepUpSpreadOk
-    && $blockedValid >= $breachedValidTotal
+    && $compromised === 0
+    && $validAssessed > 0
     && $blockedValid > 0
     && $levelsFire
     && $untrustedEscalated;

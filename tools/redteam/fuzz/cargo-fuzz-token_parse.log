@@ -1,3 +1,0 @@
-Error: manifest `/Users/sabelakhoua/IdeaProjects/kiwicaptcha-standalone/tools/redteam/fuzz/Cargo.toml` does not look like a cargo-fuzz manifest. Add following lines to override:
-[package.metadata]
-cargo-fuzz = true

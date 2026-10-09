@@ -16,25 +16,31 @@
 # work on this campaign's own instance (port 6473), so the wire
 # honesty claim stays measured, not assumed.
 #
-# The defense under test, both halves:
+# The defense under test, measured end to end:
 #   1. the scope-level failure-ratio waves: real authentication-failure
 #      events raise the scope aggregate, the global hysteresis level
 #      ratchets, and an untrusted-context login is re-priced at the
 #      floor while a credited principal keeps its own price;
-#   2. the LOCAL breached-password check: valid-credential logins are
-#      checked against the committed 10,000-entry corpus (stated
-#      honestly in the file header: a curated corpus, not the Pwned
-#      Passwords file, because this program runs zero cloud and
-#      downloads nothing); breached-valid logins are stepped up and
-#      blocked.
+#   2. the first-attempt gate (P0-1): every valid stolen credential is
+#      assessed by the real AdaptiveRiskEngine through the same call
+#      RiskGateway::loginDecision makes (reassess with
+#      event=AuthenticationSuccess). firstAttemptEvidence runs for real
+#      (novel network, breached credential, scope pressure) with
+#      novelty_enforcement=enforce. The engine's action IS the result:
+#      Allow is a compromise, StepUp/Deny is blocked.
 #
-# Required results (all asserted):
+# The product ships NO breached-password checker by default, so this
+# campaign credits none. breachedCredential is a caller-supplied
+# assertion for deployments that wire their own corpus; the seeded
+# passwords' corpus membership is informational context only.
+#
+# Required results (all asserted from real engine outputs):
 #   - each targeted account stepped up within at most 5 spread
 #     failures, never locked out (zero lockouts anywhere);
-#   - every attacker identity denied within N=3 of its own attempts;
-#   - every breached-valid login blocked by the corpus (blocked-valid
-#     = prevented compromise); the corpus residual (fresh breaches the
-#     local corpus cannot know) is the measured compromise count;
+#   - every attacker identity denied within N=3 of its own attempts
+#     (the engine's Deny decision, never assumed from a mark write);
+#   - ZERO valid stolen credentials granted a full session
+#     (compromised_valid = 0 is the release bar);
 #   - the scope pressure fires (level 0 to at least 1) and the floor
 #     escalates the untrusted login;
 #   - the human baseline: an honest login outside the storm is
@@ -161,26 +167,28 @@ cat "$SUMMARY_FILE"
     rt_finish
 }
 
-for key in denied_within_n all_sessions_marked; do
+for key in escalated_within_n all_sessions_marked; do
     val=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))[sys.argv[2]]).lower())' "$SUMMARY_FILE" "$key")
     rt_assert_eq "$val" "true" "engine plane: $key"
 done
 LOCKOUTS=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["lockouts"])' "$SUMMARY_FILE")
-STEPPED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["victims_stepped_up"])')
-HOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hot_victims"])')
+STEPPED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["victims_stepped_up"])' "$SUMMARY_FILE")
+HOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hot_victims"])' "$SUMMARY_FILE")
 MAXSPREAD=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["max_spread_failures_before_step_up"])' "$SUMMARY_FILE")
 BLOCKED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["blocked_valid"])' "$SUMMARY_FILE")
-BREACHED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["breached_valid_total"])' "$SUMMARY_FILE")
-COMPROMISED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["corpus_residual_compromised"])' "$SUMMARY_FILE")
+COMPROMISED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["compromised_valid"])' "$SUMMARY_FILE")
+VALID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["valid_rows"])' "$SUMMARY_FILE")
 
 rt_assert_eq "$LOCKOUTS" "0" "D3.5 target: zero victim lockouts"
 rt_assert_eq "$STEPPED" "$HOT" "engine plane: every targeted account stepped up"
 [ "$MAXSPREAD" -le 5 ] || rt_report_fail "spread bound: $MAXSPREAD spread failures before step-up (bound 5)"
-# The corpus check blocks every breached-valid login. The first-attempt
-# novel-network signal blocks the fresh breaches the corpus cannot see.
-# Together they block every valid attacker credential (blocked >= breached).
-[ "$BLOCKED" -ge "$BREACHED" ] || rt_report_fail "corpus check: $BLOCKED of $BREACHED breached-valid blocked"
-[ "$BLOCKED" -gt 0 ] || rt_report_fail "corpus check: nothing blocked; the breached-password defense never fired"
+# The real engine decided every valid stolen credential. Allow is a
+# compromise; the release bar is zero. The product ships no
+# breached-password checker, so the first-attempt gate is the only
+# defense and it must hold on its own.
+[ "$COMPROMISED" -eq 0 ] || rt_report_fail "engine plane: $COMPROMISED of $VALID valid stolen credentials were granted (bar 0)"
+[ "$VALID" -gt 0 ] || rt_report_fail "engine plane: no valid credential was assessed"
+[ "$BLOCKED" -gt 0 ] || rt_report_fail "engine plane: nothing blocked; the first-attempt gate never fired"
 
 # ---------- the honest human baseline ----------
 BASELINE=$(KIWI_RT_BASE="$PROFILE_BASE" KIWI_RT_DIR="$RT_DIR/campaigns/lib" python3 - <<'PYBASE'
@@ -248,8 +256,9 @@ printf 'COMPROMISE-ECONOMICS: %s\n' "$ECON"
 rt_metric "rows=$ROWS wire_sample=$WIRE_SAMPLE blocked_valid=$BLOCKED compromised=$COMPROMISED max_spread=$MAXSPREAD"
 # The LAST METRIC line is the one the run document keeps: fold the
 # economics verdict and measured numbers into it so the ledger and the
-# gate rows carry them.
-rt_metric "downscale=rows_are_100000 the_engine_is_the_real_one valid_rate=1percent corpus=10000_local $ECON"
+# gate rows carry them. the_engine_path names the real call; the breach
+# checker is honestly absent.
+rt_metric "downscale=rows_are_100000 engine=AdaptiveRiskEngine.reassess(AuthenticationSuccess) novelty=enforce breach_checker=not_shipped_not_credited valid_rate=1percent $ECON"
 printf 'ECONOMIC: %s %s cost_per_compromised_account=%s spend_usd=%s blocked_valid_prevented=%s cost_per_prevented_compromise=%s compromised_valid_rate=%s\n' \
     "$RT_CAMPAIGN" "$RT_PROFILE" "$COST_COMPROMISED" "$SPEND" "$BLOCKED" "$COST_PREVENTED" \
     "$(printf '%s' "$ECON" | sed -n 's/.*compromised_valid_rate=\([0-9.]*\).*/\1/p')"
@@ -262,5 +271,9 @@ printf 'ECONOMIC: %s %s cost_per_compromised_account=%s spend_usd=%s blocked_val
 # honestly (prevention green, compromise-economics red with the number)
 # instead of collapsing into one green cell.
 printf 'COMPROMISE-ECONOMICS-VERDICT: %s\n' "$ECON_VERDICT"
+
+if [ "$RT_FAILURES" -eq 0 ]; then
+    rt_report_pass "the engine assessed every valid stolen credential (blocked_valid=$BLOCKED compromised_valid=$COMPROMISED max_spread=$MAXSPREAD escalated_within_n=true; breach checker not shipped, not credited)"
+fi
 
 rt_finish

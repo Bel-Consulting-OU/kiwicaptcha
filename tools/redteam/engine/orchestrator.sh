@@ -41,15 +41,53 @@ target_host() {
     printf '%s' "${KIWI_RT_TARGET_HOST:-127.0.0.1}"
 }
 
+# The hard allowlist: exact localhost, literal IPs in the loopback or
+# private ranges, or a hostname whose EVERY resolved address is
+# private. Shape matching is never enough — a name like
+# 10.attacker.example must not pass on its prefix. The IPv4/IPv6
+# ranges match engine/model-adapter.mjs isPrivateHost().
 is_private() {
-    case "$1" in
-        127.* | 10.* | 192.168.* | 172.1[6-9].* | 172.2[0-9].* | 172.3[0-1].* | ::1 | localhost | fc* | fd*)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    python3 - "$1" <<'PY'
+import ipaddress, socket, sys
+host = sys.argv[1].strip()
+if not host:
+    sys.exit(1)
+if host == "localhost":
+    sys.exit(0)
+if host.startswith("[") and host.endswith("]"):
+    host = host[1:-1]
+
+def allowed(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    if ip.version == 4:
+        a, b = int(ip) >> 24, (int(ip) >> 16) & 0xFF
+        return (
+            a == 10
+            or (a == 192 and b == 168)
+            or (a == 172 and 16 <= b <= 31)
+            or (a == 169 and b == 254)
+        )
+    lower = addr.lower()
+    return lower.startswith("fc") or lower.startswith("fd") or lower.startswith("fe80")
+
+if allowed(host):
+    sys.exit(0)
+try:
+    infos = socket.getaddrinfo(host, None)
+except OSError:
+    sys.exit(1)
+if not infos:
+    sys.exit(1)
+for info in infos:
+    if not allowed(info[4][0]):
+        sys.exit(1)
+sys.exit(0)
+PY
 }
 
 TARGET=$(target_host)
@@ -189,11 +227,19 @@ for campaign in $CAMPAIGNS; do
     doc="$RUNS_DIR/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
     # The writer is a real ES module (write-run.mjs): require() of an
     # ESM fingerprint module throws ERR_REQUIRE_ESM on older Node and
-    # would silently skip the run document. The return code is checked:
-    # a failed write is a failed campaign, never a silent NOT RUN.
+    # would silently skip the run document. The document path is the
+    # FIRST argument (the writer rejects any path outside engine/runs,
+    # so a shifted argv fails loudly instead of scattering files). The
+    # return code is checked and the file must exist afterwards: a
+    # failed write is a failed campaign, never a silent NOT RUN.
     if ! node "$RT_DIR/engine/write-run.mjs" \
-        "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$method_line" "$doc"; then
+        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$method_line"; then
         log "campaign $campaign failed to write its run document"
+        RESULT=1
+        continue
+    fi
+    if [ ! -f "$doc" ]; then
+        log "campaign $campaign: the writer reported success but $doc is missing"
         RESULT=1
         continue
     fi

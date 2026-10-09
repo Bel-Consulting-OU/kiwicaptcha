@@ -128,8 +128,8 @@ function statusOf(run) {
     if (isStaleRun(run)) {
         return {
             status: "RED",
-            verdict: "stale run: the recorded evidence predates the source it measures",
-            evidence: "STALE: the run document is older than the packages/protocol sources. Re-run the campaign against the current tree; a leftover run is never a pass.",
+            verdict: "stale run: the recorded source fingerprint does not match the current tree",
+            evidence: "STALE: the run document's source fingerprint does not match the current tree. Re-run the campaign against the current tree; a leftover run is never a pass.",
         };
     }
     if (run.result === "PASS") {
