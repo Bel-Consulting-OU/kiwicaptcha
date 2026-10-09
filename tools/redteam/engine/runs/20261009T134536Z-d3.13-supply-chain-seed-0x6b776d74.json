@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.13-supply-chain",
+  "attackClass": "D3.13 supply chain",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T13:44:44Z",
+  "duration_s": 52,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "CSP gadget audit: the product's CSP and hardening suites green (16 passed)",
+  "metrics": {
+    "raw": "tamper_legs=2 pollution_leg=1 csp_suites=4 page_errors_under_pollution=0 tampered_bytes=1_per_response",
+    "sha16_solve_us": null
+  },
+  "economic": "tampered_driver_executions=0 mitm_yield=0 cost_per_accepted_supply_abuse=unbounded"
+}
