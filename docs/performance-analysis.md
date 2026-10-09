@@ -237,12 +237,12 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-103,784 bytes raw, 30,802 bytes gzip and 26,037 bytes brotli, against
+105,384 bytes raw, 31,343 bytes gzip and 26,494 bytes brotli, against
 caps of 160,000 / 32,000 / 28,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
 bootstrap target; the gzip cap is re-baselined for the Object.create(null)
 prototype-pollution hardening); every widget-risk.js copy (the lazy adaptive-risk
-module) is 42,409 bytes raw, 12,423 bytes gzip and 10,653 bytes
+module) is 42,552 bytes raw, 12,423 bytes gzip and 10,653 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 5,621 bytes raw, 2,104 bytes gzip and 1,780
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
@@ -252,7 +252,7 @@ bytes raw, 4,403 bytes gzip and 3,882 bytes brotli against caps of
 per language in a fixed key order, rebuilt into the same registered
 object shape at module scope — which removed the repeated key names
 and restored translation headroom without a cap raise); every
-widget-compat.js copy is 32,183 bytes raw, 9,423 bytes gzip and 8,191
+widget-compat.js copy is 32,096 bytes raw, 9,420 bytes gzip and 8,174
 bytes brotli against caps of 32,768 / 12,000 / 10,000; every
 widget-shims.js copy (the standalone incumbent API shims, fetched only
 by a page presenting the provider globals or Altcha / Friendly Captcha
@@ -270,7 +270,7 @@ assembled release asset (tools/embed-worker: the `var window = self;`
 prelude plus the full wasm glue text plus the worker solver source —
 155,097 raw), so the files-mode worker boots with wasm in scope and
 the optional rsw sequential solver still lives inside the worker's
-solver source; the runtime row quotes the glue asset alone, whose
+solver source; the runtime (kiwicaptcha-wasm.js at 127,009 raw) row quotes the glue asset alone, whose
 embedded workerSource copy is regenerated from that same solver
 source; the
 decoy-armed challenge-response JSON (the wire shape of the bundle's
@@ -365,13 +365,13 @@ record's budget rows, equality-gated):
   the SHA-256 solve (the page-wasm path and the files-tier worker
   dispatch decision), the state/token lifecycle, retry/reset, the
   English locale pack, the coarse client-context descriptor and the
-  lazy-module loader (103,784 raw / 30,802 gzip / 26,037 brotli);
+  lazy-module loader (105,384 raw / 31,343 gzip / 26,494 brotli);
 - `widget-risk.js`, the lazy worker solve tier: the argon2id/rsw
   worker solves and the glue-less SHA-256 worker dispatch
   (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge, an armed response or a glue-less SHA-256 solve (42,409
+  challenge, an armed response or a glue-less SHA-256 solve (42,552
   raw / 12,423 gzip / 10,653
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/

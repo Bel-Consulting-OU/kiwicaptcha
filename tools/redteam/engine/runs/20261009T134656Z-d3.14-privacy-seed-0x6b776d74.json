@@ -1,0 +1,16 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.14-privacy",
+  "attackClass": "D3.14 privacy adversary",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T13:45:36Z",
+  "duration_s": 80,
+  "exit": 1,
+  "result": "FAIL",
+  "detail": "1 failed assertions",
+  "metrics": {
+    "raw": "canary=canary-81f7716c08c2 dumps=2 files",
+    "sha16_solve_us": null
+  },
+  "economic": "reidentification_cost=infinite raw_hits=0"
+}
