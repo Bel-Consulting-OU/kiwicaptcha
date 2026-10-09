@@ -30,7 +30,10 @@ function git(args) {
 export function sourceFingerprint() {
     const paths = ["packages", "protocol", "integrations-platforms"];
     const index = git(["ls-files", "-s", "--", ...paths]);
-    const diff = git(["diff", "--", ...paths]);
+    // --no-ext-diff --no-color and fixed prefixes keep the patch bytes
+    // identical across machines and user gitconfig; without them a
+    // dirty tree fingerprints differently depending on the host.
+    const diff = git(["diff", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--", ...paths]);
     // -uno: untracked files must NOT change the fingerprint (local
     // build output is not part of the measured source).
     const status = git(["status", "--porcelain", "-uno", "--", ...paths]);

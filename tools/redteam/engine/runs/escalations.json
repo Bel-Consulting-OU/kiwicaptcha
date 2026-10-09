@@ -32,6 +32,38 @@
         "redRuns": 0,
         "campaignsInLedger": 6
       }
+    },
+    {
+      "run": 3,
+      "decidedAt": "2026-10-09T19:07:18Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "scope-confusable",
+        "duplicate-key"
+      ],
+      "priorSynthCount": 38,
+      "raisedSynthCount": 48,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
+    },
+    {
+      "run": 4,
+      "decidedAt": "2026-10-09T19:07:30Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "scope-confusable",
+        "clock-skew"
+      ],
+      "priorSynthCount": 48,
+      "raisedSynthCount": 60,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
     }
   ]
 }
