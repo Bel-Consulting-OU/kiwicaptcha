@@ -1,0 +1,18 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.7-solver-farms",
+  "attackClass": "D3.7 human solver farms",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T19:45:16Z",
+  "duration_s": 0,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "source_fingerprint": "c0d1ba32e40c711807f67612296ab61d",
+  "method": "offline-grammar (no local model consulted)",
+  "metrics": {
+    "raw": "totp_begin_rate_limited=9 of 10",
+    "sha16_solve_us": null
+  },
+  "economic": "relayed_code_resale_value=single_use webauthn_phish_yield=0 cost_per_accepted_relayed_abuse_beyond_first=unbounded"
+}
