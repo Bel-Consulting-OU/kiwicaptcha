@@ -1,0 +1,18 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.10-infrastructure",
+  "attackClass": "D3.10 infrastructure attacker",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T19:45:30Z",
+  "duration_s": 1,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "source_fingerprint": "c0d1ba32e40c711807f67612296ab61d",
+  "method": "offline-grammar (no local model consulted)",
+  "metrics": {
+    "raw": "",
+    "sha16_solve_us": null
+  },
+  "economic": "cost_per_accepted_abuse=unbounded accepted=0 backend=redis"
+}

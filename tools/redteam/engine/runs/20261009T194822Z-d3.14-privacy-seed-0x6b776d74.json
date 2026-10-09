@@ -1,0 +1,18 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.14-privacy",
+  "attackClass": "D3.14 privacy adversary",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T19:46:50Z",
+  "duration_s": 92,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "php privacy suites green (scanner and target privacy)",
+  "source_fingerprint": "c0d1ba32e40c711807f67612296ab61d",
+  "method": "offline-grammar (no local model consulted)",
+  "metrics": {
+    "raw": "canary=canary-dbb1205a8d23 dumps=2 files",
+    "sha16_solve_us": null
+  },
+  "economic": "reidentification_cost=infinite raw_hits=0"
+}

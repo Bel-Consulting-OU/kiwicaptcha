@@ -1,0 +1,18 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.12-protocol-parser",
+  "attackClass": "D3.12 protocol and parser",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T19:45:42Z",
+  "duration_s": 16,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "php fuzz mirror: the seeded confusable corpus green (5000 mutations)",
+  "source_fingerprint": "c0d1ba32e40c711807f67612296ab61d",
+  "method": "offline-grammar (no local model consulted)",
+  "metrics": {
+    "raw": "",
+    "sha16_solve_us": null
+  },
+  "economic": "cost_per_differential=infinite differentials=0 desyncs=0 sdk_green=7"
+}

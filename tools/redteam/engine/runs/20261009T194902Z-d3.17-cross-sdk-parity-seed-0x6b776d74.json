@@ -1,0 +1,18 @@
+{
+  "schema": "kiwicaptcha.redteam.run/1",
+  "campaign": "d3.17-cross-sdk-parity",
+  "attackClass": "D3.17 cross-SDK parity attack",
+  "seed": "0x6b776d74",
+  "started": "2026-10-09T19:48:52Z",
+  "duration_s": 10,
+  "exit": 0,
+  "result": "PASS",
+  "detail": "",
+  "source_fingerprint": "c0d1ba32e40c711807f67612296ab61d",
+  "method": "offline-grammar (no local model consulted)",
+  "metrics": {
+    "raw": "sdks=7 adversarial_vectors=2",
+    "sha16_solve_us": null
+  },
+  "economic": "weakest_link=none rejection_divergences=0"
+}
