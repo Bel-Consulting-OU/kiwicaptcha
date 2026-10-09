@@ -358,7 +358,7 @@ final class StepUpHandlersTest extends TestCase
     }
 
     /**
-     * First-time TOTP enrollment is gated exactly like a re-enroll:
+     * First-time totp enrollment is gated exactly like a re-enroll:
      * without a step-up completed in this session (with an established
      * factor) the handler refuses — the credential-stuffing takeover
      * path (planting the attacker's own authenticator on a secret-less

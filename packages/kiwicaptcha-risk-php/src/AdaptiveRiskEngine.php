@@ -675,7 +675,7 @@ final class AdaptiveRiskEngine
      *   honeypot evidence).
      * - scopePressure: global pressure is enabled and the scope
      *   failure-ratio pressure is running at/above
-     *   MarksEscalation::SCOPE_PRESSURE_FLOOR / SCOPE_PRESSURE_LEVEL —
+     *   MarksEscalation::`SCOPE_PRESSURE`_FLOOR / `SCOPE_PRESSURE`_LEVEL —
      *   every first-attempt login escalates, not only the attacked
      *   target's.
      */
@@ -693,7 +693,7 @@ final class AdaptiveRiskEngine
         if ($isLogin) {
             if ($this->principalNetworks !== null && $observation->principalId !== null) {
                 // Novelty is judged on the ASN bucket first: carriers
-                // rotate IPv6 /64s and CGNAT addresses per connection,
+                // rotate IPv6 /64s and cgnat addresses per connection,
                 // so a /64 key alone would step up most mobile logins.
                 // A known ASN is never novel; an unknown ASN is novel.
                 // The /64 bucket is a contributing signal only (it can

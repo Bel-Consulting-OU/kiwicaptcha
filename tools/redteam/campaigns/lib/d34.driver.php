@@ -14,7 +14,7 @@ declare(strict_types=1);
  * risk-enabled wire path (this campaign's own deployment instance
  * whose client address comes from the trusted-edge forwarding header,
  * the production shape for a deployment behind a proxy) while the risk
- * plane scores every event through the REAL sharded risk store, so the
+ * plane scores every event through the real sharded risk store, so the
  * scope aggregates and the hysteresis level machine see the storm.
  *
  * Required results, all asserted from real outputs:
@@ -24,7 +24,7 @@ declare(strict_types=1);
  *     up exactly once while the attacker source is denied;
  *   - the scope failure-ratio pressure fires: the merged scope
  *     aggregate saturates and the global hysteresis level ratchets up;
- *   - CGNAT-sharing clean users (the same /24 as attacker sources, the
+ *   - cgnat-sharing clean users (the same /24 as attacker sources, the
  *     documented carrier-grade NAT shape) are never escalated beyond
  *     their own price: their own session and source dimensions carry
  *     no attacker evidence, and their decision stays at the clean
@@ -107,7 +107,7 @@ for ($i = 0; $i < $listedCount; $i++) {
     $block = (xormix64_next($xor) % 2) === 0 ? 45 : 103;
     $poolListed[] = draw_ip($xor, $block, xormix64_next($xor) % 256);
 }
-// Unlisted pool: 198.51.100.0/24 and the CGNAT 100.64.0.0/10 ranges
+// Unlisted pool: 198.51.100.0/24 and the cgnat 100.64.0.0/10 ranges
 // stay absent from the dataset on purpose (the unknown-bucket path).
 $poolUnlisted = [];
 for ($i = 0; $i < $unlistedCount; $i++) {
@@ -160,7 +160,7 @@ $trackKey = static function (string $key) use (&$cleanupKeys): void {
 };
 
 /**
- * One storm event through the REAL sharded observe surface: the
+ * One storm event through the real sharded observe surface: the
  * authentication-failure flood of the pool shape, one unique event id
  * per draw so the dedupe never swallows the storm. The pseudonyms are
  * the factory's own (HMAC identity dimensions, epochs included).
@@ -275,7 +275,7 @@ foreach ($hotTargets as $index => $target) {
     }
 }
 
-// ---------- CGNAT-sharing clean users ----------
+// ---------- cgnat-sharing clean users ----------
 // A clean user shares the /24 with attacker sources (carrier-grade
 // NAT); the required bound: their OWN decision stays at their own
 // price. The subnet dimension of a shared /24 does carry neighborhood
@@ -307,7 +307,7 @@ $engineCleanContext = new RiskContext(
 // The clean identity's own session carries zero marks (the attacker
 // marks live on the attacker sessions and on the shared network
 // bucket); the neighbor's view reads the shared bucket, exactly the
-// CGNAT shape, and the marks stage prices the neighborhood without
+// cgnat shape, and the marks stage prices the neighborhood without
 // ever denying or stepping the clean user up.
 $ownSessionView = MarksView::read($legacy, ['session' => $cleanSession], null);
 $cleanMarked = $ownSessionView->freshestOwnInTtl($markNow, $ttl) !== null;

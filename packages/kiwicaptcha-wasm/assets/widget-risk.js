@@ -167,7 +167,7 @@
   // worker-internal; forged page traffic is ignored (the spec asserts
   // forged payloads never mint a token). Inline mode builds the Blob
   // worker from the glue's embedded workerSource (zero requests);
-  // files mode constructs a SAME-ORIGIN Worker from the fetched,
+  // files mode constructs a same-ORIGIN Worker from the fetched,
   // preflight-verified versioned asset (no Blob URL, so worker-src
   // 'self' suffices, never blob:); the legacy explicit data-kiwi-worker-
   // src URL keeps its direct-construction path. The worker never probes
@@ -443,7 +443,7 @@
         if (typeof Worker === "undefined") { resolve({ unavailable: true, reason: "no-worker-support" }); return; }
         try {
           if (workerSrc) {
-            // Files mode: a SAME-ORIGIN Worker constructed from the
+            // Files mode: a same-ORIGIN Worker constructed from the
             // content-addressed URL of the fetched + preflight-verified
             // asset. The preflight hashes the EXACT fetched bytes and
             // (when integrity is present) requires the URL's embedded
@@ -503,7 +503,7 @@
           if (settled) return;
           if (msg.type === "ready") {
             // Startup handshake: a stale cached worker must report the
-            // SAME solver protocol id; otherwise it is refused and never
+            // same solver protocol id; otherwise it is refused and never
             // contributes a solution.
             if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
               if (!settled) {

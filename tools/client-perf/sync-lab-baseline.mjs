@@ -7,7 +7,7 @@
  * The committed baseline is the schema-1 pre-matrix recording: legacy
  * rows measured at the old fixture envelope (64 KiB Argon, fixture
  * SHA default). The client-performance release gate now budgets the
- * REAL ladder (Argon m=16384 KiB target 4 since the round-5 retune)
+ * real ladder (Argon m=16384 KiB target 4 since the round-5 retune)
  * on the lab rig (the unthrottled mainstream-desktop tier = the
  * actual recording Mac), so the desktop rows must describe the
  * real-ladder measurements:
@@ -40,7 +40,7 @@
  *
  * Execution-version honesty (audit finding 1): when the merged reps
  * carry a decoded executionVersion (the execution cells), EVERY rep
- * must decode the SAME version and the merged row records it; reps
+ * must decode the same version and the merged row records it; reps
  * that disagree, or an execution row whose reps only partially
  * decode, abort the surgery — a mixed-grammar merge is never silent.
  *

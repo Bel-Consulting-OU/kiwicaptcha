@@ -10,10 +10,7 @@ use PHPUnit\Framework\TestCase;
 /**
  * The target-failure leak watermark (target_failure.lua) over real
  * Redis: one failure leaks per minute, and the watermark advances only
- * by whole leaked minutes. A `ts = now` reset on every write erases the
- * sub-minute remainder and suspends the leak for as long as failures
- * keep arriving less than a minute apart — the stuffing-storm shape —
- * so the counter would never walk back under the attack threshold.
+ * by whole leaked minutes. A `ts = now` reset on every write erases the sub-minute remainder. A steady trickle of failures then never leaks.
  *
  * The scenario: three failures spaced 30 s apart. After the third
  * failure exactly one minute has elapsed since the watermark origin, so

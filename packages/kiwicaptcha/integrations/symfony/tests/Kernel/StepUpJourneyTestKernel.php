@@ -20,9 +20,10 @@ use Symfony\Component\DependencyInjection\Reference;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage;
 
 /**
- * Kernel for the full-journey gate test: the risk engine and the step-up
- * plane armed, novelty enforcement in 'enforce', an ASN dataset fixture,
- * the real TokenStorage as the firewall's storage (security.token_storage),
+ * Kernel for the full-journey gate test. The risk engine and the
+ * step-up plane are armed. Novelty enforcement is 'enforce'. An ASN
+ * dataset fixture is present. The real TokenStorage is the firewall's
+ * storage (security.token_storage),
  * the typical TokenStorage-backed principal resolver ($security->getUser()
  * semantics), and the journey's in-memory risk surface as the engine
  * state store AND the kiwi_captcha.risk.principal_networks seam. The
@@ -74,7 +75,7 @@ final class StepUpJourneyTestKernel extends TestKernel
                 // The journey's in-memory risk surface replaces the
                 // Redis-backed state store (the engine's real pipeline
                 // runs against it) and serves as the
-                // kiwi_captcha.risk.principal_networks seam — one
+                // kiwi_captcha.risk.principal_networks seam, one
                 // shared instance for the engine's novelty read and the
                 // step-up session restore's record.
                 if ($container->hasDefinition('kiwi_captcha.risk.store')) {

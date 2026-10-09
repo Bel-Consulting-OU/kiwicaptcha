@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 /**
- * d32.router.php — the D3.2 wire surface: the REAL core issuer and
+ * d32.router.php — the D3.2 wire surface: the real core issuer and
  * verifier of the reference deployment, driven directly so the decoy
  * (honeypot) field and the execution program can both be armed, which
  * the stock deploy router only does from its own environment knobs.

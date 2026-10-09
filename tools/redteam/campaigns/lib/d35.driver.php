@@ -12,7 +12,7 @@ declare(strict_types=1);
  * victim accounts recur across the list (real lists concentrate on
  * known-valuable targets); everything else is one shot. The attempts
  * ride the risk-enabled plane: every invalid row drives a real
- * authentication-failure event through the REAL sharded risk store, so
+ * authentication-failure event through the real sharded risk store, so
  * the scope failure-ratio pressure rises wave by wave and the global
  * hysteresis floors step up untrusted-context logins.
  *

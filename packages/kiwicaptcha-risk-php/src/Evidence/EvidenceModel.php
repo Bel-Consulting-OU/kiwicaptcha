@@ -11,9 +11,9 @@ use KiwiCaptcha\Risk\RiskDecision;
 use KiwiCaptcha\Risk\RiskReason;
 
 /**
- * Plane 2 evidence scoring (change.md 3.2.1): the interaction-anomaly
- * and solve-anomaly signals derived from the telemetry-v1 payload and
- * the client-performance reference table, plus the additive decision
+ * Plane 2 evidence scoring (change.md 3.2.1). The interaction-anomaly
+ * and solve-anomaly signals derive from the telemetry-v1 payload and
+ * the client-performance reference table. They are additive decision
  * stage that composes them (change.md 3.2.3). Mirror of the Rust
  * `evidence` module; the two cores must stay byte-identical.
  *

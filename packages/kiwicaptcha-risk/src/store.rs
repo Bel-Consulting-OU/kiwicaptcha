@@ -367,7 +367,7 @@ pub trait SessionTlsTagStore {
 }
 
 /// Optional risk-v2 capability: the principal's first-seen network tag
-/// records (one per (principal, network-bucket) pair, SET NX).
+/// records (one per principal, network-bucket pair, SET NX).
 ///
 /// Kept out of the [`RiskStateStore`] trait for the same reason as the
 /// session tags — existing implementations compile unchanged — and
@@ -383,7 +383,7 @@ pub trait SessionTlsTagStore {
 /// really proves themselves.
 pub trait PrincipalNetworkTagStore: Send + Sync {
     /// Whether the principal has been seen (established) from this
-    /// network bucket: `Ok(Some(true))` = seen before, `Ok(Some(false))`
+    /// network bucket: `Ok(Sometrue)` = seen before, `Ok(Somefalse)`
     /// = never seen (the first-attempt novel-network signal),
     /// `Ok(None)` = no record surface (neutral: never novel).
     ///
@@ -416,8 +416,8 @@ pub trait PrincipalNetworkTagStore: Send + Sync {
 
     /// Whether the account carries ANY established network: the "no
     /// prior trusted network" half of the novel-network gate.
-    /// `Ok(Some(true))` = the account has a trusted network,
-    /// `Ok(Some(false))` = none, `Ok(None)` = no record surface.
+    /// `Ok(Sometrue)` = the account has a trusted network,
+    /// `Ok(Somefalse)` = none, `Ok(None)` = no record surface.
     ///
     /// # Errors
     ///

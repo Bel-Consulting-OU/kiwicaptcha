@@ -7,9 +7,9 @@ declare(strict_types=1);
  * (php -S 0.0.0.0:8080 -t /srv/kiwicaptcha/app /srv/kiwicaptcha/app/router.php).
  *
  * The surface mirrors the JSON wire contract the browser fixture
- * server and the Symfony bundle controller speak, backed by the REAL
+ * server and the Symfony bundle controller speak, backed by the real
  * core storage (RedisStorage on KC_REDIS_URL — never temp files) and
- * the REAL core issuer/verifier configured from the environment only:
+ * the real core issuer/verifier configured from the environment only:
  *
  *   GET  /healthz -> 200 {"ok":true} only after a real store round
  *                    trip (write, read, delete-if-pending); 503 with

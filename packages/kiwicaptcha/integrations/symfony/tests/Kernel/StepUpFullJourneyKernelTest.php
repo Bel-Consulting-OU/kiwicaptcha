@@ -26,21 +26,22 @@ use Symfony\Component\Security\Core\Authorization\Voter\AuthenticatedVoter;
 use Symfony\Component\Security\Core\User\InMemoryUser;
 
 /**
- * The full-journey gate test (findings 1, 2, 4 and 6 in one walk):
- * novel login -> pending token -> begin step-up -> complete step-up ->
- * restored session -> second login from the same ASN with no step-up.
+ * The full-journey gate test. It covers findings 1, 2, 4 and 6 in one
+ * walk: novel login, then a pending token, then begin step-up, then
+ * complete step-up, then a restored session. The second login from the
+ * same ASN needs no step-up.
  *
  * Everything under the security plane is real: the container's
- * FirstAttemptLoginGuard (the REAL LoginDecisionGate / RiskGateway and
- * the REAL engine pipeline behind it), the container's StepUpController
+ * FirstAttemptLoginGuard (the real LoginDecisionGate / RiskGateway and
+ * the real engine pipeline behind it), the container's StepUpController
  * and email handler, the real StepUpPendingToken wrapping a real
  * UsernamePasswordToken in a real TokenStorage, the real SessionRestorer
  * on the completion credit, real RememberMeToken / PasswordCredentials
  * authenticator shapes, and the default affirmative
  * AccessDecisionManager. A full firewall kernel would need
  * symfony/security-bundle (not a dependency of this package), so the
- * firewall's part — holding the token the guard produced in the token
- * storage — is driven directly against the same real storage the
+ * firewall's part, holding the token the guard produced in the token
+ * storage, is driven directly against the same real storage the
  * services read.
  */
 final class StepUpFullJourneyKernelTest extends TestCase
@@ -84,7 +85,7 @@ final class StepUpFullJourneyKernelTest extends TestCase
 
         // (1) Novel login: a password credential from a network the
         // principal has never proven. The real engine's first-attempt
-        // evidence (novelty_enforcement=enforce) answers StepUp BEFORE
+        // evidence (novelty_enforcement=enforce) answers StepUp before
         // the session is granted.
         $user = new InMemoryUser(self::RAW_USER, null, ['ROLE_USER']);
         $passwordToken = new UsernamePasswordToken($user, 'main', ['ROLE_USER']);
@@ -104,7 +105,7 @@ final class StepUpFullJourneyKernelTest extends TestCase
         self::assertFalse($access->decide($tokenStorage->getToken(), ['IS_AUTHENTICATED_FULLY']), 'the affirmative strategy denies a pending token');
 
         // (3) Begin step-up. The controller unwraps the pending token
-        // for the resolver — the typical $security->getUser() resolver
+        // for the resolver, the typical $security->getUser() resolver
         // would otherwise resolve nothing (finding 1).
         $session = $this->session('journey-session-00000000000001');
         $beginRequest = $this->request('10.1.2.3', '/kiwi/step-up/begin?mode=json');
@@ -159,7 +160,7 @@ final class StepUpFullJourneyKernelTest extends TestCase
         self::assertTrue($riskStore->principalNetworkSeen($principalPseudonym, 'asn:64512'), 'the step-up records the ASN under the engine spelling');
         self::assertNotSame($sessionIdBefore, (string) $session->getId(), 'the session id rotated on the privilege upgrade (finding 3)');
 
-        // (7) The second login from the same ASN: no step-up — the
+        // (7) The second login from the same ASN: no step-up, the
         // network is proven now.
         $secondToken = new UsernamePasswordToken(new InMemoryUser(self::RAW_USER, null, ['ROLE_USER']), 'main', ['ROLE_USER']);
         $secondEvent = $this->event($secondToken, $this->passwordPassport());

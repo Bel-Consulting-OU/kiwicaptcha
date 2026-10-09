@@ -163,7 +163,7 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
                 ? $this->continuityCookie->read($request)
                 : null;
             $sessionPseudonym = $sessionRaw !== null ? $this->identityFactory->sessionId($sessionRaw) : null;
-            // Evaluate the gate BEFORE recording this success: a
+            // Evaluate the gate before recording this success: a
             // record-then-check order hands every fresh session a clean
             // ratio and lets a stuffer mint session/source trust on
             // every stolen login. The gate reads the same normalized

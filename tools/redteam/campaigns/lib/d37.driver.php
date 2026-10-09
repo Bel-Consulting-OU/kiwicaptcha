@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 /**
  * d37.driver.php — the D3.7 campaign driver: human-solver farms
- * against the step-up plane, driven through the REAL bundle handlers
- * over the REAL Redis step-up store.
+ * against the step-up plane, driven through the real bundle handlers
+ * over the real Redis step-up store.
  *
  * The relay story, told honestly per handler:
  *
- *   TOTP   the code IS relayable by design: a phishing proxy that
+ *   totp   the code IS relayable by design: a phishing proxy that
  *          captures the current 6-digit code and replays it inside its
  *          acceptance window DOES complete the challenge once. What
  *          caps the farm is what the handler pins in code: the replay
@@ -168,23 +168,33 @@ $context = static fn (string $principal): StepUpContext => new StepUpContext(
     'post_solve_step_up_required',
     StepUpContext::MODE_JSON,
 );
-$beginRequest = static fn (): Request => Request::create('https://' . HOST . '/kiwi/step-up/begin');
+$withSession = static function (Request $request, string $sessionId): Request {
+    $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
+    $storage->setId($sessionId);
+    $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
+    $session->start();
+    $request->setSession($session);
+    return $request;
+};
+$beginRequest = static fn (): Request => $withSession(Request::create('https://' . HOST . '/kiwi/step-up/begin'), 'rt37-sess-begin-000000000001');
 // The controller re-resolves the principal and binds it before the
 // handler runs; a direct handler call must bind the same way or the
 // session-mismatch guard refuses every completion.
-$completeRequest = static function (string $tick, string $code, string $principal = PRINCIPAL): Request {
+$completeRequest = static function (string $tick, string $code, string $principal = PRINCIPAL) use ($withSession): Request {
     $request = Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
         TotpStepUpHandler::TICKET_FIELD => $tick,
         TotpStepUpHandler::CODE_FIELD => $code,
     ]);
+    $request = $withSession($request, 'rt37-sess-begin-000000000001');
     \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, $principal);
     return $request;
 };
-$waCompleteRequest = static function (string $tick, string $credentialJson, string $principal = PRINCIPAL): Request {
+$waCompleteRequest = static function (string $tick, string $credentialJson, string $principal = PRINCIPAL) use ($withSession): Request {
     $request = Request::create('https://' . HOST . '/kiwi/step-up/complete', 'POST', [
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler::TICKET_FIELD => $tick,
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler::CREDENTIAL_FIELD => $credentialJson,
     ]);
+    $request = $withSession($request, 'rt37-sess-begin-000000000001');
     \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, $principal);
     return $request;
 };
@@ -195,8 +205,13 @@ $ticketOf = static function (object $response): string {
     return (string) ($document['challenge'] ?? $document['ticket'] ?? '');
 };
 
-// ---------- the TOTP relay ----------
-$enrolledBase32 = $totp->enroll(PRINCIPAL);
+// ---------- the totp relay ----------
+// First totp enrollment needs a session-scoped step-up proof (N1).
+// The campaign books one the way an application would after the user
+// completed a factor in this session.
+$sessionTotp = 'rt37-session-totp-000000000001';
+$store->markSessionStepUpSuccess($sessionTotp, PRINCIPAL, 'email_otp', 900, $now);
+$enrolledBase32 = $totp->enroll(PRINCIPAL, $sessionTotp);
 $secretRaw = TotpCode::base32Decode($enrolledBase32) ?? throw new RuntimeException('base32 round trip broke');
 
 // The victim begins the challenge and the phishing proxy reads the
@@ -232,7 +247,9 @@ for ($i = 0; $i < 10; $i++) {
 }
 
 // The attempt cap: wrong codes burn the challenge's attempts.
-$enrollSecond = $totp->enroll(VICTIM);
+$sessionV = 'rt37-session-victim-0000000001';
+$store->markSessionStepUpSuccess($sessionV, VICTIM, 'email_otp', 900, $now);
+$enrollSecond = $totp->enroll(VICTIM, $sessionV);
 $beginThree = $totp->begin($beginRequest(), $context(VICTIM));
 $ticketThree = $ticketOf($beginThree);
 $attemptCapReached = false;
@@ -246,7 +263,7 @@ for ($i = 0; $i < 8; $i++) {
 
 // ---------- the WebAuthn ceremony ----------
 $waStore = new BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore($clock);
-// The TOTP completion above marked a step-up success on the TOTP
+// The totp completion above marked a step-up success on the totp
 // store; the WebAuthn enrollment precondition reads its own store, so
 // the same completed-step-up fact is recorded there (the controller
 // does this across handlers on the live plane).
@@ -317,7 +334,7 @@ $registrationOk = $registration->status === StepUpResultStatus::Succeeded;
 // evil.example with an rpId of the phisher's own domain. The library's
 // ceremony steps must refuse it (a bad attempt, never a success).
 $waBegin = $webauthn->begin(
-    Request::create('https://' . HOST . '/kiwi/step-up/begin'),
+    $withSession(Request::create('https://' . HOST . '/kiwi/step-up/begin'), 'rt37-sess-begin-000000000001'),
     $context(PRINCIPAL),
 );
 $waBeginRaw = (string) $waBegin->getContent();
@@ -330,7 +347,7 @@ $phishRefused = $phishComplete->status !== StepUpResultStatus::Succeeded;
 
 // The honest origin assertion completes end to end.
 $assertBegin = $webauthn->begin(
-    Request::create('https://' . HOST . '/kiwi/step-up/begin'),
+    $withSession(Request::create('https://' . HOST . '/kiwi/step-up/begin'), 'rt37-sess-begin-000000000001'),
     $context(PRINCIPAL),
 );
 $assertDoc = json_decode((string) $assertBegin->getContent(), true);

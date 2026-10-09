@@ -43,7 +43,7 @@ final class BootstrapAdversarialTest extends TestCase
     /**
      * Finding 1 (HIGH): the single-use grant is consumed at
      * enrollBegin, so enrollComplete must read the flag the begin
-     * recorded — re-consulting the gate finds nothing and refuses a
+     * recorded, re-consulting the gate finds nothing and refuses a
      * legitimate bootstrap enrollment at the finish line.
      */
     public function testABootstrapEnrollmentSurvivesBeginAndComplete(): void
@@ -156,7 +156,7 @@ final class BootstrapAdversarialTest extends TestCase
 
     /**
      * Finding 5 adversarial: a stateless begin (no session) mints a
-     * client secret and records no session hash — exactly one binding.
+     * client secret and records no session hash, exactly one binding.
      */
     public function testAStatelessBeginMintsOnlyAClientSecret(): void
     {
@@ -274,7 +274,7 @@ final class BootstrapAdversarialTest extends TestCase
      * Full-chain (finding 1): write the challenge, serialize it
      * (toArray), read it back (fromArray), and confirm the bootstrap
      * flag SURVIVES the store round trip. The in-memory object check
-     * is not enough — fromArray() is the real path every store takes.
+     * is not enough, fromArray() is the real path every store takes.
      */
     public function testTheBootstrapFlagSurvivesTheStoreRoundTrip(): void
     {

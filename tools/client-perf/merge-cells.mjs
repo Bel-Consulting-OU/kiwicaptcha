@@ -54,7 +54,7 @@
  *
  * Run-combination guard (audit finding 2, asset bind): before any
  * repetition is concatenated, every --run file must have been
- * measured against the SAME measurement context:
+ * measured against the same measurement context:
  *
  *   - the canonical client asset set: each run's recorded
  *     clientAssets block must name exactly the current canonical

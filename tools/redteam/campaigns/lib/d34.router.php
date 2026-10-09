@@ -4,7 +4,7 @@
 declare(strict_types=1);
 
 /**
- * d34.router.php — the D3.4 wire instance: the REAL core issuer and
+ * d34.router.php — the D3.4 wire instance: the real core issuer and
  * verifier of the reference deployment behind a trusted edge. The one
  * difference from the stock deploy router is the client address: this
  * instance reads the first value of the X-Forwarded-For header, the

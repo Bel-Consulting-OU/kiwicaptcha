@@ -323,7 +323,7 @@ if (frozenExit !== 0 || frozenPayload?.completion?.status !== 'completed') {
   }
   // The race run used development options (tiny repetitions), which are
   // not eligible for physical indexing by construction. The certifiable
-  // case runs a focused selection (sha16) with the REAL solver defaults,
+  // case runs a focused selection (sha16) with the real solver defaults,
   // which is exactly the focused-recording path: a clean run over a
   // deliberately selected subset.
   const certify = startFrozen('certify', [

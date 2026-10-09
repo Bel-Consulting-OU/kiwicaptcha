@@ -1830,7 +1830,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // (P0-1): runs the engine pipeline on
                 // AuthenticationTokenCreatedEvent so novel-network /
                 // breached-credential / scope-pressure can demand step-up
-                // BEFORE the token is stored. Registered only when the
+                // before the token is stored. Registered only when the
                 // security component is present.
                 if (class_exists(FirstAttemptLoginGuard::TOKEN_CREATED_EVENT)) {
                 $container->setDefinition(FirstAttemptLoginGuard::class, (new Definition(FirstAttemptLoginGuard::class, [

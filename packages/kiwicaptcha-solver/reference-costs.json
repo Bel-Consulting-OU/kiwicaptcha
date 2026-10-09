@@ -49,10 +49,13 @@
         "sha18": 0.001962,
         "argon16": 0.001225,
         "argon64": 0.00421
-      }
+      },
+      "anchor": "bench-measured attacker cost per 1000 solves on the release bench host (the D3.3 campaign measurement)",
+      "as_of": "2026-10"
     },
     "statement": "Every figure below is a conservative class value compiled from free, public sources, rounded in the defender's disfavor. The declared abuse values are INDEPENDENT stake anchors (public credential/account resale reporting), never a function of the attacker's own solve cost \u2014 deriving the stake from the cost would make the D3.3 check circular.",
-    "refresh_note": "Refresh by re-checking the source classes above, re-running the D3.3 campaign on the release bench host, and re-validating the independent stake anchors; bump as_of. Stale entries must be replaced, never silently kept."
+    "refresh_note": "Refresh by re-checking the source classes above, re-running the D3.3 campaign on the release bench host, and re-validating the independent stake anchors; bump as_of. Stale entries must be replaced, never silently kept.",
+    "as_of": "2026-10"
   },
   "value_classes": [
     {

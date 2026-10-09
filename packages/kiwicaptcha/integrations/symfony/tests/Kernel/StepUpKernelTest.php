@@ -151,7 +151,7 @@ final class StepUpKernelTest extends TestCase
         $this->kernel ??= new StepUpTestKernel('test', true, true);
         $this->kernel->boot();
 
-        // Every request in a kernel flow carries the SAME started
+        // Every request in a kernel flow carries the same started
         // session: the completion is bound to the session that began the
         // challenge, so a sessionless request is refused (fail closed).
         return new class ($this->kernel) extends HttpKernelBrowser {

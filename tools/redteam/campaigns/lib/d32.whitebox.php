@@ -6,7 +6,7 @@ declare(strict_types=1);
  * d32.whitebox.php — the D3.2 white-box execution forgery stage: the
  * full-knowledge adversary who has read the published verifier source
  * and reimplements the five version-6 acceptance envelopes. No browser,
- * no layout engine, no microtasks. Against REAL execution programs
+ * no layout engine, no microtasks. Against real execution programs
  * issued by this campaign's wire instance (execution armed, real
  * execution_key), the forger emits a trace and the real
  * ExecutionChallengeGenerator::verifyExecutedTrace judges it.

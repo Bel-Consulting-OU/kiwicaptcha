@@ -341,7 +341,7 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
         "the first established network records its tag"
     );
 
-    // Attempt 2 from the SAME network: established — the plain allow.
+    // Attempt 2 from the same network: established — the plain allow.
     let decision = engine
         .reassess(ctx_for(home_ip), Some("stuffing-2".to_string()))
         .expect("assess succeeds");
