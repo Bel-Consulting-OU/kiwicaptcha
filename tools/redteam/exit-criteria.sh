@@ -188,17 +188,14 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     fi
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     doc="$RT_DIR/engine/runs/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
-    node -e '
-const fs = require("fs");
-const [campaign, cls, seed, started, duration, verdict, detail, metric, economic, shaUs] = process.argv.slice(2);
-fs.writeFileSync(process.argv[process.argv.length - 1], JSON.stringify({
-    schema: "kiwicaptcha.redteam.run/1",
-    campaign, attackClass: cls, seed, started, duration_s: Number(duration),
-    exit: verdict === "PASS" ? 0 : 1, result: verdict, detail,
-    metrics: { raw: metric, sha16_solve_us: shaUs ? Number(shaUs) : null },
-    economic,
-}, null, 2) + "\n");
-' - "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$doc" 2>/dev/null || true
+    # The shared writer (write-run.mjs) records the source fingerprint
+    # and the engine method and refuses any path outside engine/runs.
+    # An inline writer without those fields is how runs went stale
+    # silently — never again.
+    if ! node "$RT_DIR/engine/write-run.mjs" \
+        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$([ "$verdict" = PASS ] && echo 0 || echo 1)" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}"; then
+        echo "exit-criteria: campaign $campaign failed to write its run document" >&2
+    fi
 done
 
 # did_run_this_invocation <campaign> — true only when this gate process
