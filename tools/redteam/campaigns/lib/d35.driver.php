@@ -81,6 +81,7 @@ use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskWeights;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Asn\AsnDataset;
 use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Risk\Storage\ShardedRedisRiskStateStore;
@@ -235,6 +236,22 @@ $epoch = intdiv($nowSecs, 900);
 $networks = new D35NetworkTagStore();
 $classifier = new CidrNetworkClassifier([]);
 
+// Seed each account with a realistic home network (and a mobile /64 on
+// the same ASN), so the engine has history to judge novelty against.
+// Without this every account is historyless and enforce mode steps up
+// everyone — the campaign could not tell "stops stuffing" from "steps
+// up everyone".
+$homeIpOf = static fn (int $a): string => sprintf('10.%d.%d.%d', 1 + intdiv($a, 65025) % 254, intdiv($a, 250) % 250, $a % 250 + 1);
+$mobileIpOf = static fn (int $a): string => sprintf('10.%d.%d.%d', 50 + intdiv($a, 65025) % 200, intdiv($a, 250) % 250, $a % 250 + 1);
+$seededPrincipals = 0;
+foreach ($accounts as $a => $account) {
+    $principal = $factory->principalId($account);
+    $networks->recordPrincipalNetworkTag($principal, AdaptiveRiskEngine::networkBucket($homeIpOf($a)));
+    $networks->recordPrincipalNetworkTag($principal, AdaptiveRiskEngine::networkBucket($mobileIpOf($a)));
+    $networks->recordPrincipalNetworkTag($principal, 'asn:64496');
+    $seededPrincipals++;
+}
+
 // The marks reader: session and principal marks, plus the login target
 // (the account identifier the attacker submits) read from the store.
 // A plain StoreMarksReader resolves no target; this one does, so
@@ -276,6 +293,14 @@ $marksReader = new class ($legacy, $ttl) implements MarksReaderInterface {
 // the first-attempt gate exists to measure. principalNetworks is the
 // seam that makes "seen from this network" a real question; without it
 // firstAttemptEvidence degrades to neutral and nothing is prevented.
+// The ASN dataset: the home ISP (10.0.0.0/8 -> ASN 64496) and the
+// botnet range (45.0.0.0/8 -> ASN 64500). The ISP-matched attacker
+// profile rides the home ISP's ASN; the engine's ASN branch is
+// exercised for real.
+$asnFixture = sys_get_temp_dir().'/kiwi-d35-asn-'.getmypid().'.tsv';
+file_put_contents($asnFixture, "# d3.5 fixture\n10.0.0.0\t10.255.255.255\t64496\n45.0.0.0\t45.255.255.255\t64500\n");
+$asnDataset = AsnDataset::open($asnFixture);
+
 $engine = new AdaptiveRiskEngine(
     store: $sharded,
     classifier: $classifier,
@@ -287,6 +312,7 @@ $engine = new AdaptiveRiskEngine(
     noveltyEnforcement: 'enforce',
     principalNetworks: $networks,
     marksReader: $marksReader,
+    asnDataset: $asnDataset,
 );
 
 $stormEvent = static function (string $ip, int $seq) use ($sharded, $factory, $epoch, &$nowMs): void {
@@ -314,20 +340,33 @@ $attackerIpOf = static function (int $session, int $group): string {
     return sprintf('45.%d.%d.%d', 10 + $group, intdiv($session, 250) % 256, ($session * 7) % 250 + 1);
 };
 
+// The ISP-matched residential-proxy attacker: half the sessions ride
+// IPs on the victims' own ASN (10.0.0.0/8 -> ASN 64496, the home ISP).
+// Before the engine fix this was an automatic pass. The campaign now
+// measures it as an explicit attacker profile.
+$isIspMatched = static fn (int $session): bool => ($session % 2) === 1;
+$attackerIspIpOf = static function (int $session): string {
+    // A fresh /32 on the home ISP's ASN, never the seeded home /64.
+    return sprintf('10.200.%d.%d', intdiv($session, 250) % 256, ($session * 3) % 200 + 1);
+};
+
 /**
  * One real login assessment. This is the exact call
  * RiskGateway::loginDecision makes (reassess, event=AuthenticationSuccess,
  * resolved principal): firstAttemptEvidence runs inside applyMarksStage,
  * and the engine's action is the result. Nothing is assumed.
  */
-$assessLogin = static function (string $ip, string $account) use ($engine, $factory, $classifier, $healthy, $marksReader): object {
+$assessLogin = static function (string $ip, string $account, ?string $sessionId = null) use ($engine, $factory, $classifier, $healthy, $marksReader): object {
     $marksReader->setTarget($account);
     try {
         $context = new RiskContext(
             scope: 1,
             sourceIp: $ip,
-            sessionId: null,
-            principalId: $factory->principalId($account),
+            sessionId: $sessionId,
+            // The raw identifier: buildObservation hashes it into the
+            // principal pseudonym. Pre-hashing here would double-hash
+            // and every network tag would miss.
+            principalId: $account,
             event: RiskEventKind::AuthenticationSuccess,
             networkFlags: $classifier->classify($ip),
             resources: $healthy,
@@ -370,7 +409,10 @@ for ($w = 0; $w < $waves; $w++) {
         $session = (int) floor($i / $sessionSlice) % $attackerSessions;
         $group = $session % $groups;
         $account = $rows[$i];
-        $attackerIp = $attackerIpOf($session, $group);
+        // Half the attacker sessions ride IPs on the victims' own ISP
+        // ASN (the residential-proxy profile). The rest are ordinary
+        // botnet addresses.
+        $attackerIp = $isIspMatched($session) ? $attackerIspIpOf($session) : $attackerIpOf($session, $group);
 
         if ($rowValid[$i]) {
             // The valid stolen credential: the real engine decides.
@@ -382,6 +424,9 @@ for ($w = 0; $w < $waves; $w++) {
             if ($inCorpus) {
                 $corpusMemberValid++;
             }
+            // The attacker never carries the victim's continuity
+            // cookie: no device continuity, so a same-ASN new-prefix
+            // login is the residential-proxy shape and must escalate.
             $decision = $assessLogin($attackerIp, $account);
             if ($decision->action === RiskAction::Allow) {
                 $compromised++;
@@ -441,21 +486,16 @@ for ($w = 0; $w < $waves; $w++) {
             }
         }
 
-        // The marks stage: once the session's evidence corroborates
-        // (its third spread failure books the abuse mark, the pinned
-        // corroboration floor), the engine is asked for the session's
-        // decision. The product's answer to a marked identity is cost
-        // imposition (Argon64 or stronger); a hard Deny is reserved for
-        // corroborated abuse. Escalation out of the cheap Allow band is
-        // the measured bound — never assumed from the mark write.
-        if (!$sessionMarked[$session] && $sessionAttempts[$session] >= $group + 1) {
-            $legacy->writeMark('session', str_pad((string) $session, 32, '0', STR_PAD_LEFT), 'accountBanned', $nowMs + $i);
-            $legacy->writeMark('asn', sprintf('a64496%d', $group), 'accountBanned', $nowMs + $i);
-            $sessionMarked[$session] = true;
-        }
-        if ($sessionMarked[$session] && $sessionDenyAt[$session] === null && $sessionAttempts[$session] > 1) {
-            // Ask the engine for this attacker session. The escalation
-            // time is the attempt the engine left the Allow band.
+        // Escalation from real failure signals only. Production never
+        // writes accountBanned marks on failed logins — those come
+        // from server-confirmed outcomes. The engine escalates a
+        // stuffing session from the failure signals the product
+        // actually records: source velocity, scope pressure and target
+        // spread. No driver-written marks.
+        if ($sessionDenyAt[$session] === null && $sessionAttempts[$session] >= 1) {
+            // Ask the engine for this attacker session after each
+            // failure. The escalation time is the attempt the engine
+            // left the Allow band.
             $marksReader->setTarget(null);
             $sessionCtx = new RiskContext(
                 scope: 1,
@@ -537,12 +577,65 @@ foreach ($sessionDenyAt as $at) {
 if ($sessionsNeverEscalated > 0) {
     $escalatedWithinN = false;
 }
-$allSessionsMarked = !in_array(false, $sessionMarked, true);
+$allSessionsEscalated = $sessionsNeverEscalated === 0;
 $lockouts = count(array_filter(array_keys($victimActions), static fn ($k) => str_starts_with((string) $k, 'lockout-')));
 $stepUpSpreadOk = count($firstStepUpFailures) === $hotVictims
     && max($firstStepUpFailures) <= SPREAD_BOUND + 1;
 $levelsFire = max($levels) >= 1 && $levels[0] === 0;
 $untrustedEscalated = count($waveFreshUntrustedRanks) > 0 && max($waveFreshUntrustedRanks) > 0;
+
+// ---------- the legitimate-user baseline ----------
+// Honest logins alongside the attack, so the campaign can tell "stops
+// stuffing" from "steps up everyone". Each seeded account logs in from
+// its home network (must Allow), a new /64 on the same ASN with device
+// continuity (must Allow), and a travel network with device continuity
+// (step-up is acceptable but counted). The false-positive rate is the
+// gated metric: bound 0.1% on the home and same-ASN cases.
+$legitHomeTotal = 0;
+$legitHomeBlocked = 0;
+$legitSameAsnTotal = 0;
+$legitSameAsnBlocked = 0;
+$legitTravelTotal = 0;
+$legitTravelBlocked = 0;
+$legitSample = min(1000, $seededPrincipals);
+for ($a = 0; $a < $legitSample; $a++) {
+    $account = $accounts[$a];
+    $homeIp = $homeIpOf($a);
+    $mobileIp = $mobileIpOf($a);
+    $travelIp = sprintf('45.200.%d.%d', intdiv($a, 250) % 256, $a % 250 + 1);
+    // Device continuity: the returning browser carries the cookie.
+    $cookie = sprintf('%032x', $a + 1);
+    foreach ([['home', $homeIp], ['same_asn', $mobileIp], ['travel', $travelIp]] as [$kind, $ip]) {
+        $decision = $assessLogin($ip, $account, $cookie);
+        $blocked = $decision->action !== RiskAction::Allow;
+        if ($a < 2 || ($a >= 40 && $a < 42)) {
+            $pHex = $factory->principalId($account);
+            fwrite(STDERR, sprintf("DBG a=%d kind=%s netSeen=%s action=%s reasons=%s\n", $a, $kind,
+                var_export($networks->principalNetworkSeen($pHex, \KiwiCaptcha\Risk\AdaptiveRiskEngine::networkBucket($ip)), true),
+                $decision->action->name,
+                json_encode(array_map(fn($r) => $r->name, $decision->reasons))));
+        }
+        if ($kind === 'home') {
+            $legitHomeTotal++;
+            if ($blocked) {
+                $legitHomeBlocked++;
+            }
+        } elseif ($kind === 'same_asn') {
+            $legitSameAsnTotal++;
+            if ($blocked) {
+                $legitSameAsnBlocked++;
+            }
+        } else {
+            $legitTravelTotal++;
+            if ($blocked) {
+                $legitTravelBlocked++;
+            }
+        }
+    }
+}
+$legitFpRate = ($legitHomeTotal + $legitSameAsnTotal) > 0
+    ? ($legitHomeBlocked + $legitSameAsnBlocked) / ($legitHomeTotal + $legitSameAsnTotal)
+    : 1.0;
 
 $sha16Us = (float) (getenv('KIWI_RT_D35_SHA16_US') ?: 0);
 $spendUsd = $sha16Us > 0 ? ($rowsProcessed * $sha16Us / 1e6) / 3600.0 * 0.01 : 0.0;
@@ -562,15 +655,28 @@ $summary = [
     'corpus_member_blocked' => $corpusMemberBlocked,
     'breached_credential_checker' => 'not shipped by default; not credited',
     'engine_path' => 'AdaptiveRiskEngine::reassess(AuthenticationSuccess) — the RiskGateway::loginDecision call; firstAttemptEvidence runs for real',
-    'novelty_enforcement' => 'enforce',
+    'novelty_enforcement' => 'enforce (the abuse posture; the engine default is learn, a rollout window)',
     'target_source' => 'store (registerTargetFailure + MarksView::read; callers never inject)',
+    'attacker_profiles' => 'botnet_45x + isp_matched_residential (victims own ASN, fresh /64, no device continuity)',
+    'seeded_network_history' => $seededPrincipals,
+    'legitimate_baseline' => [
+        'sample' => $legitSample,
+        'home_total' => $legitHomeTotal,
+        'home_blocked' => $legitHomeBlocked,
+        'same_asn_total' => $legitSameAsnTotal,
+        'same_asn_blocked' => $legitSameAsnBlocked,
+        'travel_total' => $legitTravelTotal,
+        'travel_blocked' => $legitTravelBlocked,
+        'false_positive_rate' => round($legitFpRate, 6),
+        'false_positive_bound' => 0.001,
+    ],
     'attacker_sessions' => $attackerSessions,
     'sessions_never_escalated' => $sessionsNeverEscalated,
-    'all_sessions_marked' => $allSessionsMarked,
+    'all_sessions_escalated' => $allSessionsEscalated,
     'escalated_within_n' => $escalatedWithinN,
     'denied_within_n' => $escalatedWithinN,
     'deny_bound_n' => DENY_BOUND_N,
-    'deny_bound_note' => 'the product escalates a marked identity to Argon64 or stronger (cost imposition); Deny is the corroborated-abuse rung. The bound is measured over escalation out of Allow.',
+    'deny_bound_note' => 'escalation out of Allow from real failure signals (source velocity, scope pressure, target spread). No driver-written marks.',
     'lockouts' => $lockouts,
     'hot_victims' => $hotVictims,
     'victims_stepped_up' => count($targetStepUpAt),
@@ -582,16 +688,18 @@ $summary = [
     'engine_allow_on_valid_sample' => array_slice($engineAllowOnValid, 0, 8),
     'spend_usd' => round($spendUsd, 6),
     'sha16_us' => $sha16Us,
+    'cost_threshold_note' => '50000.0 is declared_abuse_value_usd_per_1000 from packages/kiwicaptcha-solver/reference-costs.json (USD per 1000 compromised accounts; critical class = $50/account)',
 ];
 echo json_encode($summary), "\n";
 
 $pass = $escalatedWithinN
-    && $allSessionsMarked
+    && $allSessionsEscalated
     && $lockouts === 0
     && $stepUpSpreadOk
     && $compromised === 0
     && $validAssessed > 0
     && $blockedValid > 0
+    && $legitFpRate <= 0.001
     && $levelsFire
     && $untrustedEscalated;
 exit($pass ? 0 : 1);

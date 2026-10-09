@@ -167,7 +167,7 @@ cat "$SUMMARY_FILE"
     rt_finish
 }
 
-for key in escalated_within_n all_sessions_marked; do
+for key in escalated_within_n all_sessions_escalated; do
     val=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))[sys.argv[2]]).lower())' "$SUMMARY_FILE" "$key")
     rt_assert_eq "$val" "true" "engine plane: $key"
 done
@@ -189,6 +189,12 @@ rt_assert_eq "$STEPPED" "$HOT" "engine plane: every targeted account stepped up"
 [ "$COMPROMISED" -eq 0 ] || rt_report_fail "engine plane: $COMPROMISED of $VALID valid stolen credentials were granted (bar 0)"
 [ "$VALID" -gt 0 ] || rt_report_fail "engine plane: no valid credential was assessed"
 [ "$BLOCKED" -gt 0 ] || rt_report_fail "engine plane: nothing blocked; the first-attempt gate never fired"
+# The legitimate-user baseline: the campaign must not be "steps up
+# everyone". Home and same-ASN logins with device continuity must pass
+# at a false-positive rate within the 0.1% bound.
+FP_RATE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["legitimate_baseline"]["false_positive_rate"])' "$SUMMARY_FILE")
+python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= 0.001 else 1)' "$FP_RATE" \
+    || rt_report_fail "legitimate baseline: false-positive rate $FP_RATE exceeds the 0.001 bound (the defense steps up everyone)"
 
 # ---------- the honest human baseline ----------
 BASELINE=$(KIWI_RT_BASE="$PROFILE_BASE" KIWI_RT_DIR="$RT_DIR/campaigns/lib" python3 - <<'PYBASE'

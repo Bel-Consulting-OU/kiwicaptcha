@@ -70,7 +70,25 @@ $beyond = ["critical" => ["rung" => "argon64", "declared_usd_per_1000" => 10.0, 
 $advised = ValueClassCeiling::verdict("critical", "allow", $beyond);
 $verified = ValueClassCeiling::verdict("critical", "step_up", $beyond);
 $shipped = ValueClassCeiling::verdict("critical", "allow");
-echo json_encode(["advised" => $advised, "verified" => $verified, "shipped_default" => $shipped]), "\n";
+// The SHIPPED configuration, not a hand-written minimum: every default
+// scope whose value class fails must sit on a step_up or deny minimum
+// for the escalation to be real. The bundle defaults are the shipped
+// posture; a PoW rung or allow never carries a stake beyond the ceiling.
+$defaultMinimums = ["contact" => "sha16", "signup" => "sha16", "login" => "sha18", "password_reset" => "sha18", "admin_login" => "sha20"];
+$shippedEscalates = false;
+foreach ($defaultMinimums as $min) {
+    if ($min === "step_up" || $min === "deny") {
+        $shippedEscalates = true;
+        break;
+    }
+}
+echo json_encode([
+    "advised" => $advised,
+    "verified" => $verified,
+    "shipped_default" => $shipped,
+    "shipped_escalates" => $shippedEscalates,
+    "shipped_minimums" => $defaultMinimums,
+]), "\n";
 ')
 printf '%s\n' "$ESC_JSON" | python3 -c '
 import json, sys
@@ -82,18 +100,23 @@ store["critical_stakes_escalation"] = {
     "advised": {"status": doc["advised"][0], "detail": doc["advised"][1]},
     "verified_with_step_up_minimum": {"status": doc["verified"][0], "detail": doc["verified"][1]},
     "shipped_default": {"status": doc["shipped_default"][0], "detail": doc["shipped_default"][1]},
+    "shipped_escalates": doc.get("shipped_escalates", False),
+    "shipped_minimums": doc.get("shipped_minimums", {}),
 }
 json.dump(store, open(out_path, "w"), indent=2)
 # The shipped default with an independent stake beyond the ceiling is
 # the honest WARN (escalation demanded), not a PASS: raw PoW cannot
 # price a real stake at any difficulty. The verified row (step_up
-# minimum set) must PASS: the disposition carries the stake.
+# minimum set) must PASS: the disposition carries the stake. The
+# SHIPPED configuration must also escalate — a hand-written step_up
+# minimum in this script is a function test, not a deployment.
 ok = (doc["advised"][0] == "WARN"
       and "risk.scopes" in doc["advised"][1]
       and "step_up" in doc["advised"][1]
-      and doc["verified"][0] == "PASS"
-      and doc["shipped_default"][0] in ("PASS", "WARN"))
-print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s" % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0]))
+      and doc["verified"][0] == "PASS")
+shipped = doc.get("shipped_escalates", False)
+print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s shipped_escalates=%s"
+      % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0], "yes" if shipped else "no"))
 raise SystemExit(0 if ok else 1)
 ' "$D33_OUT"
 rt_assert_eq "$?" "0" "the critical-stakes escalation path: beyond-ceiling scope advises the step_up minimum, then verifies it"
@@ -117,7 +140,16 @@ rm -f "$RSW_LOG"
 ESCALATE_ROWS=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["escalate_rows"]) or "-")' "$D33_OUT")
 if [ "$FAIL_ROWS" != "-" ]; then
     printf 'VALUE-CLASS-VERDICT: FAIL %s (the priced rung undercuts the declared abuse value)\n' "$FAIL_ROWS"
-    rt_report_pass "value-class verdicts recorded honestly; the FAIL rows feed the gate row"
+    # The gate row reads fail_rows and the shipped escalation posture.
+    # This campaign is green only when every failing class is carried by
+    # the SHIPPED step_up/deny minimum — never by a hand-written minimum
+    # in this script.
+    SHIPPED_ESC=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if e.get("shipped_escalates") else "no")' "$D33_OUT")
+    if [ "$SHIPPED_ESC" = "yes" ]; then
+        rt_report_pass "value-class fails $FAIL_ROWS carried by the shipped step_up/deny minimum"
+    else
+        rt_report_fail "value-class fails $FAIL_ROWS and the shipped profile leaves them on a PoW rung or allow (escalation required: risk.scopes.<name>.minimum to step_up or deny)"
+    fi
 else
     printf 'VALUE-CLASS-VERDICT: PASS all classes (escalated to the disposition minimum: %s)\n' "$ESCALATE_ROWS"
     rt_report_pass "every value class priced above its declared abuse value, or escalated to the documented disposition path"
