@@ -94,6 +94,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         private readonly ?ChainedChallengeStateStore $chainStore,
         private readonly ?SiteVerifyIdempotencyStore $siteVerifyIdempotencyStore,
         private readonly ?array $authorityGuards = null,
+        private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
     ) {
         parent::__construct();
     }
@@ -127,6 +128,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Client-IP policy' => $this->checkClientIpPolicy(),
             'Continuity cookie' => $this->checkContinuityCookie(),
             'Risk Redis' => $this->checkRiskRedis(),
+            'Principal-network store' => $this->checkPrincipalNetworks(),
             'Risk scope policy' => $this->checkScopePolicy(),
             'Value-class pricing' => $this->checkValueClassPricing(),
             'Protocol floor' => $this->checkProtocolFloor(),
@@ -641,6 +643,34 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return $this->checkRedis($this->riskRedis, 'risk Redis');
+    }
+
+    /**
+     * The principal-network store: novelty_enforcement (learn or
+     * enforce) needs a real store. A null or non-interface store
+     * silently disables the entire first-attempt defense.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkPrincipalNetworks(): array
+    {
+        $novelty = $this->config['risk']['novelty_enforcement'] ?? 'learn';
+        if ($novelty === 'off') {
+            return ['PASS', 'novelty enforcement off: the principal-network store is inactive'];
+        }
+        $store = $this->principalNetworks ?? null;
+        if ($store === null) {
+            // enforce is the active defense posture: a missing store is
+            // a hard failure. learn is the rollout window: the defense
+            // is not yet enforcing, so the gap is a warning.
+            $level = $novelty === 'enforce' ? 'FAIL' : self::LEVEL_WARN;
+            return [$level, sprintf('novelty_enforcement is "%s" but no principal-network store is wired: the first-attempt defense is silently disabled (register kiwi_captcha.risk.principal_networks)', $novelty)];
+        }
+        if (!($store instanceof \KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface)) {
+            return ['FAIL', 'the principal-network store does not implement PrincipalNetworkTagStoreInterface: the engine cannot read network history'];
+        }
+
+        return ['PASS', sprintf('principal-network store wired (%s), novelty_enforcement=%s', get_class($store), $novelty)];
     }
 
     /**

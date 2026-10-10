@@ -84,7 +84,7 @@ final class FirstAttemptNoveltyTest extends TestCase
                 return isset($this->tags[$principalId][$network]);
             }
 
-            public function recordPrincipalNetworkTag(string $principalId, string $network): bool
+            public function recordPrincipalNetworkTag(string $principalId, string $network, bool $trusted = false): bool
             {
                 if (isset($this->tags[$principalId][$network])) {
                     return false;
@@ -97,6 +97,20 @@ final class FirstAttemptNoveltyTest extends TestCase
             public function principalHasTrustedNetwork(string $principalId): ?bool
             {
                 return isset($this->tags[$principalId]) && $this->tags[$principalId] !== [];
+            }
+
+            public function tagIsTrusted(string $principalId, string $network): ?bool
+            {
+                return isset($this->tags[$principalId][$network]);
+            }
+
+            public function forgetDevices(string $principalId): void
+            {
+                foreach (array_keys($this->tags[$principalId] ?? []) as $tag) {
+                    if (str_starts_with($tag, 'session:') || str_starts_with($tag, 'device:')) {
+                        unset($this->tags[$principalId][$tag]);
+                    }
+                }
             }
         };
         $marksReader = new class implements MarksReaderInterface {

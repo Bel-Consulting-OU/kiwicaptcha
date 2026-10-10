@@ -502,6 +502,19 @@ impl ProcessEmergencyCap {
 /// and 60 s dedupe TTL.
 ///
 /// The five fields are private and read through the accessors below:
+/// Novelty enforcement mode, the PHP mirror of `AdaptiveRiskEngine`'s
+/// `$noveltyEnforcement`. `Learn` (default) records the network tag on
+/// every successful login without demanding a step-up, so a rollout
+/// never locks out existing users. `Enforce` demands step-up on a
+/// genuinely novel ASN/network. `Off` disables the novelty gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum NoveltyEnforcement {
+    Off,
+    #[default]
+    Learn,
+    Enforce,
+}
+
 /// [`RiskTimingConfig::new`] is the only constructor, so a caller can
 /// never assemble an unvalidated configuration and hand it to
 /// [`RiskEngine::with_timing`].
@@ -617,6 +630,7 @@ pub struct RiskEngine<
     metrics: Metrics,
     current_global_level: AtomicU8,
     enable_global_pressure: bool,
+    novelty_enforcement: NoveltyEnforcement,
     hysteresis: crate::hysteresis::ScopeActionHysteresis,
     /// Optional target-identifier resolver: when attached,
     /// [`RiskEngine::resolve_target_id`] derives the target pseudonym of
@@ -694,6 +708,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             metrics: Metrics::new(),
             current_global_level: AtomicU8::new(0),
             enable_global_pressure: true,
+            novelty_enforcement: NoveltyEnforcement::default(),
             hysteresis: crate::hysteresis::ScopeActionHysteresis::new(),
             target_resolver: None,
             marks_reader: None,
@@ -728,6 +743,15 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// inert, while per-source signals keep working.
     pub fn with_global_pressure(mut self, enable: bool) -> RiskEngine<S, N> {
         self.enable_global_pressure = enable;
+        self
+    }
+
+    /// Sets the novelty enforcement mode (the PHP mirror of
+    /// `AdaptiveRiskEngine`'s `$noveltyEnforcement`). `Learn` (default)
+    /// records without escalating; `Enforce` demands step-up on a
+    /// genuinely novel network.
+    pub fn with_novelty_enforcement(mut self, mode: NoveltyEnforcement) -> RiskEngine<S, N> {
+        self.novelty_enforcement = mode;
         self
     }
 
@@ -1491,6 +1515,20 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     ///   [`crate::marks::SCOPE_PRESSURE_FLOOR`] /
     ///   [`crate::marks::SCOPE_PRESSURE_LEVEL`] — every first-attempt
     ///   login escalates, not only the attacked target's.
+    /// The ASN bucket of a source address for the novel-network gate:
+    /// the ASN number as a decimal string when the dataset resolved
+    /// one, else the bucket id. Mirrors the PHP `asnBucketOf`.
+    fn asn_bucket_of(&self, ip: &std::net::IpAddr) -> String {
+        let Some(dataset) = self.asn_dataset.as_ref() else {
+            return String::new();
+        };
+        let info = dataset.lookup(*ip);
+        match info.asn {
+            Some(asn) => asn.to_string(),
+            None => info.bucket,
+        }
+    }
+
     fn first_attempt_evidence(
         &self,
         ctx: &RiskContext<'_>,
@@ -1504,38 +1542,85 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         let is_login = ctx.event == RiskEventKind::AuthenticationSuccess
             || ctx.event == RiskEventKind::AuthenticationFailure;
         let mut evidence = FirstAttemptEvidence::zero();
+        let mut scope_pressure = false;
 
-        // Novel network: only on the login shape and only with a
-        // principal to address. The network bucket is the IPv4 address
-        // itself or the IPv6 /64 (identity::masked_network with a full
-        // IPv4 mask).
         if is_login {
+            // Scope pressure is judged first: it is an independent
+            // first-attempt signal and the override that keeps a
+            // big-ISP ASN match from passing during an active storm.
+            if self.enable_global_pressure
+                && (global_level >= crate::marks::SCOPE_PRESSURE_LEVEL
+                    || vector.global_pressure >= crate::marks::SCOPE_PRESSURE_FLOOR)
+            {
+                scope_pressure = true;
+            }
+
             if let (Some(networks), Some(principal)) =
                 (&self.principal_networks, &observation.principal_id)
             {
                 let principal_hex = hex::encode(principal);
                 let network = network_bucket(ctx.source_ip);
-                let seen = networks
+                let asn = self.asn_bucket_of(&ctx.source_ip);
+                let asn_seen = if asn.is_empty() || asn == "0" {
+                    None
+                } else {
+                    networks
+                        .principal_network_seen(&principal_hex, &format!("asn:{asn}"))
+                        .unwrap_or(None)
+                };
+                let net_seen = networks
                     .principal_network_seen(&principal_hex, &network)
                     .unwrap_or(None);
                 let trusted = networks
                     .principal_has_trusted_network(&principal_hex)
                     .unwrap_or(None);
-                // Novel when either first-attempt condition holds and
-                // the store answers definitively: the principal has
-                // never been seen from this network bucket, or the
-                // account carries no prior trusted network at all. A
-                // neutral answer (None — no surface / failed read)
-                // never fires, like the session tags.
-                evidence.novel_network =
-                    matches!(seen, Some(false)) || matches!(trusted, Some(false));
+
+                // Device continuity: the session pseudonym was
+                // previously bound to this principal at a successful
+                // login. A fresh or attacker-minted cookie is never
+                // continuity.
+                let device_continuity = observation.session_id.as_ref().map_or(false, |sid| {
+                    let sid_hex = hex::encode(sid);
+                    networks
+                        .principal_network_seen(&principal_hex, &format!("session:{sid_hex}"))
+                        .unwrap_or(None)
+                        == Some(true)
+                });
+
+                let new_prefix = net_seen == Some(false);
+                let is_novel = if asn_seen == Some(false) {
+                    // Never-seen ASN: novel regardless of the /64.
+                    true
+                } else if asn_seen == Some(true) {
+                    // Known ASN: the /64 novelty is weak, never a free
+                    // pass. It fires when the prefix is new and no
+                    // device continuity vouches for the browser.
+                    new_prefix && !device_continuity
+                } else {
+                    // No ASN data: fall back to the /64 bucket, and to
+                    // the no-trusted-network condition.
+                    new_prefix || trusted == Some(false)
+                };
+
+                // A returning browser with a bound session is exempt
+                // from the scope-pressure override: the storm targets
+                // stolen credentials from unbound sessions, not the
+                // owner's own device.
+                if scope_pressure && device_continuity && !is_novel {
+                    scope_pressure = false;
+                }
+
+                // Migration grace: learn records but never escalates.
+                if is_novel {
+                    let _ = networks.record_principal_network_tag(&principal_hex, &network);
+                    if !asn.is_empty() && asn != "0" {
+                        let _ =
+                            networks.record_principal_network_tag(&principal_hex, &format!("asn:{asn}"));
+                    }
+                }
+                evidence.novel_network = is_novel && self.novelty_enforcement == NoveltyEnforcement::Enforce;
             }
-            if self.enable_global_pressure
-                && (global_level >= crate::marks::SCOPE_PRESSURE_LEVEL
-                    || vector.global_pressure >= crate::marks::SCOPE_PRESSURE_FLOOR)
-            {
-                evidence.scope_pressure = true;
-            }
+            evidence.scope_pressure = scope_pressure;
         }
         if v2.is_some_and(|context| context.breached_credential) {
             evidence.breached_credential = true;

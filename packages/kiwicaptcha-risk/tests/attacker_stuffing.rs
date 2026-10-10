@@ -289,7 +289,8 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
         policy(),
         RiskKeys::from_master(&[0x42; 32]),
     )
-    .with_principal_networks(networks.clone());
+    .with_principal_networks(networks.clone())
+    .with_novelty_enforcement(kiwicaptcha_risk::NoveltyEnforcement::Enforce);
     let principal_bytes = [0xf6u8; 16];
     // The engine addresses the principal by its derived pseudonym, so
     // the tag writes must key the same one.
@@ -332,13 +333,14 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
         decision.reasons
     );
 
-    // The victim completes the step-up: the session credit records the
-    // network tag (SET NX) and the account now has a trusted network.
+    // The engine already recorded the network tag during the novelty
+    // check (the migration-grace write). A second record is SET NX and
+    // answers false — the tag is already established.
     assert!(
-        networks
+        !networks
             .record_principal_network_tag(&principal_hex, &home_bucket)
             .expect("record"),
-        "the first established network records its tag"
+        "the engine already established the network tag during the novelty check"
     );
 
     // Attempt 2 from the same network: established — the plain allow.

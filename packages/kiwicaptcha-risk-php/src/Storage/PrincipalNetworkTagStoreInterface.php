@@ -5,16 +5,32 @@ declare (strict_types=1);
 namespace KiwiCaptcha\Risk\Storage;
 
 /**
- * Optional capability: the principal first-seen network tag records.
- * One record per principal and network bucket. Written with SET NX.
- * This mirrors the Rust PrincipalNetworkTagStore trait. The record
- * marks a network bucket as established. The write is once-only. A
- * later login from the same bucket is no longer novel.
+ * The principal first-seen network tag records. One record per
+ * principal and tag. This mirrors the Rust PrincipalNetworkTagStore
+ * trait and the canonical `principal_networks.lua` script.
  *
- * Session tags (prefixed `session:`) carry a per-principal cap and a
- * TTL on inactivity (suggested 90 days), with least-recently-used
- * eviction, so every browser a principal ever uses cannot grow the
- * set without bound. Network and ASN tags are small and stable.
+ * Normative contract:
+ *
+ *  - Tags: `net:<prefix_hex>`, `asn:<decimal>`, `session:<pseudonym_hex>`,
+ *    `device:<pseudonym_hex>`. Each is a hash field whose value is the
+ *    last-use ms from the storage clock (never a client clock).
+ *  - Trust: a `t:` prefixed mirror field. Trust is minted only on an
+ *    Allow or a completed step-up. A Deny path can never mint trust.
+ *  - Caps (per principal, LRU by last-use): `session:` 32, `device:` 16,
+ *    `net:` 64, `asn:` 64. The oldest entries above the cap are evicted
+ *    with their trust flags.
+ *  - TTLs: `session:` 2x the continuity cookie TTL (default 3600 s);
+ *    `device:` the trusted-device TTL (default 90 days); `net:`/`asn:`
+ *    400 days. A read past the class TTL answers "not seen".
+ *  - Fail-closed errors: any storage failure throws
+ *    {@see RiskStoreException}. The implementation never returns "not
+ *    seen" on error (which would read as "novel" and price users out
+ *    without a signal) and never "seen" (which would fail open).
+ *
+ * Production implementation:
+ * {@see \KiwiCaptcha\Risk\Storage\RedisPrincipalNetworkTagStore}.
+ * In-memory fixtures in tests are named fakes and never wired into the
+ * container.
  */
 interface PrincipalNetworkTagStoreInterface
 {
@@ -29,14 +45,15 @@ interface PrincipalNetworkTagStoreInterface
     public function principalNetworkSeen (string $principalId, string $network): ?bool;
 
     /**
-     * Records the first-seen network tag for the (principal, network)
-     * pair (SET NX, first write wins). Called when a session credit is
-     * granted for a login from this network. Answers whether the record
-     * was newly created.
+     * Records the first-seen tag for the (principal, tag) pair. Called
+     * when a session credit is granted for a login from this network
+     * (or on a completed step-up). Answers whether the record was newly
+     * created. When `$trusted` is true the trust flag is minted: only
+     * an Allow or a completed step-up may pass true.
      *
      * @throws RiskStoreException when the state backend fails
      */
-    public function recordPrincipalNetworkTag (string $principalId, string $network): bool;
+    public function recordPrincipalNetworkTag (string $principalId, string $network, bool $trusted = false): bool;
 
     /**
      * Whether the account carries ANY established network: the "no
@@ -47,4 +64,23 @@ interface PrincipalNetworkTagStoreInterface
      * @throws RiskStoreException when the state backend fails
      */
     public function principalHasTrustedNetwork (string $principalId): ?bool;
+
+    /**
+     * Whether this specific tag carries trust (the `t:` mirror was
+     * minted). Trust is only set on an Allow or a completed step-up.
+     * `true` = trusted, `false` = not trusted or not seen, `null` = no
+     * record surface.
+     *
+     * @throws RiskStoreException when the state backend fails
+     */
+    public function tagIsTrusted (string $principalId, string $network): ?bool;
+
+    /**
+     * Deletes every session and device tag (and their trust flags) for
+     * a principal. Wire this to password change, admin lockout, and
+     * explicit sign-out-everywhere.
+     *
+     * @throws RiskStoreException when the state backend fails
+     */
+    public function forgetDevices (string $principalId): void;
 }

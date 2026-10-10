@@ -34,6 +34,8 @@ final class JourneyRiskStore implements
 
     /** @var array<string, array<string, true>> principal => network tag */
     private array $networks = [];
+    /** @var array<string, array<string, true>> principal => trusted tag */
+    private array $trustedTags = [];
 
     /** @var list<array{0: string, 1: string}> every network-tag write */
     public array $networkWrites = [];
@@ -129,13 +131,16 @@ final class JourneyRiskStore implements
         return isset($this->networks[$principalId][$network]);
     }
 
-    public function recordPrincipalNetworkTag(string $principalId, string $network): bool
+    public function recordPrincipalNetworkTag(string $principalId, string $network, bool $trusted = false): bool
     {
         $this->networkWrites[] = [$principalId, $network];
         if (isset($this->networks[$principalId][$network])) {
             return false;
         }
         $this->networks[$principalId][$network] = true;
+        if ($trusted) {
+            $this->trustedTags[$principalId][$network] = true;
+        }
 
         return true;
     }
@@ -143,6 +148,20 @@ final class JourneyRiskStore implements
     public function principalHasTrustedNetwork(string $principalId): ?bool
     {
         return isset($this->networks[$principalId]) && $this->networks[$principalId] !== [];
+    }
+
+    public function tagIsTrusted(string $principalId, string $network): ?bool
+    {
+        return isset($this->trustedTags[$principalId][$network]);
+    }
+
+    public function forgetDevices(string $principalId): void
+    {
+        foreach (array_keys($this->networks[$principalId] ?? []) as $tag) {
+            if (str_starts_with($tag, 'session:') || str_starts_with($tag, 'device:')) {
+                unset($this->networks[$principalId][$tag], $this->trustedTags[$principalId][$tag]);
+            }
+        }
     }
 
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string
