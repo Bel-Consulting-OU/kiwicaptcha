@@ -378,6 +378,7 @@ struct SimNetworks {
 }
 
 impl kiwicaptcha_risk::store::PrincipalNetworkTagStore for SimNetworks {
+    #[allow(clippy::type_complexity)]
     fn principal_network_seen(
         &self,
         principal_id: &str,
@@ -425,6 +426,7 @@ impl kiwicaptcha_risk::store::PrincipalNetworkTagStore for SimNetworks {
 struct SimStore {
     observed: Arc<Mutex<Vec<RiskObservation>>>,
     marks: Arc<Mutex<HashMap<(String, String), MarkRecord>>>,
+    #[allow(clippy::type_complexity)]
     target_fails: Arc<Mutex<HashMap<String, (u32, i64, i64)>>>,
     target_spread: Arc<Mutex<HashMap<String, HashSet<String>>>>,
 }

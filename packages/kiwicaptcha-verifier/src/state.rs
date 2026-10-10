@@ -465,7 +465,7 @@ impl SidecarState {
                 // identity the one-shot provider shape stands.
                 let identity = request_identity.unwrap_or("");
                 let stored_identity = meta.operation_identity.as_deref().unwrap_or("");
-                if identity != "" && identity == stored_identity && succeeded == Some(true) {
+                if !identity.is_empty() && identity == stored_identity && succeeded == Some(true) {
                     self.metrics.record_outcome("ok");
                     let mut wire = serde_json::json!({
                         "success": true,
