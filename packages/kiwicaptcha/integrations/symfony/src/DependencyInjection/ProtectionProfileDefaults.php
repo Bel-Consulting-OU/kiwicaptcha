@@ -172,12 +172,14 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                'scopes' => [
-                    'login' => ['minimum' => 'step_up'],
-                    'password_reset' => ['minimum' => 'step_up'],
-                    'admin_login' => ['minimum' => 'step_up'],
-                    'financial_action' => ['minimum' => 'step_up'],
-                ],
+                // No always-on step_up floor: a scope minimum is the
+                // floor of every decision and would force every login
+                // through a second factor, including the owner on
+                // their home network with a bound session. The
+                // risk-gated carrier for critical stakes is
+                // novelty_enforcement=enforce plus the scope-pressure
+                // override — they step up on risk, not on every
+                // request. See D3.3 value-class economics.
             ],
         ],
         // The change.md Part 5 name of the abuse posture: the identical
@@ -217,12 +219,14 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                'scopes' => [
-                    'login' => ['minimum' => 'step_up'],
-                    'password_reset' => ['minimum' => 'step_up'],
-                    'admin_login' => ['minimum' => 'step_up'],
-                    'financial_action' => ['minimum' => 'step_up'],
-                ],
+                // No always-on step_up floor: a scope minimum is the
+                // floor of every decision and would force every login
+                // through a second factor, including the owner on
+                // their home network with a bound session. The
+                // risk-gated carrier for critical stakes is
+                // novelty_enforcement=enforce plus the scope-pressure
+                // override — they step up on risk, not on every
+                // request. See D3.3 value-class economics.
             ],
         ],
         'compatibility' => [

@@ -241,7 +241,7 @@ elif [ -f "$D33_JSON" ]; then
     if [ "$complete" = "true" ] && [ "$fails" = "-" ]; then
         record value-class-costs d3.3 GREEN "every value class priced above its independent declared stake"
     elif [ "$complete" = "true" ] && [ "$escalated" = "yes" ]; then
-        record value-class-costs d3.3 GREEN "raw PoW cannot price the independent stakes; the shipped step_up/deny minimum carries them (shipped_escalates=yes)"
+        record value-class-costs d3.3 GREEN "raw PoW cannot price the independent stakes; the shipped posture carries them (risk-gated carrier or step_up/deny minimum)"
     elif [ "$complete" != "true" ]; then
         record value-class-costs d3.3 RED "the measured table is incomplete"
     elif [ "$escalated" != "yes" ]; then

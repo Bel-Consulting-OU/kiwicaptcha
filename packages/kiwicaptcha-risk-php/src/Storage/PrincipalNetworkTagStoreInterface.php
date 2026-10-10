@@ -10,6 +10,11 @@ namespace KiwiCaptcha\Risk\Storage;
  * This mirrors the Rust PrincipalNetworkTagStore trait. The record
  * marks a network bucket as established. The write is once-only. A
  * later login from the same bucket is no longer novel.
+ *
+ * Session tags (prefixed `session:`) carry a per-principal cap and a
+ * TTL on inactivity (suggested 90 days), with least-recently-used
+ * eviction, so every browser a principal ever uses cannot grow the
+ * set without bound. Network and ASN tags are small and stable.
  */
 interface PrincipalNetworkTagStoreInterface
 {

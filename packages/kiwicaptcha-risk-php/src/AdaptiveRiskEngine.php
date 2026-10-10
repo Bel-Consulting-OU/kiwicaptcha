@@ -711,10 +711,15 @@ final class AdaptiveRiskEngine
             }
             $network = self::networkBucket($c->sourceIp);
             $netSeen = false;
+            $asnSeen = false;
             try {
                 $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network) === true;
+                $asn = $this->asnBucketOf($c->sourceIp);
+                $asnSeen = $asn !== '' && $asn !== '0'
+                    && $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn) === true;
             } catch (\Throwable) {
                 $netSeen = false;
+                $asnSeen = false;
             }
             // Hard velocity: never exempt a source above the hard
             // rate limit. A shared carrier-grade NAT exit can carry an attacker
@@ -725,7 +730,12 @@ final class AdaptiveRiskEngine
                 || $vector->malformed >= 800
                 || $vector->replay >= 800
                 || $vector->networkRisk >= 900;
-            if ($deviceContinuity && $netSeen && !$hardVelocity) {
+            // Bound session + known ASN is the returning browser: the
+            // owner's own device, even on a new prefix of the same
+            // carrier (the mobile-user case). The exact network bucket
+            // need not be seen — the session binding is the stronger
+            // signal.
+            if ($deviceContinuity && ($netSeen || $asnSeen) && !$hardVelocity) {
                 // Pre-storm price: the policy's own risk at global
                 // level 0, keeping the request's signals but dropping
                 // the storm's global floor and cooldown. A hard deny
@@ -851,23 +861,23 @@ final class AdaptiveRiskEngine
                 } elseif ($asnSeen === true) {
                     // Known ASN: the /64 novelty is weak, never a free
                     // pass. It fires when the prefix is new and no
-                    // device continuity vouches for the browser, or
-                    // when scope-wide stuffing pressure is running (a
-                    // big-ISP match never overrides an active storm).
-                    $isNovel = $newPrefix && (!$deviceContinuity || $scopePressure);
+                    // device continuity vouches for the browser. A
+                    // bound session is the stronger signal — during a
+                    // storm it still vouches for the owner. The
+                    // no-continuity shape is what scope pressure
+                    // escalates.
+                    $isNovel = $newPrefix && !$deviceContinuity;
                 } else {
                     // No ASN data: fall back to the /64 bucket, and to
                     // the no-trusted-network condition.
                     $isNovel = $newPrefix || ($trusted === false);
                 }
-                // A returning browser on its known network is exempt
+                // A returning browser with a bound session is exempt
                 // from the scope-pressure override: the storm targets
-                // stolen credentials from new sessions, not the
-                // owner's own device. Without this exemption the
-                // campaign cannot tell "stops stuffing" from "steps up
-                // everyone" — the legitimate baseline would trip the
-                // 0.1% false-positive bound on every returning user.
-                if ($scopePressure && $deviceContinuity && !$isNovel && $netSeen === true) {
+                // stolen credentials from unbound sessions, not the
+                // owner's own device. This holds even on a new prefix
+                // of the same carrier (the mobile-user case).
+                if ($scopePressure && $deviceContinuity && !$isNovel) {
                     $scopePressure = false;
                 }
                 // Migration grace: in 'learn' mode a novel network is
