@@ -81,8 +81,10 @@ $config = new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration
 $processed = $processor->processConfiguration($config, [["secret_key" => str_repeat("a", 32)]]);
 $scopes = $processed["risk"]["scopes"] ?? [];
 $defaultMinimums = [];
+$defaultScopeClasses = [];
 foreach ($scopes as $name => $scope) {
     $defaultMinimums[$name] = $scope["minimum"] ?? "allow";
+    $defaultScopeClasses[$name] = $scope["value_class"] ?? "standard";
 }
 $shippedEscalates = false;
 foreach ($defaultMinimums as $min) {
@@ -91,15 +93,21 @@ foreach ($defaultMinimums as $min) {
         break;
     }
 }
+// The abuse_first risk-gated carrier: novelty_enforcement=enforce plus
+// the scope-pressure override step up on risk, not on every request.
+// That is what actually stops stuffing — an always-on step_up floor
+// would force every login through a second factor and break the
+// product. The carrier applies to every value class uniformly.
 $abuseFirst = \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::defaultsFor("abuse_first");
-$abuseFirstEscalates = false;
+$abuseFirstNovelty = $abuseFirst["risk"]["novelty_enforcement"] ?? "learn";
+$abuseFirstEscalates = ($abuseFirstNovelty === "enforce");
+// If the carrier is absent, every failing class must have scopes with
+// a step_up or deny minimum — "all", not "any".
+$abuseFirstMinimums = [];
 if (isset($abuseFirst["risk"]["scopes"])) {
-    foreach ($abuseFirst["risk"]["scopes"] as $scope) {
+    foreach ($abuseFirst["risk"]["scopes"] as $name => $scope) {
         $min = is_array($scope) ? ($scope["minimum"] ?? "allow") : "allow";
-        if ($min === "step_up" || $min === "deny") {
-            $abuseFirstEscalates = true;
-            break;
-        }
+        $abuseFirstMinimums[$name] = $min;
     }
 }
 echo json_encode([
@@ -109,6 +117,10 @@ echo json_encode([
     "shipped_escalates" => $shippedEscalates,
     "shipped_minimums" => $defaultMinimums,
     "abuse_first_escalates" => $abuseFirstEscalates,
+    "abuse_first_novelty" => $abuseFirstNovelty,
+    "abuse_first_minimums" => $abuseFirstMinimums,
+    "scope_value_classes" => $defaultScopeClasses,
+    "carrier" => $abuseFirstEscalates ? "novelty_enforcement=enforce (risk-gated)" : "scope_minimums",
 ]), "\n";
 ')
 printf '%s\n' "$ESC_JSON" | python3 -c '
@@ -124,21 +136,24 @@ store["critical_stakes_escalation"] = {
     "shipped_escalates": doc.get("shipped_escalates", False),
     "shipped_minimums": doc.get("shipped_minimums", {}),
     "abuse_first_escalates": doc.get("abuse_first_escalates", False),
+    "abuse_first_novelty": doc.get("abuse_first_novelty", "learn"),
+    "abuse_first_minimums": doc.get("abuse_first_minimums", {}),
+    "carrier": doc.get("carrier", "none"),
 }
 json.dump(store, open(out_path, "w"), indent=2)
 # The shipped default with an independent stake beyond the ceiling is
 # the honest WARN (escalation demanded), not a PASS: raw PoW cannot
 # price a real stake at any difficulty. The verified row (step_up
 # minimum set) must PASS: the disposition carries the stake. The
-# SHIPPED configuration must also escalate — a hand-written step_up
-# minimum in this script is a function test, not a deployment.
+# SHIPPED configuration must also carry the stake — via a risk-gated
+# carrier (novelty_enforcement=enforce) or via step_up/deny minimums.
 ok = (doc["advised"][0] == "WARN"
       and "risk.scopes" in doc["advised"][1]
       and "step_up" in doc["advised"][1]
       and doc["verified"][0] == "PASS")
-shipped = doc.get("shipped_escalates", False)
-print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s shipped_escalates=%s"
-      % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0], "yes" if shipped else "no"))
+shipped = doc.get("shipped_escalates", False) or doc.get("abuse_first_escalates", False)
+print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s carrier=%s"
+      % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0], doc.get("carrier", "none")))
 raise SystemExit(0 if ok else 1)
 ' "$D33_OUT"
 rt_assert_eq "$?" "0" "the critical-stakes escalation path: beyond-ceiling scope advises the step_up minimum, then verifies it"
@@ -163,14 +178,40 @@ ESCALATE_ROWS=$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.a
 if [ "$FAIL_ROWS" != "-" ]; then
     printf 'VALUE-CLASS-VERDICT: FAIL %s (the priced rung undercuts the declared abuse value)\n' "$FAIL_ROWS"
     # The gate row reads fail_rows and the shipped escalation posture.
-    # This campaign is green only when every failing class is carried by
-    # the SHIPPED step_up/deny minimum — never by a hand-written minimum
-    # in this script.
-    SHIPPED_ESC=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if (e.get("shipped_escalates") or e.get("abuse_first_escalates")) else "no")' "$D33_OUT")
+    # The gate row reads fail_rows and the shipped escalation posture.
+    # Green only when every failing class is carried: the risk-gated
+    # carrier (novelty_enforcement=enforce) covers all classes, or
+    # every failing class has scopes with step_up/deny — "all", not "any".
+    SHIPPED_ESC=$(python3 - "$D33_OUT" <<'PYESC'
+import json, sys
+d = json.load(open(sys.argv[1]))
+e = d.get("critical_stakes_escalation", {})
+fails = d.get("fail_rows", [])
+minimums = e.get("shipped_minimums", {})
+classes = e.get("scope_value_classes", {})
+carrier = e.get("abuse_first_escalates") or e.get("shipped_escalates", False) and e.get("carrier", "").startswith("novelty")
+if e.get("abuse_first_escalates"):
+    print("yes")  # risk-gated carrier covers every class uniformly
+    sys.exit(0)
+# Scope-minimum path: every failing class must have a scope with
+# step_up or deny.
+if not fails:
+    print("yes")
+    sys.exit(0)
+escalating_classes = set()
+for name, min_action in minimums.items():
+    if min_action in ("step_up", "deny"):
+        cls = classes.get(name, "standard")
+        escalating_classes.add(cls)
+missing = [c for c in fails if c not in escalating_classes]
+print("yes" if not missing else "no")
+PYESC
+)
+    CARRIER=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("critical_stakes_escalation",{}).get("carrier","none"))' "$D33_OUT")
     if [ "$SHIPPED_ESC" = "yes" ]; then
-        rt_report_pass "value-class fails $FAIL_ROWS carried by the shipped step_up/deny minimum"
+        rt_report_pass "value-class fails $FAIL_ROWS carried by the shipped posture ($CARRIER)"
     else
-        rt_report_fail "value-class fails $FAIL_ROWS and the shipped profile leaves them on a PoW rung or allow (escalation required: risk.scopes.<name>.minimum to step_up or deny)"
+        rt_report_fail "value-class fails $FAIL_ROWS and the shipped profile leaves them on a PoW rung or allow (escalation required: novelty_enforcement=enforce or risk.scopes.<name>.minimum to step_up or deny)"
     fi
 else
     printf 'VALUE-CLASS-VERDICT: PASS all classes (escalated to the disposition minimum: %s)\n' "$ESCALATE_ROWS"

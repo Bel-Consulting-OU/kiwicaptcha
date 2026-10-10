@@ -98,8 +98,13 @@ require __DIR__ . '/rt-risk-prelude.php';
  */
 final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
 {
+    /** Per-principal cap on session tags, with LRU eviction. */
+    private const SESSION_TAG_CAP = 32;
+
     /** @var array<string, array<string, true>> */
     private array $tags = [];
+    /** @var array<string, array<string, int>> principal => tag => last-use */
+    private array $sessionUse = [];
 
     public function principalNetworkSeen(string $principalId, string $network): ?bool
     {
@@ -111,6 +116,13 @@ final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
         if (isset($this->tags[$principalId][$network])) {
             return false;
         }
+        // Session tags carry a per-principal cap with LRU eviction so
+        // every browser a principal ever uses cannot grow the set
+        // without bound. Network and ASN tags are small and stable.
+        if (str_starts_with($network, 'session:')) {
+            $this->evictLruSession($principalId);
+            $this->sessionUse[$principalId][$network] = microtime(true);
+        }
         $this->tags[$principalId][$network] = true;
 
         return true;
@@ -119,6 +131,24 @@ final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
     public function principalHasTrustedNetwork(string $principalId): ?bool
     {
         return isset($this->tags[$principalId]) && $this->tags[$principalId] !== [];
+    }
+
+    private function evictLruSession(string $principalId): void
+    {
+        $sessions = $this->sessionUse[$principalId] ?? [];
+        $sessionTags = array_filter(
+            array_keys($this->tags[$principalId] ?? []),
+            static fn (string $k): bool => str_starts_with($k, 'session:'),
+        );
+        if (\count($sessionTags) < self::SESSION_TAG_CAP) {
+            return;
+        }
+        // Evict the least-recently-used session tag.
+        asort($sessions);
+        $oldest = array_key_first($sessions);
+        if ($oldest !== null) {
+            unset($this->tags[$principalId][$oldest], $this->sessionUse[$principalId][$oldest]);
+        }
     }
 }
 
@@ -688,6 +718,38 @@ for ($a = $hotVictims; $a < $legitSample; $a++) {
 }
 $legitFpRate = ($ntHome + $ntSame) > 0 ? ($ntHomeB + $ntSameB) / ($ntHome + $ntSame) : 1.0;
 
+// The novel-login-then-returning case: a user stepped up on a novel
+// network must have their session bound at restore, so the next login
+// from a new prefix on the same carrier is not novel again. Without
+// the SessionRestorer binding, mobile users get repeated step-ups.
+$stepUpThenReturnOk = true;
+$stepUpThenReturnSample = min(200, $legitSample);
+for ($a = 0; $a < $stepUpThenReturnSample; $a++) {
+    $account = $accounts[$a + 10000];
+    $principal = $factory->principalId($account);
+    $novelIp = sprintf('45.210.%d.%d', intdiv($a, 250) % 256, $a % 250 + 1);
+    $cookie = sprintf('%032x', 0xE0000000 + $a);
+    // First login from a novel network with an unbound cookie: stepped up.
+    $d1 = $assessLogin($novelIp, $account, $cookie);
+    if ($d1->action !== RiskAction::StepUp && $d1->action !== RiskAction::Deny) {
+        $stepUpThenReturnOk = false;
+        break;
+    }
+    // Simulate the step-up restore: SessionRestorer binds the session,
+    // the network, and the ASN under the principal.
+    $networks->recordPrincipalNetworkTag($principal, AdaptiveRiskEngine::networkBucket($novelIp));
+    $networks->recordPrincipalNetworkTag($principal, 'asn:64500');
+    $networks->recordPrincipalNetworkTag($principal, 'session:'.$factory->sessionId($cookie));
+    // Second login from a new prefix on the same ASN with the same
+    // (now bound) cookie: must not be stepped up.
+    $newPrefixIp = sprintf('45.210.%d.%d', intdiv($a, 250) % 256, ($a % 150) + 50);
+    $d2 = $assessLogin($newPrefixIp, $account, $cookie);
+    if ($d2->action === RiskAction::StepUp || $d2->action === RiskAction::Deny) {
+        $stepUpThenReturnOk = false;
+        break;
+    }
+}
+
 $sha16Us = (float) (getenv('KIWI_RT_D35_SHA16_US') ?: 0);
 $spendUsd = $sha16Us > 0 ? ($rowsProcessed * $sha16Us / 1e6) / 3600.0 * 0.01 : 0.0;
 
@@ -724,6 +786,8 @@ $summary = [
         'false_positive_rate' => round($legitFpRate, 6),
         'false_positive_bound' => 0.001,
         'fp_scope' => 'home and same-ASN logins for non-targeted accounts with bound device continuity',
+        'step_up_then_return_ok' => $stepUpThenReturnOk,
+        'step_up_then_return_note' => 'novel login stepped up, session bound at restore, returning login from new prefix on same carrier not stepped up',
     ],
     'attacker_sessions' => $attackerSessions,
     'sessions_never_escalated' => $sessionsNeverEscalated,
@@ -755,6 +819,7 @@ $pass = $escalatedWithinN
     && $validAssessed > 0
     && $blockedValid > 0
     && $legitFpRate <= 0.001
+    && $stepUpThenReturnOk
     && $levelsFire
     && $untrustedEscalated;
 exit($pass ? 0 : 1);

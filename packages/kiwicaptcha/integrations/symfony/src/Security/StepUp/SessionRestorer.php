@@ -30,6 +30,7 @@ final class SessionRestorer
         private readonly ?RequestStack $requestStack = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly ?AsnDataset $asnDataset = null,
+        private readonly string $cookieName = '__Host-kiwi-session',
     ) {
     }
 
@@ -86,6 +87,18 @@ final class SessionRestorer
             $asn = $this->asnBucket($ip);
             if ($asn !== '') {
                 $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'asn:'.$asn);
+            }
+            // Session binding: the continuity cookie's pseudonym is
+            // recorded under the principal so "device continuity" means
+            // "this session was used by this principal before". A
+            // step-up completed from a novel network binds the session;
+            // without this the next login from a new /64 on the same
+            // carrier would be novel again and the owner would be
+            // stepped up forever.
+            $cookie = $request->cookies->get($this->cookieName);
+            if (\is_string($cookie) && $cookie !== '') {
+                $sessionPseudonym = $this->identityFactory->sessionId($cookie);
+                $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'session:'.$sessionPseudonym);
             }
         } catch (\Throwable $e) {
             $this->logger?->warning('kiwi step-up session restore failed: {message}', [
