@@ -616,8 +616,7 @@ where
             // trust label must never mint unlimited reputation credit
             // (status 4 is the v2 confirm's trust cap and never
             // authorizes).
-            let authorize =
-                matches!(status, 1 | 2) || (status == 3 && !legitimate);
+            let authorize = matches!(status, 1 | 2) || (status == 3 && !legitimate);
             if authorize {
                 if let Some(ctx) = context {
                     let receipt: EventReceipt = self.engine.record_outcome_feedback(
@@ -1638,7 +1637,13 @@ mod tests {
         );
         assert_eq!(
             store
-                .write_mark("session", SESSION, "accountBanned", T0 + 5, &"beef".repeat(16))
+                .write_mark(
+                    "session",
+                    SESSION,
+                    "accountBanned",
+                    T0 + 5,
+                    &"beef".repeat(16)
+                )
                 .unwrap(),
             2
         );
@@ -1650,11 +1655,8 @@ mod tests {
         let _: i64 = {
             use ::redis::Commands;
             let mut conn = store_pool_connection(&store);
-            conn.del(format!(
-                "mark:{{kiwi:{}}}:dd:{event}",
-                store.namespace()
-            ))
-            .unwrap()
+            conn.del(format!("mark:{{kiwi:{}}}:dd:{event}", store.namespace()))
+                .unwrap()
         };
     }
 

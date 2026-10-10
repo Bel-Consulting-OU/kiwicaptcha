@@ -565,8 +565,10 @@ impl ShardedRedisRiskStateStore {
             script: Some(SHARDED_HYSTERESIS_LUA),
         }])?;
         let hyst = decode_channels(&replies[0], 2, "hysteresis transition")?;
-        self.last_global_level.store(hyst[0].clamp(0, 4) as u8, Ordering::Relaxed);
-        self.last_cooldown_until_ms.store(hyst[1].max(0) as u64, Ordering::Relaxed);
+        self.last_global_level
+            .store(hyst[0].clamp(0, 4) as u8, Ordering::Relaxed);
+        self.last_cooldown_until_ms
+            .store(hyst[1].max(0) as u64, Ordering::Relaxed);
         Ok(per_shard)
     }
 
@@ -604,7 +606,8 @@ impl ShardedRedisRiskStateStore {
         // the source pseudonym is the stable fallback so those writes do
         // not all funnel onto fnv1a32("")'s shard.
         let shard_fallback = o.source_id.as_bytes();
-        let shard_of_event = |event_id: &str| crate::keyspace::scope_shard(event_id, shard_fallback);
+        let shard_of_event =
+            |event_id: &str| crate::keyspace::scope_shard(event_id, shard_fallback);
         let snapshot_shard = usize::from(shard_of_event(&o.event_id));
 
         let mut units: Vec<BatchUnit> = Vec::with_capacity(12);
@@ -1456,7 +1459,9 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
                 .ok()
                 .and_then(|s| s.parse::<u8>().ok())
                 .ok_or_else(|| {
-                    RiskStoreError::ScriptError("outcome confirm returned a non-integer".to_string())
+                    RiskStoreError::ScriptError(
+                        "outcome confirm returned a non-integer".to_string(),
+                    )
                 }),
             _ => Err(RiskStoreError::ScriptError(
                 "outcome confirm returned no status".to_string(),
@@ -1505,8 +1510,11 @@ impl SessionContextTagStore for ShardedRedisRiskStateStore {
         session_id: &[u8; 16],
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
-        let key =
-            crate::keyspace::session_tag_key(&self.encoded_namespace, "ctx", &hex::encode(session_id));
+        let key = crate::keyspace::session_tag_key(
+            &self.encoded_namespace,
+            "ctx",
+            &hex::encode(session_id),
+        );
         self.session_first_tag_record(&key, tag)
     }
 }
@@ -1517,8 +1525,11 @@ impl SessionTlsTagStore for ShardedRedisRiskStateStore {
         session_id: &[u8; 16],
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
-        let key =
-            crate::keyspace::session_tag_key(&self.encoded_namespace, "tls", &hex::encode(session_id));
+        let key = crate::keyspace::session_tag_key(
+            &self.encoded_namespace,
+            "tls",
+            &hex::encode(session_id),
+        );
         self.session_first_tag_record(&key, tag)
     }
 }
@@ -1532,11 +1543,7 @@ impl ShardedRedisRiskStateStore {
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
         let endpoint = &self.endpoints[self.endpoint_for_key(key)];
-        let ttl: i64 = self
-            .options
-            .session_ttl_secs
-            .try_into()
-            .unwrap_or(i64::MAX);
+        let ttl: i64 = self.options.session_ttl_secs.try_into().unwrap_or(i64::MAX);
         endpoint.pool.with_connection(&endpoint.client, |conn| {
             use ::redis::Commands;
             let set: Option<String> = ::redis::cmd("SET")
@@ -1569,7 +1576,8 @@ impl ShardedRedisRiskStateStore {
         now_ms: u64,
         event_id: &str,
     ) -> Result<i64, RiskStoreError> {
-        self.legacy.write_mark(dimension, id, kind, now_ms, event_id)
+        self.legacy
+            .write_mark(dimension, id, kind, now_ms, event_id)
     }
 
     /// Reads one long-memory mark on the shared tag.

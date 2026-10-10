@@ -224,7 +224,7 @@ impl SidecarState {
                 action,
                 cdata,
                 decision_id: None,
-                        operation_identity: None,
+                operation_identity: None,
             },
         );
     }
@@ -453,7 +453,10 @@ impl SidecarState {
             .get("operation_identity")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
-        let (record, meta) = match self.store.consume(&decoded.nonce, now_unix, request_identity) {
+        let (record, meta) = match self
+            .store
+            .consume(&decoded.nonce, now_unix, request_identity)
+        {
             ConsumeOutcome::Won { record, meta } => (*record, meta),
             ConsumeOutcome::AlreadyConsumed { meta, succeeded } => {
                 // An idempotent retry of a delegated verification (the

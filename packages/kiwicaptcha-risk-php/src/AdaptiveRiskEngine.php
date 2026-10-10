@@ -880,20 +880,11 @@ final class AdaptiveRiskEngine
                 if ($scopePressure && $deviceContinuity && !$isNovel) {
                     $scopePressure = false;
                 }
-                // Migration grace: in 'learn' mode a novel network is
-                // recorded but never escalates. Every existing account
-                // has no network history on the day this ships; without
-                // this window every user would be stepped up at once.
-                if ($isNovel) {
-                    try {
-                        $this->principalNetworks->recordPrincipalNetworkTag($observation->principalId, $network);
-                        if ($asn !== '' && $asn !== '0') {
-                            $this->principalNetworks->recordPrincipalNetworkTag($observation->principalId, 'asn:'.$asn);
-                        }
-                    } catch (\Throwable) {
-                        // Best effort: the tag write never breaks login.
-                    }
-                }
+                // Evidence is read-only: the network tag is recorded
+                // only after the decision (post-Allow binding), never
+                // during evaluation. Recording here would write the
+                // attacker's network under the victim's principal and
+                // make the second attempt from the same IP "seen".
                 $novelNetwork = $isNovel && $this->noveltyEnforcement === 'enforce';
             }
         }

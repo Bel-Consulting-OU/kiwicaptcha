@@ -602,8 +602,7 @@ fn out_of_contract_parameters_are_refused_before_work() {
         Err(SolveError::UnsupportedRswParams(_))
     ));
     // A zip-bomb-sized salt is refused before any decode allocation.
-    let huge_salt =
-        serde_json::json!({"algorithm": "sha256", "mKib": 0, "t": 1, "p": 1, "targetBits": 4, "salt": "A".repeat(100_000)});
+    let huge_salt = serde_json::json!({"algorithm": "sha256", "mKib": 0, "t": 1, "p": 1, "targetBits": 4, "salt": "A".repeat(100_000)});
     assert!(matches!(
         solve(&merge(&base, &huge_salt), &mut opts),
         Err(SolveError::MalformedChallenge(_))

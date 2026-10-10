@@ -79,7 +79,12 @@ pub trait RecordStore: Send + Sync {
 
     /// The atomic pending to consumed transition. Expired records are
     /// pruned within the same call.
-    fn consume(&self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome;
+    fn consume(
+        &self,
+        nonce: &str,
+        now_unix: u64,
+        operation_identity: Option<&str>,
+    ) -> ConsumeOutcome;
 
     /// Persist the derivation outcome on the consumed record. Best
     /// effort: a lost commit only degrades a later replay to the
@@ -143,7 +148,12 @@ impl MapState {
         dropped
     }
 
-    fn consume(&mut self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
+    fn consume(
+        &mut self,
+        nonce: &str,
+        now_unix: u64,
+        operation_identity: Option<&str>,
+    ) -> ConsumeOutcome {
         self.prune_expired(now_unix);
         if let Some(entry) = self.pending.remove(nonce) {
             let mut meta = entry.meta.clone();
@@ -204,7 +214,12 @@ impl RecordStore for MemoryStore {
         Ok(())
     }
 
-    fn consume(&self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
+    fn consume(
+        &self,
+        nonce: &str,
+        now_unix: u64,
+        operation_identity: Option<&str>,
+    ) -> ConsumeOutcome {
         let mut state = self.state.lock().expect("store lock");
         state.consume(nonce, now_unix, operation_identity)
     }
@@ -409,7 +424,12 @@ impl RecordStore for FileStore {
         Ok(())
     }
 
-    fn consume(&self, nonce: &str, now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
+    fn consume(
+        &self,
+        nonce: &str,
+        now_unix: u64,
+        operation_identity: Option<&str>,
+    ) -> ConsumeOutcome {
         let mut state = self.state.lock().expect("store lock");
         let dropped = state.prune_expired(now_unix);
         for gone in &dropped {
@@ -516,7 +536,12 @@ impl RecordStore for RedisStore {
             .map_err(|e| format!("redis store failed: {e}"))
     }
 
-    fn consume(&self, nonce: &str, _now_unix: u64, operation_identity: Option<&str>) -> ConsumeOutcome {
+    fn consume(
+        &self,
+        nonce: &str,
+        _now_unix: u64,
+        operation_identity: Option<&str>,
+    ) -> ConsumeOutcome {
         let meta = self
             .meta
             .lock()
@@ -532,7 +557,10 @@ impl RecordStore for RedisStore {
                         meta,
                     }
                 } else {
-                    ConsumeOutcome::AlreadyConsumed { meta, succeeded: entry.valid }
+                    ConsumeOutcome::AlreadyConsumed {
+                        meta,
+                        succeeded: entry.valid,
+                    }
                 }
             }
             Ok(None) => ConsumeOutcome::NotFound,
