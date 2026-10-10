@@ -103,6 +103,8 @@ final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
 
     /** @var array<string, array<string, true>> */
     private array $tags = [];
+    /** @var array<string, array<string, true>> */
+    private array $trusted = [];
     /** @var array<string, array<string, int>> principal => tag => last-use */
     private array $sessionUse = [];
 
@@ -111,7 +113,7 @@ final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
         return isset($this->tags[$principalId][$network]);
     }
 
-    public function recordPrincipalNetworkTag(string $principalId, string $network): bool
+    public function recordPrincipalNetworkTag(string $principalId, string $network, bool $trusted = false): bool
     {
         if (isset($this->tags[$principalId][$network])) {
             return false;
@@ -124,6 +126,9 @@ final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
             $this->sessionUse[$principalId][$network] = microtime(true);
         }
         $this->tags[$principalId][$network] = true;
+        if ($trusted) {
+            $this->trusted[$principalId][$network] = true;
+        }
 
         return true;
     }
@@ -131,6 +136,20 @@ final class D35NetworkTagStore implements PrincipalNetworkTagStoreInterface
     public function principalHasTrustedNetwork(string $principalId): ?bool
     {
         return isset($this->tags[$principalId]) && $this->tags[$principalId] !== [];
+    }
+
+    public function tagIsTrusted(string $principalId, string $network): ?bool
+    {
+        return isset($this->trusted[$principalId][$network]);
+    }
+
+    public function forgetDevices(string $principalId): void
+    {
+        foreach (array_keys($this->tags[$principalId] ?? []) as $tag) {
+            if (str_starts_with($tag, 'session:') || str_starts_with($tag, 'device:')) {
+                unset($this->tags[$principalId][$tag], $this->trusted[$principalId][$tag], $this->sessionUse[$principalId][$tag]);
+            }
+        }
     }
 
     private function evictLruSession(string $principalId): void

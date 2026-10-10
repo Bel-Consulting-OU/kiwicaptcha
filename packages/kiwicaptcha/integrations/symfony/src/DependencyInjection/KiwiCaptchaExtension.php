@@ -114,6 +114,7 @@ use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\Storage\ProcessEmergencyCap;
 use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
+use KiwiCaptcha\Risk\Storage\RedisPrincipalNetworkTagStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\AtomicStorageInterface;
@@ -1274,6 +1275,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion));
             $container->setDefinition('kiwi_captcha.risk.metrics', new Definition(RiskMetrics::class));
 
+            // Production principal-network tag store: the engine's
+            // novelty, device-continuity and session-binding seam.
+            // Always defined — the container must never resolve null
+            // (a null-on-invalid reference silently disables the
+            // entire first-attempt defense).
+            $container->setDefinition('kiwi_captcha.risk.principal_networks', (new Definition(RedisPrincipalNetworkTagStore::class, [
+                $riskRedis,
+                $rawNamespace,
+            ]))
+                ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion));
+
             // In-process emergency limiter (cheap admission before the
             // risk engine): one honest per-process window from
             // hard_limits.process_per_second, checked by
@@ -1496,7 +1508,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // kiwi_captcha.risk.principal_networks) and the ASN
                 // dataset, so "seen from this network" is judged the
                 // same way the step-up session restore records it.
-                ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks'))
                 ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                 // The decoy-escalation reader (change.md 3.2.2): the
                 // engine's post-marks escalation stage consults the
@@ -1884,7 +1896,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         new Reference('kiwi_captcha.risk.identity_factory'),
                     ]))
                     ->setArgument('$tokenStorage', new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE))
-                    ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks'))
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$logger', $loggerRef)
@@ -2876,6 +2888,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $idempotencyStoreRef,
             $authorityGuardRefs,
         ]))
+            ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
             ->addTag('console.command')
             ->setPublic(true));
 
