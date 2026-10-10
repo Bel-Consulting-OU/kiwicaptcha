@@ -5,6 +5,7 @@
 //! deep/NaN/oversized JSON, unicode remoteip spellings, and the
 //! one-shot same-token race under parallel raw connections.
 
+#![allow(clippy::all)]
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Barrier};
