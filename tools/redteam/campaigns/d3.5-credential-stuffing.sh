@@ -159,7 +159,7 @@ import lib.rtclient as rt
 print("%.0f" % rt.sha16_mean_us(3))
 ' "$RT_DIR/campaigns" 2>/dev/null || echo 300000) \
 KIWI_RT_D35_OUT="$SUMMARY_FILE" \
-    php -d memory_limit=512M "$RT_DIR/campaigns/lib/d35.driver.php" >"$SUMMARY_FILE" 2>"$RT_DIR/runs/env/d35-engine.err"
+    php -d memory_limit=512M "$RT_DIR/campaigns/lib/d35.kernel.php" >"$SUMMARY_FILE" 2>"$RT_DIR/runs/env/d35-engine.err"
 ENGINE_RC=$?
 cat "$SUMMARY_FILE"
 [ "$ENGINE_RC" -eq 0 ] || {

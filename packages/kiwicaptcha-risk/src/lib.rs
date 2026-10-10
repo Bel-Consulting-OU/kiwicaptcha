@@ -136,9 +136,9 @@ pub enum RiskError {
     /// observation pipeline.
     #[error("{0} must be >= 1 (got {1})")]
     InvalidTiming(&'static str, u64),
-    /// The risk master secret is shorter than the 16-byte minimum: an
+    /// The risk master secret is shorter than the 32-byte minimum: an
     /// empty or tiny master deterministically derives predictable keys.
-    #[error("the risk master secret must be at least 16 bytes (got {0})")]
+    #[error("the risk master secret must be at least 32 bytes (got {0})")]
     InvalidMasterLength(usize),
     /// A typed outcome handle is inadmissible: the identifier value
     /// fails its byte-shape rule (a raw principal, target or session

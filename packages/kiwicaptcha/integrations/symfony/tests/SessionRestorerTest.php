@@ -192,6 +192,69 @@ final class SessionRestorerTest extends TestCase
         );
     }
 
+    public function testACustomCookieNameIsHonored(): void
+    {
+        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        $request = $this->request('203.0.113.10', 'session-original-000000000001');
+        $continuity = new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie(name: 'custom-session');
+        $cookieValue = $continuity->mint();
+        $request->cookies->set('custom-session', $cookieValue);
+        $restorer = new SessionRestorer(
+            tokenStorage: $tokenStorage,
+            principalNetworks: $this->networks,
+            identityFactory: $this->identity,
+            continuity: $continuity,
+        );
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $pseudonym = $this->identity->sessionId($cookieValue);
+        self::assertTrue(
+            $this->networks->principalNetworkSeen($this->identity->principalId(self::RAW_USER), 'session:'.$pseudonym),
+            'a custom cookie_name is honored',
+        );
+    }
+
+    public function testAMalformedCookieRecordsNothing(): void
+    {
+        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        $request = $this->request('203.0.113.10', 'session-original-000000000001');
+        // Array-shaped cookie and non-hex value both record nothing.
+        $request->cookies->set('__Host-kiwi-session', ['x']);
+        $continuity = new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie();
+        $restorer = new SessionRestorer(
+            tokenStorage: $tokenStorage,
+            principalNetworks: $this->networks,
+            identityFactory: $this->identity,
+            continuity: $continuity,
+        );
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        foreach ($this->networks->writes as [$p, $tag]) {
+            self::assertStringNotContainsString('session:', $tag, 'a malformed cookie records no session tag');
+        }
+    }
+
+    public function testBothCookiesRecordBothTags(): void
+    {
+        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        $request = $this->request('203.0.113.10', 'session-original-000000000001');
+        $continuity = new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie();
+        $device = new \BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie();
+        $sessionValue = $continuity->mint();
+        $deviceValue = $device->mint();
+        $request->cookies->set('__Host-kiwi-session', $sessionValue);
+        $request->cookies->set('__Host-kiwi-device', $deviceValue);
+        $restorer = new SessionRestorer(
+            tokenStorage: $tokenStorage,
+            principalNetworks: $this->networks,
+            identityFactory: $this->identity,
+            continuity: $continuity,
+            device: $device,
+        );
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $principal = $this->identity->principalId(self::RAW_USER);
+        self::assertTrue($this->networks->principalNetworkSeen($principal, 'session:'.$this->identity->sessionId($sessionValue)), 'session tag recorded');
+        self::assertTrue($this->networks->principalNetworkSeen($principal, 'device:'.$this->identity->sessionId($deviceValue)), 'device tag recorded');
+    }
+
     private function asnFixturePath(): string
     {
         $path = sys_get_temp_dir().'/kiwicaptcha-asn-fixture.tsv';

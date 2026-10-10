@@ -80,6 +80,10 @@ local function valid_tag(tag)
     if string.match(tag, '^asn:[0-9]+$') and #tag > 4 and #tag <= 14 then
         return true
     end
+    -- bare hex: the engine's networkBucket() spelling (no prefix)
+    if string.match(tag, '^[0-9a-f]+$') and #tag >= 2 and #tag <= 68 then
+        return true
+    end
     return false
 end
 

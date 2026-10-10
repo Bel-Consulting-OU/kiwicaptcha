@@ -30,7 +30,8 @@ final class SessionRestorer
         private readonly ?RequestStack $requestStack = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly ?AsnDataset $asnDataset = null,
-        private readonly string $cookieName = '__Host-kiwi-session',
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie $continuity = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie $device = null,
     ) {
     }
 
@@ -94,11 +95,21 @@ final class SessionRestorer
             // step-up completed from a novel network binds the session;
             // without this the next login from a new /64 on the same
             // carrier would be novel again and the owner would be
-            // stepped up forever.
-            $cookie = $request->cookies->get($this->cookieName);
-            if (\is_string($cookie) && $cookie !== '') {
-                $sessionPseudonym = $this->identityFactory->sessionId($cookie);
-                $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'session:'.$sessionPseudonym);
+            // stepped up forever. The trusted-device cookie is bound
+            // the same way, so it outlives the 30-minute session window.
+            if ($this->continuity !== null) {
+                $sessionValue = $this->continuity->read($request);
+                if ($sessionValue !== null) {
+                    $sessionPseudonym = $this->identityFactory->sessionId($sessionValue);
+                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'session:'.$sessionPseudonym, trusted: true);
+                }
+            }
+            if ($this->device !== null) {
+                $deviceValue = $this->device->read($request);
+                if ($deviceValue !== null) {
+                    $devicePseudonym = $this->identityFactory->sessionId($deviceValue);
+                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'device:'.$devicePseudonym, trusted: true);
+                }
             }
         } catch (\Throwable $e) {
             $this->logger?->warning('kiwi step-up session restore failed: {message}', [
