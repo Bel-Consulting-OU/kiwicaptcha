@@ -219,7 +219,9 @@ pub(crate) fn read_request<R: Read>(stream: &mut R) -> Result<Request, ReadFailu
             // proxy and this reader can never disagree on the body
             // boundary (the CL.TE / CL.CL request-smuggling family).
             if content_length_seen {
-                return Err(ReadFailure::Malformed("duplicate content-length".to_string()));
+                return Err(ReadFailure::Malformed(
+                    "duplicate content-length".to_string(),
+                ));
             }
             content_length_seen = true;
             content_length = parse_canonical_content_length(value)?;

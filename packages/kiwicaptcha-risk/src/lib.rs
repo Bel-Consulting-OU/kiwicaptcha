@@ -868,10 +868,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// through it to the source address's listed or unlisted bucket.
     /// Without a dataset the element resolves to the unlisted-namespace
     /// bucket of the source address, so distinct origins still spread.
-    pub fn with_asn_dataset(
-        mut self,
-        dataset: Arc<crate::asn::AsnDataset>,
-    ) -> RiskEngine<S, N> {
+    pub fn with_asn_dataset(mut self, dataset: Arc<crate::asn::AsnDataset>) -> RiskEngine<S, N> {
         self.asn_dataset = Some(dataset);
         self
     }
@@ -1330,13 +1327,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // wired). Novel-network and scope-pressure evidence are
         // login-shaped (AuthenticationSuccess / first login); the
         // breached-credential flag rides the v2 context like honeypot.
-        let first_attempt = self.first_attempt_evidence(
-            &ctx,
-            &observation,
-            v2,
-            &vector,
-            global_level,
-        );
+        let first_attempt =
+            self.first_attempt_evidence(&ctx, &observation, v2, &vector, global_level);
         // allow.
         if let Some(reader) = self.marks_reader.as_ref() {
             let request = crate::marks::MarksRequest {
@@ -1515,6 +1507,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     ///   [`crate::marks::SCOPE_PRESSURE_FLOOR`] /
     ///   [`crate::marks::SCOPE_PRESSURE_LEVEL`] — every first-attempt
     ///   login escalates, not only the attacked target's.
+    ///
     /// The ASN bucket of a source address for the novel-network gate:
     /// the ASN number as a decimal string when the dataset resolved
     /// one, else the bucket id. Mirrors the PHP `asnBucketOf`.
@@ -1579,7 +1572,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 // previously bound to this principal at a successful
                 // login. A fresh or attacker-minted cookie is never
                 // continuity.
-                let device_continuity = observation.session_id.as_ref().map_or(false, |sid| {
+                let device_continuity = observation.session_id.as_ref().is_some_and(|sid| {
                     let sid_hex = hex::encode(sid);
                     networks
                         .principal_network_seen(&principal_hex, &format!("session:{sid_hex}"))
@@ -1610,15 +1603,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     scope_pressure = false;
                 }
 
-                // Migration grace: learn records but never escalates.
-                if is_novel {
-                    let _ = networks.record_principal_network_tag(&principal_hex, &network);
-                    if !asn.is_empty() && asn != "0" {
-                        let _ =
-                            networks.record_principal_network_tag(&principal_hex, &format!("asn:{asn}"));
-                    }
-                }
-                evidence.novel_network = is_novel && self.novelty_enforcement == NoveltyEnforcement::Enforce;
+                // Evidence is read-only: the network tag is recorded
+                // only after the decision (post-Allow binding), never
+                // during evaluation. Recording here would write the
+                // attacker's network under the victim's principal and
+                // make the second attempt from the same IP "seen".
+                evidence.novel_network =
+                    is_novel && self.novelty_enforcement == NoveltyEnforcement::Enforce;
             }
             evidence.scope_pressure = scope_pressure;
         }
@@ -1646,6 +1637,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     /// The tags returned by the consolidated call are non-`None` exactly
     /// when a tag was presented, so `existing_* == None` implies the
     /// current tag is absent — identical to the individual-record path.
+    #[allow(clippy::too_many_arguments)]
     fn derive_v2_signals_from_records(
         &self,
         v2: &RiskV2Context,
@@ -1780,8 +1772,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     // survives an error, so a retry applies the outcome
                     // exactly once instead of amplifying it.
                     Ok(status) => {
-                        let authorize = matches!(status, 1 | 2)
-                            || (status == 3 && !legitimate);
+                        let authorize = matches!(status, 1 | 2) || (status == 3 && !legitimate);
                         if !authorize {
                             return Ok(EventReceipt {
                                 event_id: observation.event_id,

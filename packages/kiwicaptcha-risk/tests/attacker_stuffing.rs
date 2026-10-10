@@ -244,8 +244,7 @@ fn run_simulation(
     );
     let quiet_at = last_failure_at + QUIET_WINDOW_MS;
     assert!(quiet_at > 0);
-    let state = OutcomeMarksStore::read_target_state(store, &victim_target)
-        .expect("target state");
+    let state = OutcomeMarksStore::read_target_state(store, &victim_target).expect("target state");
     assert!(
         state.fails < TARGET_ATTACK_THRESHOLD,
         "the engine's target state is relieved (got {})",
@@ -294,9 +293,8 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
     let principal_bytes = [0xf6u8; 16];
     // The engine addresses the principal by its derived pseudonym, so
     // the tag writes must key the same one.
-    let identity = kiwicaptcha_risk::identity::RiskIdentityFactory::new(RiskKeys::from_master(
-        &[0x42; 32],
-    ));
+    let identity =
+        kiwicaptcha_risk::identity::RiskIdentityFactory::new(RiskKeys::from_master(&[0x42; 32]));
     let principal_hex = hex::encode(identity.principal_id(&principal_bytes));
     let home_ip = "198.51.100.23".parse().unwrap();
     let home_bucket = hex::encode(kiwicaptcha_risk::identity::masked_network(home_ip, 32, 64));
@@ -333,24 +331,25 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
         decision.reasons
     );
 
-    // The engine already recorded the network tag during the novelty
-    // check (the migration-grace write). A second record is SET NX and
-    // answers false — the tag is already established.
-    assert!(
-        !networks
-            .record_principal_network_tag(&principal_hex, &home_bucket)
-            .expect("record"),
-        "the engine already established the network tag during the novelty check"
+    // Evidence is read-only: the engine must NOT have written any
+    // network tag during the novelty check. A retry from the same IP
+    // must stay stepped up — the attacker's network is never bound
+    // under the victim's principal by a mere evaluation.
+    assert_eq!(
+        networks.principal_network_seen(&principal_hex, &home_bucket),
+        Ok(Some(false)),
+        "the engine must not write the network tag during evidence gathering"
     );
 
-    // Attempt 2 from the same network: established — the plain allow.
+    // Attempt 2 from the same network: still novel — the engine never
+    // recorded the attacker's network during evaluation.
     let decision = engine
         .reassess(ctx_for(home_ip), Some("stuffing-2".to_string()))
         .expect("assess succeeds");
     assert_eq!(
         decision.action.as_str(),
-        "allow",
-        "an established network is the plain allow again ({:?})",
+        "step_up",
+        "a retry from the same IP must stay stepped up, never allowed ({:?})",
         decision.action
     );
 
@@ -384,12 +383,10 @@ impl kiwicaptcha_risk::store::PrincipalNetworkTagStore for SimNetworks {
         principal_id: &str,
         network: &str,
     ) -> Result<Option<bool>, RiskStoreError> {
-        Ok(Some(
-            self.pairs
-                .lock()
-                .unwrap()
-                .contains(&(principal_id.to_string(), network.to_string())),
-        ))
+        Ok(Some(self.pairs.lock().unwrap().contains(&(
+            principal_id.to_string(),
+            network.to_string(),
+        ))))
     }
 
     fn record_principal_network_tag(
@@ -408,7 +405,13 @@ impl kiwicaptcha_risk::store::PrincipalNetworkTagStore for SimNetworks {
         &self,
         principal_id: &str,
     ) -> Result<Option<bool>, RiskStoreError> {
-        Ok(Some(self.pairs.lock().unwrap().iter().any(|(p, _)| p == principal_id)))
+        Ok(Some(
+            self.pairs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(p, _)| p == principal_id),
+        ))
     }
 }
 
@@ -494,7 +497,9 @@ impl RiskStateStore for SimStore {
         let now_ms = T0 as i64;
         {
             let mut fails = self.target_fails.lock().unwrap();
-            let entry = fails.entry(target_id.to_string()).or_insert((0, now_ms, now_ms));
+            let entry = fails
+                .entry(target_id.to_string())
+                .or_insert((0, now_ms, now_ms));
             entry.0 += 1;
             entry.2 = now_ms;
         }

@@ -35,9 +35,7 @@ fn spawn(bearer: Option<&str>) -> SocketAddr {
 /// refused head or body) still yields whatever bytes arrived.
 fn raw(addr: SocketAddr, request: impl AsRef<[u8]>) -> String {
     let mut stream = TcpStream::connect(addr).expect("the sidecar socket answers");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
     stream.write_all(request.as_ref()).expect("request sent");
     let mut response = Vec::new();
     match stream.read_to_end(&mut response) {
@@ -211,7 +209,10 @@ fn oversized_bodies_refuse_at_the_reader() {
     assert_eq!(status_of(&response), 413, "{response}");
     // The 64 KiB document itself (just under the cap) is readable and
     // reaches the JSON handler.
-    let big = format!("{{\"pad\":\"{}\",\"remoteip\":\"{CLIENT_IP}\"}}", "a".repeat(65_300));
+    let big = format!(
+        "{{\"pad\":\"{}\",\"remoteip\":\"{CLIENT_IP}\"}}",
+        "a".repeat(65_300)
+    );
     let (status, _) = verify(addr, "", &big);
     assert_eq!(status, 200, "a body under the cap must reach the handler");
 }
@@ -415,16 +416,16 @@ fn json_body_attack_shapes_never_reach_the_verifier() {
 fn unicode_and_zone_remoteip_forms_are_refused() {
     let addr = spawn(None);
     for remoteip in [
-        "２０３.０.１１３.７",           // fullwidth digits
-        "127.0.0.1\u{202e}",           // RTL override
-        "fe80::1%eth0",                // zone id
-        "fe80::1%25eth0",              // encoded zone id
-        "127.0.0.1\u{0}",              // embedded null
-        "127.0.0.\u{ff11}",            // fullwidth 1 in the last octet
-        "\u{ff11}27.0.0.1",            // fullwidth leading digit
-        "127.0.0.1:80",                // a port is not an address
-        "::ffff:127.0.0.1%1",          // mapped + zone
-        "  127.0.0.1  \u{202e}",       // whitespace trim must not launder a bidi override
+        "２０３.０.１１３.７",   // fullwidth digits
+        "127.0.0.1\u{202e}",     // RTL override
+        "fe80::1%eth0",          // zone id
+        "fe80::1%25eth0",        // encoded zone id
+        "127.0.0.1\u{0}",        // embedded null
+        "127.0.0.\u{ff11}",      // fullwidth 1 in the last octet
+        "\u{ff11}27.0.0.1",      // fullwidth leading digit
+        "127.0.0.1:80",          // a port is not an address
+        "::ffff:127.0.0.1%1",    // mapped + zone
+        "  127.0.0.1  \u{202e}", // whitespace trim must not launder a bidi override
     ] {
         let body = serde_json::json!({"scope": "login", "remoteip": remoteip}).to_string();
         let (status, response) = issue(addr, "", &body);
@@ -518,7 +519,10 @@ fn header_bombs_are_capped_and_never_hang_the_pool() {
     let response = raw(addr, request.as_bytes());
     assert_eq!(status_of(&response), 400, "{response}");
     // The pool still answers after the bomb.
-    let response = raw(addr, b"GET /healthz HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n");
+    let response = raw(
+        addr,
+        b"GET /healthz HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n",
+    );
     assert_eq!(status_of(&response), 200, "{response}");
     // A token candidate in an oversized header never reaches /verify.
     let token = SolutionToken {
@@ -555,9 +559,15 @@ fn an_idempotent_retry_with_operation_identity_returns_the_stored_success() {
     // success, not already_consumed.
     let (status, retry) = verify(addr, "", &body("op-retry-1"));
     assert_eq!(status, 200, "{retry}");
-    assert!(!retry.contains("already_consumed"), "idempotent retry must return the stored success: {retry}");
+    assert!(
+        !retry.contains("already_consumed"),
+        "idempotent retry must return the stored success: {retry}"
+    );
     assert!(retry.contains("success"), "{retry}");
     // A different identity is a plain replay.
     let (_, other) = verify(addr, "", &body("op-other"));
-    assert!(other.contains("already_consumed") || other.contains("timeout-or-duplicate"), "{other}");
+    assert!(
+        other.contains("already_consumed") || other.contains("timeout-or-duplicate"),
+        "{other}"
+    );
 }

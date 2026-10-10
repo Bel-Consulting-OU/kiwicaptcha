@@ -1576,7 +1576,10 @@ impl RiskStateStore for RedisRiskStateStore {
         Ok(())
     }
 
-    fn read_target_state(&self, target_id: &str) -> Result<crate::store::TargetState, RiskStoreError> {
+    fn read_target_state(
+        &self,
+        target_id: &str,
+    ) -> Result<crate::store::TargetState, RiskStoreError> {
         self.run_target_op("read", target_id, "", "")
     }
 

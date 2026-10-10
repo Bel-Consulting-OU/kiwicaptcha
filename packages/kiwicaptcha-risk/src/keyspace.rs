@@ -236,10 +236,7 @@ pub fn mark_dedupe_key(encoded_namespace: &str, event_id: &str) -> String {
 /// target never hammers the primary that holds the rest of the risk
 /// state.
 pub fn target_state_tag(encoded_namespace: &str, hex_id: &str) -> String {
-    format!(
-        "{{kiwi:{encoded_namespace}:target:{}}}",
-        id_prefix(hex_id)
-    )
+    format!("{{kiwi:{encoded_namespace}:target:{}}}", id_prefix(hex_id))
 }
 
 /// The three target-dimension state keys of one target pseudonym:
@@ -433,7 +430,11 @@ mod tests {
         for i in 0..64u32 {
             let id = format!("{i:064x}");
             assert!(scope_shard(&id, b"") <= 15);
-            assert_eq!(scope_shard(&id, b""), scope_shard(&id, b""), "deterministic");
+            assert_eq!(
+                scope_shard(&id, b""),
+                scope_shard(&id, b""),
+                "deterministic"
+            );
         }
     }
 
@@ -498,14 +499,8 @@ mod tests {
             outcome_ledger_key(ns, "ab".repeat(16).as_str()),
             format!("{{kiwi:n1:o:ab}}:outcome:{}", "ab".repeat(16))
         );
-        assert_eq!(
-            mark_dedupe_key(ns, "cd"),
-            "mark:{kiwi:n1}:dd:cd"
-        );
-        assert_eq!(
-            target_state_tag(ns, "5e2a"),
-            "{kiwi:n1:target:5e}"
-        );
+        assert_eq!(mark_dedupe_key(ns, "cd"), "mark:{kiwi:n1}:dd:cd");
+        assert_eq!(target_state_tag(ns, "5e2a"), "{kiwi:n1:target:5e}");
         assert_eq!(
             target_state_keys(ns, "5e2a"),
             [

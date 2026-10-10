@@ -398,9 +398,7 @@ fn expected_request_binding_is_enforced_when_the_caller_states_it() {
     // Equal binding redeems.
     let ok = mint_bound(Some("txn-A"));
     let ok_wire = kiwicaptcha_verifier::issue_wire_of(&ok);
-    server
-        .state
-        .inject_record(ok.record.clone(), None, None);
+    server.state.inject_record(ok.record.clone(), None, None);
     let ok_token = solve_token(&ok_wire);
     let (status, body) = post_json(
         server.addr,
