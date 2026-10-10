@@ -584,6 +584,31 @@ final class AdaptiveRiskEngine
         $this->metrics->gauge('resources:argon_capacity', $c->resources->argonCapacity);
         $this->recordDecisionMetrics($c->scope, $decision);
         $this->registerDecisionOutcome($c->scope, $decision, $nowMs);
+
+        // Session-to-principal binding: a successful (non-pending)
+        // login records the session pseudonym under the principal so
+        // "device continuity" means "this session was used by this
+        // principal before", never "a cookie was presented". A fresh
+        // or attacker-minted cookie has no binding and cannot vouch
+        // for anyone. Pending (step-up) logins bind at restore.
+        if (
+            $c->event === RiskEventKind::AuthenticationSuccess
+            && $decision->action === RiskAction::Allow
+            && $this->principalNetworks !== null
+            && $observation->principalId !== null
+            && $observation->sessionId !== null
+            && $observation->sessionId !== ''
+        ) {
+            try {
+                $this->principalNetworks->recordPrincipalNetworkTag(
+                    $observation->principalId,
+                    'session:'.$observation->sessionId,
+                );
+            } catch (\Throwable) {
+                // Best effort: the binding write never breaks login.
+            }
+        }
+
         return $decision;
     }
 
@@ -658,42 +683,75 @@ final class AdaptiveRiskEngine
             true,
         );
 
-        // Returning-browser exemption: a login with device continuity
+        // Returning-browser exemption: a login whose session was
+        // previously bound to this principal (real device continuity),
         // on a known network, carrying no marks and no target-under-
-        // attack, is the owner's own device. Scope pressure, cooldown
-        // and action-failure noise from a stuffing storm must never
-        // block it — without this the campaign cannot tell "stops
-        // stuffing" from "steps up everyone".
+        // attack, is the owner's own device. Storm state (cooldown,
+        // global floor) must never step it up. This is NOT a blanket
+        // Allow: the pre-storm price stands, and a source above the
+        // hard velocity threshold is never exempt.
         if (
             $result->action !== RiskAction::Allow
             && !$firstAttempt->requiresStepUp()
             && $view->freshestOwnInTtl($nowMs, $this->marksReader->markTtlMs()) === null
             && $view->targetInTtl($nowMs, $this->marksReader->markTtlMs()) === null
+            && $this->principalNetworks !== null
+            && $observation->principalId !== null
         ) {
-            $deviceContinuity = $observation->sessionId !== null && $observation->sessionId !== '';
+            $deviceContinuity = false;
+            if ($observation->sessionId !== null && $observation->sessionId !== '') {
+                try {
+                    $deviceContinuity = $this->principalNetworks->principalNetworkSeen(
+                        $observation->principalId,
+                        'session:'.$observation->sessionId,
+                    ) === true;
+                } catch (\Throwable) {
+                    $deviceContinuity = false;
+                }
+            }
             $network = self::networkBucket($c->sourceIp);
             $netSeen = false;
             try {
-                $netSeen = $this->principalNetworks !== null && $observation->principalId !== null
-                    && $this->principalNetworks->principalNetworkSeen($observation->principalId, $network) === true;
+                $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network) === true;
             } catch (\Throwable) {
                 $netSeen = false;
             }
-            if ($deviceContinuity && $netSeen) {
-                // The owner's own device on a known network: Allow,
-                // bypassing the storm state the policy baked into the
-                // plain decision (cooldown, global floor, noise).
-                return new RiskDecision(
-                    score: $decision->score,
-                    action: RiskAction::Allow,
-                    reasons: [],
-                    policyVersion: $decision->policyVersion,
-                    globalLevel: $decision->globalLevel,
-                    retryAfterMs: null,
-                    band: $decision->band,
-                    decisionId: $decision->decisionId,
-                    modelRevision: $decision->modelRevision,
+            // Hard velocity: never exempt a source above the hard
+            // rate limit. A shared carrier-grade NAT exit can carry an attacker
+            // beside the owner; velocity alone is not a deny but it
+            // removes the exemption.
+            $hardVelocity = $vector->sourceFast >= 950
+                || $vector->badProof >= 800
+                || $vector->malformed >= 800
+                || $vector->replay >= 800
+                || $vector->networkRisk >= 900;
+            if ($deviceContinuity && $netSeen && !$hardVelocity) {
+                // Pre-storm price: the policy's own risk at global
+                // level 0, keeping the request's signals but dropping
+                // the storm's global floor and cooldown. A hard deny
+                // from the request's own evidence (bad proofs, replay,
+                // malformed) is already excluded above.
+                $preStorm = $this->policy->decide(
+                    $c->scope,
+                    $decision->score,
+                    $vector,
+                    $c->resources,
+                    0,
+                    $nowMs,
                 );
+                if ($preStorm->action !== RiskAction::Deny) {
+                    return new RiskDecision(
+                        score: $preStorm->score,
+                        action: $preStorm->action,
+                        reasons: $preStorm->reasons,
+                        policyVersion: $preStorm->policyVersion,
+                        globalLevel: $preStorm->globalLevel,
+                        retryAfterMs: $preStorm->retryAfterMs,
+                        band: $preStorm->band,
+                        decisionId: $decision->decisionId,
+                        modelRevision: $preStorm->modelRevision,
+                    );
+                }
             }
         }
 
@@ -769,12 +827,22 @@ final class AdaptiveRiskEngine
                     $trusted = null;
                     $netSeen = null;
                 }
-                // Device continuity: the request carries a session
-                // pseudonym from the first-party continuity cookie. A
-                // returning browser is the stronger legitimacy signal;
-                // a cookie-less request on a fresh /64 of a known ASN
-                // is exactly the residential-proxy shape.
-                $deviceContinuity = $observation->sessionId !== null && $observation->sessionId !== '';
+                // Device continuity: the session pseudonym was
+                // previously bound to this principal at a successful
+                // login. A fresh or attacker-minted cookie has no
+                // binding and cannot vouch for anyone — presenting
+                // any 32-hex value is not the owner's device.
+                $deviceContinuity = false;
+                if ($observation->sessionId !== null && $observation->sessionId !== '') {
+                    try {
+                        $deviceContinuity = $this->principalNetworks->principalNetworkSeen(
+                            $observation->principalId,
+                            'session:'.$observation->sessionId,
+                        ) === true;
+                    } catch (\Throwable) {
+                        $deviceContinuity = false;
+                    }
+                }
                 $newPrefix = ($netSeen === false);
                 $isNovel = false;
                 if ($asnSeen === false) {

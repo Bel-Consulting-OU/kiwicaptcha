@@ -717,19 +717,37 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', 'risk disabled: the value-class pricing is inactive'];
         }
         $escalations = [];
+        $hardFails = [];
         foreach (($risk['scopes'] ?? []) as $name => $scope) {
             if (!\is_array($scope)) {
                 continue;
             }
+            $valueClass = (string) ($scope['value_class'] ?? 'standard');
+            $minimum = (string) ($scope['minimum'] ?? 'allow');
             [$status, $detail] = ValueClassCeiling::verdict(
-                (string) ($scope['value_class'] ?? 'standard'),
-                (string) ($scope['minimum'] ?? 'allow'),
+                $valueClass,
+                $minimum,
                 null,
                 isset($scope['stake_usd']) ? (float) $scope['stake_usd'] : null,
             );
             if ($status !== 'PASS') {
                 $escalations[] = sprintf('%s: %s', $name, $detail);
+                // A critical or high stake sitting on a PoW rung is a
+                // A hard failure, not a warning: raw proof of work cannot carry
+                // it at any difficulty, and the scope protects
+                // something the deployment declared valuable.
+                if (\in_array($valueClass, ['critical', 'high'], true)
+                    && !\in_array($minimum, ['step_up', 'deny'], true)) {
+                    $hardFails[] = $name;
+                }
             }
+        }
+        if ($hardFails !== []) {
+            return ['FAIL', sprintf(
+                '%d high-value scope(s) priced below their declared stake on a PoW rung (%s): set risk.scopes.<name>.minimum to step_up or deny',
+                \count($hardFails),
+                implode(', ', $hardFails),
+            )];
         }
         if ($escalations === []) {
             return ['PASS', sprintf('every configured scope prices inside its rung ceiling or carries a step_up/deny minimum (%d scope(s))', \count($risk['scopes'] ?? []))];
