@@ -144,8 +144,23 @@ final class FirstAttemptNoveltyTest extends TestCase
         );
     }
 
-    /** The learned history: the home /32 and the home ASN, under the hashed principal. */
+    /**
+     * The learned history: the home /32, the home ASN, and the owner's
+     * continuity session bound to the principal at a prior login.
+     */
     private function homeTags(): array
+    {
+        return [
+            $this->principalHex => [
+                self::HOME_ASN_TAG => true,
+                AdaptiveRiskEngine::networkBucket(self::HOME_IP) => true,
+                'session:'.$this->identity->sessionId(self::SESSION) => true,
+            ],
+        ];
+    }
+
+    /** Home history without a bound session (the attacker's shape). */
+    private function homeTagsUnbound(): array
     {
         return [
             $this->principalHex => [
@@ -202,6 +217,23 @@ final class FirstAttemptNoveltyTest extends TestCase
             \KiwiCaptcha\Risk\RiskAction::Allow,
             $decision->action,
             'a returning browser on a new /64 of its home ISP passes on device continuity',
+        );
+    }
+
+    /**
+     * The ISP-matched bypass with a cookie: the attacker mints a fresh
+     * 32-hex value (they loaded the login page). Unbound sessions are
+     * never continuity, so the known-ASN new-prefix shape must still
+     * escalate.
+     */
+    public function testAFreshUnboundCookieIsNotDeviceContinuity(): void
+    {
+        $engine = $this->buildEngine($this->homeTagsUnbound());
+        $decision = $engine->reassess($this->loginContext(self::ATTACKER_SAME_ASN, self::SESSION));
+        self::assertNotSame(
+            \KiwiCaptcha\Risk\RiskAction::Allow,
+            $decision->action,
+            'a fresh unbound cookie is not device continuity: the residential-proxy shape must escalate',
         );
     }
 

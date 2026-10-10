@@ -243,12 +243,17 @@ $classifier = new CidrNetworkClassifier([]);
 // up everyone".
 $homeIpOf = static fn (int $a): string => sprintf('10.%d.%d.%d', 1 + intdiv($a, 65025) % 254, intdiv($a, 250) % 250, $a % 250 + 1);
 $mobileIpOf = static fn (int $a): string => sprintf('10.%d.%d.%d', 50 + intdiv($a, 65025) % 200, intdiv($a, 250) % 250, $a % 250 + 1);
+$legitCookieOf = static fn (int $a): string => sprintf('%032x', $a + 1);
 $seededPrincipals = 0;
 foreach ($accounts as $a => $account) {
     $principal = $factory->principalId($account);
     $networks->recordPrincipalNetworkTag($principal, AdaptiveRiskEngine::networkBucket($homeIpOf($a)));
     $networks->recordPrincipalNetworkTag($principal, AdaptiveRiskEngine::networkBucket($mobileIpOf($a)));
     $networks->recordPrincipalNetworkTag($principal, 'asn:64496');
+    // Bind the owner's continuity session to the principal, as a prior
+    // successful login did. Device continuity means "this session was
+    // used by this principal before" — never "a cookie was presented".
+    $networks->recordPrincipalNetworkTag($principal, 'session:'.$factory->sessionId($legitCookieOf($a)));
     $seededPrincipals++;
 }
 
@@ -344,11 +349,21 @@ $attackerIpOf = static function (int $session, int $group): string {
 // IPs on the victims' own ASN (10.0.0.0/8 -> ASN 64496, the home ISP).
 // Before the engine fix this was an automatic pass. The campaign now
 // measures it as an explicit attacker profile.
-$isIspMatched = static fn (int $session): bool => ($session % 2) === 1;
+$isIspMatched = static fn (int $session): bool => ($session % 3) === 1;
+$isCgnatMatched = static fn (int $session): bool => ($session % 3) === 2;
 $attackerIspIpOf = static function (int $session): string {
     // A fresh /32 on the home ISP's ASN, never the seeded home /64.
     return sprintf('10.200.%d.%d', intdiv($session, 250) % 256, ($session * 3) % 200 + 1);
 };
+// The CGNAT attacker: the same address as the victim's home network
+// (carrier-grade NAT shares one IPv4 across many subscribers). The
+// attacker mints a fresh cookie, so device continuity does not vouch
+// for them even on the owner's own address.
+$attackerCgnatIpOf = static fn (int $accountIndex): string => $homeIpOf($accountIndex % 20000);
+// The attacker's cookie: a fresh 32-hex value (they loaded the login
+// page, so they carry a continuity cookie — just never one bound to
+// the victim).
+$attackerCookieOf = static fn (int $session): string => sprintf('%032x', 0xF0000000 + $session);
 
 /**
  * One real login assessment. This is the exact call
@@ -409,10 +424,19 @@ for ($w = 0; $w < $waves; $w++) {
         $session = (int) floor($i / $sessionSlice) % $attackerSessions;
         $group = $session % $groups;
         $account = $rows[$i];
-        // Half the attacker sessions ride IPs on the victims' own ISP
-        // ASN (the residential-proxy profile). The rest are ordinary
-        // botnet addresses.
-        $attackerIp = $isIspMatched($session) ? $attackerIspIpOf($session) : $attackerIpOf($session, $group);
+        $accountIndex = (int) array_search($account, $accounts, true);
+        // Three attacker profiles: ordinary botnet, ISP-matched
+        // residential (victims own ASN), and CGNAT (victims own
+        // address). All carry a fresh, unbound cookie — the realistic
+        // case for a stuffer who loaded the login page.
+        if ($isIspMatched($session)) {
+            $attackerIp = $attackerIspIpOf($session);
+        } elseif ($isCgnatMatched($session)) {
+            $attackerIp = $attackerCgnatIpOf($accountIndex >= 0 ? $accountIndex : $session);
+        } else {
+            $attackerIp = $attackerIpOf($session, $group);
+        }
+        $attackerCookie = $attackerCookieOf($session);
 
         if ($rowValid[$i]) {
             // The valid stolen credential: the real engine decides.
@@ -424,10 +448,10 @@ for ($w = 0; $w < $waves; $w++) {
             if ($inCorpus) {
                 $corpusMemberValid++;
             }
-            // The attacker never carries the victim's continuity
-            // cookie: no device continuity, so a same-ASN new-prefix
-            // login is the residential-proxy shape and must escalate.
-            $decision = $assessLogin($attackerIp, $account);
+            // The attacker carries a fresh cookie (they loaded the
+            // login page) but it was never bound to this principal, so
+            // device continuity does not vouch for them.
+            $decision = $assessLogin($attackerIp, $account, $attackerCookie);
             if ($decision->action === RiskAction::Allow) {
                 $compromised++;
                 $engineAllowOnValid[] = substr($account, 0, 16);
@@ -597,17 +621,32 @@ $legitSameAsnTotal = 0;
 $legitSameAsnBlocked = 0;
 $legitTravelTotal = 0;
 $legitTravelBlocked = 0;
+$legitTargetedTotal = 0;
+$legitTargetedBlocked = 0;
 $legitSample = min(1000, $seededPrincipals);
 for ($a = 0; $a < $legitSample; $a++) {
     $account = $accounts[$a];
     $homeIp = $homeIpOf($a);
     $mobileIp = $mobileIpOf($a);
     $travelIp = sprintf('45.200.%d.%d', intdiv($a, 250) % 256, $a % 250 + 1);
-    // Device continuity: the returning browser carries the cookie.
-    $cookie = sprintf('%032x', $a + 1);
+    // Device continuity: the cookie was bound to this principal at
+    // seeding (a prior successful login). The attacker's fresh cookie
+    // has no such binding.
+    $cookie = $legitCookieOf($a);
+    // Include targeted victims (the first hotVictims accounts carry
+    // target state from the storm) so the baseline is not optimistic
+    // for accounts under attack. Their step-up is target protection
+    // working, not a false positive.
+    $withTarget = $a < $hotVictims;
     foreach ([['home', $homeIp], ['same_asn', $mobileIp], ['travel', $travelIp]] as [$kind, $ip]) {
-        $decision = $assessLogin($ip, $account, $cookie, false);
+        $decision = $assessLogin($ip, $account, $cookie, $withTarget);
         $blocked = $decision->action === RiskAction::StepUp || $decision->action === RiskAction::Deny;
+        if ($withTarget) {
+            $legitTargetedTotal++;
+            if ($blocked) {
+                $legitTargetedBlocked++;
+            }
+        }
         if ($kind === 'home') {
             $legitHomeTotal++;
             if ($blocked) {
@@ -626,9 +665,28 @@ for ($a = 0; $a < $legitSample; $a++) {
         }
     }
 }
-$legitFpRate = ($legitHomeTotal + $legitSameAsnTotal) > 0
-    ? ($legitHomeBlocked + $legitSameAsnBlocked) / ($legitHomeTotal + $legitSameAsnTotal)
-    : 1.0;
+// The false-positive bound (0.1%) applies to home and same-ASN logins
+// for NON-targeted accounts. A targeted victim being stepped up is
+// target protection working, not a false positive.
+$ntHome = 0;
+$ntHomeB = 0;
+$ntSame = 0;
+$ntSameB = 0;
+for ($a = $hotVictims; $a < $legitSample; $a++) {
+    $account = $accounts[$a];
+    $cookie = $legitCookieOf($a);
+    $d1 = $assessLogin($homeIpOf($a), $account, $cookie, false);
+    $d2 = $assessLogin($mobileIpOf($a), $account, $cookie, false);
+    $ntHome++;
+    $ntSame++;
+    if ($d1->action === RiskAction::StepUp || $d1->action === RiskAction::Deny) {
+        $ntHomeB++;
+    }
+    if ($d2->action === RiskAction::StepUp || $d2->action === RiskAction::Deny) {
+        $ntSameB++;
+    }
+}
+$legitFpRate = ($ntHome + $ntSame) > 0 ? ($ntHomeB + $ntSameB) / ($ntHome + $ntSame) : 1.0;
 
 $sha16Us = (float) (getenv('KIWI_RT_D35_SHA16_US') ?: 0);
 $spendUsd = $sha16Us > 0 ? ($rowsProcessed * $sha16Us / 1e6) / 3600.0 * 0.01 : 0.0;
@@ -650,7 +708,8 @@ $summary = [
     'engine_path' => 'AdaptiveRiskEngine::reassess(AuthenticationSuccess) — the RiskGateway::loginDecision call; firstAttemptEvidence runs for real',
     'novelty_enforcement' => 'enforce (the abuse posture; the engine default is learn, a rollout window)',
     'target_source' => 'store (registerTargetFailure + MarksView::read; callers never inject)',
-    'attacker_profiles' => 'botnet_45x + isp_matched_residential (victims own ASN, fresh /64, no device continuity)',
+    'attacker_profiles' => 'botnet_45x + isp_matched_residential (victims own ASN, fresh unbound cookie) + cgnat_shared_address (victims own IP, fresh unbound cookie)',
+    'device_continuity_note' => 'a session previously bound to this principal at a successful login; a fresh or attacker-minted cookie is never continuity',
     'seeded_network_history' => $seededPrincipals,
     'legitimate_baseline' => [
         'sample' => $legitSample,
@@ -660,8 +719,11 @@ $summary = [
         'same_asn_blocked' => $legitSameAsnBlocked,
         'travel_total' => $legitTravelTotal,
         'travel_blocked' => $legitTravelBlocked,
+        'targeted_total' => $legitTargetedTotal,
+        'targeted_blocked' => $legitTargetedBlocked,
         'false_positive_rate' => round($legitFpRate, 6),
         'false_positive_bound' => 0.001,
+        'fp_scope' => 'home and same-ASN logins for non-targeted accounts with bound device continuity',
     ],
     'attacker_sessions' => $attackerSessions,
     'sessions_never_escalated' => $sessionsNeverEscalated,

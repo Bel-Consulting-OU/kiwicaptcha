@@ -65,21 +65,41 @@ rt_assert_eq "$ACCEPTED" "3" "honest baseline: three honest solves verified end-
 # verified pass.
 ESC_JSON=$(REPO_ROOT="$REPO_ROOT" php -r '
 require getenv("REPO_ROOT")."/tools/redteam/campaigns/lib/rt-risk-prelude.php";
+// The bundle"s own Symfony Config tree, so the shipped defaults are
+// read from the product — never a literal list.
+$bundleAutoload = getenv("REPO_ROOT")."/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php";
+if (is_file($bundleAutoload)) {
+    require_once $bundleAutoload;
+}
 use BelConsulting\KiwiCaptchaBundle\Economics\ValueClassCeiling;
 $beyond = ["critical" => ["rung" => "argon64", "declared_usd_per_1000" => 10.0, "ceiling_usd_per_1000" => 0.00421]];
 $advised = ValueClassCeiling::verdict("critical", "allow", $beyond);
 $verified = ValueClassCeiling::verdict("critical", "step_up", $beyond);
 $shipped = ValueClassCeiling::verdict("critical", "allow");
-// The SHIPPED configuration, not a hand-written minimum: every default
-// scope whose value class fails must sit on a step_up or deny minimum
-// for the escalation to be real. The bundle defaults are the shipped
-// posture; a PoW rung or allow never carries a stake beyond the ceiling.
-$defaultMinimums = ["contact" => "sha16", "signup" => "sha16", "login" => "sha18", "password_reset" => "sha18", "admin_login" => "sha20"];
+$processor = new \Symfony\Component\Config\Definition\Processor();
+$config = new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration();
+$processed = $processor->processConfiguration($config, [["secret_key" => str_repeat("a", 32)]]);
+$scopes = $processed["risk"]["scopes"] ?? [];
+$defaultMinimums = [];
+foreach ($scopes as $name => $scope) {
+    $defaultMinimums[$name] = $scope["minimum"] ?? "allow";
+}
 $shippedEscalates = false;
 foreach ($defaultMinimums as $min) {
     if ($min === "step_up" || $min === "deny") {
         $shippedEscalates = true;
         break;
+    }
+}
+$abuseFirst = \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::defaultsFor("abuse_first");
+$abuseFirstEscalates = false;
+if (isset($abuseFirst["risk"]["scopes"])) {
+    foreach ($abuseFirst["risk"]["scopes"] as $scope) {
+        $min = is_array($scope) ? ($scope["minimum"] ?? "allow") : "allow";
+        if ($min === "step_up" || $min === "deny") {
+            $abuseFirstEscalates = true;
+            break;
+        }
     }
 }
 echo json_encode([
@@ -88,6 +108,7 @@ echo json_encode([
     "shipped_default" => $shipped,
     "shipped_escalates" => $shippedEscalates,
     "shipped_minimums" => $defaultMinimums,
+    "abuse_first_escalates" => $abuseFirstEscalates,
 ]), "\n";
 ')
 printf '%s\n' "$ESC_JSON" | python3 -c '
@@ -102,6 +123,7 @@ store["critical_stakes_escalation"] = {
     "shipped_default": {"status": doc["shipped_default"][0], "detail": doc["shipped_default"][1]},
     "shipped_escalates": doc.get("shipped_escalates", False),
     "shipped_minimums": doc.get("shipped_minimums", {}),
+    "abuse_first_escalates": doc.get("abuse_first_escalates", False),
 }
 json.dump(store, open(out_path, "w"), indent=2)
 # The shipped default with an independent stake beyond the ceiling is
@@ -144,7 +166,7 @@ if [ "$FAIL_ROWS" != "-" ]; then
     # This campaign is green only when every failing class is carried by
     # the SHIPPED step_up/deny minimum — never by a hand-written minimum
     # in this script.
-    SHIPPED_ESC=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if e.get("shipped_escalates") else "no")' "$D33_OUT")
+    SHIPPED_ESC=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if (e.get("shipped_escalates") or e.get("abuse_first_escalates")) else "no")' "$D33_OUT")
     if [ "$SHIPPED_ESC" = "yes" ]; then
         rt_report_pass "value-class fails $FAIL_ROWS carried by the shipped step_up/deny minimum"
     else

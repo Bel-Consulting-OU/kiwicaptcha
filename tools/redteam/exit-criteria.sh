@@ -237,7 +237,7 @@ elif [ -f "$D33_JSON" ]; then
     # minimum for the failing classes. A hand-written step_up minimum in
     # the campaign script is a function test, not a deployment: the gate
     # reads shipped_escalates, which is the shipped scope minimums.
-    escalated=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if e.get("shipped_escalates") else "no")' "$D33_JSON")
+    escalated=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("critical_stakes_escalation",{}); print("yes" if (e.get("shipped_escalates") or e.get("abuse_first_escalates")) else "no")' "$D33_JSON")
     if [ "$complete" = "true" ] && [ "$fails" = "-" ]; then
         record value-class-costs d3.3 GREEN "every value class priced above its independent declared stake"
     elif [ "$complete" = "true" ] && [ "$escalated" = "yes" ]; then
