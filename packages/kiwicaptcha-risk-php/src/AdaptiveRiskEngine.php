@@ -648,7 +648,7 @@ final class AdaptiveRiskEngine
             return MarksEscalation::applyUnreadable($decision, $nowMs, $c->resources);
         }
 
-        return MarksEscalation::apply(
+        $result = MarksEscalation::apply(
             $decision,
             $view->withFirstAttempt($firstAttempt),
             MarksEscalation::corroborated($vector, $decoyEvidence),
@@ -657,6 +657,47 @@ final class AdaptiveRiskEngine
             $c->resources,
             true,
         );
+
+        // Returning-browser exemption: a login with device continuity
+        // on a known network, carrying no marks and no target-under-
+        // attack, is the owner's own device. Scope pressure, cooldown
+        // and action-failure noise from a stuffing storm must never
+        // block it — without this the campaign cannot tell "stops
+        // stuffing" from "steps up everyone".
+        if (
+            $result->action !== RiskAction::Allow
+            && !$firstAttempt->requiresStepUp()
+            && $view->freshestOwnInTtl($nowMs, $this->marksReader->markTtlMs()) === null
+            && $view->targetInTtl($nowMs, $this->marksReader->markTtlMs()) === null
+        ) {
+            $deviceContinuity = $observation->sessionId !== null && $observation->sessionId !== '';
+            $network = self::networkBucket($c->sourceIp);
+            $netSeen = false;
+            try {
+                $netSeen = $this->principalNetworks !== null && $observation->principalId !== null
+                    && $this->principalNetworks->principalNetworkSeen($observation->principalId, $network) === true;
+            } catch (\Throwable) {
+                $netSeen = false;
+            }
+            if ($deviceContinuity && $netSeen) {
+                // The owner's own device on a known network: Allow,
+                // bypassing the storm state the policy baked into the
+                // plain decision (cooldown, global floor, noise).
+                return new RiskDecision(
+                    score: $decision->score,
+                    action: RiskAction::Allow,
+                    reasons: [],
+                    policyVersion: $decision->policyVersion,
+                    globalLevel: $decision->globalLevel,
+                    retryAfterMs: null,
+                    band: $decision->band,
+                    decisionId: $decision->decisionId,
+                    modelRevision: $decision->modelRevision,
+                );
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -713,7 +754,7 @@ final class AdaptiveRiskEngine
                 // An unknown ASN is novel. A known ASN is NOT an
                 // automatic pass: ISP-matched residential proxies ride
                 // the victim's own ASN on a fresh /64, so the same-ASN
-                // new-/64 shape is a WEAKER novelty signal that fires
+                // new-/64 shape is a weaker novelty signal that fires
                 // unless device continuity vouches for the browser.
                 $network = self::networkBucket($c->sourceIp);
                 $asn = $this->asnBucketOf($c->sourceIp);
