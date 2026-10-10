@@ -37,7 +37,7 @@ impl RiskKeys {
 
     /// The minimum master-secret length: the same 16-byte core contract
     /// the PHP `RiskKeys::fromMaster` enforces.
-    pub const MIN_MASTER_BYTES: usize = 16;
+    pub const MIN_MASTER_BYTES: usize = 32;
 
     /// Derives the five keys with hkdf-sha256 (salt `kiwicaptcha-risk-v1`,
     /// 32-byte output per info), refusing a master shorter than the
@@ -46,7 +46,7 @@ impl RiskKeys {
     /// # Errors
     ///
     /// [`RiskError::InvalidMasterLength`] when `master` is shorter than
-    /// 16 bytes.
+    /// 32 bytes.
     pub fn try_from_master(master: &[u8]) -> Result<RiskKeys, RiskError> {
         if master.len() < Self::MIN_MASTER_BYTES {
             return Err(RiskError::InvalidMasterLength(master.len()));
@@ -116,7 +116,11 @@ mod tests {
             RiskKeys::try_from_master(&[0x42; 15]),
             Err(RiskError::InvalidMasterLength(15))
         ));
-        assert!(RiskKeys::try_from_master(&[0x42; 16]).is_ok());
+        assert!(matches!(
+            RiskKeys::try_from_master(&[0x42; 31]),
+            Err(RiskError::InvalidMasterLength(31))
+        ));
+        assert!(RiskKeys::try_from_master(&[0x42; 32]).is_ok());
     }
 
     #[test]

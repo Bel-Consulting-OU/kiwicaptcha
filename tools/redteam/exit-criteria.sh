@@ -682,6 +682,17 @@ else
     fi
 fi
 
+# ---------- campaign lint (P3 gate: no product seams in campaigns) ----------
+if [ "${KIWI_EC_SKIP_LINT:-0}" = 1 ]; then
+    record campaign-lint gates SKIP "skipped"
+else
+    if sh tools/redteam/lint-campaigns.sh >"$GATE_DIR/campaign-lint.log" 2>&1; then
+        record campaign-lint gates GREEN "no product-seam implementations in campaign code"
+    else
+        record campaign-lint gates RED "campaign drivers implement product seams (see $GATE_DIR/campaign-lint.log)"
+    fi
+fi
+
 # ---------- perf budget (a red row fails the gate; no excuse) ----------
 if [ "${KIWI_EC_SKIP_BUDGET:-0}" = 1 ]; then
     record perf-budget budget SKIP "skipped"

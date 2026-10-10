@@ -172,14 +172,21 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                // No always-on step_up floor: a scope minimum is the
-                // floor of every decision and would force every login
-                // through a second factor, including the owner on
-                // their home network with a bound session. The
-                // risk-gated carrier for critical stakes is
-                // novelty_enforcement=enforce plus the scope-pressure
-                // override — they step up on risk, not on every
-                // request. See D3.3 value-class economics.
+                // No always-on step_up floor on login scopes: a scope
+                // minimum is the floor of every decision and would
+                // force every login through a second factor. The
+                // risk-gated carrier for login is novelty_enforcement=
+                // enforce plus the scope-pressure override. Non-login
+                // scopes (financial, signup) carry step_up directly —
+                // they are not login paths and the floor is safe there.
+                'scopes' => [
+                    'financial_action' => ['minimum' => 'step_up', 'value_class' => 'high'],
+                    'admin_login' => ['value_class' => 'critical'],
+                    'login' => ['value_class' => 'standard'],
+                    'password_reset' => ['value_class' => 'standard'],
+                    'signup' => ['minimum' => 'step_up', 'value_class' => 'low'],
+                    'contact' => ['minimum' => 'step_up', 'value_class' => 'low'],
+                ],
             ],
         ],
         // The change.md Part 5 name of the abuse posture: the identical
@@ -219,14 +226,21 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                // No always-on step_up floor: a scope minimum is the
-                // floor of every decision and would force every login
-                // through a second factor, including the owner on
-                // their home network with a bound session. The
-                // risk-gated carrier for critical stakes is
-                // novelty_enforcement=enforce plus the scope-pressure
-                // override — they step up on risk, not on every
-                // request. See D3.3 value-class economics.
+                // No always-on step_up floor on login scopes: a scope
+                // minimum is the floor of every decision and would
+                // force every login through a second factor. The
+                // risk-gated carrier for login is novelty_enforcement=
+                // enforce plus the scope-pressure override. Non-login
+                // scopes (financial, signup) carry step_up directly —
+                // they are not login paths and the floor is safe there.
+                'scopes' => [
+                    'financial_action' => ['minimum' => 'step_up', 'value_class' => 'high'],
+                    'admin_login' => ['value_class' => 'critical'],
+                    'login' => ['value_class' => 'standard'],
+                    'password_reset' => ['value_class' => 'standard'],
+                    'signup' => ['minimum' => 'step_up', 'value_class' => 'low'],
+                    'contact' => ['minimum' => 'step_up', 'value_class' => 'low'],
+                ],
             ],
         ],
         'compatibility' => [

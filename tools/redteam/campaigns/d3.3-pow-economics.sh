@@ -78,7 +78,7 @@ $verified = ValueClassCeiling::verdict("critical", "step_up", $beyond);
 $shipped = ValueClassCeiling::verdict("critical", "allow");
 $processor = new \Symfony\Component\Config\Definition\Processor();
 $config = new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration();
-$processed = $processor->processConfiguration($config, [["secret_key" => str_repeat("a", 32)]]);
+$processed = $processor->processConfiguration($config, \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::stack([["secret_key" => str_repeat("a", 32), "protection_profile" => "abuse_first"]]));
 $scopes = $processed["risk"]["scopes"] ?? [];
 $defaultMinimums = [];
 $defaultScopeClasses = [];
@@ -93,22 +93,31 @@ foreach ($defaultMinimums as $min) {
         break;
     }
 }
-// The abuse_first risk-gated carrier: novelty_enforcement=enforce plus
-// the scope-pressure override step up on risk, not on every request.
-// That is what actually stops stuffing — an always-on step_up floor
-// would force every login through a second factor and break the
-// product. The carrier applies to every value class uniformly.
+// The abuse_first risk-gated carrier: novelty_enforcement=enforce
+// covers login-class scopes (login, password_reset, admin_login) only.
+// Non-login scopes (financial_action, signup, contact) have no
+// first-attempt carrier — they need action_novelty or step_up/deny
+// minimums. The carrier is NOT uniform across classes.
 $abuseFirst = \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::defaultsFor("abuse_first");
 $abuseFirstNovelty = $abuseFirst["risk"]["novelty_enforcement"] ?? "learn";
+$loginScopes = ["login", "password_reset", "admin_login"];
 $abuseFirstEscalates = ($abuseFirstNovelty === "enforce");
-// If the carrier is absent, every failing class must have scopes with
-// a step_up or deny minimum — "all", not "any".
+// Per-class carrier map: novelty covers login scopes; every other
+// scope needs a step_up/deny minimum to carry its class.
 $abuseFirstMinimums = [];
 if (isset($abuseFirst["risk"]["scopes"])) {
     foreach ($abuseFirst["risk"]["scopes"] as $name => $scope) {
         $min = is_array($scope) ? ($scope["minimum"] ?? "allow") : "allow";
         $abuseFirstMinimums[$name] = $min;
     }
+}
+$classCarrier = [];
+foreach ($defaultScopeClasses as $name => $cls) {
+    $min = $defaultMinimums[$name] ?? "allow";
+    $isLogin = in_array($name, $loginScopes, true);
+    $covered = ($isLogin && $abuseFirstNovelty === "enforce")
+        || in_array($min, ["step_up", "deny"], true);
+    $classCarrier[$cls] = ($classCarrier[$cls] ?? false) || $covered;
 }
 echo json_encode([
     "advised" => $advised,
@@ -120,7 +129,8 @@ echo json_encode([
     "abuse_first_novelty" => $abuseFirstNovelty,
     "abuse_first_minimums" => $abuseFirstMinimums,
     "scope_value_classes" => $defaultScopeClasses,
-    "carrier" => $abuseFirstEscalates ? "novelty_enforcement=enforce (risk-gated)" : "scope_minimums",
+    "class_carrier" => $classCarrier,
+    "carrier" => $abuseFirstEscalates ? "novelty_enforcement=enforce (login scopes only)" : "scope_minimums",
 ]), "\n";
 ')
 printf '%s\n' "$ESC_JSON" | python3 -c '
@@ -138,6 +148,8 @@ store["critical_stakes_escalation"] = {
     "abuse_first_escalates": doc.get("abuse_first_escalates", False),
     "abuse_first_novelty": doc.get("abuse_first_novelty", "learn"),
     "abuse_first_minimums": doc.get("abuse_first_minimums", {}),
+    "scope_value_classes": doc.get("scope_value_classes", {}),
+    "class_carrier": doc.get("class_carrier", {}),
     "carrier": doc.get("carrier", "none"),
 }
 json.dump(store, open(out_path, "w"), indent=2)
@@ -179,31 +191,19 @@ if [ "$FAIL_ROWS" != "-" ]; then
     printf 'VALUE-CLASS-VERDICT: FAIL %s (the priced rung undercuts the declared abuse value)\n' "$FAIL_ROWS"
     # The gate row reads fail_rows and the shipped escalation posture.
     # The gate row reads fail_rows and the shipped escalation posture.
-    # Green only when every failing class is carried: the risk-gated
-    # carrier (novelty_enforcement=enforce) covers all classes, or
-    # every failing class has scopes with step_up/deny — "all", not "any".
+    # Green only when every failing class has a carrier that applies to
+    # it. Novelty covers login scopes only; non-login scopes need
+    # step_up/deny. Per-class, not uniform.
     SHIPPED_ESC=$(python3 - "$D33_OUT" <<'PYESC'
 import json, sys
 d = json.load(open(sys.argv[1]))
 e = d.get("critical_stakes_escalation", {})
 fails = d.get("fail_rows", [])
-minimums = e.get("shipped_minimums", {})
-classes = e.get("scope_value_classes", {})
-carrier = e.get("abuse_first_escalates") or e.get("shipped_escalates", False) and e.get("carrier", "").startswith("novelty")
-if e.get("abuse_first_escalates"):
-    print("yes")  # risk-gated carrier covers every class uniformly
-    sys.exit(0)
-# Scope-minimum path: every failing class must have a scope with
-# step_up or deny.
+class_carrier = e.get("class_carrier", {})
 if not fails:
     print("yes")
     sys.exit(0)
-escalating_classes = set()
-for name, min_action in minimums.items():
-    if min_action in ("step_up", "deny"):
-        cls = classes.get(name, "standard")
-        escalating_classes.add(cls)
-missing = [c for c in fails if c not in escalating_classes]
+missing = [c for c in fails if not class_carrier.get(c, False)]
 print("yes" if not missing else "no")
 PYESC
 )

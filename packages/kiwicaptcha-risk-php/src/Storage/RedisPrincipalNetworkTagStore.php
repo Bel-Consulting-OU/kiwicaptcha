@@ -251,6 +251,10 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         if (preg_match('/^asn:[0-9]{1,10}$/', $tag)) {
             return;
         }
-        throw new \InvalidArgumentException('tag must match net|session|device:<hex> or asn:<decimal>');
+        // Bare hex: the engine's networkBucket() spelling (no prefix).
+        if (preg_match('/^[0-9a-f]{2,68}$/', $tag)) {
+            return;
+        }
+        throw new \InvalidArgumentException('tag must match net|session|device:<hex>, asn:<decimal>, or bare hex');
     }
 }

@@ -51,6 +51,7 @@ use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyRecoveryCapableStorageI
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
+use BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\FailClosedOutcomeTrustGate;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisAuthOutcomeWindow;
 use BelConsulting\KiwiCaptchaBundle\Risk\StoreBackedOutcomeTrustGate;
@@ -1509,7 +1510,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // dataset, so "seen from this network" is judged the
                 // same way the step-up session restore records it.
                 ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks'))
-                ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                ->setArgument('$asnDataset', $asnRef ?? new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                 // The decoy-escalation reader (change.md 3.2.2): the
                 // engine's post-marks escalation stage consults the
                 // session's live record through this reader; the stage
@@ -1666,6 +1667,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $cookie['secure'],
                 $cookie['samesite'],
                 $cookie['http_only'],
+            ]))->setPublic(true));
+            // Trusted-device cookie: outlives the continuity window so
+            // a returning user is not novel on every visit. Defaults
+            // match the plan (90 days, __Host-kiwi-device).
+            $deviceCookie = $riskConfig['trusted_device'] ?? [];
+            $container->setDefinition(TrustedDeviceCookie::class, (new Definition(TrustedDeviceCookie::class, [
+                $deviceCookie['cookie_name'] ?? '__Host-kiwi-device',
+                $deviceCookie['ttl'] ?? 7_776_000,
+                $deviceCookie['path'] ?? '/',
+                $deviceCookie['secure'] ?? null,
+                $deviceCookie['samesite'] ?? 'lax',
+                $deviceCookie['http_only'] ?? true,
             ]))->setPublic(true));
             $riskGatewayRef = new Reference(RiskGateway::class);
             $riskCookieRef = new Reference(ContinuityCookie::class);
@@ -1900,7 +1913,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$logger', $loggerRef)
-                    ->setArgument('$asnDataset', new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$asnDataset', $asnRef ?? new Reference('kiwi_captcha.risk.asn', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$continuity', new Reference(ContinuityCookie::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$device', new Reference(TrustedDeviceCookie::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setPublic(true));
                 $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
                     ->addTag('security.voter')

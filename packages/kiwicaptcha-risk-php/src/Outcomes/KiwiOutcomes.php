@@ -39,7 +39,17 @@ final class KiwiOutcomes
     public function __construct(
         private readonly AdaptiveRiskEngine $engine,
         private readonly OutcomeMarksStoreInterface $marks,
+        private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
     ) {
+    }
+
+    /**
+     * Deletes every session and device tag for a principal. Wire this
+     * to password change, admin lockout, and sign-out-everywhere.
+     */
+    public function forgetDevices(string $principalId): void
+    {
+        $this->principalNetworks?->forgetDevices($principalId);
     }
 
     /**
