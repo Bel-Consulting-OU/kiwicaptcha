@@ -63,7 +63,7 @@ final class FirstAttemptNoveltyTest extends TestCase
     /** @param array<string, true> $tags */
     private function buildEngine(array $tags, string $noveltyEnforcement = 'enforce'): AdaptiveRiskEngine
     {
-        // The SAME identity factory as setUp: the tag store is keyed by
+        // The same identity factory as setUp: the tag store is keyed by
         // the hashed principal, so the engine and the seed must agree.
         $keys = RiskKeys::fromMaster(str_repeat("\x11", 32));
         $identity = new RiskIdentityFactory($keys);
@@ -179,7 +179,7 @@ final class FirstAttemptNoveltyTest extends TestCase
 
     /**
      * The residential-proxy bypass: a stuffer on the victim's own ISP
-     * ASN, fresh /64, no device continuity. Before this fix the known
+     * ASN, fresh /64, no device continuity. Before this change the known
      * ASN was an automatic pass. It must now escalate.
      */
     public function testAKnownAsnWithANewPrefixAndNoDeviceContinuityIsNovel(): void

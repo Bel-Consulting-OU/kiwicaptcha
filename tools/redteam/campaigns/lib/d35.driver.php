@@ -356,8 +356,8 @@ $attackerIspIpOf = static function (int $session): string {
  * resolved principal): firstAttemptEvidence runs inside applyMarksStage,
  * and the engine's action is the result. Nothing is assumed.
  */
-$assessLogin = static function (string $ip, string $account, ?string $sessionId = null) use ($engine, $factory, $classifier, $healthy, $marksReader): object {
-    $marksReader->setTarget($account);
+$assessLogin = static function (string $ip, string $account, ?string $sessionId = null, bool $withTarget = true) use ($engine, $factory, $classifier, $healthy, $marksReader): object {
+    if ($withTarget) { $marksReader->setTarget($account); }
     try {
         $context = new RiskContext(
             scope: 1,
@@ -606,15 +606,8 @@ for ($a = 0; $a < $legitSample; $a++) {
     // Device continuity: the returning browser carries the cookie.
     $cookie = sprintf('%032x', $a + 1);
     foreach ([['home', $homeIp], ['same_asn', $mobileIp], ['travel', $travelIp]] as [$kind, $ip]) {
-        $decision = $assessLogin($ip, $account, $cookie);
-        $blocked = $decision->action !== RiskAction::Allow;
-        if ($a < 2 || ($a >= 40 && $a < 42)) {
-            $pHex = $factory->principalId($account);
-            fwrite(STDERR, sprintf("DBG a=%d kind=%s netSeen=%s action=%s reasons=%s\n", $a, $kind,
-                var_export($networks->principalNetworkSeen($pHex, \KiwiCaptcha\Risk\AdaptiveRiskEngine::networkBucket($ip)), true),
-                $decision->action->name,
-                json_encode(array_map(fn($r) => $r->name, $decision->reasons))));
-        }
+        $decision = $assessLogin($ip, $account, $cookie, false);
+        $blocked = $decision->action === RiskAction::StepUp || $decision->action === RiskAction::Deny;
         if ($kind === 'home') {
             $legitHomeTotal++;
             if ($blocked) {
