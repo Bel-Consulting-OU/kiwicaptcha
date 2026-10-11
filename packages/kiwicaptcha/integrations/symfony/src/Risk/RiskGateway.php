@@ -540,11 +540,17 @@ final class RiskGateway implements LoginDecisionGate
      * reach it here — the feedback paths never do. A StepUp decision
      * means the caller must NOT grant the session yet.
      *
+     * $principal is the raw user identifier, exactly like every other
+     * context-bearing path: the engine derives the keyed principal
+     * pseudonym itself, so the identity the gate judges is the same one
+     * the step-up restore and the reputation paths bind. A pre-derived
+     * pseudonym here would be keyed twice and match nothing.
+     *
      * The raw continuity and trusted-device cookie values ride the
-     * context ($session / $device): the engine derives the keyed session
-     * and device pseudonyms itself, so the continuity the gate judges is
-     * the browser's real, previously bound identity and not the absence
-     * of one. Null keeps the identity out of the observation.
+     * context ($session / $device). The engine derives the keyed session
+     * and device pseudonyms itself, so the gate judges the browser's
+     * real bound identity instead of the absence of one. Null keeps an
+     * identity out of the observation.
      */
     public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null): ?RiskDecision
     {

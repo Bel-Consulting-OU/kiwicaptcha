@@ -36,10 +36,10 @@ use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
  * The browser's continuity identities ride the same decision: the
  * continuity cookie read and the trusted-device cookie read flow into
  * the gate, so a returning browser on a rotated address is recognized.
- * On an Allow the device value is staged on the request (the
- * {@see DEVICE_MINT_ATTRIBUTE} attribute) and the response subscriber
- * issues the cookie; a fresh mint on a StepUp is simply dropped, the
- * step-up restore mints its own.
+ * On an Allow the device value is staged on the request under the
+ * {@see self::DEVICE_MINT_ATTRIBUTE} attribute and the response
+ * subscriber issues the cookie; a fresh mint on a StepUp is simply
+ * dropped, the step-up restore mints its own.
  *
  * Client IP comes from the bundle's own {@see ClientIpResolver} so the
  * novelty decision follows the same trust rules as every other
@@ -119,7 +119,6 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
 
                 return;
             }
-            $principal = $this->identityFactory->principalId($identifier);
             $ip = $this->resolveIp($request);
             if ($ip === '') {
                 $this->withhold($event, $token, 'empty_client_ip');
@@ -137,7 +136,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             $sessionCookie = $this->continuity?->read($request);
             $presentedDevice = $this->device?->read($request);
             $deviceValue = $presentedDevice ?? $this->device?->mint();
-            $decision = $this->gateway->loginDecision($this->scope, $ip, $sessionCookie, $principal, null, $deviceValue);
+            $decision = $this->gateway->loginDecision($this->scope, $ip, $sessionCookie, $identifier, null, $deviceValue);
             if ($decision === null) {
                 $this->withhold($event, $token, 'no_decision');
 

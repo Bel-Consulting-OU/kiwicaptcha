@@ -172,16 +172,18 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                // No always-on step_up floor on login scopes: a scope
-                // minimum is the floor of every decision and would
-                // force every login through a second factor. The
+                // No always-on step_up floor on ordinary login scopes:
+                // a scope minimum is the floor of every decision and
+                // would force every login through a second factor. The
                 // risk-gated carrier for login is novelty_enforcement=
-                // enforce plus the scope-pressure override. Non-login
-                // scopes (financial, signup) carry step_up directly —
-                // they are not login paths and the floor is safe there.
+                // enforce plus the scope-pressure override. The scopes
+                // whose declared stake exceeds any proof-of-work rung
+                // (financial, signup, the critical admin_login) carry
+                // step_up directly: the doctor's value-class pricing
+                // check hard-fails a critical stake priced on a rung.
                 'scopes' => [
                     'financial_action' => ['minimum' => 'step_up', 'value_class' => 'high'],
-                    'admin_login' => ['value_class' => 'critical'],
+                    'admin_login' => ['minimum' => 'step_up', 'value_class' => 'critical'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],
                     'signup' => ['minimum' => 'step_up', 'value_class' => 'low'],
@@ -226,16 +228,18 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                // No always-on step_up floor on login scopes: a scope
-                // minimum is the floor of every decision and would
-                // force every login through a second factor. The
+                // No always-on step_up floor on ordinary login scopes:
+                // a scope minimum is the floor of every decision and
+                // would force every login through a second factor. The
                 // risk-gated carrier for login is novelty_enforcement=
-                // enforce plus the scope-pressure override. Non-login
-                // scopes (financial, signup) carry step_up directly —
-                // they are not login paths and the floor is safe there.
+                // enforce plus the scope-pressure override. The scopes
+                // whose declared stake exceeds any proof-of-work rung
+                // (financial, signup, the critical admin_login) carry
+                // step_up directly: the doctor's value-class pricing
+                // check hard-fails a critical stake priced on a rung.
                 'scopes' => [
                     'financial_action' => ['minimum' => 'step_up', 'value_class' => 'high'],
-                    'admin_login' => ['value_class' => 'critical'],
+                    'admin_login' => ['minimum' => 'step_up', 'value_class' => 'critical'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],
                     'signup' => ['minimum' => 'step_up', 'value_class' => 'low'],

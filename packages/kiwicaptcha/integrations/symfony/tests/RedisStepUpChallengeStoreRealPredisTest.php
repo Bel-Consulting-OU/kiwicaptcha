@@ -111,9 +111,14 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $body = json_decode((string) $response->getContent(), true);
         self::assertIsArray($body);
         $ticket = (string) $body['challenge'];
+        // A sessionless begin is stateless: the challenge mints its
+        // one-time client secret and the completion must present it
+        // (exactly one binding per challenge).
+        $clientSecret = (string) ($body['client_secret'] ?? '');
+        self::assertNotSame('', $clientSecret, 'a stateless begin returns its one-time client secret');
 
         $code = TotpCode::at($secretRaw, TotpCode::stepOf(self::NOW), 'sha1', 6);
-        $result = $this->handler->complete($this->completeRequest($ticket, $code));
+        $result = $this->handler->complete($this->completeRequest($ticket, $code, $clientSecret));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted, consumed and credited end to end');
         self::assertTrue($result->creditedPrincipal);
     }
@@ -180,12 +185,16 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         );
     }
 
-    private function completeRequest(string $ticket, string $code): Request
+    private function completeRequest(string $ticket, string $code, string $clientSecret = ''): Request
     {
-        $request = Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', [
+        $fields = [
             TotpStepUpHandler::TICKET_FIELD => $ticket,
             TotpStepUpHandler::CODE_FIELD => $code,
-        ]);
+        ];
+        if ($clientSecret !== '') {
+            $fields[\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::CLIENT_SECRET_FIELD] = $clientSecret;
+        }
+        $request = Request::create('https://captcha.example.com/kiwi/step-up/complete', 'POST', $fields);
         // The controller binds the re-resolved principal before the
         // handler runs; direct handler calls bind it the same way.
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);

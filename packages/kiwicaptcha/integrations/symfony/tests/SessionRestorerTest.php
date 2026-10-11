@@ -252,7 +252,7 @@ final class SessionRestorerTest extends TestCase
         $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
         $principal = $this->identity->principalId(self::RAW_USER);
         self::assertTrue($this->networks->principalNetworkSeen($principal, 'session:'.$this->identity->sessionId($sessionValue)), 'session tag recorded');
-        self::assertTrue($this->networks->principalNetworkSeen($principal, 'device:'.$this->identity->sessionId($deviceValue)), 'device tag recorded');
+        self::assertTrue($this->networks->principalNetworkSeen($principal, 'device:'.$this->identity->deviceId($deviceValue)), 'device tag recorded under the device context derivation');
     }
 
     private function asnFixturePath(): string
