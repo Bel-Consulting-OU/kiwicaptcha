@@ -9,7 +9,7 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -22,6 +22,8 @@ import {
     runAgentLoop,
     complete,
     optionalCompletion,
+    summarizeSurface,
+    summarizeLabels,
     methodNote,
     ALLOWED_ROUTES,
 } from "../model-adapter.mjs";
@@ -230,6 +232,65 @@ describe("agent loop — sandbox and offline mode", () => {
     });
 });
 
+describe("optionalCompletion carries the surface map and prior labels", () => {
+    let modelServer;
+    let modelPort;
+    let seenPrompts;
+
+    before(async () => {
+        seenPrompts = [];
+        modelServer = http.createServer((req, res) => {
+            let body = "";
+            req.on("data", (c) => { body += c; });
+            req.on("end", () => {
+                try {
+                    const parsed = JSON.parse(body);
+                    seenPrompts.push(parsed.messages?.[0]?.content ?? "");
+                } catch { seenPrompts.push(""); }
+                res.writeHead(200, { "content-type": "application/json" });
+                res.end(JSON.stringify({ choices: [{ message: { content: "" } }] }));
+            });
+        });
+        modelPort = await listen(modelServer);
+    });
+
+    after(async () => {
+        await close(modelServer);
+        delete process.env.KIWI_RT_LOCAL_LLM_URL;
+    });
+
+    test("the pinned prompt carries the surface map and the prior technique labels", async () => {
+        process.env.KIWI_RT_LOCAL_LLM_URL = `http://127.0.0.1:${modelPort}`;
+        process.env.KIWI_RT_LOCAL_LLM_KIND = "openai";
+        const res = await optionalCompletion({
+            seed: 0x6b776d74,
+            surface: {
+                endpoints: [
+                    { surface: "reference-deployment", route: "/verify", methods: ["POST"], notes: "one-shot consume" },
+                ],
+            },
+            priorLabels: ["replay", "forged-token", "replay"],
+        });
+        assert.equal(res.consulted, true);
+        const prompt = seenPrompts.at(-1);
+        assert.match(prompt, /reference-deployment \/verify \[POST\]/);
+        assert.match(prompt, /one-shot consume/);
+        assert.match(prompt, /forged-token/);
+        assert.match(prompt, /replay/);
+        assert.match(prompt, /6b776d74/);
+    });
+
+    test("labels are deduplicated and sorted; empty context still renders", () => {
+        assert.equal(summarizeLabels(["b", "a", "b"]), "a\nb");
+        assert.equal(summarizeLabels([]), "none recorded yet");
+        assert.match(summarizeSurface(null), /no endpoints recorded/);
+        assert.equal(
+            summarizeSurface({ endpoints: [{ surface: "s", route: "/r", methods: ["GET"] }] }),
+            "s /r [GET]",
+        );
+    });
+});
+
 describe("agent loop end to end against a local model and local target", () => {
     let modelServer;
     let targetServer;
@@ -381,6 +442,17 @@ describe("harness stubs are honest", () => {
         assert.ok(!src.includes('verdict": \\"REFUTED\\"') && !src.includes('\'verdict\': \'REFUTED\''),
             "issuance-burst.sh must not hardcode REFUTED");
         assert.match(src, /accepted.*>.*45/);
+    });
+
+    test("a failed challenge issue is INCONCLUSIVE in every harness that can hit it", () => {
+        for (const name of readdirSync(REPROS).filter((f) => f.endsWith(".sh") && f !== "repro-common.sh")) {
+            const src = readFileSync(join(REPROS, name), "utf8");
+            if (!src.includes("issue_failed")) continue;
+            assert.match(src, /verdict = 'INCONCLUSIVE'/,
+                `${name} must map issue_failed to INCONCLUSIVE`);
+            assert.doesNotMatch(src, /"issue_failed", "(accepted|leaked)": 1/,
+                `${name} must never score an issue failure as attack success`);
+        }
     });
 
     test("target_unavailable is INCONCLUSIVE, never a quiet REFUTED", () => {

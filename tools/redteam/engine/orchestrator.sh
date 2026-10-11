@@ -15,21 +15,83 @@
 #   - generated attacks are committed under tools/redteam/findings/
 #     only after the triage gate reproduced them deterministically.
 #
+# Modes:
+#   fixed (default)  the documented battery. The synthesis corpus is
+#                    generated and triaged once up front, and only
+#                    when --synth, KIWI_RT_SYNTH=1 or an escalation
+#                    asks for it.
+#   hybrid           the fixed battery plus one synthesis cycle after
+#                    every campaign: synth.mjs generates a fresh
+#                    candidate corpus with the seeded LCG grammar
+#                    under a per-campaign derived seed (the same run
+#                    seed and campaign name always produce the same
+#                    corpus), triage.mjs consumes it through the
+#                    two-run hash gate, and every surviving finding is
+#                    committed as a reproducible test under
+#                    tools/redteam/findings/ by triage itself.
+#                    KIWI_RT_HYBRID_SYNTH_COUNT bounds each cycle
+#                    (default 8 candidates).
+#
+# Model honesty: the engine runs deterministically without a model.
+# When KIWI_RT_LOCAL_LLM_URL is set, the synthesis prompt additionally
+# carries the recon surface map and the prior technique labels, and
+# the model's parsed candidate lines join the corpus beside the
+# grammar's. A local model improves attack diversity; it never gates
+# correctness. What becomes a finding is decided by the deterministic
+# two-run triage gate alone.
+#
 # Budget knobs:
-#   KIWI_RT_SEED              the run seed (ledger + synthesis pin)
-#   KIWI_RT_BUDGET_MINUTES    wall-clock budget (default 120)
-#   KIWI_RT_CAMPAIGN_TIMEOUT  per-campaign seconds (default 900)
-#   KIWI_RT_CAMPAIGNS         subset list (default the full battery)
-#   KIWI_RT_SCALE             environment downscale passed through
-#   KIWI_RT_LOCAL_LLM_URL     optional local runtime (see
-#                             engine/model-adapter.mjs for the exact
-#                             request and response contract)
+#   KIWI_RT_SEED                 the run seed (ledger + synthesis pin)
+#   KIWI_RT_BUDGET_MINUTES       wall-clock budget (default 120)
+#   KIWI_RT_CAMPAIGN_TIMEOUT     per-campaign seconds (default 900)
+#   KIWI_RT_CAMPAIGNS            subset list (default the full battery)
+#   KIWI_RT_SCALE                environment downscale passed through
+#   KIWI_RT_LOCAL_LLM_URL        optional local runtime (see
+#                                engine/model-adapter.mjs for the exact
+#                                request and response contract)
+#   KIWI_RT_HYBRID_SYNTH_COUNT   candidates per hybrid cycle (default 8)
 #
 # Usage:
-#   tools/redteam/engine/orchestrator.sh [--profile redis]
+#   tools/redteam/engine/orchestrator.sh [--mode fixed|hybrid]
 #                                        [--synth] [--regression]
 
 set -u
+
+# ---------- argument parsing (before anything else can run) ----------
+MODE=fixed
+SYNTH_REQUESTED=0
+REGRESSION_REQUESTED=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --mode)
+            if [ "$#" -lt 2 ]; then
+                printf 'orchestrator: --mode needs an argument (fixed or hybrid)\n' >&2
+                exit 2
+            fi
+            MODE=$2
+            shift 2
+            ;;
+        --mode=*) MODE=${1#--mode=}; shift ;;
+        --synth) SYNTH_REQUESTED=1; shift ;;
+        --regression) REGRESSION_REQUESTED=1; shift ;;
+        *)
+            printf 'orchestrator: unknown argument: %s (supported: --mode fixed|hybrid, --synth, --regression)\n' "$1" >&2
+            exit 2
+            ;;
+    esac
+done
+case "$MODE" in
+    fixed|hybrid) ;;
+    *)
+    printf 'orchestrator: --mode must be fixed or hybrid (got %s)\n' "$MODE" >&2
+    exit 2
+    ;;
+esac
+# Hybrid always runs the up-front synthesis cycle too: the battery is
+# unchanged and every campaign then feeds its own synthesis cycle.
+if [ "$MODE" = hybrid ]; then
+    SYNTH_REQUESTED=1
+fi
 
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 REPO_ROOT=$(cd "$RT_DIR/../.." && pwd)
@@ -111,6 +173,8 @@ export KIWI_RT_SEED KIWI_RT_PROFILE
 
 BUDGET_DEADLINE=$(( $(date +%s) + KIWI_RT_BUDGET_MINUTES * 60 ))
 RESULT=0
+HYBRID_CYCLES=0
+HYBRID_FINDINGS=0
 
 log() { printf 'orchestrator: %s\n' "$*" >&2; }
 
@@ -141,7 +205,7 @@ if [ -n "$ESCALATION_ENV" ]; then
     log "synthesis escalation: combine=$COMBINE synth_count=$COUNT"
 fi
 
-if [ "${1:-}" = "--synth" ] || [ "${KIWI_RT_SYNTH:-0}" = "1" ] || [ -n "$ESCALATION_ENV" ]; then
+if [ "$SYNTH_REQUESTED" = 1 ] || [ "${KIWI_RT_SYNTH:-0}" = "1" ] || [ -n "$ESCALATION_ENV" ]; then
     log "synthesis agent: generating the candidate corpus"
     node "$RT_DIR/engine/synth.mjs" >&2 || log "synthesis agent failed; continuing with the campaign battery"
     log "triage agent: consuming the candidate corpus through the harness library"
@@ -244,10 +308,62 @@ for campaign in $CAMPAIGNS; do
         continue
     fi
     log "campaign $campaign -> $verdict in ${duration}s (ledger: $(basename "$doc"))"
+
+    # ---------- the hybrid cycle (synthesis after each campaign) ----
+    # A fresh corpus from the seeded LCG grammar, then the two-run
+    # triage gate. The cycle seed is derived from the run seed and the
+    # campaign name, so every cycle explores another reproducible
+    # corner of the grammar and the per-cycle corpora and reports keep
+    # their own files beside the canonical ones. Findings are filed by
+    # triage itself; the orchestrator only counts them.
+    if [ "$MODE" = hybrid ]; then
+        now=$(date +%s)
+        if [ "$now" -ge "$BUDGET_DEADLINE" ]; then
+            log "budget exhausted before the hybrid cycle for $campaign; the ledger keeps what ran"
+            RESULT=1
+            break
+        fi
+        hybrid_hex=$(python3 - "$KIWI_RT_SEED" "$campaign" <<'PYSEED'
+import sys
+
+seed = int(sys.argv[1], 0)
+label = 0
+for ch in sys.argv[2]:
+    label = (label * 31 + ord(ch)) & 0xFFFFFFFF
+print(hex(((seed ^ label) & 0x7FFFFFFF) or 1))
+PYSEED
+        ) || { log "hybrid: cannot derive the cycle seed for $campaign"; RESULT=1; continue; }
+        log "hybrid cycle for $campaign: synthesizing with seed $hybrid_hex"
+        HYBRID_CYCLES=$((HYBRID_CYCLES + 1))
+        if ! KIWI_RT_SEED="$hybrid_hex" \
+            KIWI_RT_SYNTH_COUNT="${KIWI_RT_HYBRID_SYNTH_COUNT:-8}" \
+            node "$RT_DIR/engine/synth.mjs" >&2; then
+            log "hybrid: synthesis failed for $campaign (seed $hybrid_hex)"
+            RESULT=1
+            continue
+        fi
+        triage_out=$(KIWI_RT_SEED="$hybrid_hex" node "$RT_DIR/engine/triage.mjs" 2>&1)
+        triage_rc=$?
+        printf '%s\n' "$triage_out" | grep '^TRIAGE-SUMMARY' >&2 || true
+        if [ "$triage_rc" -ne 0 ]; then
+            log "hybrid: triage failed for $campaign (seed $hybrid_hex)"
+            RESULT=1
+            continue
+        fi
+        filed=$(printf '%s\n' "$triage_out" | sed -n 's/.*findings=\([0-9]*\).*/\1/p' | tail -n 1)
+        if [ "${filed:-0}" -gt 0 ]; then
+            HYBRID_FINDINGS=$((HYBRID_FINDINGS + filed))
+            log "hybrid: the $campaign cycle filed $filed finding(s); triage committed the reproducible test(s) under tools/redteam/findings/"
+        fi
+    fi
 done
 
+if [ "$MODE" = hybrid ]; then
+    log "hybrid summary: $HYBRID_CYCLES synthesis cycle(s) after the battery, $HYBRID_FINDINGS new finding(s) filed by the deterministic triage gate"
+fi
+
 # ---------- the regression agent (nightly corpus) ----------
-if [ "${1:-}" = "--regression" ] || [ "${KIWI_RT_REGRESSION:-0}" = "1" ]; then
+if [ "$REGRESSION_REQUESTED" = 1 ] || [ "${KIWI_RT_REGRESSION:-0}" = "1" ]; then
     log "regression agent: replaying the committed finding corpus"
     node "$RT_DIR/engine/regression.mjs" --out "$RUNS_DIR/regression-$(date -u +%Y%m%dT%H%M%SZ).json" >&2 || RESULT=1
 fi

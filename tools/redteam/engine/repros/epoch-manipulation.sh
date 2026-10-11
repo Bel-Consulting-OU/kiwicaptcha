@@ -19,9 +19,18 @@ fi
 env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \
     KC_REDIS_URL="$EPH_REDIS_URL" KIWI_SECRET_KEY="ephephephEPHEPHEPHEPHEPHEPHEPHephepheph" \
     KIWI_SHA_TARGET_BITS=10 KIWI_MIN_DURATION_MS=0 KIWI_TTL_SECS=1 \
+    KIWI_ISSUANCE_PER_MINUTE_PER_IP=0 \
     php -S "127.0.0.1:$PORT" -t "$REPO_ROOT/deploy/app" "$REPO_ROOT/deploy/app/router.php" >/dev/null 2>&1 &
 EPH_PID=$!
-sleep 0.8
+# Wait for readiness instead of a fixed sleep: a busy host boots the
+# php server late, and a raced boot would only mint an honest
+# INCONCLUSIVE. The probe below still reports a real failure as such.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$PORT/healthz"; then
+        break
+    fi
+    sleep 0.5
+done
 EPH_BASE="http://127.0.0.1:$PORT"
 OUT=$(KIWI_RT_BASE="$EPH_BASE" KIWI_RT_DIR="$RT_DIR/campaigns/lib" python3 - <<'PY'
 import json, os, sys, time
@@ -30,6 +39,8 @@ import rtclient as rt
 base = os.environ["KIWI_RT_BASE"]
 doc = rt.challenge(base, "login")
 if doc.status != 200:
+    # A failed issue is no measurement: the verdict below is
+    # INCONCLUSIVE, never a quiet REFUTED and never a REPRODUCED.
     print(json.dumps({"code": "issue_failed", "expired": 0}))
     raise SystemExit
 counter = rt.pow_solve(doc.body)
@@ -40,9 +51,18 @@ print(json.dumps({"code": resp.error_code or resp.code or "ok", "expired": 0 if 
 PY
 )
 kill "$EPH_PID" 2>/dev/null
+# The teardown is synchronous so the next harness run can bind the
+# same port: a lingering server would turn the next boot into a race.
+wait "$EPH_PID" 2>/dev/null
 pkill -f "php -S 127.0.0.1:$PORT " 2>/dev/null
 printf "%s" "$OUT" | python3 -c "
 import json, sys
 doc = json.load(sys.stdin)
-print(json.dumps({\"harness\": \"epoch-manipulation\", \"verdict\": \"REPRODUCED\" if doc.get(\"accepted\") else \"REFUTED\", \"wire_code\": doc[\"code\"]}))
+if doc.get('code') == 'issue_failed':
+    verdict = 'INCONCLUSIVE'
+elif doc.get('accepted'):
+    verdict = 'REPRODUCED'
+else:
+    verdict = 'REFUTED'
+print(json.dumps({\"harness\": \"epoch-manipulation\", \"verdict\": verdict, \"wire_code\": doc[\"code\"]}))
 "

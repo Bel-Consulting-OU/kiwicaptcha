@@ -39,7 +39,13 @@ enum KeyspaceMode: string
     /** The historical single-tag layout: the mode of the classic store. */
     case Legacy = 'legacy';
 
-    /** The horizontally scalable per-family layout; the recommended mode for new namespaces. */
+    /**
+     * The horizontally scalable per-family layout; the recommended mode
+     * for new namespaces. Each family and each scope shard carries its
+     * own hash tag, so assessment writes disperse over cluster slots
+     * and throughput scales with the shard count instead of serializing
+     * on the shared namespace tag.
+     */
     case Sharded = 'sharded';
 
     /**
