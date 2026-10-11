@@ -913,14 +913,16 @@ impl RedisRiskStateStore {
                     invocation.arg(weight);
                 }
                 // Target dimension (KEYS[14..16]) and the two additive
-                // target score weights (ARGV[52..53]).
+                // target score weights (ARGV[52..53]); the failing
+                // request's spread elements ride ARGV[49..50], PFADDed
+                // when the observation itself is a failure.
                 if reg.target_id.is_some() {
                     invocation.arg(1u8);
                 } else {
                     invocation.arg(0u8);
                 }
-                invocation.arg("");
-                invocation.arg("");
+                invocation.arg(reg.target_source_element.as_str());
+                invocation.arg(reg.target_asn_element.as_str());
                 invocation.arg(self.target_ttl_secs);
                 invocation.arg(w2.target_failure_pressure);
                 invocation.arg(w2.target_spread);
@@ -2682,6 +2684,8 @@ mod tests {
             v1_weights: crate::score::RiskWeights::default(),
             v2_weights: crate::score::RiskV2Weights::default(),
             target_id: None,
+            target_source_element: String::new(),
+            target_asn_element: String::new(),
         };
 
         let reply = store

@@ -385,6 +385,8 @@ fn consolidated_assessment_registers_tags_and_the_ledger() {
             v1_weights: kiwicaptcha_risk::score::RiskWeights::default(),
             v2_weights: kiwicaptcha_risk::score::RiskV2Weights::default(),
             target_id: None,
+            target_source_element: String::new(),
+            target_asn_element: String::new(),
         };
         (o, registration)
     };

@@ -804,13 +804,16 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
                 $registration->honeypotHit ? 1 : 0,
                 ...array_values($registration->weights->toArray()),
                 // The wire still takes exactly three risk-v2 weights at
-                // ARGV[45..47]; the two target weights ride ARGV[52..53].
+                // ARGV[45..47]; the two target weights ride ARGV[52..53]
+                // and the failing request's spread elements ride
+                // ARGV[49..50], PFADDed when the observation itself is a
+                // failure.
                 $v2w->honeypot,
                 $v2w->sessionInconsistency,
                 $v2w->tls,
                 ($registration->targetId !== null && $registration->targetId !== '') ? 1 : 0,
-                '',
-                '',
+                $registration->targetSourceElement,
+                $registration->targetAsnElement,
                 $this->targetTtlSecs,
                 $v2w->targetFailurePressure,
                 $v2w->targetSpread,

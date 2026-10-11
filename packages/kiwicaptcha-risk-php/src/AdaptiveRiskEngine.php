@@ -28,6 +28,7 @@ use KiwiCaptcha\Risk\Storage\RiskStateStoreInterface;
 use KiwiCaptcha\Risk\Storage\RiskStoreException;
 use KiwiCaptcha\Risk\Storage\SessionContextTagStoreInterface;
 use KiwiCaptcha\Risk\Storage\SessionTlsTagStoreInterface;
+use KiwiCaptcha\Risk\Storage\TargetStateStoreInterface;
 
 /**
  * Adaptive risk engine: assesses one request and returns a RiskDecision.
@@ -388,6 +389,20 @@ final class AdaptiveRiskEngine
         // ledger atomically, so the engine keeps that as the sole
         // authority. The decision_id is generated here so the ledger and
         // the returned decision carry the same id.
+        //
+        // The assessment's target dimension (target-account protection,
+        // change.md 3.2.1): resolved beside the frozen observation wire
+        // from the context's submitted fields through the wired
+        // resolver. The pseudonym rides the consolidated registration,
+        // so the assessment itself maintains the target's failure
+        // counter and spread HLLs and the reply carries them into the
+        // score; the raw field values never leave this boundary.
+        $targetId = $this->resolveTargetId($c->scope, $c->targetFields);
+        $targetSourceElement = '';
+        $targetAsnElement = '';
+        if ($targetId !== null) {
+            [$targetSourceElement, $targetAsnElement] = $this->targetSpreadElements($targetId, $c);
+        }
         $decisionId = null;
         $registration = null;
         if ($this->calibration === null && $this->store instanceof ConsolidatedAssessmentStoreInterface) {
@@ -400,6 +415,9 @@ final class AdaptiveRiskEngine
                 honeypotHit: $v2?->honeypotHit ?? false,
                 weights: $this->policy->weights,
                 v2Weights: $v2Weights ?? new RiskV2Weights(),
+                targetId: $targetId,
+                targetSourceElement: $targetSourceElement,
+                targetAsnElement: $targetAsnElement,
             );
         }
 
@@ -509,7 +527,7 @@ final class AdaptiveRiskEngine
         if ($v2 !== null) {
             $v2Signals = $this->store instanceof ConsolidatedAssessmentStoreInterface
                 ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpreadSources, $targetSpreadAsns)
-                : $this->buildV2Signals($v2, $c, $observation);
+                : $this->buildV2Signals($v2, $c, $observation, ...$this->liveTargetCounts($targetId));
         }
         $score = $v2Signals !== null
             ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
@@ -539,7 +557,7 @@ final class AdaptiveRiskEngine
         // marks surface floors the request at the maximum challenge rung
         // fail-closed instead of fabricating a deny.
         if ($this->marksReader !== null) {
-            $decision = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs);
+            $decision = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs, $targetId);
         }
 
         // The decoy escalation stage: additive, after the marks stage,
@@ -701,12 +719,14 @@ final class AdaptiveRiskEngine
         SignalVector $vector,
         ?RiskV2Context $v2,
         int $nowMs,
+        ?string $targetId = null,
     ): RiskDecision {
         $request = new MarksRequest(
             scope: $c->scope,
             sourceIp: $c->sourceIp,
             session: $observation->sessionId,
             principal: $observation->principalId,
+            target: $targetId,
         );
         $decoyEvidence = $c->event->isHoneypot() || ($v2?->honeypotHit ?? false);
         $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision);
@@ -1595,6 +1615,34 @@ final class AdaptiveRiskEngine
     private static function targetSpreadSignal(int $spread): int
     {
         return (int) min(1000, intdiv(max(0, $spread) * 1000, 20));
+    }
+
+    /**
+     * The live target-dimension counts of one resolved target, for the
+     * fallback path without a consolidated reply: the same state the
+     * outcome bridge maintains, read through the store's target
+     * surface. A store without the capability (or a failed read)
+     * degrades to the neutral zero counts, exactly like the
+     * session-tag record reads.
+     *
+     * @return array{0: int, 1: int, 2: int} failures, source spread, asn spread
+     */
+    private function liveTargetCounts(?string $targetId): array
+    {
+        if ($targetId === null || !$this->store instanceof TargetStateStoreInterface) {
+            return [0, 0, 0];
+        }
+        try {
+            $state = $this->store->readTargetState($targetId);
+        } catch (\Throwable) {
+            return [0, 0, 0];
+        }
+
+        return [
+            (int) ($state['fails'] ?? 0),
+            (int) ($state['spread_sources'] ?? 0),
+            (int) ($state['spread_asns'] ?? 0),
+        ];
     }
 
     /**

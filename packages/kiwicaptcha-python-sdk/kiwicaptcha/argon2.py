@@ -2,15 +2,27 @@
 
 Two backends, one byte-exact contract per RFC 9106 and the reference
 implementation. The native backend is ``argon2-cffi``'s
-``argon2.low_level`` when importable: milliseconds instead of minutes
-for the 16-64 MiB rungs. The pure-stdlib backend over hashlib.blake2b
-stays as the last resort for deployments without the binding; it is
-correct but slow, so the verifier's default admission gate caps the
-profiles it will even attempt (see ``kiwicaptcha.verify``). Every
-exported profile the protocol allows is computed by both: one to four
-lanes and one to sixteen passes, with the memory parameter in KiB
-exactly like the PHP verifier's libsodium call (sodium_crypto_pwhash
-with memlimit = m_kib * 1024, a 32-byte tag).
+``argon2.low_level``: milliseconds instead of minutes for the 16-64 MiB
+rungs. It is an optional extra (``pip install kiwicaptcha[argon2]``),
+so admission is explicit: without the binding, argon2id derivation
+refuses with the actionable :class:`Argon2BackendUnavailable` error
+instead of silently falling back to an interpreted compression
+function. A pure-Python block loop costs seconds per 16-64 MiB
+derivation, and an attacker who arms such records would turn every
+verify call into a denial-of-service amplification. The refusal is the
+documented contract; a deployment that cannot install the binding
+routes its argon2id traffic through a local verifier sidecar.
+
+The pure implementation stays in-tree for exactly two jobs: the
+RFC 9106 vectors that carry a secret key or associated data (the
+native binding exposes neither adder), and the differential pins that
+keep the two backends byte-identical. Those inputs never occur in the
+protocol's own proof recompute, which always derives with an empty
+secret and empty ad and always takes the native path. Every exported
+profile the protocol allows is computed: one to four lanes and one to
+sixteen passes, with the memory parameter in KiB exactly like the PHP
+verifier's libsodium call (sodium_crypto_pwhash with memlimit =
+m_kib * 1024, a 32-byte tag).
 
 The pure compression function works on blocks of 128 unsigned 64-bit
 words. A block is therefore a plain Python list of ints and the whole
@@ -21,11 +33,6 @@ segment reads its pseudo-random word from the previous block. Index
 selection follows index_alpha() from the reference implementation,
 including the uint32 wrap when the reference area underflows (only
 reachable off the same lane).
-
-Argon2-cffi exposes neither the secret key nor the associated data
-adder, so derivations carrying either input (the RFC 9106 vector) fall
-back to the pure implementation; the protocol's own proof recompute
-always runs with empty secret and ad and takes the native path.
 """
 
 import hashlib
@@ -40,13 +47,31 @@ _MASK32 = (1 << 32) - 1
 
 _ZERO_BLOCK = [0] * _BLOCK_QWORDS
 
+#: The refusal text every argon2id entry point raises without the
+#: binding: the extra installs the native path, the sidecar is the
+#: delegated alternative for deployments that cannot compile it.
+BACKEND_REQUIRED_MESSAGE = (
+    "Argon2id verification requires the [argon2] extra or a local"
+    " sidecar. Install with: pip install kiwicaptcha[argon2]"
+)
+
+
+class Argon2BackendUnavailable(ValueError):
+    """Raised for argon2id derivation when no native binding is importable.
+
+    The pure implementation is deliberately unreachable for argon2id in
+    that state: an interpreted block compression is slow enough that a
+    signed 16-64 MiB record becomes a per-request CPU amplification.
+    The message names both remediations, the extra and the sidecar.
+    """
+
+
 try:  # pragma: no cover - exercised only when argon2-cffi is installed
     from argon2.low_level import Type as _NativeType
-    from argon2.low_level import Version as _NativeVersion
     from argon2.low_level import hash_secret_raw as _native_hash_secret_raw
 
     _NATIVE = True
-except Exception:  # pragma: no cover - the documented last-resort path
+except Exception:  # pragma: no cover - the documented refusal path
     _NATIVE = False
 
 
@@ -71,7 +96,9 @@ def _native_derive(password: bytes, salt: bytes, t_cost: int, m_cost: int,
             parallelism=lanes,
             hash_len=out_len,
             type=_NativeType.ID,
-            version=_NativeVersion.V13,
+            # The wire version 1.3 as a plain int: newer bindings dropped
+            # the Version enum, older ones accept the raw constant.
+            version=VERSION_13,
         )
     except ValueError:
         raise
@@ -239,10 +266,14 @@ def derive(password: bytes, salt: bytes, t_cost: int, m_cost: int,
            secret: bytes = b"", ad: bytes = b"") -> bytes:
     """Derive an Argon2id tag, byte-identical to the reference build.
 
-    Prefers the argon2-cffi binding when it is importable and the
-    inputs fit its surface (no secret/AD adder there); otherwise the
-    pure last-resort implementation answers. Both paths are pinned to
-    the same RFC 9106 and reference-build vectors by the test suite.
+    Requires the argon2-cffi binding: without it the call raises
+    :class:`Argon2BackendUnavailable` carrying
+    :data:`BACKEND_REQUIRED_MESSAGE`, never a silent fallback into the
+    interpreted implementation. The one exception is the RFC-vector
+    input shape (a non-empty secret or ad): the binding exposes neither
+    adder, so those derivations answer from the retained pure oracle.
+    The protocol's own proof recompute always passes empty secret and
+    ad and takes the native path.
     """
     if t_cost < 1:
         raise _Argon2idError("argon2 passes must be at least 1")
@@ -250,10 +281,14 @@ def derive(password: bytes, salt: bytes, t_cost: int, m_cost: int,
         raise _Argon2idError("argon2 lanes out of range")
     if m_cost < 8 * lanes:
         raise _Argon2idError("argon2 memory must cover eight blocks per lane")
-    if _NATIVE and not secret and not ad:
-        return _native_derive(password, salt, t_cost, m_cost, lanes, out_len)
-    return derive_pure(password, salt, t_cost, m_cost, lanes, out_len,
-                       secret, ad)
+    if not _NATIVE:
+        raise Argon2BackendUnavailable(BACKEND_REQUIRED_MESSAGE)
+    if secret or ad:
+        # The binding cannot express these inputs; the pure oracle
+        # answers and the test suite pins it to the reference tags.
+        return derive_pure(password, salt, t_cost, m_cost, lanes, out_len,
+                           secret, ad)
+    return _native_derive(password, salt, t_cost, m_cost, lanes, out_len)
 
 
 def derive_pure(password: bytes, salt: bytes, t_cost: int, m_cost: int,

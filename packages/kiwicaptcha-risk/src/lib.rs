@@ -1169,6 +1169,18 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         } else {
             None
         };
+        // The assessment's target dimension (target-account protection,
+        // change.md 3.2.1): resolved beside the frozen observation wire
+        // from the context's submitted fields through the wired resolver.
+        // The pseudonym rides the consolidated registration, so the
+        // assessment itself maintains the target's failure counter and
+        // spread HLLs and the reply carries them into the score; the raw
+        // field values never leave this boundary.
+        let target_id = self.resolve_target_id(ctx.scope, ctx.target_fields);
+        let (target_source_element, target_asn_element) = match &target_id {
+            Some(id) => self.target_spread_elements(id, Some(&ctx)),
+            None => (String::new(), String::new()),
+        };
         let effective_v2_weights = v2_weights.unwrap_or_default();
         let registration = decision_id.as_ref().map(|id| OutcomeRegistration {
             decision_id: id.clone(),
@@ -1178,7 +1190,9 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             honeypot_hit: v2.map(|v2ctx| v2ctx.honeypot_hit).unwrap_or(false),
             v1_weights: self.policy.weights,
             v2_weights: effective_v2_weights,
-            target_id: None,
+            target_id: target_id.clone(),
+            target_source_element,
+            target_asn_element,
         });
 
         let start = Instant::now();
@@ -1241,9 +1255,25 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 self.breaker.record_success();
                 let v2_signals = v2.map(|v2ctx| {
                     // The fallback path has no consolidated reply: the
-                    // target counters stay zero here (the marks stage
-                    // still reads live TargetState on its own).
-                    self.derive_v2_signals(v2ctx, observation.session_id, ctx.event, 0, 0, 0)
+                    // live target state is read directly (the same state
+                    // the outcome bridge maintains), degrading to the
+                    // neutral zero counts on a store miss, exactly like
+                    // the session-tag record reads.
+                    let (target_failures, spread_sources, spread_asns) = match &target_id {
+                        Some(id) => match self.store.read_target_state(id) {
+                            Ok(state) => (state.fails, state.spread_sources, state.spread_asns),
+                            Err(_) => (0, 0, 0),
+                        },
+                        None => (0, 0, 0),
+                    };
+                    self.derive_v2_signals(
+                        v2ctx,
+                        observation.session_id,
+                        ctx.event,
+                        target_failures,
+                        spread_sources,
+                        spread_asns,
+                    )
                 });
                 (observed, v2_signals, false)
             }
@@ -1336,6 +1366,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 source_ip: ctx.source_ip,
                 session: observation.session_id.map(hex::encode),
                 principal: observation.principal_id.map(hex::encode),
+                target: target_id.clone(),
             };
             let decoy_evidence =
                 v2.is_some_and(|context| context.honeypot_hit) || ctx.event.is_honeypot();
@@ -2469,14 +2500,14 @@ fn presented_tls_tag(v2: Option<&RiskV2Context>, session_id: Option<[u8; 16]>) -
 /// Bounded target-failure pressure: five failures (the attack threshold)
 /// saturates at 1000 so a stuffed target raises the numeric score before
 /// the marks stage escalates.
-fn target_pressure_signal(fails: u32) -> u16 {
+pub(crate) fn target_pressure_signal(fails: u32) -> u16 {
     crate::signals::normalize(fails.min(u32::from(u16::MAX)), 5)
 }
 
 /// Bounded target source+asn spread: twenty distinct sources saturate at
 /// 1000 so a wide spray raises the numeric score. The scored value is
 /// the wider of the two dimensions (never the sum).
-fn target_spread_signal(spread: u32) -> u16 {
+pub(crate) fn target_spread_signal(spread: u32) -> u16 {
     crate::signals::normalize(spread.min(u32::from(u16::MAX)), 20)
 }
 

@@ -17,6 +17,10 @@ The public surface mirrors the shared server SDK contract:
 - ``python -m kiwicaptcha.doctor`` validates a deployment.
 """
 
+from .argon2 import (
+    BACKEND_REQUIRED_MESSAGE,
+    Argon2BackendUnavailable,
+)
 from .config import Settings, VerifierConfig, argon_rung_verifiable
 from .decision import VerifyDecision
 from .errors import VerifyError, VerifyOutcome
@@ -63,6 +67,8 @@ from .verify import ArgonAdmissionGate, VerifyOptions, Verifier
 __version__ = "1.0.0"
 
 __all__ = [
+    "Argon2BackendUnavailable",
+    "BACKEND_REQUIRED_MESSAGE",
     "ArgonAdmissionGate",
     "ChallengeRecord",
     "ChallengeRuntimeState",
