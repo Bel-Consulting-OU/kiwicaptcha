@@ -1769,6 +1769,7 @@ mod tests {
             subnet_id_next: net_next,
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: event_id.to_string(),
             network_risk,
             now_ms,

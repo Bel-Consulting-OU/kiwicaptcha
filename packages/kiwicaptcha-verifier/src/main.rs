@@ -254,7 +254,7 @@ fn main() -> ExitCode {
     };
     if insecure_example {
         eprintln!(
-            "kiwicaptcha-verifier: WARNING the secret is a published example value, accepted only through the development escape hatch; never expose this process beyond loopback"
+            "kiwicaptcha-verifier: WARNING the secret is a published example value, accepted only through the development escape hatch; generate a real secret (openssl rand -base64 48) and never expose this process beyond loopback"
         );
     }
 

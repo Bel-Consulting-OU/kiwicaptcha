@@ -103,7 +103,7 @@ final class FirstAttemptLoginGuardAuthenticatorScopeTest extends TestCase
             {
             }
 
-            public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+            public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null): ?RiskDecision
             {
                 return $this->result;
             }

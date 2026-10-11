@@ -17,6 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\StepUpController;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaMigrateCommand;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\DeviceCookieSubscriber;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
@@ -1867,6 +1868,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$logger', $loggerRef)
                     ->setArgument('$enabled', true)
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    // Hard references: the cookie services exist whenever
+                    // the risk plane is on (defined beside the gateway
+                    // wiring above), and a silent null would strip the
+                    // continuity identities from every login decision.
+                    ->setArgument('$continuity', new Reference(ContinuityCookie::class))
+                    ->setArgument('$device', new Reference(TrustedDeviceCookie::class))
+                    ->addTag('kernel.event_subscriber')
+                    ->setPublic(true));
+
+                // The response side of the trusted-device cookie: issues
+                // (or re-issues) the cookie staged by the login gate or
+                // the step-up session restore.
+                $container->setDefinition(DeviceCookieSubscriber::class, (new Definition(DeviceCookieSubscriber::class, [
+                    new Reference(TrustedDeviceCookie::class),
+                ]))
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
                 }

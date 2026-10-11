@@ -323,7 +323,7 @@ class SqliteStoreSpecificTest(unittest.TestCase):
 
 
 class SqliteConnectionPolicyTest(unittest.TestCase):
-    def test_caller_connection_is_never_mutated(self):
+    def test_caller_connection_is_refused_and_never_mutated(self):
         import sqlite3
 
         handle, path = tempfile.mkstemp(suffix=".db")
@@ -334,19 +334,20 @@ class SqliteConnectionPolicyTest(unittest.TestCase):
         # transactions (isolation_level == "") and its own row shape.
         self.assertEqual("", caller.isolation_level)
         self.assertIsNone(caller.row_factory)
-        storage = SqliteStorage(caller)
         try:
-            # The caller's connection keeps its own settings: the store
-            # drove a dedicated connection instead of switching the host
-            # app into autocommit.
+            # A connection object is refused with the deprecation
+            # error: the store owns its connection and its transaction
+            # posture, so the caller must pass the path instead.
+            with self.assertRaises(ValueError) as caught:
+                SqliteStorage(caller)
+            self.assertIn("file path", str(caught.exception))
+            self.assertIn("deprecated", str(caught.exception))
+            # The refused constructor never touched the caller's
+            # connection: the original isolation_level and row_factory
+            # are exactly as the host application set them.
             self.assertEqual("", caller.isolation_level)
             self.assertIsNone(caller.row_factory)
-            self.assertIsNot(storage.conn, caller)
-            record = mint_v2_record()
-            storage.store(record)
-            self.assertIsNotNone(storage.find(record.nonce))
         finally:
-            storage.close()
             caller.close()
             os.unlink(path)
 
@@ -356,11 +357,22 @@ class SqliteConnectionPolicyTest(unittest.TestCase):
         caller = sqlite3.connect(":memory:")
         try:
             SqliteStorage(caller)
-            self.fail("an in-memory connection cannot be shared and must be refused")
+            self.fail("a connection object is refused regardless of the database it carries")
         except ValueError as exc:
-            self.assertIn("in-memory", str(exc))
+            self.assertIn("file path", str(exc))
         finally:
             caller.close()
+
+    def test_path_constructs_a_dedicated_connection(self):
+        import sqlite3
+
+        storage = make_sqlite()
+        self.addCleanup(storage.close)
+        self.addCleanup(lambda: os.unlink(storage.test_path))
+        # The store's own session posture: explicit BEGIN IMMEDIATE
+        # transitions and the sqlite3.Row reader.
+        self.assertIsNone(storage.conn.isolation_level)
+        self.assertIs(storage.conn.row_factory, sqlite3.Row)
 
 
 class SqliteThreadedAccessTest(unittest.TestCase):

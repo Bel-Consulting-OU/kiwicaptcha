@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use KiwiCaptcha\Risk\Asn\AsnDataset;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
@@ -81,35 +82,62 @@ final class SessionRestorer
             if ($ip === '') {
                 return;
             }
-            $network = self::networkBucket($ip);
-            if ($network !== '') {
-                $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, $network);
-            }
-            $asn = $this->asnBucket($ip);
-            if ($asn !== '') {
-                $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'asn:'.$asn);
-            }
-            // Session binding: the continuity cookie's pseudonym is
-            // recorded under the principal so "device continuity" means
-            // "this session was used by this principal before". A
-            // step-up completed from a novel network binds the session;
-            // without this the next login from a new /64 on the same
-            // carrier would be novel again and the owner would be
-            // stepped up forever. The trusted-device cookie is bound
-            // the same way, so it outlives the 30-minute session window.
+            // Session and device bindings first, each in its own try:
+            // the identity-bound tags are the stronger continuity
+            // signal, so a failed network-tag write must never mask
+            // them (nor they mask the network records that follow).
             if ($this->continuity !== null) {
-                $sessionValue = $this->continuity->read($request);
-                if ($sessionValue !== null) {
-                    $sessionPseudonym = $this->identityFactory->sessionId($sessionValue);
-                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'session:'.$sessionPseudonym, trusted: true);
+                try {
+                    $sessionValue = $this->continuity->read($request);
+                    if ($sessionValue !== null) {
+                        $sessionPseudonym = $this->identityFactory->sessionId($sessionValue);
+                        $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'session:'.$sessionPseudonym, trusted: true);
+                    }
+                } catch (\Throwable $e) {
+                    $this->logger?->warning('kiwi step-up session restore: session binding failed: {message}', [
+                        'message' => $e->getMessage(),
+                    ]);
                 }
             }
             if ($this->device !== null) {
-                $deviceValue = $this->device->read($request);
-                if ($deviceValue !== null) {
-                    $devicePseudonym = $this->identityFactory->sessionId($deviceValue);
+                try {
+                    // The trusted-device binding mints the cookie when
+                    // the browser presented none: the completed step-up
+                    // is the trust event, so the value is bound under
+                    // the principal (trusted) and staged for the
+                    // response subscriber to issue. The next login then
+                    // carries a binding identity even after the
+                    // continuity cookie expired. The pseudonym derives
+                    // under the device context, never the session one.
+                    $deviceValue = $this->device->read($request) ?? $this->device->mint();
+                    $devicePseudonym = $this->identityFactory->deviceId($deviceValue);
                     $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'device:'.$devicePseudonym, trusted: true);
+                    $request->attributes->set(FirstAttemptLoginGuard::DEVICE_MINT_ATTRIBUTE, $deviceValue);
+                } catch (\Throwable $e) {
+                    $this->logger?->warning('kiwi step-up session restore: device binding failed: {message}', [
+                        'message' => $e->getMessage(),
+                    ]);
                 }
+            }
+            try {
+                $network = self::networkBucket($ip);
+                if ($network !== '') {
+                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, $network);
+                }
+            } catch (\Throwable $e) {
+                $this->logger?->warning('kiwi step-up session restore: network record failed: {message}', [
+                    'message' => $e->getMessage(),
+                ]);
+            }
+            try {
+                $asn = $this->asnBucket($ip);
+                if ($asn !== '') {
+                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'asn:'.$asn);
+                }
+            } catch (\Throwable $e) {
+                $this->logger?->warning('kiwi step-up session restore: asn record failed: {message}', [
+                    'message' => $e->getMessage(),
+                ]);
             }
         } catch (\Throwable $e) {
             $this->logger?->warning('kiwi step-up session restore failed: {message}', [

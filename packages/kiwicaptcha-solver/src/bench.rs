@@ -17,14 +17,16 @@
 //!   fields the parser requires; argon2id and rsw intentionally carry
 //!   no reference class, and their verdicts say
 //!   insufficient-reference-data instead of guessing.
-//! - The declared abuse values are measured-cost-derived, not free-hand
-//!   policy guesses: each default is the bench-measured attacker cost
-//!   per 1000 solves for its rung, divided by the table's documented
-//!   calibration margin (10x) and rounded down to a clean figure. The
-//!   doctor owns the real per-scope values. Where even the recalibrated
-//!   value exceeds what a rung can price, the honest answer is the
+//! - The declared abuse values are independent stake anchors, one per
+//!   account class, drawn from public credential and account resale
+//!   reporting. They are never a function of the attacker's own solve
+//!   cost: deriving the stake from the cost would make the pricing
+//!   check circular. The table's calibration block carries the
+//!   bench-measured attacker cost per 1000 solves as the pricing
+//!   ceiling per rung. A declared stake above that ceiling means raw
+//!   PoW cannot price the scope, and the honest answer is the
 //!   disposition escalation (a step_up or deny minimum), never a
-//!   bigger declared number.
+//!   bigger declared number. The doctor owns the real per-scope values.
 //! - Instances derive deterministically from a seed, so two runs at
 //!   one seed solve byte-identical challenges and find identical
 //!   counters; only the timings vary.
@@ -284,20 +286,20 @@ pub struct AttackerRate {
 pub struct Economics {
     pub cpu_usd_per_core_hour: f64,
     pub provenance: String,
-    /// The measured-cost calibration of the declared abuse values,
-    /// present when the table ships the recalibrated defaults. The
-    /// margin statement is machine-readable so the bench can print it
-    /// beside every dollar figure it derives.
+    /// The measured-cost calibration of the declared abuse values:
+    /// the per-rung attacker-cost ceiling the pricing verdicts are
+    /// stated against. The block is machine-readable so the bench can
+    /// print it beside every dollar figure it derives.
     #[serde(default)]
     pub calibration: Option<Calibration>,
 }
 
-/// The measured-cost calibration block: how the declared abuse values
-/// derive from the bench's own measurements.
+/// The measured-cost calibration block: the measured attacker costs
+/// the declared stakes are printed beside, with the pricing-ceiling
+/// rule in words.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Calibration {
-    /// The safety margin divisor: a declared default prices its rung at
-    /// one margin-th of the measured attacker cost.
+    /// The margin divisor the calibration statement declares.
     pub margin_divisor: f64,
     /// What was measured to anchor the defaults.
     pub anchor: String,
@@ -512,7 +514,7 @@ pub fn render_references(table: &ReferenceCosts) -> String {
     ));
     if let Some(cal) = &table.economics.calibration {
         out.push_str(&format!(
-            "  declared abuse values: measured-cost-derived ({}), margin 1/{} of the anchor, as_of {} — {}\n",
+            "  declared abuse values: independent stakes; the attacker-cost ceiling per rung ({}), margin statement 1/{}, as_of {} — {}\n",
             cal.anchor, cal.margin_divisor, cal.as_of, cal.rule
         ));
     }
@@ -719,20 +721,18 @@ mod tests {
             .expect("the shipped table calibrates its declared values");
         assert!(cal.margin_divisor >= 2.0, "the margin statement exists");
         assert!(!cal.anchor_usd_per_1000.is_empty());
-        // Every declared default prices its rung strictly below the
-        // measured anchor, by at least the stated margin (the downward
-        // rounding to a clean figure only widens the gap).
+        // The declared stakes are independent per-account anchors, so
+        // the measured attacker cost is not their source: it is the
+        // pricing ceiling each rung's verdict states. The table must
+        // carry a positive measured anchor for every declared rung and
+        // a positive stake for every class.
         for class in &table.value_classes {
             let anchor = cal
                 .anchor_usd_per_1000
                 .get(&class.rung)
                 .copied()
                 .expect("every declared rung carries its measured anchor");
-            assert!(
-                class.declared_abuse_value_usd_per_1000 * cal.margin_divisor <= anchor,
-                "the {} default sits inside the calibration margin",
-                class.class
-            );
+            assert!(anchor > 0.0, "the {} anchor is positive", class.rung);
             assert!(class.declared_abuse_value_usd_per_1000 > 0.0);
         }
     }

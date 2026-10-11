@@ -534,7 +534,9 @@ final class RedisRiskStateStoreTest extends TestCase
     {
         self::assertSame(0x31C3, RedisRiskStateStore::crc16('123456789'));
 
-        $store = $this->store();
+        // The guard checks family-tag membership against the store's own
+        // namespace, so this store is built on the slot namespace.
+        $store = new RedisRiskStateStore($this->client, namespace: 'slot');
         // Contract key set for one observation: each epoch uses ITS OWN
         // pseudonym (prev/current/next differ).
         $tag = '{kiwi:' . 'slot' . '}';
@@ -549,6 +551,8 @@ final class RedisRiskStateStoreTest extends TestCase
             "{$tag}:risk:principal:" . str_repeat('0', 32),
             "{$tag}:risk:global",
             "{$tag}:risk:dedupe:" . str_repeat('c', 32),
+            // The target family rides its own tag: the guard accepts it.
+            '{kiwi:slot:target:5e}:risk:tgt:' . str_repeat('1', 32),
         ];
         $store->assertSameSlot($keys); // must not throw
 

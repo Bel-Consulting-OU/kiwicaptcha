@@ -23,6 +23,7 @@ use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\Risk\Evidence\AutofillQualificationGate;
+use KiwiCaptcha\Storage\RealApcuBackend;
 use KiwiCaptcha\StorageInterface;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -199,10 +200,12 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
-     * The APCu segment hazard flag: the adapter refuses construction
-     * under the cli SAPI outside tests, and this check names the same
-     * boundary when the adapter is reachable here (a test-runner
-     * process, or a web-SAPI doctor run).
+     * The APCu segment hazard flag: with apc.enable_cli=1 the adapter
+     * constructs under the cli SAPI (the operator's explicit opt-in to
+     * a per-process segment), and this check answers with the warning
+     * the opt-in owes the operator. Without the opt-in the adapter
+     * refuses construction before any doctor run, so a wired adapter
+     * under cli is always the deliberate case.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
@@ -214,12 +217,17 @@ final class KiwiCaptchaDoctorCommand extends Command
         if (\PHP_SAPI !== 'cli') {
             return ['PASS', sprintf('APCu storage under the %s SAPI: one shared segment per host', \PHP_SAPI)];
         }
+        $optIn = RealApcuBackend::apcEnableCliIni(\ini_get('apc.enable_cli'));
         $detail = 'APCu storage under the cli SAPI: every worker process owns a private APCu '
             . 'segment, so a RoadRunner/queue worker stores records the web tier can never read '
-            . '(or the reverse). The adapter refuses construction under cli outside tests; '
-            . 'select the Redis/SQLite store for CLI hosts.';
+            . '(or the reverse). apc.enable_cli is '
+            . ($optIn
+                ? 'on: the adapter constructs by the operator\'s explicit opt-in, and each '
+                .'CLI worker sees only its own segment'
+                : 'off: the adapter refuses construction here, so this wiring cannot serve')
+            . '. Select the Redis/SQLite store for CLI hosts.';
 
-        return [\in_array($this->environment, ['test', 'dev'], true) ? 'WARN' : 'FAIL', $detail];
+        return ['WARN', $detail];
     }
 
     /**

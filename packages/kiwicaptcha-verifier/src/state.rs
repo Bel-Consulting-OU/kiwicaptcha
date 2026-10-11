@@ -140,7 +140,7 @@ impl SidecarState {
 
     /// The full constructor over validated configuration.
     pub fn build(config: SidecarConfig) -> Self {
-        let secret_warned = crate::config::EXAMPLE_SECRETS.contains(&config.secret_key.as_str());
+        let secret_warned = crate::config::is_example_secret(&config.secret_key);
         SidecarState {
             secret_key: config.secret_key,
             bearer: config.bearer.filter(|b| !b.is_empty()),

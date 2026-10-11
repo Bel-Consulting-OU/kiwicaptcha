@@ -591,21 +591,64 @@ final class AdaptiveRiskEngine
         // principal before", never "a cookie was presented". A fresh
         // or attacker-minted cookie has no binding and cannot vouch
         // for anyone. Pending (step-up) logins bind at restore.
+        //
+        // The device pseudonym binds the same way with the trust flag
+        // minted: an Allow is a trust-minting event, and the trusted
+        // device cookie outlives the session window, so the sliding
+        // refresh happens here on every Allow that carries the cookie.
+        //
+        // The same Allow also records the network bucket and the ASN
+        // bucket with the trust flag minted, so the novelty gate's
+        // trusted history accrues from the logins that earned it. Each
+        // write stands alone: one failed record never masks the others,
+        // and no binding write ever breaks the login.
         if (
             $c->event === RiskEventKind::AuthenticationSuccess
             && $decision->action === RiskAction::Allow
             && $this->principalNetworks !== null
             && $observation->principalId !== null
-            && $observation->sessionId !== null
-            && $observation->sessionId !== ''
         ) {
+            if ($observation->sessionId !== null && $observation->sessionId !== '') {
+                try {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        'session:'.$observation->sessionId,
+                    );
+                } catch (\Throwable) {
+                    // Best effort: the binding write never breaks login.
+                }
+            }
+            if ($observation->deviceId !== null && $observation->deviceId !== '') {
+                try {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        'device:'.$observation->deviceId,
+                        trusted: true,
+                    );
+                } catch (\Throwable) {
+                    // Best effort: the binding write never breaks login.
+                }
+            }
             try {
                 $this->principalNetworks->recordPrincipalNetworkTag(
                     $observation->principalId,
-                    'session:'.$observation->sessionId,
+                    self::networkBucket($c->sourceIp),
+                    trusted: true,
                 );
             } catch (\Throwable) {
                 // Best effort: the binding write never breaks login.
+            }
+            $asn = $this->asnBucketOf($c->sourceIp);
+            if ($asn !== '' && $asn !== '0') {
+                try {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        'asn:'.$asn,
+                        trusted: true,
+                    );
+                } catch (\Throwable) {
+                    // Best effort: the binding write never breaks login.
+                }
             }
         }
 
@@ -684,12 +727,12 @@ final class AdaptiveRiskEngine
         );
 
         // Returning-browser exemption: a login whose session was
-        // previously bound to this principal (real device continuity),
-        // on a known network, carrying no marks and no target-under-
-        // attack, is the owner's own device. Storm state (cooldown,
-        // global floor) must never step it up. This is NOT a blanket
-        // Allow: the pre-storm price stands, and a source above the
-        // hard velocity threshold is never exempt.
+        // bound to this principal at an earlier login (real device
+        // continuity), on a known network, carrying no marks and no
+        // target-under-attack, is the owner's own device. Storm state
+        // (cooldown, global floor) must never step it up. This is NOT a
+        // blanket Allow: the pre-storm price stands, and a source above
+        // the hard velocity threshold is never exempt.
         if (
             $result->action !== RiskAction::Allow
             && !$firstAttempt->requiresStepUp()
@@ -698,16 +741,19 @@ final class AdaptiveRiskEngine
             && $this->principalNetworks !== null
             && $observation->principalId !== null
         ) {
+            // Continuity is the trust probe over both identities: the
+            // session tag or the device tag, whichever the request
+            // carries. The tagIsTrusted read is the strict form (the
+            // mirror field, not bare seen-ness), and a store failure
+            // keeps the storm decision (the exemption is best effort).
             $deviceContinuity = false;
-            if ($observation->sessionId !== null && $observation->sessionId !== '') {
-                try {
-                    $deviceContinuity = $this->principalNetworks->principalNetworkSeen(
-                        $observation->principalId,
-                        'session:'.$observation->sessionId,
-                    ) === true;
-                } catch (\Throwable) {
-                    $deviceContinuity = false;
-                }
+            try {
+                $deviceContinuity = ($observation->sessionId !== null && $observation->sessionId !== ''
+                    && $this->principalNetworks->tagIsTrusted($observation->principalId, 'session:'.$observation->sessionId) === true)
+                    || ($observation->deviceId !== null && $observation->deviceId !== ''
+                    && $this->principalNetworks->tagIsTrusted($observation->principalId, 'device:'.$observation->deviceId) === true);
+            } catch (\Throwable) {
+                $deviceContinuity = false;
             }
             $network = self::networkBucket($c->sourceIp);
             $netSeen = false;
@@ -779,6 +825,13 @@ final class AdaptiveRiskEngine
      *   IPv6, the IPv4 itself) OR the account carries no prior trusted
      *   network. A store without the record surface degrades to neutral
      *   (never novel), like the session tags.
+     * - evidenceUnavailable: a history probe failed with a store error,
+     *   so no read can vouch for the login. Fail closed: the request
+     *   counts as novel (enforce mode steps it up carrying the
+     *   evidence-unavailable reason; learn mode stays on Allow while
+     *   still carrying the reason and the degraded:evidence metric).
+     *   A store without the record surface is not a failure and keeps
+     *   the neutral degradation above.
      * - breachedCredential: the caller's v2 context asserts a
      *   known-breached credential (the same step-up-worthy shape as
      *   honeypot evidence).
@@ -799,6 +852,7 @@ final class AdaptiveRiskEngine
             || $c->event === RiskEventKind::AuthenticationFailure;
         $novelNetwork = false;
         $scopePressure = false;
+        $evidenceUnavailable = false;
         if ($isLogin) {
             // Scope pressure is judged first: it is an independent
             // first-attempt signal and also the override that keeps a
@@ -826,32 +880,55 @@ final class AdaptiveRiskEngine
                 // unless device continuity vouches for the browser.
                 $network = self::networkBucket($c->sourceIp);
                 $asn = $this->asnBucketOf($c->sourceIp);
+                // Each probe stands alone in its own try: one failed
+                // read must not neutralize the other two (a single
+                // shared catch would wipe all three to null and fail
+                // open on every branch below).
                 try {
                     $asnSeen = $asn !== '' && $asn !== '0'
                         ? $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn)
                         : null;
-                    $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
-                    $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
+                } catch (RiskStoreException) {
+                    $evidenceUnavailable = true;
+                    $asnSeen = false;
                 } catch (\Throwable) {
                     $asnSeen = null;
+                }
+                try {
+                    $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
+                } catch (RiskStoreException) {
+                    $evidenceUnavailable = true;
+                    $trusted = false;
+                } catch (\Throwable) {
                     $trusted = null;
+                }
+                try {
+                    $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
+                } catch (RiskStoreException) {
+                    $evidenceUnavailable = true;
+                    $netSeen = false;
+                } catch (\Throwable) {
                     $netSeen = null;
                 }
-                // Device continuity: the session pseudonym was
-                // previously bound to this principal at a successful
-                // login. A fresh or attacker-minted cookie has no
-                // binding and cannot vouch for anyone — presenting
-                // any 32-hex value is not the owner's device.
+                // Device continuity: the session or the device pseudonym
+                // was bound to this principal with the trust flag
+                // minted (an Allow or a completed step-up). A fresh
+                // or attacker-minted cookie has no binding and cannot
+                // vouch for anyone — presenting any 32-hex value is not
+                // the owner's device. Both identities are probed: the
+                // continuity cookie may have expired while the
+                // trusted-device cookie still vouches.
                 $deviceContinuity = false;
-                if ($observation->sessionId !== null && $observation->sessionId !== '') {
-                    try {
-                        $deviceContinuity = $this->principalNetworks->principalNetworkSeen(
-                            $observation->principalId,
-                            'session:'.$observation->sessionId,
-                        ) === true;
-                    } catch (\Throwable) {
-                        $deviceContinuity = false;
-                    }
+                try {
+                    $deviceContinuity = ($observation->sessionId !== null && $observation->sessionId !== ''
+                        && $this->principalNetworks->tagIsTrusted($observation->principalId, 'session:'.$observation->sessionId) === true)
+                        || ($observation->deviceId !== null && $observation->deviceId !== ''
+                        && $this->principalNetworks->tagIsTrusted($observation->principalId, 'device:'.$observation->deviceId) === true);
+                } catch (RiskStoreException) {
+                    $evidenceUnavailable = true;
+                    $deviceContinuity = false;
+                } catch (\Throwable) {
+                    $deviceContinuity = false;
                 }
                 $newPrefix = ($netSeen === false);
                 $isNovel = false;
@@ -871,6 +948,15 @@ final class AdaptiveRiskEngine
                     // No ASN data: fall back to the /64 bucket, and to
                     // the no-trusted-network condition.
                     $isNovel = $newPrefix || ($trusted === false);
+                }
+                if ($evidenceUnavailable) {
+                    // Fail closed: history that cannot be read cannot
+                    // vouch for the login, so the request counts as
+                    // novel. Learn mode records the condition and the
+                    // metric without escalating; enforce mode steps it
+                    // up with the evidence-unavailable reason.
+                    $this->metrics->increment('degraded:evidence');
+                    $isNovel = true;
                 }
                 // A returning browser with a bound session is exempt
                 // from the scope-pressure override: the storm targets
@@ -893,6 +979,7 @@ final class AdaptiveRiskEngine
             novelNetwork: $novelNetwork,
             breachedCredential: $v2?->breachedCredential ?? false,
             scopePressure: $scopePressure,
+            evidenceUnavailable: $evidenceUnavailable,
         );
     }
 
@@ -1543,6 +1630,7 @@ final class AdaptiveRiskEngine
             subnetIdNext: $this->identityFactory->subnetIdForEpoch($c, $netEpoch + 1),
             sessionId: $sessionPseudonym ?? ($c->sessionId !== null ? $this->identityFactory->sessionId($c->sessionId) : null),
             principalId: $principalPseudonym ?? ($c->principalId !== null ? $this->identityFactory->principalId($c->principalId) : null),
+            deviceId: $c->deviceId !== null && $c->deviceId !== '' ? $this->identityFactory->deviceId($c->deviceId) : null,
             eventId: $this->normalizeEventId($event, $c->scope, $idempotencyKey),
             networkRisk: $c->networkFlags->networkRisk(),
             nowMs: $nowMs,

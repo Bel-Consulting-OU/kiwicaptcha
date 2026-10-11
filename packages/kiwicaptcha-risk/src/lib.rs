@@ -1351,10 +1351,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 ),
                 Err(_) => crate::marks::apply_unreadable(decision, now_ms, &ctx.resources),
             };
-        } else if first_attempt.requires_step_up() {
+        } else if first_attempt.requires_step_up() || first_attempt.evidence_unavailable {
             // No marks reader: the first-attempt gate still runs (a
             // clean view with just the evidence), so the prevention
-            // never depends on the marks surface being wired.
+            // never depends on the marks surface being wired. Unreadable
+            // trusted history takes the same path in learn mode: the
+            // action stays Allow while the decision carries the
+            // evidence-unavailable reason.
             let view = crate::marks::MarksView::default().with_first_attempt(first_attempt);
             decision = crate::marks::apply(
                 decision,
@@ -1554,34 +1557,69 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 let principal_hex = hex::encode(principal);
                 let network = network_bucket(ctx.source_ip);
                 let asn = self.asn_bucket_of(&ctx.source_ip);
+                // Each probe is judged on its own result, and a store
+                // error arms the fail-closed flag instead of reading as
+                // neutral: unreadable history cannot vouch for the
+                // login, so the request counts as novel.
+                let mut evidence_unavailable = false;
                 let asn_seen = if asn.is_empty() || asn == "0" {
                     None
                 } else {
-                    networks
-                        .principal_network_seen(&principal_hex, &format!("asn:{asn}"))
-                        .unwrap_or(None)
+                    match networks.principal_network_seen(&principal_hex, &format!("asn:{asn}")) {
+                        Ok(seen) => seen,
+                        Err(_) => {
+                            evidence_unavailable = true;
+                            Some(false)
+                        }
+                    }
                 };
-                let net_seen = networks
-                    .principal_network_seen(&principal_hex, &network)
-                    .unwrap_or(None);
-                let trusted = networks
-                    .principal_has_trusted_network(&principal_hex)
-                    .unwrap_or(None);
+                let net_seen = match networks.principal_network_seen(&principal_hex, &network) {
+                    Ok(seen) => seen,
+                    Err(_) => {
+                        evidence_unavailable = true;
+                        Some(false)
+                    }
+                };
+                let trusted = match networks.principal_has_trusted_network(&principal_hex) {
+                    Ok(trusted) => trusted,
+                    Err(_) => {
+                        evidence_unavailable = true;
+                        Some(false)
+                    }
+                };
 
-                // Device continuity: the session pseudonym was
-                // previously bound to this principal at a successful
-                // login. A fresh or attacker-minted cookie is never
-                // continuity.
-                let device_continuity = observation.session_id.as_ref().is_some_and(|sid| {
+                // Device continuity: the session or the device pseudonym
+                // was bound to this principal with trust minted (an
+                // Allow or a completed step-up). A fresh or
+                // attacker-minted cookie is never continuity. Both
+                // identities are probed: the continuity cookie may have
+                // expired while the trusted-device cookie still vouches.
+                let mut device_continuity = false;
+                if let Some(sid) = &observation.session_id {
                     let sid_hex = hex::encode(sid);
-                    networks
+                    match networks
                         .principal_network_seen(&principal_hex, &format!("session:{sid_hex}"))
-                        .unwrap_or(None)
-                        == Some(true)
-                });
+                    {
+                        Ok(seen) => device_continuity |= seen == Some(true),
+                        Err(_) => {
+                            evidence_unavailable = true;
+                        }
+                    }
+                }
+                if let Some(did) = &observation.device_id {
+                    let did_hex = hex::encode(did);
+                    match networks
+                        .principal_network_seen(&principal_hex, &format!("device:{did_hex}"))
+                    {
+                        Ok(seen) => device_continuity |= seen == Some(true),
+                        Err(_) => {
+                            evidence_unavailable = true;
+                        }
+                    }
+                }
 
                 let new_prefix = net_seen == Some(false);
-                let is_novel = if asn_seen == Some(false) {
+                let mut is_novel = if asn_seen == Some(false) {
                     // Never-seen ASN: novel regardless of the /64.
                     true
                 } else if asn_seen == Some(true) {
@@ -1594,6 +1632,13 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     // the no-trusted-network condition.
                     new_prefix || trusted == Some(false)
                 };
+                if evidence_unavailable {
+                    // Learn mode records the condition and the metric
+                    // without escalating; enforce mode steps the login
+                    // up carrying the evidence-unavailable reason.
+                    self.metrics.incr("degraded:evidence");
+                    is_novel |= evidence_unavailable;
+                }
 
                 // A returning browser with a bound session is exempt
                 // from the scope-pressure override: the storm targets
@@ -1610,6 +1655,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 // make the second attempt from the same IP "seen".
                 evidence.novel_network =
                     is_novel && self.novelty_enforcement == NoveltyEnforcement::Enforce;
+                evidence.evidence_unavailable = evidence_unavailable;
             }
             evidence.scope_pressure = scope_pressure;
         }
@@ -2209,6 +2255,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             Some(raw) => Some(raw),
             None => ctx.principal_id.map(|p| self.identity.principal_id(p)),
         };
+        let device_id = ctx.device_id.map(|d| self.identity.device_id(d));
         // Canonical idempotency normalization shared with PHP: verbatim keys
         // become the lowercase hex of the hmac-sha256 MAC over event_key,
         // pack('N', scope), chr(event) and key — domain-separated per scope
@@ -2242,6 +2289,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 .subnet_id_for_epoch(ctx.source_ip, net_epoch + 1),
             session_id,
             principal_id,
+            device_id,
             event_id,
             network_risk: ctx.network_flags.network_risk(),
             now_ms,

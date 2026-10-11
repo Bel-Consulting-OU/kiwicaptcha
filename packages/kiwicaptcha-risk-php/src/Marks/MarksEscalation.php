@@ -212,6 +212,13 @@ final class MarksEscalation
                 $stageReasons[] = RiskReason::GlobalAttack;
             }
         }
+        // Unreadable trusted history is its own reason, independent of
+        // the step-up: enforcement escalates a novel verdict carrying
+        // it, learn mode keeps the plain Allow while still reporting
+        // why the evidence plane could not vouch for the login.
+        if ($firstAttempt->evidenceUnavailable) {
+            $stageReasons[] = RiskReason::EvidenceUnavailable;
+        }
 
         if ($stageReasons === []) {
             return $plain;

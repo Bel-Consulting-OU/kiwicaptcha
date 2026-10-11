@@ -94,6 +94,31 @@ The risk engine's state script has its own family-wide hash tag
 `ClusterKeyslotTest`; the challenge storage and the admission
 semaphore are the components covered by the suites named above.
 
+## Risk keyspace mode: the legacy default and the sharded layout
+
+The risk state has two key layouts, and a namespace carries exactly one
+of them, recorded in its mode marker key `{kiwi:<ns>}:mode`. The
+`KeyspaceMode` type of both risk cores (`kiwicaptcha_risk::keyspace`
+and `KiwiCaptcha\Risk\Storage\KeyspaceMode`) defines the pair:
+
+- **Legacy**: the single-tag layout, `{kiwi:<ns>}` for every surface.
+  It remains the default store mode: the classic
+  `RedisRiskStateStore` serves it, an existing namespace keeps the
+  layout its marker records, and the engine wiring does not move a
+  live namespace between layouts.
+- **Sharded**: the horizontally scalable per-family layout, one hash
+  tag per dimension family (`{kiwi:<ns>:<dim>:<hex2>}`), the scope
+  aggregate spread over 16 shard counters. It is the recommended mode
+  for new namespaces: assessment writes disperse over cluster slots
+  instead of serializing on one tag's slot.
+
+The first store constructed against a namespace claims the marker
+(`SET NX`, persistent); a store built in the other mode is refused with
+a typed mismatch error instead of silently addressing the wrong keys.
+The mixed-fleet rule: pick the mode once per namespace before it serves
+traffic, and drain the stores of the other mode before switching,
+because the two layouts address disjoint state families.
+
 ## Redis Sentinel: the failover contract
 
 A Sentinel topology (master, replicas, sentinel nodes) serves reads

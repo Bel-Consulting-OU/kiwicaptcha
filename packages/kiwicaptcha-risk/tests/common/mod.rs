@@ -123,5 +123,6 @@ pub fn observation(
         event_id,
         network_risk: 0,
         now_ms,
+        device_id: None,
     }
 }

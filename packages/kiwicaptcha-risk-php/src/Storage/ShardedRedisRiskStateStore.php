@@ -31,12 +31,16 @@ use Predis\Response\ServerException;
  * `{kiwi:<ns>:s:<id>:<shard>}:dd:<event_id>`. The hysteresis state is
  * `{kiwi:<ns>}:risk:hyst` and the mode marker is `{kiwi:<ns>}:mode`.
  *
- * <dim> names a source, net, session or principal family. <hex2> is the
- * two hex characters of the family identifier's first byte. <shard> is
- * fnv1a32(event_id) mod 16. Source and subnet keep their epoch boundary
- * pseudonyms: each pseudonym carries its own family prefix, so the
- * boundary reads run as their own read-only invocations and the caller
- * sums the replies exactly per the risk-v1 sum3 contract.
+ * <dim> names one of the seven sharded dimensions: src, net, session,
+ * principal, asn, target and agent. <hex2> is the two hex characters of
+ * the family identifier's first byte. <shard> is fnv1a32(event_id)
+ * mod 16, or the caller's stable fallback hash for an empty event id
+ * (the assessment's source pseudonym), so dedupe-less writes disperse
+ * over the shards instead of funneling onto one slot. Source and subnet
+ * keep their epoch boundary pseudonyms: each pseudonym carries its own
+ * family prefix, so the boundary reads run as their own read-only
+ * invocations and the caller sums the replies exactly per the risk-v1
+ * sum3 contract.
  *
  * Batching contract: one assessment is one pipelined batch. The batch's
  * invocations are grouped by endpoint (the owner of each key's slot:

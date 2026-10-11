@@ -59,32 +59,21 @@ class SqliteStorageError(Exception):
     unavailable store."""
 
 
-def _main_database_file(connection: sqlite3.Connection) -> str:
-    """The file path behind a caller's connection, or '' when the main
-    database is in memory (and therefore not shareable)."""
-    try:
-        rows = connection.execute("PRAGMA database_list").fetchall()
-    except sqlite3.Error:
-        return ""
-    for row in rows:
-        if row[1] == "main":
-            return row[2] or ""
-    return ""
-
-
-def _is_memory_file(path: str) -> bool:
-    return (not path) or path == ":memory:" or "mode=memory" in path
-
-
 class SqliteStorage:
     """The SQLite store adapter, mirroring the PHP SqliteStorage.
 
-    The adapter always drives its own connection. A path opens one; a
-    caller-passed connection is never touched (setting ``isolation_level``
-    on it would silently flip the host application into autocommit) —
-    the adapter resolves the connection's main database file and opens a
-    dedicated connection to that file instead. An in-memory database has
-    no shareable file and is refused with a configuration error.
+    The adapter accepts a database file path only and always drives a
+    connection it opens and owns itself. Earlier releases also accepted
+    a caller-passed ``sqlite3.Connection``; that shape is refused with
+    a deprecation error, because sharing one connection between the
+    host application and the store couples the two transaction
+    postures (the store needs ``isolation_level = None`` and its own
+    row factory, and setting either on a host connection would silently
+    flip the host application's own transaction behavior). Passing the
+    path lets the store open a dedicated connection to the same file:
+    both connections see one database, and neither touches the other's
+    session state. An in-memory database is therefore not shareable at
+    all (a second connection would open a different private database).
 
     The connection is shared by every thread of the host process (the
     WSGI singleton pattern): ``check_same_thread`` is off and every
@@ -95,11 +84,20 @@ class SqliteStorage:
 
     def __init__(
         self,
-        connection_or_path: "sqlite3.Connection | str",
+        path: str,
         busy_timeout_ms: int = 5000,
         ttl_margin_secs: int = 60,
         now: Optional[Callable[[], float]] = None,
     ) -> None:
+        if not isinstance(path, str):
+            raise ValueError(
+                "SqliteStorage accepts a database file path only; passing a"
+                " sqlite3.Connection was deprecated and is now refused, because"
+                " the store must own its connection's transaction posture"
+                " (isolation_level and row_factory). Pass the same file path"
+                " the connection was opened with and the store will open its"
+                " own dedicated connection to that database."
+            )
         if busy_timeout_ms < 0:
             raise ValueError("busy_timeout_ms must be >= 0")
         if ttl_margin_secs < 0:
@@ -107,17 +105,6 @@ class SqliteStorage:
         self._ttl_margin = ttl_margin_secs
         self._now = now
         self._lock = threading.RLock()
-        if isinstance(connection_or_path, str):
-            path = connection_or_path
-        else:
-            path = _main_database_file(connection_or_path)
-            if _is_memory_file(path):
-                raise ValueError(
-                    "SqliteStorage opens a dedicated connection and cannot"
-                    " share an in-memory database: pass a file path (or a"
-                    " connection to a file-backed database)"
-                )
-        self._owns_connection = True
         self.conn = sqlite3.connect(
             path, timeout=busy_timeout_ms / 1000.0, check_same_thread=False
         )
@@ -135,10 +122,9 @@ class SqliteStorage:
                 raise self._failure("schema initialization", exc) from exc
 
     def close(self) -> None:
-        """Close the connection when this adapter opened it."""
-        if self._owns_connection:
-            with self._lock:
-                self.conn.close()
+        """Close the connection this store opened and owns."""
+        with self._lock:
+            self.conn.close()
 
     # ---- schema -------------------------------------------------------------
 

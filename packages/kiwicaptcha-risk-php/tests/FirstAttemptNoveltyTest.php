@@ -42,6 +42,7 @@ final class FirstAttemptNoveltyTest extends TestCase
     private RiskIdentityFactory $identity;
     private string $principalHex;
     private string $asnFixture;
+    private PrincipalNetworkTagStoreInterface $networks;
 
     protected function setUp(): void
     {
@@ -61,7 +62,7 @@ final class FirstAttemptNoveltyTest extends TestCase
     }
 
     /** @param array<string, true> $tags */
-    private function buildEngine(array $tags, string $noveltyEnforcement = 'enforce'): AdaptiveRiskEngine
+    private function buildEngine(array $tags, string $noveltyEnforcement = 'enforce', bool $failingReads = false): AdaptiveRiskEngine
     {
         // The same identity factory as setUp: the tag store is keyed by
         // the hashed principal, so the engine and the seed must agree.
@@ -73,14 +74,31 @@ final class FirstAttemptNoveltyTest extends TestCase
                 return \KiwiCaptcha\Risk\SignalVector::fromArray([]);
             }
         };
-        $networks = new class ($tags) implements PrincipalNetworkTagStoreInterface {
-            /** @param array<string, array<string, true>> $tags */
-            public function __construct(private array $tags)
-            {
+        $networks = new class ($tags, $failingReads) implements PrincipalNetworkTagStoreInterface {
+            /**
+             * @param array<string, array<string, true>> $tags
+             * @param array<string, array<string, true>> $trusted
+             */
+            public function __construct(
+                private array $tags,
+                private bool $failingReads = false,
+                private array $trusted = [],
+            ) {
+                // Seeded history stands for the learned trusted state:
+                // it was minted by Allow logins before the test window.
+                foreach (array_keys($this->tags) as $principal) {
+                    foreach (array_keys($this->tags[$principal]) as $tag) {
+                        $this->trusted[$principal][$tag] = true;
+                    }
+                }
             }
 
             public function principalNetworkSeen(string $principalId, string $network): ?bool
             {
+                if ($this->failingReads) {
+                    throw new \KiwiCaptcha\Risk\Storage\RiskStoreException('tag backend unavailable');
+                }
+
                 return isset($this->tags[$principalId][$network]);
             }
 
@@ -90,18 +108,26 @@ final class FirstAttemptNoveltyTest extends TestCase
                     return false;
                 }
                 $this->tags[$principalId][$network] = true;
+                if ($trusted) {
+                    $this->trusted[$principalId][$network] = true;
+                }
 
                 return true;
             }
 
             public function principalHasTrustedNetwork(string $principalId): ?bool
             {
+                if ($this->failingReads) {
+                    throw new \KiwiCaptcha\Risk\Storage\RiskStoreException('tag backend unavailable');
+                }
+
                 return isset($this->tags[$principalId]) && $this->tags[$principalId] !== [];
             }
 
             public function tagIsTrusted(string $principalId, string $network): ?bool
             {
-                return isset($this->tags[$principalId][$network]);
+                return isset($this->tags[$principalId][$network])
+                    && isset($this->trusted[$principalId][$network]);
             }
 
             public function forgetDevices(string $principalId): void
@@ -113,6 +139,7 @@ final class FirstAttemptNoveltyTest extends TestCase
                 }
             }
         };
+        $this->networks = $networks;
         $marksReader = new class implements MarksReaderInterface {
             public function requestMarks(MarksRequest $request): MarksView
             {
@@ -259,6 +286,125 @@ final class FirstAttemptNoveltyTest extends TestCase
             \KiwiCaptcha\Risk\RiskAction::Allow,
             $decision->action,
             'learn mode is the rollout window: novel networks are recorded, never escalated',
+        );
+    }
+
+    /**
+     * Learn mode is the seeding window: a successful (Allow) login
+     * binds the session and accrues the trusted network and ASN
+     * history, so the second login from the same /64 is no longer
+     * novel and carries no novelty signal.
+     */
+    public function testLearnModeAccruesTrustedHistoryOnAllow(): void
+    {
+        $engine = $this->buildEngine([], 'learn');
+        $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
+
+        $first = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::Allow,
+            $first->action,
+            'learn mode never escalates a first login',
+        );
+
+        // The post-Allow binding recorded the network bucket and the
+        // ASN bucket with the trust flag minted (the session binding
+        // stays alongside them).
+        self::assertTrue(
+            $this->networks->principalNetworkSeen($this->principalHex, $networkBucket),
+            'the Allow binding must record the network bucket',
+        );
+        self::assertTrue(
+            $this->networks->principalNetworkSeen($this->principalHex, self::HOME_ASN_TAG),
+            'the Allow binding must record the ASN bucket',
+        );
+        self::assertTrue(
+            $this->networks->tagIsTrusted($this->principalHex, $networkBucket),
+            'the recorded network tag must carry trust',
+        );
+        self::assertTrue(
+            $this->networks->tagIsTrusted($this->principalHex, self::HOME_ASN_TAG),
+            'the recorded ASN tag must carry trust',
+        );
+
+        $second = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::Allow,
+            $second->action,
+            'the second login from the same /64 rides the accrued history',
+        );
+        self::assertFalse(
+            $second->hasReason(\KiwiCaptcha\Risk\RiskReason::NovelNetwork),
+            'the second login from the same /64 is not novel',
+        );
+    }
+
+    /**
+     * Enforce mode never lets a repeated attempt earn its own trust:
+     * the post-Allow binding is the only writer, so a stepped-up login
+     * records nothing and every retry from the same IP stays novel.
+     */
+    public function testRetryFromSameNetworkStaysSteppedUp(): void
+    {
+        $engine = $this->buildEngine([], 'enforce');
+        $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
+
+        for ($attempt = 1; $attempt <= 10; $attempt++) {
+            $decision = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION));
+            self::assertSame(
+                \KiwiCaptcha\Risk\RiskAction::StepUp,
+                $decision->action,
+                sprintf('retry %d from the same network must stay stepped up', $attempt),
+            );
+        }
+
+        // Zero network tags written across all ten attempts: neither
+        // the network bucket, nor the ASN bucket, nor the session.
+        self::assertFalse($this->networks->principalNetworkSeen($this->principalHex, $networkBucket));
+        self::assertFalse($this->networks->principalNetworkSeen($this->principalHex, self::HOME_ASN_TAG));
+        self::assertFalse($this->networks->principalNetworkSeen(
+            $this->principalHex,
+            'session:'.$this->identity->sessionId(self::SESSION),
+        ));
+    }
+
+    /**
+     * Fail closed on an unreadable history: a store error on any probe
+     * means no read can vouch for the login. Enforce mode treats the
+     * request as novel and steps it up carrying the evidence-
+     * unavailable reason, with the degraded:evidence metric recorded.
+     */
+    public function testAStoreFailureStepsUpWithTheEvidenceUnavailableReason(): void
+    {
+        $engine = $this->buildEngine([], 'enforce', failingReads: true);
+        $decision = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::StepUp,
+            $decision->action,
+            'unreadable trusted history cannot vouch for the login: fail closed',
+        );
+        self::assertTrue($decision->hasReason(\KiwiCaptcha\Risk\RiskReason::EvidenceUnavailable));
+        self::assertSame(
+            1,
+            $engine->metrics()->snapshot()['counters']['degraded:evidence'] ?? 0,
+            'the degraded:evidence metric records the store failure',
+        );
+    }
+
+    /** Learn mode never escalates on a store failure: Allow carrying the reason. */
+    public function testAStoreFailureInLearnModeStaysAllowCarryingTheReason(): void
+    {
+        $engine = $this->buildEngine([], 'learn', failingReads: true);
+        $decision = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::Allow,
+            $decision->action,
+            'learn mode records the evidence failure without escalating',
+        );
+        self::assertTrue($decision->hasReason(\KiwiCaptcha\Risk\RiskReason::EvidenceUnavailable));
+        self::assertFalse(
+            $decision->hasReason(\KiwiCaptcha\Risk\RiskReason::NovelNetwork),
+            'learn mode never reports the novelty signal as enforcing',
         );
     }
 }

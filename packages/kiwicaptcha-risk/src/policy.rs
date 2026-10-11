@@ -71,6 +71,7 @@ pub enum RiskReason {
     SpamMarkQuarantine,
     NovelNetwork,
     BreachedCredential,
+    EvidenceUnavailable,
 }
 
 impl RiskReason {
@@ -101,6 +102,7 @@ impl RiskReason {
             RiskReason::SpamMarkQuarantine => "spam_mark_quarantine",
             RiskReason::NovelNetwork => "novel_network",
             RiskReason::BreachedCredential => "breached_credential",
+            RiskReason::EvidenceUnavailable => "evidence_unavailable",
         }
     }
 }
