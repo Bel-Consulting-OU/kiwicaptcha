@@ -73,7 +73,7 @@ final class RealRedisIntegrationTest extends TestCase
             p: 1,
             targetBits: 8,
             salt: base64_encode('1234567890abcdef'),
-            prefix: 'prefix',
+            prefix: 'challenge|'.base64_encode('1234567890abcdef').'|',
             challenge: 'challenge',
             minDurationMs: 0,
             issuedAtNs: 1_800_000_000_000_000,

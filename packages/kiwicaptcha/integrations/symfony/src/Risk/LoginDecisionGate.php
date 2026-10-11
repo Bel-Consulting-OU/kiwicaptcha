@@ -17,12 +17,15 @@ use KiwiCaptcha\Risk\RiskDecision;
 interface LoginDecisionGate
 {
     /**
-     * @param string|null $session the raw continuity cookie value (32 hex
-     *                             chars), null when the request presents
-     *                             none
-     * @param string|null $device  the raw trusted-device cookie value (32
-     *                             hex chars), null when the request
-     *                             presents none
+     * @param string|null $session the raw continuity cookie value (32
+     *                             hex chars), null when absent
+     * @param string|null $device  the raw trusted-device cookie value
+     *                             (32 hex chars), null when absent
+     *
+     * @param string|null $principal the raw user identifier. The engine
+     *                             derives the keyed pseudonym itself, so
+     *                             the judged identity is the one the
+     *                             restore and reputation paths bind
      */
     public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null): ?RiskDecision;
 }
