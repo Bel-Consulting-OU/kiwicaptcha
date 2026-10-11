@@ -482,6 +482,9 @@ final class RiskGateway implements LoginDecisionGate
         if ($context->principalId !== null) {
             $names[] = 'principal';
         }
+        if ($context->deviceId !== null) {
+            $names[] = 'device';
+        }
 
         return $names;
     }
@@ -536,8 +539,14 @@ final class RiskGateway implements LoginDecisionGate
      * pressure) only runs inside the pipeline, so the login path must
      * reach it here — the feedback paths never do. A StepUp decision
      * means the caller must NOT grant the session yet.
+     *
+     * The raw continuity and trusted-device cookie values ride the
+     * context ($session / $device): the engine derives the keyed session
+     * and device pseudonyms itself, so the continuity the gate judges is
+     * the browser's real, previously bound identity and not the absence
+     * of one. Null keeps the identity out of the observation.
      */
-    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null): ?RiskDecision
     {
         $scopeId = $this->tryScopeId($scope);
         if ($scopeId === null) {
@@ -551,6 +560,7 @@ final class RiskGateway implements LoginDecisionGate
             event: RiskEventKind::AuthenticationSuccess,
             networkFlags: $this->classifier->classify($ip),
             resources: $this->resources(),
+            deviceId: $device,
         );
         $decision = $this->engine->reassess($context, $idempotencyKey);
         $this->setCurrentDecisionId($decision->decisionId);

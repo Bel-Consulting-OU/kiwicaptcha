@@ -464,6 +464,7 @@ pub trait RiskStateStoreExt: RiskStateStore {
             subnet_id_next: subnet_id_next.to_string(),
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: event_id.to_string(),
             network_risk: 0,
             now_ms,

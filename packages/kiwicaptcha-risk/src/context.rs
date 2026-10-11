@@ -17,13 +17,20 @@ pub struct RiskContext<'a> {
     pub session_id: Option<&'a [u8; 16]>,
     /// Application principal id bytes (pseudonymized before storage).
     pub principal_id: Option<&'a [u8]>,
+    /// The raw trusted-device cookie bytes (pseudonymized before
+    /// storage): the decoded 16 bytes of the 32-hex cookie value, under
+    /// the same decode contract as the session cookie. The PHP mirror
+    /// names the field `deviceId`.
+    pub device_id: Option<&'a [u8]>,
     pub event: RiskEventKind,
     pub network_flags: NetworkFlags,
     pub resources: ResourcePressure,
 }
 
 impl<'a> RiskContext<'a> {
-    /// Convenience constructor for tests and simple call sites.
+    /// Convenience constructor for tests and simple call sites: no
+    /// trusted-device cookie. Attach one through
+    /// [`RiskContext::with_device_id`].
     pub fn new(
         scope: u32,
         source_ip: IpAddr,
@@ -38,10 +45,18 @@ impl<'a> RiskContext<'a> {
             source_ip,
             session_id,
             principal_id,
+            device_id: None,
             event,
             network_flags,
             resources,
         }
+    }
+
+    /// Builder form carrying the raw trusted-device cookie bytes (the
+    /// decoded 16 bytes of the 32-hex cookie value).
+    pub fn with_device_id(mut self, device_id: Option<&'a [u8]>) -> RiskContext<'a> {
+        self.device_id = device_id;
+        self
     }
 }
 

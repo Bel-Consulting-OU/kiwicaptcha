@@ -13,6 +13,7 @@ use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Storage\ApcuBackendInterface;
+use KiwiCaptcha\Storage\ApcuFetchOutcome;
 use KiwiCaptcha\Storage\ApcuStorage;
 use KiwiCaptcha\Storage\ApcuStorageException;
 use KiwiCaptcha\Storage\RealApcuBackend;
@@ -164,7 +165,10 @@ final class ApcuStorageContractTest extends TestCase
     {
         // The default construction path names the remedy instead of a
         // fatal undefined-function call later; where the extension is
-        // present and enabled the same call simply works.
+        // present and enabled the same call simply works. Under the cli
+        // SAPI the segment detection refuses first and names the
+        // apc.enable_cli opt-in, so the actionable message depends on
+        // which check fired.
         if (RealApcuTestEnv::available()) {
             $storage = new ApcuStorage();
             $storage->establishReplicationFence('probe');
@@ -176,8 +180,82 @@ final class ApcuStorageContractTest extends TestCase
             new ApcuStorage();
             self::fail('a missing APCu extension must fail construction closed');
         } catch (ApcuStorageException $e) {
-            self::assertStringContainsString('ext-apcu', $e->getMessage());
+            if (\PHP_SAPI === 'cli') {
+                self::assertStringContainsString('apc.enable_cli', $e->getMessage());
+            } else {
+                self::assertStringContainsString('ext-apcu', $e->getMessage());
+            }
         }
+    }
+
+    public function testTheSimulatedCliSapiWithoutTheOptInRefusesConstruction(): void
+    {
+        // The simulated cli seam drives the same detection the real
+        // process would: a CLI host without the apc.enable_cli opt-in
+        // is refused with the actionable remedy, never a silent
+        // private-segment store.
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '0']);
+            self::fail('the simulated cli SAPI without the opt-in must fail construction closed');
+        } catch (ApcuStorageException $e) {
+            self::assertStringContainsString('refuses the cli SAPI', $e->getMessage());
+            self::assertStringContainsString('apc.enable_cli=1', $e->getMessage());
+        }
+    }
+
+    public function testTheSimulatedEnableCliOptInPassesTheSegmentDetection(): void
+    {
+        // With the ini opt-in the detection passes and construction
+        // proceeds to the extension checks: where the extension is
+        // absent the refusal is the extension remedy, never the cli
+        // one, and on a provisioned host the storage simply constructs.
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '1']);
+            self::addToAssertionCount(1);
+        } catch (ApcuStorageException $e) {
+            self::assertStringNotContainsString('refuses the cli SAPI', $e->getMessage());
+        }
+    }
+
+    public function testTheSimulatedWebSapiSkipsTheCliDetection(): void
+    {
+        try {
+            new ApcuStorage(null, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['fpm-fcgi', '0']);
+            self::addToAssertionCount(1);
+        } catch (ApcuStorageException $e) {
+            self::assertStringNotContainsString('refuses the cli SAPI', $e->getMessage());
+        }
+    }
+
+    public function testTheInjectedBackendSkipsTheCliDetection(): void
+    {
+        // An injected backend is the deliberate emulated-seam override:
+        // the cli detection guards the default real segment only, so
+        // the emulation constructs under a simulated cli SAPI too.
+        $backend = new class implements ApcuBackendInterface {
+            public function fetch(string $key): ApcuFetchOutcome
+            {
+                return ApcuFetchOutcome::notFound();
+            }
+
+            public function store(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function add(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function delete(string $key): bool
+            {
+                return true;
+            }
+        };
+        $storage = new ApcuStorage($backend, 'kiwicaptcha', 5000, 60, null, static fn (): array => ['cli', '0']);
+        $storage->establishReplicationFence('probe');
+        self::addToAssertionCount(1);
     }
 
     /**

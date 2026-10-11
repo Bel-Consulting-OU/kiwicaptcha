@@ -11,9 +11,12 @@ namespace KiwiCaptcha\Risk\Storage;
  *
  * Normative contract:
  *
- *  - Tags: `net:<prefix_hex>`, `asn:<decimal>`, `session:<pseudonym_hex>`,
- *    `device:<pseudonym_hex>`. Each is a hash field whose value is the
- *    last-use ms from the storage clock (never a client clock).
+ *  - Tags: `net:<prefix_hex>`, `asn:<decimal>`, `asn:u4/<prefix>`,
+ *    `asn:u6/<prefix>`, `session:<pseudonym_hex>`,
+ *    `device:<pseudonym_hex>`. The asn class carries a listed decimal
+ *    and the unlisted-namespace buckets. Each is a hash field whose
+ *    value is the last-use ms from the storage clock (never a client
+ *    clock).
  *  - Trust: a `t:` prefixed mirror field. Trust is minted only on an
  *    Allow or a completed step-up. A Deny path can never mint trust.
  *  - Caps (per principal, LRU by last-use): `session:` 32, `device:` 16,

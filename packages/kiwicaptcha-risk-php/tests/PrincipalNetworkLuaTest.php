@@ -154,4 +154,31 @@ final class PrincipalNetworkLuaTest extends TestCase
         self::assertTrue($store->recordPrincipalNetworkTag(self::PRINCIPAL, 'asn:64496'));
         self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, 'asn:64496'));
     }
+
+    /**
+     * The unlisted-ASN buckets (AsnBucket::forUnlistedIp spellings) are
+     * first-class tags: a refusal would fail tag validation and leave
+     * the novelty gate blind on exactly those networks.
+     */
+    public function testUnlistedAsnBucketsAreAccepted(): void
+    {
+        $store = $this->store();
+        foreach (['asn:0', 'asn:1', 'asn:4294967294', 'asn:u4/0', 'asn:u4/65535', 'asn:u6/00000000', 'asn:u6/ffffffff'] as $shape) {
+            self::assertTrue(
+                $store->recordPrincipalNetworkTag(self::PRINCIPAL, $shape),
+                sprintf('the unlisted-ASN shape %s must be recorded', $shape),
+            );
+            self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, $shape));
+        }
+        // Malformed neighbours stay refused: leading zeros, out-of-shape
+        // u4/u6 spellings. (Numeric range checks live in AsnBucket at
+        // the engine boundary; tag validation is grammar-only.)
+        foreach (['asn:007', 'asn:u4/065535', 'asn:u4/655360', 'asn:u6/0000000', 'asn:u6/000000000', 'asn:u6/ABCDEFGH'] as $bad) {
+            try {
+                $store->recordPrincipalNetworkTag(self::PRINCIPAL, $bad);
+                self::fail(sprintf('tag %s must be refused', var_export($bad, true)));
+            } catch (\InvalidArgumentException) {
+            }
+        }
+    }
 }

@@ -153,6 +153,7 @@ fn context() -> RiskContext<'static> {
         source_ip: "203.0.113.77".parse::<IpAddr>().unwrap(),
         session_id: None,
         principal_id: None,
+        device_id: None,
         event: RiskEventKind::PreIssue,
         network_flags: NetworkFlags::default(),
         resources: ResourcePressure {

@@ -160,10 +160,22 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
      *                                                 deterministic
      *                                                 expiry and lease
      *                                                 checks.
+     * @param \Closure|null            $sapiEnvironment the simulated
+     *                                                 SAPI environment
+     *                                                 for the cli
+     *                                                 detection, an
+     *                                                 array of the SAPI
+     *                                                 name and the raw
+     *                                                 apc.enable_cli ini
+     *                                                 value; defaults to
+     *                                                 reading the real
+     *                                                 process. A test
+     *                                                 seam.
      *
      * @throws ApcuStorageException   when the default real backend is
-     *                                requested and the extension is
-     *                                missing or disabled
+     *                                requested under the cli SAPI with
+     *                                apc.enable_cli off, or when the
+     *                                extension is missing or disabled
      * @throws \InvalidArgumentException when an argument is out of
      *                                  range.
 
@@ -174,6 +186,7 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
         private readonly int $lockTimeoutMs = 5000,
         private readonly int $ttlMarginSecs = 60,
         private readonly ?\Closure $now = null,
+        private readonly ?\Closure $sapiEnvironment = null,
     ) {
         if ($this->lockTimeoutMs < 0) {
             throw new \InvalidArgumentException('lockTimeoutMs must be >= 0');
@@ -184,7 +197,32 @@ final class ApcuStorage implements AtomicStorageInterface, ConsumedStateReadable
         if ($keyPrefix === '') {
             throw new \InvalidArgumentException('keyPrefix must not be empty');
         }
-        $this->backend = $backend ?? new RealApcuBackend();
+        if ($backend === null) {
+            // The real backend carries the segment policy of the
+            // adapter: a CLI process owns a private APCu segment
+            // invisible to the web tier, so the default construction
+            // refuses the cli SAPI unless the operator's
+            // apc.enable_cli=1 opt-in is set (the doctor then warns
+            // about the per-process segment). An injected backend is a
+            // deliberate override (the emulated test seam), never the
+            // production segment, so the detection does not fire.
+            [$sapi, $enableCliRaw] = $this->sapiEnvironment !== null
+                ? ($this->sapiEnvironment)()
+                : [\PHP_SAPI, \ini_get('apc.enable_cli')];
+            if (RealApcuBackend::cliConstructionRefused($sapi, RealApcuBackend::apcEnableCliIni($enableCliRaw))) {
+                throw new ApcuStorageException(
+                    'ApcuStorage refuses the cli SAPI while apc.enable_cli is off: a CLI process '
+                    . '(RoadRunner worker, queue consumer, command) owns a private APCu segment '
+                    . 'invisible to the web tier that serves traffic, so a challenge stored here '
+                    . 'can never be verified by the web tier (or the reverse). Set '
+                    . 'apc.enable_cli=1 in php.ini to opt this CLI host into its own segment, '
+                    . 'or select the Redis/SQLite store for CLI hosts.'
+                );
+            }
+            $this->backend = new RealApcuBackend($this->sapiEnvironment);
+        } else {
+            $this->backend = $backend;
+        }
         $this->prefix = $keyPrefix;
     }
 

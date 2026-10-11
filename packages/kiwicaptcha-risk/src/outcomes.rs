@@ -1541,6 +1541,7 @@ mod tests {
             subnet_id_next: hex32('b'),
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: event_id.to_string(),
             network_risk: 0,
             now_ms,

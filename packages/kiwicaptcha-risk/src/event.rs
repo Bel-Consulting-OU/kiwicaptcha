@@ -172,6 +172,11 @@ pub struct RiskObservation {
     pub subnet_id_next: String,
     pub session_id: Option<[u8; 16]>,
     pub principal_id: Option<[u8; 16]>,
+    /// The keyed device pseudonym, or `None` when the request carries no
+    /// trusted-device cookie. Same 16-byte contract as the session
+    /// pseudonym, derived under the `dev` context (the PHP mirror names
+    /// the field `deviceId`).
+    pub device_id: Option<[u8; 16]>,
     /// Dedupe key: 16 random bytes in hex (32 chars) or the 64-hex
     /// HMAC-SHA256 of a normalized caller idempotency key — the same
     /// 32-or-64 lowercase-hex contract the PHP mirror's constructor
@@ -246,6 +251,7 @@ impl Default for RiskObservation {
             subnet_id_next: "0".repeat(32),
             session_id: None,
             principal_id: None,
+            device_id: None,
             event_id: "0".repeat(32),
             network_risk: 0,
             now_ms: 0,

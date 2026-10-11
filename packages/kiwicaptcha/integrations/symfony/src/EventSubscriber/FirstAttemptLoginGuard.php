@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\EventSubscriber;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
+use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\LoginDecisionGate;
+use BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
@@ -31,6 +33,14 @@ use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
  * (novel network, breached credential, scope pressure) can fire. The
  * feedback paths never reach that code.
  *
+ * The browser's continuity identities ride the same decision: the
+ * continuity cookie read and the trusted-device cookie read flow into
+ * the gate, so a returning browser on a rotated address is recognized.
+ * On an Allow the device value is staged on the request (the
+ * {@see DEVICE_MINT_ATTRIBUTE} attribute) and the response subscriber
+ * issues the cookie; a fresh mint on a StepUp is simply dropped, the
+ * step-up restore mints its own.
+ *
  * Client IP comes from the bundle's own {@see ClientIpResolver} so the
  * novelty decision follows the same trust rules as every other
  * component. An unexpected error fails closed to the pending token:
@@ -53,6 +63,9 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
      */
     private const PASSWORD_CREDENTIALS = 'Symfony\Component\Security\Http\Authenticator\Passport\Credentials\PasswordCredentials';
 
+    /** Request attribute carrying the device value to (re)issue as a cookie. */
+    public const DEVICE_MINT_ATTRIBUTE = '_kiwi_device_mint';
+
     public function __construct(
         private readonly LoginDecisionGate $gateway,
         private readonly RiskIdentityFactory $identityFactory,
@@ -61,6 +74,8 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         private readonly ?LoggerInterface $logger = null,
         private readonly bool $enabled = true,
         private readonly ?RequestStack $requestStack = null,
+        private readonly ?ContinuityCookie $continuity = null,
+        private readonly ?TrustedDeviceCookie $device = null,
     ) {
     }
 
@@ -111,7 +126,18 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
 
                 return;
             }
-            $decision = $this->gateway->loginDecision($this->scope, $ip, null, $principal, null);
+            // The browser's continuity identities ride the decision: the
+            // continuity cookie read and the trusted-device cookie read.
+            // Without them the gate would judge every login novel and
+            // continuity would never exist in production. When no device
+            // cookie was presented, a fresh value is minted before the
+            // call: a random mint carries no binding, so it cannot change
+            // the decision, and an Allow can bind it and re-issue the
+            // cookie in one pass.
+            $sessionCookie = $this->continuity?->read($request);
+            $presentedDevice = $this->device?->read($request);
+            $deviceValue = $presentedDevice ?? $this->device?->mint();
+            $decision = $this->gateway->loginDecision($this->scope, $ip, $sessionCookie, $principal, null, $deviceValue);
             if ($decision === null) {
                 $this->withhold($event, $token, 'no_decision');
 
@@ -124,6 +150,16 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
                     'action' => $decision->action->value,
                 ]);
                 $this->replaceToken($event, new StepUpPendingToken($token));
+
+                return;
+            }
+            // Allow: issue (or re-issue) the trusted-device cookie. The
+            // presented value re-issues verbatim so the Max-Age slides
+            // forward; the minted value issues for the first time. The
+            // engine's post-Allow binding records the device tag, so the
+            // tag's last-use and trust refresh with every Allow.
+            if ($deviceValue !== null) {
+                $request->attributes->set(self::DEVICE_MINT_ATTRIBUTE, $deviceValue);
             }
         } catch (\Throwable $e) {
             // Fail Closed: a gate error must never hand out a full

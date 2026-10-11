@@ -15,10 +15,11 @@ use Predis\Client;
  * the container.
  *
  * The hash key is `pnet:{kiwi:<ns>}:<principal_hex>`. Each tag
- * (`net:<hex>`, `asn:<decimal>`, `session:<hex>`, `device:<hex>`) is a
- * hash field whose value is the last-use ms (Redis TIME, never a client
- * clock). Trust is a `t:` prefixed mirror field, minted only on an Allow
- * or a completed step-up.
+ * (`net:<hex>`, `asn:<decimal|u4/prefix|u6/prefix>`, `session:<hex>`,
+ * `device:<hex>`) is a hash field whose value is the last-use ms (Redis
+ * TIME, never a client clock). The asn class carries a listed decimal
+ * and the unlisted-namespace buckets. Trust is a `t:` prefixed mirror
+ * field, minted only on an Allow or a completed step-up.
  *
  * Error contract: any Redis failure throws {@see RiskStoreException},
  * so the engine follows its existing fail-closed path. The store never
@@ -248,13 +249,17 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         if (preg_match('/^(net|session|device):[0-9a-f]{1,64}$/', $tag)) {
             return;
         }
-        if (preg_match('/^asn:[0-9]{1,10}$/', $tag)) {
+        // The ASN shapes: a canonical listed decimal, or the unlisted
+        // namespace buckets (u4/<decimal /16 prefix>, u6/<8 hex of the
+        // /32 prefix>). Without them an unlisted-ASN record is refused
+        // and the novelty gate fails open for exactly those networks.
+        if (preg_match('/^asn:(?:0|[1-9][0-9]{0,9}|u4\/(?:0|[1-9][0-9]{0,4})|u6\/[0-9a-f]{8})$/D', $tag)) {
             return;
         }
         // Bare hex: the engine's networkBucket() spelling (no prefix).
         if (preg_match('/^[0-9a-f]{2,68}$/', $tag)) {
             return;
         }
-        throw new \InvalidArgumentException('tag must match net|session|device:<hex>, asn:<decimal>, or bare hex');
+        throw new \InvalidArgumentException('tag must match net|session|device:<hex>, asn:<decimal|u4/prefix|u6/prefix>, or bare hex');
     }
 }

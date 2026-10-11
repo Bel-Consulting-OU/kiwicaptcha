@@ -25,9 +25,24 @@ pub const MIN_SECRET_BYTES: usize = kiwicaptcha::keys::MIN_MASTER_BYTES;
 pub const EXAMPLE_SECRET: &str = "change-me-32-bytes-of-random-entropy";
 
 /// Secrets that appear in published examples and must never guard a real
-/// deployment. Both are refused at startup unless
+/// deployment. Each exact value is refused at startup unless
 /// `KIWI_ALLOW_INSECURE_EXAMPLE_SECRET=1` is set (which prints a warning).
 pub const EXAMPLE_SECRETS: [&str; 2] = ["0123456789abcdef0123456789abcdef", EXAMPLE_SECRET];
+
+/// Secret prefixes that mark a placeholder: any secret starting with one
+/// is an example value by construction (every "change-me-*" string is a
+/// label an operator was meant to replace, never a credential). Refused
+/// exactly like the exact list above.
+pub const EXAMPLE_SECRET_PREFIXES: [&str; 1] = ["change-me-"];
+
+/// Whether a secret is a published example: an exact [`EXAMPLE_SECRETS`]
+/// entry or a value carrying an [`EXAMPLE_SECRET_PREFIXES`] prefix.
+pub fn is_example_secret(raw: &str) -> bool {
+    EXAMPLE_SECRETS.contains(&raw)
+        || EXAMPLE_SECRET_PREFIXES
+            .iter()
+            .any(|prefix| raw.starts_with(prefix))
+}
 
 /// The default listen address: loopback only.
 pub const DEFAULT_LISTEN: &str = "http://127.0.0.1:7371";
@@ -351,7 +366,7 @@ pub fn validate_secret(raw: &str, allow_insecure_example: bool) -> Result<(Strin
             raw.len()
         ));
     }
-    if EXAMPLE_SECRETS.contains(&raw) {
+    if is_example_secret(raw) {
         if !allow_insecure_example {
             return Err(
                 "the configured secret is a published example value and is refused; generate a real secret (openssl rand -base64 48) or set the environment variable KIWI_ALLOW_INSECURE_EXAMPLE_SECRET=1 to accept it for local development"
@@ -510,9 +525,16 @@ mod tests {
         assert!(validate_secret("short", false).is_err());
         assert!(validate_secret("0123456789abcdef0123456789abcdef", false).is_err());
         assert!(validate_secret(EXAMPLE_SECRET, false).is_err());
+        // The change-me prefix is refused for any suffix, not only the
+        // one documented example string.
+        assert!(validate_secret("change-me-for-the-demo-deployment", false).is_err());
         let (secret, warned) =
             validate_secret(EXAMPLE_SECRET, true).expect("the hatch accepts the example");
         assert_eq!(secret, EXAMPLE_SECRET);
+        assert!(warned);
+        let (secret, warned) = validate_secret("change-me-for-the-demo-deployment", true)
+            .expect("the hatch accepts a prefixed placeholder too");
+        assert_eq!(secret, "change-me-for-the-demo-deployment");
         assert!(warned);
         let strong = "a-locally-generated-secret-of-48-bytes!!";
         let (secret, warned) = validate_secret(strong, false).expect("a real secret passes");

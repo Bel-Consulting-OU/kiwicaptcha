@@ -150,7 +150,7 @@ final class FirstAttemptLoginGuardTest extends TestCase
             {
             }
 
-            public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null): ?RiskDecision
+            public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null): ?RiskDecision
             {
                 if ($this->throw) {
                     throw new \RuntimeException('redis down');

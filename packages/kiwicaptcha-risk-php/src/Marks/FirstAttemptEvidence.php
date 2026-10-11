@@ -21,6 +21,11 @@ namespace KiwiCaptcha\Risk\Marks;
  *   MarksEscalation::`SCOPE_PRESSURE`_FLOOR / `SCOPE_PRESSURE`_LEVEL, so
  *   every first-attempt login escalates, not only the attacked
  *   target's.
+ * - evidenceUnavailable: a trusted-history probe failed with a store
+ *   error, so no read can vouch for the login. Fail closed: the
+ *   request counts as novel under enforcement, while learn mode stays
+ *   on Allow; the decision carries the evidence-unavailable reason in
+ *   both modes.
  *
  * Rust mirror: marks::FirstAttemptEvidence.
  */
@@ -30,6 +35,7 @@ final class FirstAttemptEvidence
         public readonly bool $novelNetwork = false,
         public readonly bool $breachedCredential = false,
         public readonly bool $scopePressure = false,
+        public readonly bool $evidenceUnavailable = false,
     ) {
     }
 

@@ -10,7 +10,8 @@
 --
 -- KEYS[1] principal tag hash (key form kiwi:<ns>:pnet:{<principal_hex>}).
 -- ARGV[1] operation: 'seen', 'record', or 'has_trusted'.
--- ARGV[2] tag (net:<hex>, asn:<decimal>, session:<hex>, device:<hex>).
+-- ARGV[2] tag (net:<hex>, asn:<decimal|u4/prefix|u6/prefix>,
+--         session:<hex>, device:<hex>).
 -- ARGV[3] class_ttl_ms (record only).
 -- ARGV[4] class_cap (record only).
 -- ARGV[5] trust ('1' = mint trust on record, '' or absent = do not).
@@ -76,10 +77,15 @@ local function valid_tag(tag)
     if string.match(tag, '^device:[0-9a-f]+$') and #tag > 7 and #tag <= 71 then
         return true
     end
-    -- asn:<decimal 1-10>
-    if string.match(tag, '^asn:[0-9]+$') and #tag > 4 and #tag <= 14 then
-        return true
-    end
+    -- asn:<decimal 1-10> and the unlisted-namespace buckets:
+    -- asn:u4/<decimal /16 prefix>, asn:u6/<8 hex of the /32 prefix>.
+    -- A refused unlisted bucket fails tag validation and the novelty
+    -- gate then fails open for exactly those networks.
+    if string.match(tag, '^asn:[1-9]%d*$') and #tag <= 14 then return true end
+    if tag == 'asn:0' then return true end
+    if string.match(tag, '^asn:u4/[1-9]%d*$') and #tag <= 12 then return true end
+    if tag == 'asn:u4/0' then return true end
+    if string.match(tag, '^asn:u6/[0-9a-f]+$') and #tag == 15 then return true end
     -- bare hex: the engine's networkBucket() spelling (no prefix)
     if string.match(tag, '^[0-9a-f]+$') and #tag >= 2 and #tag <= 68 then
         return true
@@ -94,7 +100,7 @@ end
 
 local tag = ARGV[2]
 if not valid_tag(tag) then
-    return redis.error_reply('pnet: tag must match net|session|device:<hex> or asn:<decimal>')
+    return redis.error_reply('pnet: tag must match net|session|device:<hex> or asn:<decimal|u4/prefix|u6/prefix>')
 end
 
 local class = classify(tag)

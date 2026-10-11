@@ -369,6 +369,122 @@ fn first_attempt_valid_stuffing_gets_step_up_not_allow() {
     );
 }
 
+/// The store-outage fake: every trusted-history probe fails like a
+/// backend outage. Unit-only: proves the fail-closed evidence path
+/// without any Redis round trip.
+struct FailingNetworks;
+
+impl PrincipalNetworkTagStore for FailingNetworks {
+    fn principal_network_seen(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Err(RiskStoreError::BackendUnavailable(
+            "probe outage".to_string(),
+        ))
+    }
+
+    fn record_principal_network_tag(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<bool, RiskStoreError> {
+        Err(RiskStoreError::BackendUnavailable(
+            "record outage".to_string(),
+        ))
+    }
+
+    fn principal_has_trusted_network(
+        &self,
+        _principal_id: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Err(RiskStoreError::BackendUnavailable(
+            "trusted outage".to_string(),
+        ))
+    }
+}
+
+fn first_attempt_engine(
+    networks: Arc<dyn PrincipalNetworkTagStore>,
+    novelty: kiwicaptcha_risk::NoveltyEnforcement,
+) -> kiwicaptcha_risk::RiskEngine<SimStore, CidrNetworkClassifier> {
+    kiwicaptcha_risk::RiskEngine::new(
+        SimStore::default(),
+        CidrNetworkClassifier::from_entries(vec![]),
+        policy(),
+        RiskKeys::from_master(&[0x42; 32]),
+    )
+    .with_principal_networks(networks)
+    .with_novelty_enforcement(novelty)
+}
+
+fn login_ctx() -> RiskContext<'static> {
+    RiskContext::new(
+        1,
+        "198.51.100.23".parse().unwrap(),
+        None,
+        Some(&[0xf6u8; 16]),
+        RiskEventKind::AuthenticationSuccess,
+        NetworkFlags::default(),
+        ResourcePressure::default(),
+    )
+}
+
+/// Fail closed on an unreadable trusted history: a store error on any
+/// probe means no read can vouch for the login, so enforce mode treats
+/// the request as novel. The step-up carries the evidence-unavailable
+/// reason next to the novel-network one, and the degraded:evidence
+/// metric records the outage.
+#[test]
+fn store_failure_steps_up_with_the_evidence_unavailable_reason() {
+    let engine = first_attempt_engine(
+        Arc::new(FailingNetworks),
+        kiwicaptcha_risk::NoveltyEnforcement::Enforce,
+    );
+    let decision = engine
+        .reassess(login_ctx(), Some("outage-1".to_string()))
+        .expect("assess succeeds");
+    assert_eq!(
+        decision.action.as_str(),
+        "step_up",
+        "unreadable trusted history cannot vouch for the login: fail closed"
+    );
+    assert!(decision.has_reason(RiskReason::EvidenceUnavailable));
+    assert!(decision.has_reason(RiskReason::NovelNetwork));
+    let metrics = engine.metrics().snapshot();
+    let degraded = metrics
+        .iter()
+        .find(|(key, _)| key == "degraded:evidence")
+        .map(|(_, value)| *value)
+        .unwrap_or(0);
+    assert_eq!(
+        degraded, 1,
+        "the degraded:evidence metric counts the outage"
+    );
+}
+
+/// Learn mode never escalates on a store failure: the action stays the
+/// plain Allow while the decision still carries the evidence-
+/// unavailable reason (and never the enforcing novelty signal).
+#[test]
+fn store_failure_in_learn_mode_stays_allow_carrying_the_reason() {
+    let engine = first_attempt_engine(
+        Arc::new(FailingNetworks),
+        kiwicaptcha_risk::NoveltyEnforcement::Learn,
+    );
+    let decision = engine
+        .reassess(login_ctx(), Some("outage-learn".to_string()))
+        .expect("assess succeeds");
+    assert_eq!(
+        decision.action.as_str(),
+        "allow",
+        "learn mode records the evidence failure without escalating"
+    );
+    assert!(decision.has_reason(RiskReason::EvidenceUnavailable));
+    assert!(!decision.has_reason(RiskReason::NovelNetwork));
+}
+
 /// The in-memory principal first-seen network tag store (P0-1): SET NX
 /// per (principal, network-bucket) pair, plus the account-level trusted
 /// flag the novel-network gate also consults.

@@ -255,11 +255,17 @@ pub struct MarksRequest {
 /// - `scope_pressure`: the scope failure-ratio pressure is running at or
 ///   above [`SCOPE_PRESSURE_FLOOR`] / [`SCOPE_PRESSURE_LEVEL`], so every
 ///   first-attempt login escalates — not only the attacked target's.
+/// - `evidence_unavailable`: a trusted-history probe failed with a
+///   store error, so no read can vouch for the login. Fail closed: the
+///   request counts as novel under enforcement, while learn mode keeps
+///   the plain Allow; the decision carries the evidence-unavailable
+///   reason in both modes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FirstAttemptEvidence {
     pub novel_network: bool,
     pub breached_credential: bool,
     pub scope_pressure: bool,
+    pub evidence_unavailable: bool,
 }
 
 impl FirstAttemptEvidence {
@@ -468,6 +474,13 @@ pub fn apply(
         if view.first_attempt.scope_pressure {
             stage_reasons.push(RiskReason::GlobalAttack);
         }
+    }
+    // Unreadable trusted history is its own reason, independent of the
+    // step-up: enforcement escalates a novel verdict carrying it, learn
+    // mode keeps the plain Allow while still reporting why the evidence
+    // plane could not vouch for the login.
+    if view.first_attempt.evidence_unavailable {
+        stage_reasons.push(RiskReason::EvidenceUnavailable);
     }
 
     merge_stage_reasons(&mut decision, stage_reasons);
