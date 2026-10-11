@@ -7,22 +7,29 @@ pure-local: the signature check, the message authentication codes and
 your store adapter are the only inputs, and no call ever reaches a
 network service.
 
-The core is pure standard library. SHA-256, Argon2id (RFC 9106) and the
-optional RSW time-lock algorithm are implemented in-tree. `argon2-cffi`
-is a required dependency so a default install gets the full Argon ladder
-at native speed; the pure-stdlib Argon2id path remains as a last resort
-when the wheel is missing, and the verifier then answers
-`unsupported_argon2_params` (never a silent downgrade) for any rung that
-exceeds its tight pure-Python admission budget. The Redis store adapter
-is the one optional extra: it speaks RESP through a narrow client
-surface and runs the exact Lua transition scripts of the PHP adapter.
+The core is pure standard library. SHA-256 and the optional RSW
+time-lock algorithm are implemented in-tree, and Argon2id (RFC 9106)
+ships as the optional `[argon2]` extra: the `argon2-cffi` binding
+derives the 16-64 MiB rungs in milliseconds, while the in-tree pure
+implementation is retained only as the RFC-vector oracle and is never
+reachable for argon2id verification. Admission is explicit: without
+the binding, argon2id derivation refuses with an actionable error, and
+the default admission gate requires the native binding or an explicit
+sidecar URL at construction. The Redis store adapter is the other
+optional extra: it speaks RESP through a narrow client surface and
+runs the exact Lua transition scripts of the PHP adapter.
 
 ## Install
 
 ```
-pip install kiwicaptcha            # includes argon2-cffi (full Argon ladder)
+pip install "kiwicaptcha[argon2]"  # the native Argon2id binding (recommended)
 pip install "kiwicaptcha[redis]"   # add the Redis client for redis:// stores
 ```
+
+A bare `pip install kiwicaptcha` verifies SHA-256 and RSW records on
+the standard library alone. Argon2id records need the `[argon2]`
+extra, or a local kiwicaptcha-verifier sidecar passed as
+`argon_sidecar_url` (see the delegation section below).
 
 ## Quickstart
 
@@ -173,7 +180,19 @@ rollout-floor window.
 Two capability notes. An execution-armed record (the signed `e=`
 commitment) refuses deterministically with `execution_mismatch`: the
 browser-trace walker is a browser-behavior oracle this SDK does not
-carry, and an armed record must never pass without it. The pure-Python
-Argon2id is exact but slow; large memory rungs take minutes per
-derivation, so prefer an issuer that mints `standard` profiles for
-Python-verified deployments or budget for the latency.
+carry, and an armed record must never pass without it. The
+`ExecutionPolicy(sidecar_url=...)` option delegates exactly that
+dimension to a co-located kiwicaptcha-verifier sidecar, which runs the
+full Rust core and consumes the record.
+
+Argon2id runs on the `argon2-cffi` binding (the `[argon2]` extra): the
+in-tree pure implementation would cost seconds per 16-64 MiB rung, an
+amplification an armed record turns into a denial of service, so it is
+deliberately unreachable for verification. Without the binding,
+derivation raises an actionable error, and the default admission gate
+refuses at construction. A deployment that cannot install the binding
+builds its verifier with `argon_sidecar_url` pointing at a co-located
+kiwicaptcha-verifier sidecar; argon2id records then delegate to the
+sidecar's full-core pass over the same plane as the execution policy,
+with the sidecar consuming the record and the issuer guard refusing
+any argon rung the runtime cannot verify.

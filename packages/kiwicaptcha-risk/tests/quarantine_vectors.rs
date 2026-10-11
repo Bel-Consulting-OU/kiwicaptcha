@@ -326,6 +326,7 @@ fn engine_context<'a>() -> kiwicaptcha_risk::context::RiskContext<'a> {
         event: kiwicaptcha_risk::event::RiskEventKind::PreIssue,
         network_flags: Default::default(),
         resources: Default::default(),
+        target_fields: &[],
     }
 }
 

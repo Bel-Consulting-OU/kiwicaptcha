@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kiwicaptcha"
 version = "1.0.0"
-description = "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for Python. Zero third-party services or tracking; pure-stdlib verification (SHA-256, Argon2id and the optional RSW time-lock are all implemented in-tree)."
+description = "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for Python. Zero third-party services or tracking; the SHA-256 and RSW proofs verify on the stdlib alone, Argon2id through the native [argon2] extra (or a local verifier sidecar)."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Bel Consulting OU" }]
@@ -24,10 +24,15 @@ classifiers = [
     "Topic :: Security",
     "Topic :: Internet :: WWW/HTTP :: Session",
 ]
-dependencies = ["argon2-cffi>=23.1.0"]
+dependencies = []
 
 [project.optional-dependencies]
+argon2 = ["argon2-cffi>=23.1.0"]
 redis = ["redis>=4.2"]
+# The test suite constructs default verifiers, so the native binding
+# must be importable when it runs (the no-binding refusals are tested
+# through a simulated flag, not a missing install).
+test = ["argon2-cffi>=23.1.0"]
 
 [project.urls]
 Homepage = "https://kiwicaptcha.dev"

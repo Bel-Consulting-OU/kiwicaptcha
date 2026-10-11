@@ -26,6 +26,17 @@ final class RiskContext
          * value, the raw bytes never reach storage.
          */
         public readonly ?string $deviceId = null,
+        /**
+         * The request's submitted form field values keyed by field name:
+         * the input the engine's target resolver reads when a resolver is
+         * wired, so the assessment's target dimension (failure counter
+         * and spread) rides the decision path. Only the resolved HMAC
+         * pseudonym ever leaves the engine; the raw field values are
+         * never stored, logged or passed to the state backend.
+         *
+         * @var array<string, string>
+         */
+        public readonly array $targetFields = [],
     ) {
     }
 }

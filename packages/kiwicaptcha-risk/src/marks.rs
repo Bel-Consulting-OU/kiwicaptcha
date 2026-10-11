@@ -238,6 +238,12 @@ pub struct MarksRequest {
     /// The principal pseudonym (32 hex chars), or `None` when the request
     /// is unauthenticated.
     pub principal: Option<String>,
+    /// The request's resolved target pseudonym (32-byte hex HMAC), or
+    /// `None` when the assessment carries no target dimension. The
+    /// engine derives it beside the frozen observation wire when a
+    /// target resolver is wired; the reader reads the target dimension's
+    /// attacked-target record from the live failure state.
+    pub target: Option<String>,
 }
 
 /// The first-attempt prevention evidence (D3.5 P0-1): the signals that
@@ -361,7 +367,10 @@ impl MarksReader for StoreMarksReader {
         if let Some(dataset) = &self.asn {
             own.push((MarkDimension::Asn, dataset.bucket_id(request.source_ip)));
         }
-        MarksView::read(self.store.as_ref(), &own, None)
+        // The target dimension: the attacked-target record is compiled
+        // from the live failure state when no mark was written, so a
+        // stuffed target forces the interactive step-up (rule 3).
+        MarksView::read(self.store.as_ref(), &own, request.target.as_deref())
     }
 
     fn mark_ttl_ms(&self) -> u64 {
@@ -1056,6 +1065,7 @@ mod tests {
             source_ip: "192.0.2.10".parse().unwrap(),
             session: Some(SESSION.to_string()),
             principal: None,
+            target: None,
         };
         let view = reader.request_marks(&request).unwrap();
         // No dataset attached: the ASN dimension is absent, the agent is

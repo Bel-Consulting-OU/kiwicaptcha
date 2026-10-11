@@ -81,8 +81,9 @@ def check_settings(secret: str, profile: str) -> CheckResult:
             False,
             f"the profile {profile!r} issues an argon2id rung this"
             f" runtime cannot verify (backend"
-            f" {argon2_backend.backend_name()}); install argon2-cffi or"
-            " choose the standard profile",
+            f" {argon2_backend.backend_name()});"
+            f" {argon2_backend.BACKEND_REQUIRED_MESSAGE} Or choose the"
+            " standard profile",
         )
     return CheckResult("settings", True, "the settings shape is valid")
 
@@ -92,7 +93,13 @@ def check_store(store_url: str) -> CheckResult:
         storage = open_store(store_url)
     except Exception as exc:
         return CheckResult("store", False, f"the store did not open: {exc}")
-    config = VerifierConfig()
+    try:
+        config = VerifierConfig()
+    except ValueError as exc:
+        # The admission gate refused the boot: without the native
+        # binding or a sidecar URL the verifier has no argon2id path,
+        # and the deployment must hear that from the doctor.
+        return CheckResult("store", False, f"the verifier did not construct: {exc}")
     verifier = Verifier(storage, config)
     record = _self_check_record()
     try:
@@ -203,7 +210,10 @@ def check_proof_budget(profile: str) -> CheckResult:
             f" ({counter} iterations)",
         )
     start = time.perf_counter()
-    argon2id_derive(b"doctor", bytes(SALT_B64_BYTES), 3, 16, lanes=1, out_len=32)
+    try:
+        argon2id_derive(b"doctor", bytes(SALT_B64_BYTES), 3, 16, lanes=1, out_len=32)
+    except ValueError as exc:
+        return CheckResult("proof_budget", False, str(exc))
     elapsed = time.perf_counter() - start
     return CheckResult(
         "proof_budget",

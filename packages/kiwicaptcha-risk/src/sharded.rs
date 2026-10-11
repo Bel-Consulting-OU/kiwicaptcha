@@ -57,17 +57,18 @@
 //! | identity dimension apply | one state hash + its marker | one Lua script, one slot; the marker is `SET NX` inside the script, so a partial-batch retry cannot double-count |
 //! | scope shard increment | one shard hash + its marker | one Lua script, one slot, same marker rule |
 //! | nonce dedupe verdict | one marker key | one `SET NX EX`; single-slot and atomic |
-//! | level/cooldown transition | one hysteresis hash | one Lua script, one slot; concurrent assessments serialize on the hash |
-//! | first-seen session tags | one record key each | one `SET NX EX`; the lifetime rides the write |
-//! | outcome ledger register | one ledger key | one canonical script, `SET NX EX` |
+//! | level/cooldown transition | one hysteresis hash | one Lua script, one slot, run once per merge window inside the staleness refresh, never on the hot path |
+//! | first-seen session tags | one record key each | one `SET NX EX` on the session family; the lifetime rides the write |
+//! | target failure / spread | one hash + two HLLs | the canonical target script, one op on the target family slot; the assessment's read rides the batch, the failure write its second phase |
+//! | outcome ledger register | one ledger key | one canonical script, `SET NX EX`, on the decision-id family |
 //! | outcome confirm/correct | one ledger key | one canonical script; pending flips exactly once, corrections only after confirmation |
 //! | marks and bucket trust | one key each | one canonical script per op |
 //! | cross-dimension aggregation | client-side | reads of already-committed per-slot state; each dimension's own atomicity stays per-slot above |
 //!
 //! Single-use consume (the nonce marker, the ledger transitions, the
-//! first-seen tags) and the level chain stay single-slot on purpose: a
-//! wider batch would widen the atomicity boundary without adding
-//! throughput, because these transitions touch one key each.
+//! first-seen tags) stays single-slot on purpose: a wider batch would
+//! widen the atomicity boundary without adding throughput, because these
+//! transitions touch one key each.
 //!
 //! # Keyspace mode and the mixed-fleet rule
 //!
@@ -86,12 +87,15 @@
 //!
 //! # Auxiliary surfaces
 //!
-//! The outcome ledger, the long-memory marks, the bucket trust records
-//! and the first-seen session tag records are single-key scripts: their
-//! slot placement is irrelevant to throughput, so they keep the shared
-//! `{kiwi:<ns>}` tag in both modes and this store delegates them to an
-//! embedded [`RedisRiskStateStore`] aimed at the node that owns that
-//! tag. The assessment path is where the sharded layout lives.
+//! The long-memory marks and the bucket trust records are single-key
+//! scripts whose slot placement is irrelevant to throughput: they keep
+//! the shared `{kiwi:<ns>}` tag in both modes and this store delegates
+//! them to an embedded [`RedisRiskStateStore`] aimed at the node that
+//! owns that tag. The surfaces the hot path touches (the first-seen
+//! session tags, the outcome ledger, the target failure state) ride
+//! their own family slots and are addressed through the same routed
+//! dispatch as the assessment batch. The assessment path is where the
+//! sharded layout lives.
 
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, MutexGuard};
@@ -107,7 +111,7 @@ use crate::redis::{map_redis_error, value_i64, ConnectionPool, RedisRiskStateSto
 use crate::signals::SignalVector;
 use crate::store::{
     AssessV2Reply, Observed, OutcomeRegistration, RiskStateStore, RiskStoreError,
-    SessionContextTagStore, SessionTlsTagStore,
+    SessionContextTagStore, SessionTlsTagStore, TargetState,
 };
 use ::redis as redis_crate;
 
@@ -135,6 +139,11 @@ pub const OUTCOME_CONFIRM_LUA: &str = include_str!("../resources/outcome_confirm
 /// The canonical outcome-ledger correction script (shared verbatim with
 /// the legacy store): flip L <-> A after confirmation.
 pub const OUTCOME_CORRECT_LUA: &str = include_str!("../resources/outcome_correct.lua");
+
+/// The canonical target-dimension state script (shared verbatim with the
+/// legacy store): the target's leaky failure counter plus its source/asn
+/// spread HyperLogLogs, one op per call on the target family's own slot.
+pub const TARGET_FAILURE_LUA: &str = include_str!("../resources/target_failure.lua");
 
 /// The scope aggregate id the assessment path maintains: the
 /// deployment-wide aggregate. Per-scope ids may be addressed through the
@@ -177,6 +186,9 @@ pub struct ShardedOptions {
     pub outcome_ttl_secs: u64,
     /// Long-memory mark lifetime (seconds).
     pub mark_ttl_secs: u64,
+    /// Target-dimension retention (seconds): the failure counter and the
+    /// spread HyperLogLogs of one target.
+    pub target_ttl_secs: u64,
     /// Raw saturations in the legacy argv order.
     pub saturations: [u32; 11],
     /// Connection establishment timeout per endpoint (ms).
@@ -198,6 +210,7 @@ impl Default for ShardedOptions {
             principal_ttl_secs: 86_400,
             outcome_ttl_secs: crate::redis::DEFAULT_OUTCOME_TTL_SECS,
             mark_ttl_secs: crate::redis::DEFAULT_MARK_TTL_SECS,
+            target_ttl_secs: 86_400,
             saturations: crate::redis::DEFAULT_SATURATIONS,
             connection_timeout_ms: RedisRiskStateStore::CONNECTION_TIMEOUT_MS,
             command_timeout_ms: RedisRiskStateStore::COMMAND_TIMEOUT_MS,
@@ -278,6 +291,7 @@ pub struct ShardedRedisRiskStateStore {
     outcome_register_script: Arc<redis_crate::Script>,
     outcome_confirm_script: Arc<redis_crate::Script>,
     outcome_correct_script: Arc<redis_crate::Script>,
+    target_script: Arc<redis_crate::Script>,
     merge: MergeCache,
     merge_gate: MergeGate,
     last_global_level: AtomicU8,
@@ -327,6 +341,7 @@ impl ShardedRedisRiskStateStore {
             ("principal_ttl_secs", options.principal_ttl_secs),
             ("outcome_ttl_secs", options.outcome_ttl_secs),
             ("mark_ttl_secs", options.mark_ttl_secs),
+            ("target_ttl_secs", options.target_ttl_secs),
         ] {
             assert!(
                 (1..=crate::redis::MAX_TTL_SECS).contains(&value),
@@ -418,6 +433,7 @@ impl ShardedRedisRiskStateStore {
             outcome_register_script: Arc::new(redis_crate::Script::new(OUTCOME_REGISTER_LUA)),
             outcome_confirm_script: Arc::new(redis_crate::Script::new(OUTCOME_CONFIRM_LUA)),
             outcome_correct_script: Arc::new(redis_crate::Script::new(OUTCOME_CORRECT_LUA)),
+            target_script: Arc::new(redis_crate::Script::new(TARGET_FAILURE_LUA)),
             merge: MergeCache::empty(),
             merge_gate: MergeGate::default(),
             last_global_level: AtomicU8::new(0),
@@ -781,6 +797,32 @@ impl ShardedRedisRiskStateStore {
                 });
             }
         }
+
+        // The target dimension (target-account protection): a read-only
+        // invocation on the target family's own slot returns the
+        // leak-decayed failure count and the two spread cardinalities
+        // with the main batch's round trip. The failure write (an
+        // AuthenticationFailure observation) runs as the batch's second
+        // phase, once the nonce verdict is known — the canonical
+        // target_failure.lua owns the same state the outcome bridge
+        // writes, and the ledger score reacts to the returned counts.
+        let target_id = registration.and_then(|reg| reg.target_id.as_deref());
+        let target_id = target_id.filter(|id| !id.is_empty());
+        if let Some(target) = target_id {
+            let keys = crate::keyspace::target_state_keys(ns, target);
+            units.push(BatchUnit {
+                endpoint: self.endpoint_for_key(&keys[0]),
+                eval: target_evalsha(
+                    &self.target_script,
+                    &keys,
+                    "read",
+                    "",
+                    "",
+                    self.options.target_ttl_secs,
+                ),
+                script: Some(TARGET_FAILURE_LUA),
+            });
+        }
         let replies = self.dispatch(units)?;
         let mut it = replies.into_iter();
         let mut assessment = Assessment::decode(
@@ -793,6 +835,66 @@ impl ShardedRedisRiskStateStore {
             context_tag,
             tls_tag,
         )?;
+        // The target read's reply rides the main batch when a target is
+        // addressed: {fails, spread_sources, spread_asns, first_ms,
+        // last_ms} of the leak-decayed state.
+        let mut target_state: Option<TargetCounts> = if target_id.is_some() {
+            let reply = it
+                .next()
+                .ok_or_else(|| RiskStoreError::ScriptError("missing target reply".to_string()))?;
+            let channels = decode_channels(&reply, 5, "target state")?;
+            Some(TargetCounts {
+                fails: channels[0].max(0) as u32,
+                spread_sources: channels[1].max(0) as u32,
+                spread_asns: channels[2].max(0) as u32,
+            })
+        } else {
+            None
+        };
+        // The failure write: an AuthenticationFailure observation against
+        // the target records one failure (leaky counter + spread PFADDs)
+        // unless the event id is a duplicate — the same rule the
+        // consolidated legacy script applies inside its atomic block.
+        if let Some(target) = target_id {
+            let records_failure = o.event.as_u8() == 11 && !assessment.is_duplicate;
+            let (op, source_element, asn_element) = match registration {
+                Some(reg) if records_failure => (
+                    "fail",
+                    reg.target_source_element.as_str(),
+                    reg.target_asn_element.as_str(),
+                ),
+                _ => ("read", "", ""),
+            };
+            if records_failure {
+                let keys = crate::keyspace::target_state_keys(ns, target);
+                let mut eval = redis_crate::cmd("EVALSHA");
+                eval.arg(self.target_script.get_hash())
+                    .arg(3)
+                    .arg(&keys[0])
+                    .arg(&keys[1])
+                    .arg(&keys[2])
+                    .arg(op)
+                    .arg(source_element)
+                    .arg(asn_element)
+                    .arg(self.options.target_ttl_secs);
+                let replies = self.dispatch(vec![BatchUnit {
+                    endpoint: self.endpoint_for_key(&keys[0]),
+                    eval,
+                    script: Some(TARGET_FAILURE_LUA),
+                }])?;
+                let channels = decode_channels(&replies[0], 5, "target failure")?;
+                target_state = Some(TargetCounts {
+                    fails: channels[0].max(0) as u32,
+                    spread_sources: channels[1].max(0) as u32,
+                    spread_asns: channels[2].max(0) as u32,
+                });
+            }
+        }
+        if let Some(counts) = target_state {
+            assessment.target_failures = counts.fails;
+            assessment.target_spread_sources = counts.spread_sources;
+            assessment.target_spread_asns = counts.spread_asns;
+        }
         self.record_shard_sum(shard, assessment.shard_sum);
         assessment.global_level = self.last_global_level();
         assessment.cooldown_until_ms = self.last_cooldown_until_ms();
@@ -828,6 +930,46 @@ impl ShardedRedisRiskStateStore {
         }
 
         Ok(assessment)
+    }
+
+    /// One canonical target_failure.lua op on the target family's own
+    /// slot (the read the consolidated assessment reuses): op is one of
+    /// `fail`, `clear`, `read`, with the source/asn spread elements
+    /// PFADDed on the fail path.
+    fn run_target_op(
+        &self,
+        op: &str,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        if !RedisRiskStateStore::valid_key_component(target_id) {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "target_id is not a safe Redis key component (got 0x{})",
+                hex::encode(target_id)
+            )));
+        }
+        let keys = crate::keyspace::target_state_keys(&self.encoded_namespace, target_id);
+        let replies = self.dispatch(vec![BatchUnit {
+            endpoint: self.endpoint_for_key(&keys[0]),
+            eval: target_evalsha(
+                &self.target_script,
+                &keys,
+                op,
+                source,
+                asn,
+                self.options.target_ttl_secs,
+            ),
+            script: Some(TARGET_FAILURE_LUA),
+        }])?;
+        let channels = decode_channels(&replies[0], 5, "target state")?;
+        Ok(TargetState {
+            fails: channels[0].clamp(0, i64::from(u32::MAX)) as u32,
+            spread_sources: channels[1].clamp(0, i64::from(u32::MAX)) as u32,
+            spread_asns: channels[2].clamp(0, i64::from(u32::MAX)) as u32,
+            first_ms: channels[3],
+            last_ms: channels[4],
+        })
     }
 
     /// Dispatches one pipelined batch: the units are grouped by
@@ -1012,6 +1154,40 @@ fn scope_evalsha(
     eval
 }
 
+/// The decoded target-dimension counts of one assessment: the
+/// leak-decayed failure count plus the two separate spread
+/// cardinalities (sources and ASNs, never summed).
+#[derive(Debug, Clone, Copy, Default)]
+struct TargetCounts {
+    fails: u32,
+    spread_sources: u32,
+    spread_asns: u32,
+}
+
+/// Builds the target-dimension `EVALSHA` invocation (the
+/// target_failure.lua contract): three family keys, then op, the two
+/// spread elements and the state TTL.
+fn target_evalsha(
+    script: &redis_crate::Script,
+    keys: &[String; 3],
+    op: &str,
+    source_element: &str,
+    asn_element: &str,
+    target_ttl_secs: u64,
+) -> redis_crate::Cmd {
+    let mut eval = redis_crate::cmd("EVALSHA");
+    eval.arg(script.get_hash())
+        .arg(3)
+        .arg(&keys[0])
+        .arg(&keys[1])
+        .arg(&keys[2])
+        .arg(op)
+        .arg(source_element)
+        .arg(asn_element)
+        .arg(target_ttl_secs);
+    eval
+}
+
 /// The assembled result of one sharded assessment.
 struct Assessment {
     vector: SignalVector,
@@ -1174,9 +1350,10 @@ impl Assessment {
             existing_context_tag,
             existing_tls_tag,
             registration_status: false,
-            // Target state rides a separate key family; the sharded
-            // batch does not carry those slots. The engine reads the
-            // live TargetState on the marks/score path instead.
+            // The target dimension's decoded counts: the read-only
+            // target_failure.lua invocation rides the main batch (its
+            // own family slot) and a failure observation re-reads the
+            // state after the atomic fail op.
             target_failures: 0,
             target_spread_sources: 0,
             target_spread_asns: 0,
@@ -1232,6 +1409,23 @@ fn ledger_score(
         registration.v2_weights.session_inconsistency,
     );
     risk += weighted(tls_inconsistency, registration.v2_weights.tls);
+    // Target-account pressure and spread: five failures or twenty
+    // distinct sources saturate at 1000, matching the engine's target
+    // helpers and the consolidated legacy script. The scored spread is
+    // the wider of the two dimensions (never the sum: sources+asns
+    // would double-count one campaign's growth).
+    risk += weighted(
+        crate::target_pressure_signal(assessment.target_failures),
+        registration.v2_weights.target_failure_pressure,
+    );
+    risk += weighted(
+        crate::target_spread_signal(
+            assessment
+                .target_spread_sources
+                .max(assessment.target_spread_asns),
+        ),
+        registration.v2_weights.target_spread,
+    );
     risk.min(1000) as u16
 }
 
@@ -1267,6 +1461,56 @@ fn normalize(value: i64, saturation: u32) -> u16 {
         return 0;
     }
     (value * 1000 / i64::from(saturation)).clamp(0, 1000) as u16
+}
+
+/// The outcomes plane's marks surface over the sharded store: the marks
+/// keys are mode-insensitive (the shared `{kiwi:<ns>}` tag), the live
+/// target-dimension state rides the target family's own slot through the
+/// sharded dispatch. This is what lets the typed outcomes facade and the
+/// marks stage serve a sharded deployment without an extra store.
+impl crate::outcomes::OutcomeMarksStore for ShardedRedisRiskStateStore {
+    fn mark_key(&self, dimension: &str, id: &str) -> Result<String, crate::RiskError> {
+        self.legacy
+            .mark_key(dimension, id)
+            .map_err(|e| crate::RiskError::Store(e.to_string()))
+    }
+
+    fn write_mark(
+        &self,
+        dimension: &str,
+        id: &str,
+        kind: &str,
+        now_ms: u64,
+        event_id: &str,
+    ) -> Result<i64, crate::RiskError> {
+        self.legacy
+            .write_mark(dimension, id, kind, now_ms, event_id)
+            .map_err(|e| crate::RiskError::Store(e.to_string()))
+    }
+
+    fn read_mark(
+        &self,
+        dimension: &str,
+        id: &str,
+    ) -> Result<Option<crate::outcomes::MarkRecord>, crate::RiskError> {
+        self.legacy
+            .read_mark(dimension, id)
+            .map_err(|e| crate::RiskError::Store(e.to_string()))
+    }
+
+    fn forget_marks(&self, dimension: &str, id: &str) -> Result<u32, crate::RiskError> {
+        self.legacy
+            .forget_marks(dimension, id)
+            .map_err(|e| crate::RiskError::Store(e.to_string()))
+    }
+
+    fn read_target_state(
+        &self,
+        target_id: &str,
+    ) -> Result<crate::store::TargetState, crate::RiskError> {
+        RiskStateStore::read_target_state(self, target_id)
+            .map_err(|e| crate::RiskError::Store(e.to_string()))
+    }
 }
 
 /// The endpoint index owning a slot: the real topology range when
@@ -1502,6 +1746,28 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
 
     fn last_cooldown_until_ms(&self) -> u64 {
         ShardedRedisRiskStateStore::last_cooldown_until_ms(self)
+    }
+
+    /// The canonical target_failure.lua ops, routed to the target
+    /// family's own slot (never the shared namespace tag): the
+    /// outcome-bridge write path of target-account protection in the
+    /// sharded layout.
+    fn register_target_failure(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        self.run_target_op("fail", target_id, source, asn)
+    }
+
+    fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
+        self.run_target_op("clear", target_id, "", "")?;
+        Ok(())
+    }
+
+    fn read_target_state(&self, target_id: &str) -> Result<TargetState, RiskStoreError> {
+        self.run_target_op("read", target_id, "", "")
     }
 }
 

@@ -100,6 +100,16 @@ pub struct OutcomeRegistration {
     /// target failure counter and spread HLLs and reports them back so
     /// the score can react.
     pub target_id: Option<String>,
+    /// The failing request's source-spread HyperLogLog element (the
+    /// engine's keyed HMAC element, see
+    /// [`crate::RiskEngine::target_spread_elements`]): PFADDed to the
+    /// target's source spread when the assessment itself records a
+    /// failure (an AuthenticationFailure observation). Empty = no
+    /// element.
+    pub target_source_element: String,
+    /// The failing request's ASN-spread HyperLogLog element. Empty = no
+    /// element. The two spreads are kept separate and never summed.
+    pub target_asn_element: String,
 }
 
 /// The full reply of one consolidated assessment.

@@ -25,6 +25,13 @@ pub struct RiskContext<'a> {
     pub event: RiskEventKind,
     pub network_flags: NetworkFlags,
     pub resources: ResourcePressure,
+    /// The request's submitted form field values, empty by default: the
+    /// input the target resolver reads to resolve the assessment's
+    /// target dimension (target-account protection). Only the resolved
+    /// HMAC pseudonym ever leaves the engine; the raw field values are
+    /// never stored, logged or passed to the state backend. The PHP
+    /// mirror names the field `targetFields`.
+    pub target_fields: &'a [(&'a str, &'a str)],
 }
 
 impl<'a> RiskContext<'a> {
@@ -49,13 +56,25 @@ impl<'a> RiskContext<'a> {
             event,
             network_flags,
             resources,
+            target_fields: &[],
         }
     }
 
     /// Builder form carrying the raw trusted-device cookie bytes (the
     /// decoded 16 bytes of the 32-hex cookie value).
-    pub fn with_device_id(mut self, device_id: Option<&'a [u8]>) -> RiskContext<'a> {
+    pub fn with_device_id(mut self, device_id: Option<&'a [u8]>) -> Self {
         self.device_id = device_id;
+        self
+    }
+
+    /// Builder form carrying the request's submitted form field values:
+    /// the input the engine's target resolver reads when a resolver is
+    /// wired, so the assessment's target dimension (failure counter and
+    /// spread) rides the decision path. Pass the submitted fields of
+    /// the form being protected: the username field for a login scope,
+    /// the email field for a signup scope.
+    pub fn with_target_fields(mut self, target_fields: &'a [(&'a str, &'a str)]) -> Self {
+        self.target_fields = target_fields;
         self
     }
 }

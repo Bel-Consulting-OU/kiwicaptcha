@@ -195,9 +195,14 @@ pub struct OutcomeHandle {
 
 impl OutcomeHandle {
     fn new(dimension: HandleDimension, id: &str) -> Result<OutcomeHandle, RiskError> {
-        let rule = if matches!(
+        // The target dimension carries the engine's derived target
+        // pseudonym (the full 64-char HMAC hex), so its rule is wider
+        // than the 128-bit identity pseudonyms.
+        let rule = if dimension == HandleDimension::Target {
+            Self::is_target_pseudonym
+        } else if matches!(
             dimension,
-            HandleDimension::Principal | HandleDimension::Target | HandleDimension::Session
+            HandleDimension::Principal | HandleDimension::Session
         ) {
             Self::is_pseudonym
         } else {
@@ -251,6 +256,17 @@ impl OutcomeHandle {
     /// HMAC pseudonym byte shape shared by both cores.
     fn is_pseudonym(value: &str) -> bool {
         value.len() == 32
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// The target pseudonym rule: the engine's derived target pseudonym
+    /// (the full 64-char HMAC hex) or the 32-char form (legacy call
+    /// sites). Every other shape looks raw and is rejected before any
+    /// target key is built from it.
+    fn is_target_pseudonym(value: &str) -> bool {
+        (value.len() == 32 || value.len() == 64)
             && value
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))

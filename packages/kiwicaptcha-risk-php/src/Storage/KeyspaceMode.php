@@ -307,4 +307,26 @@ enum KeyspaceMode: string
     {
         return "mark:{kiwi:{$encodedNamespace}}:dd:{$eventId}";
     }
+
+    /**
+     * The target-dimension state family of one target pseudonym
+     * ({kiwi:<ns>:target:<hex2>}): the failure hash and the two spread
+     * HLLs live on the target id's own family slot in both modes. A
+     * stuffing storm never hammers the primary holding the rest of the
+     * risk state. Byte-identical with the Rust mirror
+     * `kiwicaptcha_risk::keyspace::target_state_keys`.
+     *
+     * @return array{0: string, 1: string, 2: string} the failure hash,
+     *         the source-spread HLL and the asn-spread HLL keys
+     */
+    public static function targetStateKeys(string $encodedNamespace, string $hexId): array
+    {
+        $tag = '{kiwi:' . $encodedNamespace . ':target:' . self::idPrefix($hexId) . '}';
+
+        return [
+            $tag . ':risk:tgt:' . $hexId,
+            $tag . ':risk:tgt:src:' . $hexId,
+            $tag . ':risk:tgt:asn:' . $hexId,
+        ];
+    }
 }

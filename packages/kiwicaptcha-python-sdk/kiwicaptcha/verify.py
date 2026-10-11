@@ -26,6 +26,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from . import argon2 as argon2_backend
+from .argon2 import BACKEND_REQUIRED_MESSAGE
 from .argon2 import derive as argon2id_derive
 from .canonical import (
     ServerStateMac,
@@ -193,38 +194,46 @@ class AdmissionGate:
 class ArgonAdmissionGate(AdmissionGate):
     """The shipped default: bounded concurrency plus a hard params budget.
 
-    Pure-Python derivation of a 16-64 MiB rung costs seconds of CPU per
-    request, so the default refuses any profile whose memory or time
-    cost leaves the configured budget before a slot is handed out
-    (``admits`` is False; the verifier answers
-    ``unsupported_argon2_params``, never a silent downgrade). With the
-    native binding the budget is the protocol's process ceiling; the
-    pure last-resort backend gets a deliberately tight budget whose
-    worst-case derivation stays under about a second. Exhaustion of the
-    bounded pool answers ``capacity_exceeded`` and the record stays
-    retryable.
-    """
+    The budget refuses any profile whose memory or time cost leaves the
+    configured envelope before a slot is handed out (``admits`` is
+    False; the verifier answers ``unsupported_argon2_params``, never a
+    silent downgrade). With the native binding the budget is the
+    protocol's process ceiling. Exhaustion of the bounded pool answers
+    ``capacity_exceeded`` and the record stays retryable.
 
-    #: Worst-case pure-Python admission budget (8 MiB, t=3): about a
-    #: second of interpreted block compression on commodity hardware.
-    PURE_MAX_MEMORY_KIB = 8_192
-    PURE_MAX_TIME = 3
+    Admission is explicit: the constructor requires the native binding
+    OR an explicit ``sidecar_url``. Without the binding an interpreted
+    derivation is seconds of CPU per 16-64 MiB rung, a per-request
+    amplification, so the default construction raises the actionable
+    :data:`BACKEND_REQUIRED_MESSAGE` instead of arming that path. A
+    gate built with a ``sidecar_url`` admits the protocol ceiling and
+    the verifier delegates argon2id derivations to that co-located
+    kiwicaptcha-verifier sidecar (the same plane the execution policy
+    uses, see ``kiwicaptcha.sidecar``).
+    """
 
     def __init__(
         self,
         max_concurrent: int = 2,
         max_memory_kib: Optional[int] = None,
         max_time_cost: Optional[int] = None,
+        sidecar_url: Optional[str] = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent must be at least 1")
+        if sidecar_url is not None and not sidecar_url.strip():
+            raise ValueError("sidecar_url must be a non-empty URL when set")
+        if not argon2_backend.native_available() and not (
+            sidecar_url and sidecar_url.strip()
+        ):
+            # The boot-time admission refusal: no binding and no
+            # delegation target means no argon2id verification, ever,
+            # and the deployment learns it at construction, not on a
+            # request.
+            raise ValueError(BACKEND_REQUIRED_MESSAGE)
         if max_memory_kib is None or max_time_cost is None:
-            if argon2_backend.native_available():
-                budget_memory = MAX_ARGON_MEMORY_KIB
-                budget_time = MAX_ARGON_TIME
-            else:
-                budget_memory = self.PURE_MAX_MEMORY_KIB
-                budget_time = self.PURE_MAX_TIME
+            budget_memory = MAX_ARGON_MEMORY_KIB
+            budget_time = MAX_ARGON_TIME
         else:
             budget_memory = max_memory_kib
             budget_time = max_time_cost
@@ -233,6 +242,7 @@ class ArgonAdmissionGate(AdmissionGate):
         self.max_concurrent = max_concurrent
         self.max_memory_kib = budget_memory
         self.max_time_cost = budget_time
+        self.sidecar_url = (sidecar_url or "").strip() or None
         self._slots = threading.Semaphore(max_concurrent)
 
     def admits(self, record: object) -> bool:
@@ -242,6 +252,14 @@ class ArgonAdmissionGate(AdmissionGate):
 
     def admits_params(self, m_kib: int, t_cost: int) -> bool:
         return m_kib <= self.max_memory_kib and t_cost <= self.max_time_cost
+
+    def sidecar_admitted(self) -> bool:
+        """True when this gate delegates derivations to a sidecar.
+
+        Only meaningful without the native binding: with the binding
+        the local native path answers and the URL stays inert.
+        """
+        return bool(self.sidecar_url) and not argon2_backend.native_available()
 
     def acquire(self) -> Optional[object]:
         if not self._slots.acquire(blocking=False):
@@ -269,7 +287,10 @@ class VerifierConfig:
 
     ``argon_gate`` admits argon2id derivations; ``None`` installs the
     shipped :class:`ArgonAdmissionGate` (a hard params budget plus
-    bounded concurrency — never an ungated derivation). ``now_provider``
+    bounded concurrency — never an ungated derivation). The default
+    gate requires the native argon2 binding or, when
+    ``argon_sidecar_url`` names a co-located verifier sidecar, admits
+    argon2id through that sidecar instead. ``now_provider``
     returns epoch seconds (float or int) and stands in
     for the wall clock in tests. ``secrets_by_kid`` maps positive integer
     kid values to secrets of at least 32 bytes; an empty map keeps the
@@ -293,7 +314,12 @@ class VerifierConfig:
         rsw_verification_keys: Optional[Dict[str, Dict[str, str]]] = None,
         allow_legacy_rsw_identity: bool = False,
         policy_version_floor: Optional[int] = None,
+        argon_sidecar_url: Optional[str] = None,
     ) -> None:
+        if argon_sidecar_url is not None and not argon_sidecar_url.strip():
+            raise ValueError(
+                "argon_sidecar_url must be a non-empty URL when set"
+            )
         secrets_by_kid = dict(secrets_by_kid or {})
         for kid, secret in secrets_by_kid.items():
             if (
@@ -319,7 +345,10 @@ class VerifierConfig:
             raise ValueError(
                 "tenant_id must be 1-64 characters of [A-Za-z0-9._:-] when set"
             )
-        self.argon_gate: AdmissionGate = argon_gate if argon_gate is not None else ArgonAdmissionGate()
+        self.argon_gate: AdmissionGate = argon_gate if argon_gate is not None else ArgonAdmissionGate(
+            sidecar_url=argon_sidecar_url
+        )
+        self.argon_sidecar_url = (argon_sidecar_url or "").strip() or None
         self.now_provider = now_provider
         self.accept_legacy_v1 = accept_legacy_v1
         self.region = region
@@ -434,6 +463,26 @@ class Verifier:
         if self.config.now_provider is not None:
             return self.config.now_provider()
         return time.time()
+
+    def _argon_sidecar_policy(
+        self, record: ChallengeRecord
+    ) -> Optional["ExecutionPolicy"]:
+        """The delegation policy for one argon2id record, or None.
+
+        Set only when the record is argon2id, the native binding is
+        absent, and the admission gate was constructed with a
+        ``sidecar_url``: exactly the state where the gate admitted the
+        rung on the sidecar's behalf. The bearer credential and timeout
+        ride the execution policy defaults; the sidecar is co-located
+        and trusted to the same standard as the verifier itself.
+        """
+        if record.algorithm != "argon2id":
+            return None
+        gate = self.config.argon_gate
+        url = getattr(gate, "sidecar_url", None)
+        if not url or not getattr(gate, "sidecar_admitted", lambda: False)():
+            return None
+        return ExecutionPolicy(sidecar_url=url)
 
     # ---- record validation ---------------------------------------------
 
@@ -1003,6 +1052,10 @@ class Verifier:
         # sidecar policy delegates the execution dimension after the
         # cheap phase proved everything the SDK checks locally.
         delegate_execution = delegation_enabled(peek, options.execution_policy)
+        # The argon2id delegation plane: a sidecar-admitted gate on a
+        # runtime without the native binding delegates the whole proof
+        # to the sidecar instead of deriving locally.
+        argon_delegate = self._argon_sidecar_policy(peek)
         failure = self.cheap_phase_check(
             peek,
             token.nonce,
@@ -1100,6 +1153,37 @@ class Verifier:
         )
         if gate_outcome is not None:
             return gate_outcome
+
+        if failure is None and argon_delegate is not None:
+            # The sidecar's full-core pass derives the argon2id rung
+            # this runtime cannot: it consumes the record (single-use
+            # semantics preserved, the shared store is the boundary)
+            # and its verdict maps onto the shared wire vocabulary. A
+            # known code maps onto the enum, an unknown one stays the
+            # deterministic deny (never widened into an acceptance).
+            ok, code = delegate_to_sidecar(
+                raw_token,
+                options.expected_scope,
+                options.client_ip,
+                argon_delegate,
+                enforce_telemetry=options.enforce_telemetry,
+                operation_identity=options.operation_identity,
+            )
+            if ok:
+                return VerifyOutcome.valid_outcome(
+                    nonce=token.nonce,
+                    request_binding=peek.request_binding,
+                    from_stored_result=False,
+                    solve_duration_ms=self.measurable_solve_duration_ms(
+                        peek, receipt_ns
+                    ),
+                    decoy_field=peek.decoy_field,
+                )
+            try:
+                mapped = VerifyError(code)
+            except ValueError:
+                mapped = VerifyError.EXECUTION_MISMATCH
+            return VerifyOutcome.invalid(mapped)
 
         if runtime is not None:
             if runtime.kind == ChallengeRuntimeStateKind.CANCELLED:

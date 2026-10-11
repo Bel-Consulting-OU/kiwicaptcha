@@ -160,6 +160,7 @@ fn context() -> RiskContext<'static> {
             argon_capacity: 1000,
             issuance_capacity: 1000,
         },
+        target_fields: &[],
     }
 }
 

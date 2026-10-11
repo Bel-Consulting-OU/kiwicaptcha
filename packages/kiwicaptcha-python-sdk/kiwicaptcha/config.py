@@ -61,11 +61,18 @@ def argon_rung_verifiable(m_kib: int, t_cost: int,
     """Whether this runtime can verify the argon2id rung (m_kib, t).
 
     The rung must sit in the protocol power-of-two profile space AND
-    inside this runtime's admission budget.
+    inside this runtime's admission budget. Without an explicit gate
+    the default gate answers; it requires the native binding or a
+    sidecar-admitted construction, so a runtime with neither simply
+    answers False (the caller refuses the rung loudly at configuration
+    time, never per request).
     """
     if not valid_argon_memory_kib(m_kib):
         return False
-    gate = gate if gate is not None else ArgonAdmissionGate()
+    if gate is None:
+        if not argon2_backend.native_available():
+            return False
+        gate = ArgonAdmissionGate()
     return gate.admits_params(m_kib, t_cost)
 
 
@@ -90,6 +97,7 @@ class Settings:
     expected_issuer: Optional[str] = None
     tenant_id: Optional[str] = None
     accept_legacy_v1: bool = False
+    argon_sidecar_url: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.secret, str) or len(self.secret) < MIN_SECRET_BYTES:
@@ -103,6 +111,10 @@ class Settings:
             )
         if not isinstance(self.scopes, tuple):
             self.scopes = tuple(self.scopes)
+        if self.argon_sidecar_url is not None and not self.argon_sidecar_url.strip():
+            raise ValueError(
+                "argon_sidecar_url must be a non-empty URL when set"
+            )
         rung = PROFILE_ARGON_PARAMS.get(self.profile)
         if rung is not None and not valid_argon_memory_kib(rung[0]):
             raise ValueError(
@@ -111,14 +123,17 @@ class Settings:
                 " (powers of two within 8..=65536 KiB): refused at"
                 " configuration time, never per request"
             )
-        if rung is not None and not argon_rung_verifiable(*rung):
+        sidecar_admitted = bool(
+            self.argon_sidecar_url and self.argon_sidecar_url.strip()
+        )
+        if rung is not None and not sidecar_admitted and not argon_rung_verifiable(*rung):
             raise ValueError(
                 f"profile {self.profile!r} issues an argon2id rung"
                 f" (m_kib={rung[0]}, t={rung[1]}) this runtime cannot"
                 " verify within its admission budget"
-                f" (backend {argon2_backend.backend_name()}); install"
-                " argon2-cffi for the native path or choose the"
-                " standard profile — the rung is never silently"
+                f" (backend {argon2_backend.backend_name()});"
+                f" {argon2_backend.BACKEND_REQUIRED_MESSAGE} Or choose"
+                " the standard profile — the rung is never silently"
                 " downgraded"
             )
 
@@ -131,6 +146,7 @@ class Settings:
             expected_issuer=self.expected_issuer,
             tenant_id=self.tenant_id,
             policy_version_floor=self.policy_version_floor,
+            argon_sidecar_url=self.argon_sidecar_url,
         )
         storage = open_store(self.store)
         return Verifier(storage, config)
