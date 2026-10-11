@@ -13,9 +13,12 @@
  * Offline determinism: without KIWI_RT_LOCAL_LLM_URL no model is
  * consulted and the candidate list is a pure function of the seed.
  * With it (operator-provided, private-range only, temperature 0,
- * pinned prompt), the adapter's completion may ADD candidates; its
- * text is never executed, it is parsed as candidate descriptions and
- * everything still passes through triage before it can gate.
+ * pinned prompt), the pinned prompt carries the recon surface map and
+ * the prior technique labels beside the seed, and the adapter's
+ * completion may ADD candidates; its text is never executed, it is
+ * parsed as candidate descriptions and everything still passes through
+ * triage before it can gate. The model widens attack diversity; the
+ * deterministic gate alone decides what counts.
  *
  * Budget knobs: KIWI_RT_SYNTH_COUNT (default 24 candidates),
  * KIWI_RT_SEED (default 0x6b776d74).
@@ -132,12 +135,47 @@ for (let i = 0; i < count; i++) {
     });
 }
 
+// The run history: the ledger documents the engine already carries.
+// Read before the model consult so the prompt can carry the prior
+// technique labels, and reused for the novelty ordering below.
+const runsDir = join(ENGINE_DIR, "runs");
+const runHistory = existsSync(runsDir)
+    ? readdirSync(runsDir)
+        .filter((name) => name.endsWith(".json") && !name.startsWith("triage"))
+        .map((name) => {
+            try { return JSON.parse(readFileSync(join(runsDir, name), "utf8")); } catch { return null; }
+        })
+        .filter((doc) => doc !== null)
+    : [];
+
+// The prior technique labels (change.md 10.2): every class the grammar
+// knows, every class in an earlier corpus, and every campaign slot the
+// ledger recorded. With a configured model the list rides in the
+// pinned prompt as the lineages to combine with or move beyond;
+// offline the same list feeds the escalation combine and the corpus
+// ordering. Either way the corpus stays a pure function of the seed.
+const priorLabels = new Set(CLASSES);
+for (const doc of runHistory) {
+    if (typeof doc.campaign === "string" && doc.campaign) priorLabels.add(doc.campaign);
+    if (Array.isArray(doc.candidates)) {
+        for (const c of doc.candidates) {
+            if (c && typeof c.class === "string" && c.class) priorLabels.add(c.class);
+        }
+    }
+}
+for (const c of candidates) {
+    if (typeof c.class === "string" && c.class) priorLabels.add(c.class);
+}
+
 // The local-model adapter: consulted only when an operator points the
-// engine at their own runtime; candidates parsed from its text are
-// marked with their source and still go through triage.
+// engine at their own runtime; the prompt carries the recon surface
+// map and the prior technique labels, and candidates parsed from its
+// text are marked with their source and still go through triage. No
+// model is contacted when KIWI_RT_LOCAL_LLM_URL is unset, so the
+// offline corpus is the seeded grammar alone (fully deterministic).
 let modelNote = "offline mode: no local model consulted";
 try {
-    const completion = await optionalCompletion({ seed });
+    const completion = await optionalCompletion({ seed, surface, priorLabels: [...priorLabels] });
     if (completion.consulted) {
         const lines = completion.text.split("\n").filter((line) => line.startsWith("CANDIDATE:"));
         for (const [index, line] of lines.entries()) {
@@ -162,15 +200,6 @@ try {
 // The novelty ordering: with a configured model its completion feeds
 // the scores; in CI mode the documented no-op scorer orders the corpus
 // deterministically from the surface map and the runs ledger.
-const runsDir = join(ENGINE_DIR, "runs");
-const runHistory = existsSync(runsDir)
-    ? readdirSync(runsDir)
-        .filter((name) => name.endsWith(".json") && !name.startsWith("triage"))
-        .map((name) => {
-            try { return JSON.parse(readFileSync(join(runsDir, name), "utf8")); } catch { return null; }
-        })
-        .filter((doc) => doc !== null)
-    : [];
 for (const candidate of candidates) {
     const novelty = scoreNovelty({ candidate, surface, runHistory });
     candidate.novelty = novelty.score;

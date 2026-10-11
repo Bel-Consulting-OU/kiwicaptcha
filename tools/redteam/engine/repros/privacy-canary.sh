@@ -16,7 +16,9 @@ canary = os.environ["KIWI_RT_CANARY"]
 binding = canary + "-binding"
 doc = rt.challenge(base, "login", binding=binding)
 if doc.status != 200:
-    print(json.dumps({"code": "issue_failed", "leaked": 1}))
+    # A failed issue is no measurement: leaked stays 0 and the
+    # verdict below is INCONCLUSIVE, never a quiet REPRODUCED.
+    print(json.dumps({"code": "issue_failed", "leaked": 0}))
     raise SystemExit
 counter = rt.pow_solve(doc.body)
 token = rt.mint_token(str(doc.body["nonce"]), counter)
@@ -36,5 +38,11 @@ PY
 printf "%s" "$OUT" | python3 -c "
 import json, sys
 doc = json.load(sys.stdin)
-print(json.dumps({\"harness\": \"privacy-canary\", \"verdict\": \"REPRODUCED\" if doc[\"leaked\"] else \"REFUTED\", \"wire_code\": doc[\"code\"]}))
+if doc.get('code') == 'issue_failed':
+    verdict = 'INCONCLUSIVE'
+elif doc['leaked']:
+    verdict = 'REPRODUCED'
+else:
+    verdict = 'REFUTED'
+print(json.dumps({\"harness\": \"privacy-canary\", \"verdict\": verdict, \"wire_code\": doc[\"code\"]}))
 "

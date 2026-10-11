@@ -47,7 +47,10 @@ pub enum KeyspaceMode {
     /// The historical single-tag layout (the default store mode).
     Legacy,
     /// The horizontally scalable per-family layout; the recommended mode
-    /// for new namespaces.
+    /// for new namespaces. Each family and each scope shard carries its
+    /// own hash tag, so assessment writes disperse over cluster slots
+    /// and throughput scales with the shard count instead of serializing
+    /// on the shared namespace tag.
     Sharded,
 }
 

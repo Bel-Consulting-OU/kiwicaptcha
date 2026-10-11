@@ -277,16 +277,53 @@ export async function complete({ url, kind, model, prompt, seed, lookup, timeout
 }
 
 /**
+ * The compact deterministic rendering of the recon surface map the
+ * synthesis prompt carries. Pure function of the map, so a model run
+ * stays reproducible for a fixed map.
+ */
+export function summarizeSurface(surface) {
+    const endpoints = Array.isArray(surface?.endpoints) ? surface.endpoints : [];
+    if (endpoints.length === 0) {
+        return "the recon surface map has no endpoints recorded for this cycle";
+    }
+    return endpoints
+        .map((e) => {
+            const methods = Array.isArray(e.methods) ? e.methods.join(",") : "?";
+            const notes = e.notes ? ` — ${e.notes}` : "";
+            return `${e.surface ?? "?"} ${e.route ?? "?"} [${methods}]${notes}`;
+        })
+        .join("\n");
+}
+
+/**
+ * The prior technique labels (the classes and campaigns the ledger and
+ * earlier corpora already carry), deduplicated and sorted so the
+ * prompt is stable for a fixed history.
+ */
+export function summarizeLabels(labels) {
+    const clean = [...new Set((labels ?? []).map((l) => String(l).trim()).filter(Boolean))].sort();
+    return clean.length > 0 ? clean.join("\n") : "none recorded yet";
+}
+
+/**
  * The offline gate the orchestrator uses: without an explicitly
  * configured local runtime the adapter is a no-op that reports why.
+ * When configured, the pinned prompt carries the run seed and, when
+ * the caller passes them, the recon surface map and the prior
+ * technique labels: the mutation-seed context that lets the model
+ * propose candidates beyond the deterministic grammar's cross product.
  */
-export async function optionalCompletion({ seed }) {
+export async function optionalCompletion({ seed, surface = null, priorLabels = [] }) {
     const url = process.env.KIWI_RT_LOCAL_LLM_URL;
     if (!url) return { consulted: false, reason: "offline mode: KIWI_RT_LOCAL_LLM_URL not set" };
     const kind = process.env.KIWI_RT_LOCAL_LLM_KIND ?? "openai";
     const model = process.env.KIWI_RT_LOCAL_LLM_MODEL ?? "local";
     const promptName = process.env.KIWI_RT_LOCAL_LLM_PROMPT ?? "synth.prompt.md";
-    const prompt = pinnedPrompt(promptName, { seed: seed.toString(16) });
+    const prompt = pinnedPrompt(promptName, {
+        seed: seed.toString(16),
+        surfaceMap: summarizeSurface(surface),
+        priorLabels: summarizeLabels(priorLabels),
+    });
     const text = await complete({ url, kind, model, prompt, seed });
     return { consulted: true, text };
 }

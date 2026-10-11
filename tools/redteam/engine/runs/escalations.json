@@ -64,6 +64,70 @@
         "redRuns": 0,
         "campaignsInLedger": 17
       }
+    },
+    {
+      "run": 5,
+      "decidedAt": "2026-10-11T07:53:50Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "clock-skew",
+        "replay"
+      ],
+      "priorSynthCount": 60,
+      "raisedSynthCount": 75,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
+    },
+    {
+      "run": 6,
+      "decidedAt": "2026-10-11T07:57:59Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "scope-confusable",
+        "wire-differential"
+      ],
+      "priorSynthCount": 75,
+      "raisedSynthCount": 94,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
+    },
+    {
+      "run": 7,
+      "decidedAt": "2026-10-11T08:01:08Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "clock-skew",
+        "epoch-manipulation"
+      ],
+      "priorSynthCount": 94,
+      "raisedSynthCount": 118,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
+    },
+    {
+      "run": 8,
+      "decidedAt": "2026-10-11T08:04:07Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "clock-skew",
+        "scope-confusable"
+      ],
+      "priorSynthCount": 118,
+      "raisedSynthCount": 148,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
     }
   ]
 }

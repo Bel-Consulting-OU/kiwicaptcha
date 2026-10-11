@@ -87,13 +87,36 @@ at all (the deployment's budget-0 setting is the limiter off switch).
     tools/redteam/engine/orchestrator.sh            # full run
     tools/redteam/engine/orchestrator.sh --synth    # with synthesis and triage
     tools/redteam/engine/orchestrator.sh --regression
+    tools/redteam/engine/orchestrator.sh --mode hybrid
     tools/redteam/exit-criteria.sh                  # the release gate
 
 Knobs: `KIWI_RT_SEED` (ledger and synthesis pin), `KIWI_RT_SCALE`
 (environment downscale multiplier), `KIWI_RT_PROFILE` (target),
 `KIWI_RT_BUDGET_MINUTES` and `KIWI_RT_CAMPAIGN_TIMEOUT` (budget),
-`KIWI_RT_CAMPAIGNS` (subset). Campaigns state their downscale openly;
+`KIWI_RT_CAMPAIGNS` (subset), `KIWI_RT_HYBRID_SYNTH_COUNT` (candidates
+per hybrid cycle, default 8). Campaigns state their downscale openly;
 the default battery is a laptop-scale envelope of the 9.3 volumes.
+
+### Modes
+
+`fixed` (the default) is the documented battery: one up-front
+synthesis cycle when `--synth`, `KIWI_RT_SYNTH=1` or an escalation
+asks for it. `hybrid` keeps that battery unchanged and adds one
+synthesis cycle after every campaign: `synth.mjs` generates a fresh
+candidate corpus with the seeded LCG grammar under a per-campaign
+derived seed (the same run seed and campaign name always produce the
+same corpus), `triage.mjs` consumes it through the two-run hash gate,
+and any surviving finding is committed as a reproducible test under
+`tools/redteam/findings/` by triage itself. Per-cycle corpora and
+reports land beside the canonical ones
+(`engine/candidates-<hex>.json`, `engine/runs/triage-<hex>.json`).
+
+Model honesty: the engine runs deterministically without a model.
+When `KIWI_RT_LOCAL_LLM_URL` is set, the synthesis prompt also carries
+the recon surface map and the prior technique labels, and the model's
+parsed candidate lines join the corpus beside the grammar's, which
+improves attack diversity. It never gates correctness: only the
+deterministic two-run triage gate decides what becomes a finding.
 
 Every campaign reserves its own loopback ports; the auxiliaries live
 in the 6470-6479 band (the campaign headers carry the exact map) and
@@ -114,8 +137,8 @@ adapter (engine/model-adapter.mjs) speaks four shapes:
 
 `KIWI_RT_LOCAL_LLM_MODEL` names the local model where the runtime
 needs one. Temperature is pinned to 0 and the seed to the run seed;
-the prompt is the pinned file under engine/prompts/ with the seed
-substituted.
+the prompt is the pinned file under engine/prompts/ with the seed,
+the recon surface map and the prior technique labels substituted.
 
 Guardrails (enforced in code, not policy):
 

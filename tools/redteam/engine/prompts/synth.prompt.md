@@ -26,3 +26,10 @@ Rules:
   inputs must produce identical candidates.
 
 Run seed (hex): {{seed}}
+
+Attack surface to aim at (from recon; surface, route, methods, notes):
+{{surfaceMap}}
+
+Prior technique labels the ledger and earlier corpora already carry
+(combine two of them, or propose a lineage around them):
+{{priorLabels}}
