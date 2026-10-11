@@ -53,6 +53,8 @@ public final class Outcomes {
     public static final int CHANNEL_AUTHENTICATION_FAILURE = 11;
     public static final int CHANNEL_PROTECTED_ACTION_FAILURE = 9;
     public static final int CHANNEL_CONFIRMED_ABUSE = 13;
+    /** The dedicated step-up completion event (22), NOT 18 (the honeypot kind). */
+    public static final int CHANNEL_STEP_UP_COMPLETED = 22;
 
     /** The subject-address dimensions. */
     public enum HandleDimension {
@@ -218,7 +220,7 @@ public final class Outcomes {
             Outcome.CONFIRMED_LEGITIMATE, new OutcomeMapping(Outcome.CONFIRMED_LEGITIMATE,
                     CHANNEL_CONFIRMED_LEGITIMATE, true, false, true, true, HANDLE_DIMENSION_ORDER),
             Outcome.STEP_UP_COMPLETED, new OutcomeMapping(Outcome.STEP_UP_COMPLETED,
-                    CHANNEL_PROTECTED_ACTION_SUCCESS, null, false, true, true, IDENTITY_DIMENSIONS),
+                    CHANNEL_STEP_UP_COMPLETED, null, false, true, true, IDENTITY_DIMENSIONS),
             Outcome.AUTHENTICATION_SUCCESS, new OutcomeMapping(Outcome.AUTHENTICATION_SUCCESS,
                     CHANNEL_AUTHENTICATION_SUCCESS, null, false, true, true, IDENTITY_DIMENSIONS),
             Outcome.AUTHENTICATION_FAILURE, new OutcomeMapping(Outcome.AUTHENTICATION_FAILURE,

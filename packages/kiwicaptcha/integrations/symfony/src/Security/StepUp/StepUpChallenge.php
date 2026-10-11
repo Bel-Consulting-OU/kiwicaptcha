@@ -14,10 +14,26 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
  * code (never the code itself), so a store snapshot leaks no second
  * factor. Records carry only pseudonyms: the raw identifier of the
  * principal or target never reaches this object or its wire form.
+ *
+ * The demand binding (schema v2): an authorizing challenge names the
+ * {@see StepUpDemand} it answers in `demandId`, and its proof can only
+ * ever finalize that demand. Null is the pre-demand wire shape of the
+ * drain period and the shape of the explicitly non-authorizing
+ * ceremonies (the WebAuthn creation of enrollment/bootstrap, which
+ * books no completion effect and restores no login). A demandless
+ * record stores and verifies like any other, but it authorizes
+ * nothing: the demand plane's completion refuses a demandless proof,
+ * so demandless challenge completion can never invoke the
+ * finalization, restore a pending login or authorize the original
+ * action. Records of the earlier wire shape (version 1, no demand
+ * binding at all) are refused during the drain period. The refusal is
+ * bounded by the challenge TTL, and an upgrade must fail closed,
+ * never verify against a record the new schema cannot fully
+ * interpret.
  */
 final class StepUpChallenge
 {
-    private const SCHEMA_VERSION = 1;
+    private const SCHEMA_VERSION = 2;
 
     /**
      * The plaintext of the client secret minted for a stateless begin.
@@ -70,6 +86,14 @@ final class StepUpChallenge
          * record can then never answer for an account.
          */
         public readonly ?string $subjectPseudonym = null,
+        /**
+         * The demand the challenge answers: the id of the live
+         * {@see StepUpDemand} record the plane minted for this step-up.
+         * The proof of a consumed challenge finalizes exactly that
+         * demand; an unbound challenge finalizes nothing. Absent on the
+         * pre-demand wire shape (the decode derives null).
+         */
+        public readonly ?string $demandId = null,
     ) {
     }
 
@@ -84,6 +108,8 @@ final class StepUpChallenge
      * (stored as a hash, never the raw id). `$targetOwned` is the
      * caller's assertion that the principal owns the named target; only
      * then may completion clear the target's failure/lockout state.
+     * `$demandId` is the demand the challenge answers; the proof of the
+     * consumed challenge finalizes exactly that demand.
      */
     public static function begin(
         string $id,
@@ -102,6 +128,7 @@ final class StepUpChallenge
         bool $targetOwned = false,
         bool $bootstrapAuthorized = false,
         ?string $subjectPseudonym = null,
+        ?string $demandId = null,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up challenge TTL must be positive');
@@ -114,6 +141,12 @@ final class StepUpChallenge
         }
         if ($ceremony !== null && !\in_array($ceremony, ['creation', 'assertion'], true)) {
             throw new \InvalidArgumentException('A step-up challenge ceremony must be creation or assertion');
+        }
+        if ($demandId !== null && preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
+            throw new \InvalidArgumentException('A step-up challenge demand id must be the base64url id shape');
+        }
+        if ($demandId !== null && $ceremony === 'creation') {
+            throw new \InvalidArgumentException('An enrollment creation ceremony is explicitly non-authorizing and never binds a demand id');
         }
         // The subject is a principal pseudonym only when the record's
         // family is principal-keyed. The email-ownership family
@@ -156,6 +189,7 @@ final class StepUpChallenge
             $targetOwned && $targetPseudonym !== null,
             $bootstrapAuthorized,
             $subjectPseudonym,
+            $demandId,
         );
         $challenge->issuedClientSecret = $clientSecret;
 
@@ -245,6 +279,7 @@ final class StepUpChallenge
             $this->targetOwned,
             $this->bootstrapAuthorized,
             $this->subjectPseudonym,
+            $this->demandId,
         );
     }
 
@@ -281,6 +316,7 @@ final class StepUpChallenge
             'bootstrap' => $this->bootstrapAuthorized ? 1 : 0,
             'target_owned' => $this->targetOwned,
             'subject' => $this->subjectPseudonym,
+            'demand_id' => $this->demandId,
         ];
     }
 
@@ -298,7 +334,7 @@ final class StepUpChallenge
             'The step-up challenge record is malformed: '.$what,
         );
         if (($record['v'] ?? null) !== self::SCHEMA_VERSION) {
-            throw $fail('schema version must be 1');
+            throw $fail('schema version must be 2');
         }
         foreach (['id', 'kind', 'principal', 'scope', 'reason'] as $field) {
             if (!\is_string($record[$field] ?? null) || $record[$field] === '') {
@@ -346,6 +382,7 @@ final class StepUpChallenge
                 null,
                 ($record['target_owned'] ?? false) === true,
                 subjectPseudonym: $subjectRaw,
+                demandId: \is_string($record['demand_id'] ?? null) && $record['demand_id'] !== '' ? $record['demand_id'] : null,
             );
         } catch (\InvalidArgumentException $e) {
             throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
@@ -403,6 +440,7 @@ final class StepUpChallenge
             $challenge->targetOwned,
             $bootstrapAuthorized,
             $challenge->subjectPseudonym,
+            $challenge->demandId,
         );
         $attempts = $record['attempts'] ?? null;
         if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {
@@ -421,6 +459,23 @@ final class StepUpChallenge
         }
         if ($challenge->kind !== StepUpChallengeKind::WebAuthn && $challenge->ceremony !== null) {
             throw $fail('only a webauthn challenge carries a ceremony');
+        }
+        // The demand binding of the v2 wire shape. A demand id rides
+        // only in its exact base64url shape, and only on a record that
+        // can authorize: an enrollment creation ceremony is explicitly
+        // non-authorizing and never binds one. A record without a
+        // demand id decodes (the pre-demand wire shape of the drain
+        // period), but it authorizes nothing: the demand plane's
+        // completion refuses a demandless proof, so a stored
+        // demandless challenge can never invoke the finalization,
+        // restore a pending login or authorize the original action.
+        $demandId = $record['demand_id'] ?? null;
+        if ($challenge->ceremony === 'creation') {
+            if ($demandId !== null) {
+                throw $fail('a creation ceremony carries no demand id');
+            }
+        } elseif ($demandId !== null && preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
+            throw $fail('demand_id must be the base64url id shape');
         }
 
         return $challenge->withAttempts($attempts);

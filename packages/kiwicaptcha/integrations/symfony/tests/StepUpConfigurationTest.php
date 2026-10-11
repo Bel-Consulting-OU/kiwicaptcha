@@ -184,7 +184,7 @@ final class StepUpConfigurationTest extends TestCase
         self::assertTrue($container->hasDefinition(OutcomeReporterInterface::class), 'the plane alone arms the outcomes reporter seam');
 
         $handler = $container->getDefinition(EmailOtpStepUpHandler::class);
-        $sender = $handler->getArgument(3);
+        $sender = $handler->getArgument(2);
         if ($sender instanceof Reference) {
             $sender = $container->getDefinition((string) $sender);
         }
@@ -245,7 +245,6 @@ final class StepUpConfigurationTest extends TestCase
             new WebAuthnStepUpHandler(
                 new ArrayStepUpChallengeStore(static fn (): int => 0),
                 new StepUpTicket(self::MASTER),
-                new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
                 null,
                 self::MASTER,
                 300, 5, 3, 900, '/kiwi/step-up/complete', null, false,

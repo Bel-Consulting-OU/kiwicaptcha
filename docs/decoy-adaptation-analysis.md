@@ -10,11 +10,15 @@ and the signed record decide the outcome; the decoy evidence is a
 signal, never a gate.
 
 This document is the deliberate threat-model summary of the decoy
-surface. The adaptation-sensitive details behind it (the naming
-structure, the presentation inventory, the exact attribute surface, the
-timing characteristics and any classifier features) are intentionally
-not published: strategic silence buys adaptation time, and the
-properties below hold regardless of those details.
+surface. Attacker can read the source, and the algorithms and defaults
+behind it (the naming structure, the presentation inventory, the exact
+attribute surface, the timing characteristics and any classifier
+features) are public, auditable constants — not a secret weapon. What
+stays private is each deployment's policy and thresholds (the specific
+trap placement, escalation bands and weights an operator configures),
+never the algorithms that apply them. The properties below hold
+regardless of those deployment choices, and they hold even when the
+attacker knows the mechanism completely.
 
 ## The standing properties
 

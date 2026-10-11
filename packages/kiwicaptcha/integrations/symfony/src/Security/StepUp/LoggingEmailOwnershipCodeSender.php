@@ -38,11 +38,12 @@ final class LoggingEmailOwnershipCodeSender implements EmailOwnershipCodeSenderI
         return substr(hash_hmac('sha256', $email, $hashKey), 0, 16);
     }
 
-    public function send(string $email, string $code, int $ttlSecs): void
+    public function send(string $email, string $code, int $ttlSecs, EmailOwnershipDeliveryMetadata $delivery): void
     {
         $this->logger?->info('kiwi email-ownership step-up code generated', [
             'recipient' => self::hashForLog($email, $this->hashKey),
             'expires_in' => $ttlSecs,
+            'demand_generation' => $delivery->generation,
         ]);
     }
 }

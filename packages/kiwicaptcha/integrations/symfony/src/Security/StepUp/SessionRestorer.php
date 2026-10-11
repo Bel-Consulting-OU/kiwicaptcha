@@ -44,8 +44,17 @@ final class SessionRestorer
      * Restore the wrapped token and record the network bucket. No-op
      * when the current token is not pending (a plain step-up inside an
      * already-authenticated session) or when a seam is missing.
+     *
+     * $demandId is the exact demand the completed factor finalizes. A
+     * pending token unwraps only when its own demand identity equals
+     * it. Two pending logins of one session hold two demands, so the
+     * completion of one can never restore the other, however equal the
+     * principal, the scope or the session look. The gate sits before
+     * every effect of the restore (the unwrap, the session rotation,
+     * the trust bindings and the device mint); a refused restore
+     * writes nothing and changes nothing.
      */
-    public function restore(string $principalPseudonym, ?Request $request = null): void
+    public function restore(string $principalPseudonym, ?Request $request = null, ?string $demandId = null): void
     {
         try {
             $token = $this->tokenStorage?->getToken();
@@ -72,6 +81,18 @@ final class SessionRestorer
                 if (!hash_equals($pendingPrincipal, $principalPseudonym)) {
                     $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
                     $this->logger?->warning('kiwi step-up session restore refused: principal mismatch');
+
+                    return;
+                }
+                // The exact-demand gate: the completed challenge names
+                // the demand it finalizes and the pending token carries
+                // the demand it was wrapped under. Only their equality
+                // opens the session; an unstamped token, an unnamed
+                // demand and any mismatch all refuse, fail closed.
+                $pendingDemand = $token->demandId();
+                if ($pendingDemand === null || $demandId === null || !hash_equals($pendingDemand, $demandId)) {
+                    $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
+                    $this->logger?->warning('kiwi step-up session restore refused: demand mismatch');
 
                     return;
                 }

@@ -57,8 +57,9 @@ use Webauthn\PublicKeyCredentialUserEntity;
  * the sign-count check. A counter that fails to advance counts as a
  * failed attempt and answers the replayed failure code; an assertion
  * over an unregistered credential answers the unknown-credential code.
- * On success the single-use record is consumed and the credit runs
- * through {@see StepUpCompletionCredit}, exactly once per challenge.
+ * On success the single-use record is consumed and the verified factor
+ * proof is answered, naming the demand the challenge was bound to; the
+ * demand finalization owns the authorization and the effects.
  */
 final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 {
@@ -89,6 +90,9 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     private const CHALLENGE_HKDF_INFO = 'kiwi/v1/stepup-webauthn-challenge';
 
     private const CHALLENGE_HKDF_SALT = 'kiwicaptcha/deploy-salt/v1';
+
+    /** How long the factor-plane proof markers of one completion live. */
+    private const PROOF_MARKER_TTL_SECS = 900;
 
     /**
      * The ceremony script body shared by the inline (nonce) and the
@@ -269,7 +273,6 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public function __construct(
         private readonly StepUpChallengeStore $store,
         private readonly StepUpTicket $ticket,
-        private readonly StepUpCompletionCredit $credit,
         private readonly ?WebAuthnCredentialRegistry $registry,
         private readonly string $master,
         private readonly int $challengeTtlSecs = 300,
@@ -322,6 +325,11 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $this->assertionValidator = new AuthenticatorAssertionResponseValidator($this->registry, null, null, null, null, $factory->requestCeremony());
         $manager = AttestationStatementSupportManager::create([new NoneAttestationStatementSupport()]);
         $this->loader = PublicKeyCredentialLoader::create(AttestationObjectLoader::create($manager));
+    }
+
+    public function assurance(): StepUpFactorAssurance
+    {
+        return StepUpFactorAssurance::webauthn();
     }
 
     public function begin(Request $request, StepUpContext $context): Response
@@ -392,6 +400,9 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             $ceremony,
             StepUpSessionBinding::sessionId($request),
             $context->targetOwned,
+            false,
+            null,
+            $context->demandId,
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
@@ -512,13 +523,37 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             return $this->failedAttempt($challenge, $boundContextKey);
         }
 
-        $consumed = $this->store->consume($challenge->id);
-        if ($consumed === null) {
+        // The single-use boundary is one atomic transition: the challenge
+        // consumption and the demand completion are the same script, so
+        // a verified factor can never strand beside a demand that stayed
+        // open, and a lost race consumes nothing. A replayed completion
+        // answers unknown_challenge and never reaches a proof.
+        if (!$this->completeAtomically($request, $challenge, $now)) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
         $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $boundContextKey);
 
-        return $this->credit($challenge, $boundSessionId);
+        return $this->proof($challenge, $boundSessionId);
+    }
+
+    /**
+     * The atomic completion of one verified factor: the store's single
+     * script consumes the challenge and completes its demand. A
+     * challenge that names no demand consumes single-use as before; its
+     * proof carries no demand id and finalizes nothing (the finalizer
+     * refuses an unbound proof, fail closed).
+     */
+    private function completeAtomically(Request $request, StepUpChallenge $challenge, int $now): bool
+    {
+        if ($challenge->demandId === null) {
+            return $this->store->consume($challenge->id) !== null;
+        }
+        $binding = StepUpSessionBinding::presentedBindingHash($request, $challenge);
+        if ($binding === null) {
+            return false;
+        }
+
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $this->assurance()->identity, $challenge->sessionHash) !== null;
     }
 
     private function creationOptions(StepUpChallenge $challenge, string $challengeBytes, string $host): PublicKeyCredentialCreationOptions
@@ -813,28 +848,16 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         return $this->store->read($payload['challengeId']);
     }
 
-    private function credit(StepUpChallenge $challenge, string $boundSessionId = ''): StepUpResult
+    /**
+     * The factor-plane proof of the consumed record: FactorVerified,
+     * never AuthorizedStepUp. No enrollment marker, no session restore,
+     * no StepUpCompleted is booked here — the shared
+     * {@see StepUpDemandFinalizer} creates those only after the demand
+     * settles authorized.
+     */
+    private function proof(StepUpChallenge $challenge, string $boundSessionId): StepUpResult
     {
-        try {
-            $result = $this->credit->credit($challenge->id, $challenge);
-        } catch (\Throwable) {
-            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $challenge->id);
-        }
-        if ($result->status === StepUpResultStatus::Succeeded) {
-            $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
-            // Session-scoped proof: only the session that completed the
-            // step-up may enroll a factor. A principal-level marker is
-            // never enough (N1).
-            $this->store->markSessionStepUpSuccess(
-                $boundSessionId,
-                $challenge->principalPseudonym,
-                'webauthn',
-                900,
-                $this->now(),
-            );
-        }
-
-        return $result;
+        return StepUpResult::proved($challenge, $this->assurance());
     }
 
     /**

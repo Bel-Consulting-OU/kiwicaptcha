@@ -17,17 +17,16 @@ Developed by Bel Consulting OÜ (MIT license).
 
 ## What KiwiCaptcha is
 
-KiwiCaptcha is anti-abuse protection.
-The core value is economic: every signup, login, password-reset, or scraping attempt carries a real, tunable computational cost, which makes mass abuse uneconomical at scale.
-A human does not solve the challenge: their CPU does, and an automated client's CPU can do the same work.
-The security property is the proof-of-work cost; everything else is defense-in-depth.
+**Self-hosted adaptive anti-abuse with transaction-bound authorization and auditable enforcement.**
+
+KiwiCaptcha is a Symfony-first, self-hosted anti-abuse platform with language-neutral verification and risk cores (Rust and PHP, protocol-identical). It imposes measurable computational friction on cheap abuse — every signup, login, password-reset, or scraping attempt carries a real, tunable proof-of-work cost — and then escalates adaptively: the risk engine steps up, quarantines, or denies per source, without storing identities. The value is not "PoW alone": it is the combination of priced friction and self-hosted enforcement that can refuse, step up, or quarantine with an auditable decision trail.
+
+A human does not solve the challenge: their CPU does, and an automated client's CPU can do the same work. That is exactly why the proof-of-work cost is friction, not a Turing test — the enforcement plane on top is what converts friction into a decision.
 
 The anti-abuse layer adapts per source without storing identities: only keyed ephemeral pseudonyms (HMAC-derived, epoch-rotating, never a raw IP or a stable identifier), plus aggregate, identity-free statistics.
 It can arm an authenticated decoy, bound to the specific challenge it was issued with, that generic automation may fill.
 Decoys are probabilistic automation evidence, never a sole security boundary.
-Knowledge of the architecture does not invalidate KiwiCaptcha's core security guarantees.
-The exact decoy vocabulary, scoring weights, escalation thresholds, classifiers, and other adaptation-sensitive parameters are intentionally not published.
-Strategic silence buys adaptation time; it is not a security guarantee.
+Knowledge of the architecture does not invalidate KiwiCaptcha's core security guarantees: attackers can read the source, and the algorithms and defaults are public, auditable constants. What stays private is each deployment's policy and thresholds — the specific weights, escalation bands, and trap placement an operator configures — not the algorithms that apply them. Auditable openness of the mechanism is a deliberate security property; secret algorithms are not.
 The guarantees and non-guarantees are stated in [the security document](SECURITY.md).
 
 Browser behavioral telemetry is a supplementary signal, not the security boundary.
@@ -116,6 +115,10 @@ The solver and driver are embedded at render time, so nothing is fetched from a 
 
 The Rust crate and the PHP SDK are protocol-identical and share a language-neutral JSON record schema.
 The risk engines (Rust and PHP) are byte-identical in the state protocol; both embed the same canonical Lua and reproduce the same golden scoring fixtures.
+
+## Platform scope
+
+KiwiCaptcha is Symfony-first: the complete enforcement plane (challenge issuance, risk decisions, step-up, quarantine, deny) ships as the standalone Symfony bundle. The verification core (`packages/kiwicaptcha-php`) and the risk cores (`packages/kiwicaptcha-risk`, `packages/kiwicaptcha-risk-php`) are language-neutral and protocol-identical, so other hosts can embed them — but only the Symfony integration is a first-class enforcement plane today. SDK packages (Go, Node, Python, Ruby, JVM, .NET, Elixir) are verification/risk clients, not full framework enforcement planes.
 
 ## Five-minute installation (Symfony)
 

@@ -71,6 +71,8 @@ CHANNEL_AUTHENTICATION_SUCCESS = 10
 CHANNEL_AUTHENTICATION_FAILURE = 11
 CHANNEL_PROTECTED_ACTION_FAILURE = 9
 CHANNEL_CONFIRMED_ABUSE = 13
+# The dedicated step-up completion event (22), NOT 18 (the honeypot kind).
+CHANNEL_STEP_UP_COMPLETED = 22
 
 _PSEUDONYM = re.compile(r"^[0-9a-f]{32}$")
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f:}]|\xc2[\x80-\x9f]|\xe2\x80[\xa8\xa9]")
@@ -209,7 +211,7 @@ _TABLE: Dict[str, OutcomeMapping] = {
     ),
     "stepUpCompleted": OutcomeMapping(
         Outcome.STEP_UP_COMPLETED,
-        CHANNEL_PROTECTED_ACTION_SUCCESS,
+        CHANNEL_STEP_UP_COMPLETED,
         None,
         False,
         True,

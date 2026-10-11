@@ -19,8 +19,16 @@ use Symfony\Component\Mime\Email;
  *
  * The From identity is build-time configuration (derived from the
  * canonical public origin), never a request value, so no client input
- * reaches a mail header beyond the recipient itself. The delivery log
- * carries the address only as the truncated keyed HMAC of
+ * reaches a mail header beyond the recipient itself. The Message-ID is
+ * server-minted from the delivery identity:
+ * `<kiwi.<base64urlDemandId>.<generation>@message-id-domain>`, under
+ * the domain of the configured From address. Every part is dot-atom
+ * safe (a base64url demand id, an integer generation, a domain). The
+ * id never carries a colon, so the header is valid RFC 5322 and the
+ * message is auditable back to the exact demand and escalation
+ * generation that funded it.
+ *
+ * The delivery log carries the address only as the truncated keyed HMAC of
  * {@see LoggingEmailOwnershipCodeSender::hashForLog()}, never raw.
  */
 final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderInterface
@@ -33,7 +41,7 @@ final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderIn
     ) {
     }
 
-    public function send(string $email, string $code, int $ttlSecs): void
+    public function send(string $email, string $code, int $ttlSecs, EmailOwnershipDeliveryMetadata $delivery): void
     {
         $minutes = max(1, (int) ceil($ttlSecs / 60));
         $message = (new Email())
@@ -45,10 +53,32 @@ final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderIn
                 $code,
                 $minutes,
             ));
+        $message->getHeaders()->addIdHeader('Message-ID', $this->messageId($delivery));
         $this->mailer->send($message);
         $this->logger?->info('kiwi email-ownership step-up code delivered', [
             'recipient' => LoggingEmailOwnershipCodeSender::hashForLog($email, $this->hashKey),
             'expires_in' => $ttlSecs,
+            'demand_generation' => $delivery->generation,
         ]);
+    }
+
+    /**
+     * The Message-ID of one delivery: the server-minted local part over
+     * the configured From identity's domain. The From address is
+     * build-time configuration, so the domain never derives from a
+     * request value; a From without a domain refuses the delivery
+     * fail-closed rather than sending an unidentifiable message.
+     */
+    private function messageId(EmailOwnershipDeliveryMetadata $delivery): string
+    {
+        $at = strrpos($this->fromAddress, '@');
+        $domain = $at === false ? '' : substr($this->fromAddress, $at + 1);
+        if ($domain === '' || preg_match('/^[A-Za-z0-9.-]+$/D', $domain) !== 1) {
+            throw new \RuntimeException(sprintf(
+                'The mailer email-ownership sender cannot derive a Message-ID domain from the configured From identity; set a deliverable from address (got a From without a usable domain)',
+            ));
+        }
+
+        return '<'.$delivery->messageIdLocalPart().'@'.strtolower($domain).'>';
     }
 }

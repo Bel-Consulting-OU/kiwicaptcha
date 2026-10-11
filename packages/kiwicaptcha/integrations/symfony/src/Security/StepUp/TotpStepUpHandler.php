@@ -25,10 +25,12 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     /** How far back a completed session step-up may authorize enrollment. */
     private const ENROLLMENT_LOOKBACK_SECS = 900;
 
+    /** How long the factor-plane proof markers of one completion live. */
+    private const PROOF_MARKER_TTL_SECS = 900;
+
     public function __construct(
         private readonly StepUpChallengeStore $store,
         private readonly StepUpTicket $ticket,
-        private readonly StepUpCompletionCredit $credit,
         private readonly string $algo = 'sha1',
         private readonly int $digits = 6,
         private readonly int $window = 1,
@@ -55,6 +57,11 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         if ($window < 0 || $window > 2) {
             throw new \InvalidArgumentException('The acceptance window must be 0..2 steps');
         }
+    }
+
+    public function assurance(): StepUpFactorAssurance
+    {
+        return StepUpFactorAssurance::totp();
     }
 
     /**
@@ -215,6 +222,9 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             null,
             StepUpSessionBinding::sessionId($request),
             $context->targetOwned,
+            false,
+            null,
+            $context->demandId,
         );
         $this->store->create($challenge, $this->challengeTtlSecs);
 
@@ -280,16 +290,37 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             return StepUpResult::failed(StepUpResult::FAIL_REPLAYED_STEP, $challenge->id);
         }
 
-        // The single-use boundary: exactly one completer consumes the
-        // record; a replayed completion answers unknown_challenge and
-        // never reaches the credit.
-        $consumed = $this->store->consume($challenge->id);
-        if ($consumed === null) {
+        // The single-use boundary is one atomic transition: the challenge
+        // consumption and the demand completion are the same script, so
+        // a verified factor can never strand beside a demand that stayed
+        // open, and a lost race consumes nothing. A replayed completion
+        // answers unknown_challenge and never reaches a proof.
+        if (!$this->completeAtomically($request, $challenge, $now)) {
             return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $challenge->id);
         }
         $this->lockout?->registerSuccess($challenge->principalPseudonym, $challenge->targetOwned ? $challenge->targetPseudonym : null, $boundContextKey);
 
-        return $this->credit($challenge, $boundSessionId);
+        return $this->proof($challenge, $boundSessionId);
+    }
+
+    /**
+     * The atomic completion of one verified factor: the store's single
+     * script consumes the challenge and completes its demand. A
+     * challenge that names no demand consumes single-use as before; its
+     * proof carries no demand id and finalizes nothing (the finalizer
+     * refuses an unbound proof, fail closed).
+     */
+    private function completeAtomically(Request $request, StepUpChallenge $challenge, int $now): bool
+    {
+        if ($challenge->demandId === null) {
+            return $this->store->consume($challenge->id) !== null;
+        }
+        $binding = StepUpSessionBinding::presentedBindingHash($request, $challenge);
+        if ($binding === null) {
+            return false;
+        }
+
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $this->assurance()->identity, $challenge->sessionHash) !== null;
     }
 
     /**
@@ -360,30 +391,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return $this->store->read($payload['challengeId']);
     }
 
-    private function credit(StepUpChallenge $challenge, string $boundSessionId = ''): StepUpResult
+    /**
+     * The factor-plane proof of the consumed record: FactorVerified,
+     * never AuthorizedStepUp. No enrollment marker, no session restore,
+     * no StepUpCompleted is booked here — the shared
+     * {@see StepUpDemandFinalizer} creates those only after the demand
+     * settles authorized.
+     */
+    private function proof(StepUpChallenge $challenge, string $boundSessionId): StepUpResult
     {
-        $result = $this->creditOnce($challenge);
-        if ($result->status === StepUpResultStatus::Succeeded) {
-            $this->store->markStepUpSuccess($challenge->principalPseudonym, 900, $this->now());
-            $this->store->markSessionStepUpSuccess(
-                $boundSessionId,
-                $challenge->principalPseudonym,
-                'totp',
-                900,
-                $this->now(),
-            );
-        }
-
-        return $result;
-    }
-
-    private function creditOnce(StepUpChallenge $challenge): StepUpResult
-    {
-        try {
-            return $this->credit->credit($challenge->id, $challenge);
-        } catch (\Throwable) {
-            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $challenge->id);
-        }
+        return StepUpResult::proved($challenge, $this->assurance());
     }
 
     /**

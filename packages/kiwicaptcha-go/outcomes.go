@@ -42,6 +42,10 @@ const (
 	ChannelAuthenticationFailure  = 11
 	ChannelProtectedActionFailure = 9
 	ChannelConfirmedAbuse         = 13
+	// ChannelStepUpCompleted is the dedicated step-up completion event
+	// (22), NOT 18 (the honeypot kind). Same trust credit as
+	// ChannelProtectedActionSuccess in the state script.
+	ChannelStepUpCompleted = 22
 )
 
 // HandleDimension is one subject-address dimension with its key role.
@@ -205,7 +209,7 @@ var outcomeTable = map[Outcome]OutcomeMapping{
 	},
 	OutcomeStepUpCompleted: {
 		Outcome:         OutcomeStepUpCompleted,
-		Channel:         ChannelProtectedActionSuccess,
+		Channel:         ChannelStepUpCompleted,
 		ServerConfirmed: true,
 		MaySubtractRisk: true,
 		AcceptedHandles: IdentityDimensions,

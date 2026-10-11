@@ -80,6 +80,8 @@ export const RISK_EVENT_KINDS = {
   AuthenticationFailure: 11,
   ConfirmedLegitimate: 12,
   ConfirmedAbuse: 13,
+  /** The dedicated step-up completion event (22), NOT 18 (the honeypot kind). */
+  StepUpCompleted: 22,
 } as const;
 
 export interface OutcomeMapping {
@@ -128,7 +130,7 @@ const TABLE: Readonly<Record<Outcome, OutcomeMapping>> = {
   },
   stepUpCompleted: {
     outcome: 'stepUpCompleted',
-    channel: RISK_EVENT_KINDS.ProtectedActionSuccess,
+    channel: RISK_EVENT_KINDS.StepUpCompleted,
     ledgerLegitimate: null,
     writesAbuseMark: false,
     serverConfirmed: true,

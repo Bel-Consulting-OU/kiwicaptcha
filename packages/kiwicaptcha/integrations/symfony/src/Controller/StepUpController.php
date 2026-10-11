@@ -6,7 +6,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFinalization;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
@@ -57,17 +59,31 @@ use Symfony\Component\HttpFoundation\Response;
  * because the principal is resolved server-side through the wired
  * resolver, never from a client-supplied field.
  *
- * The context inputs are server-owned: the principal pseudonym from
- * the resolver, the target pseudonym and the return path from request
- * attributes the application sets, and the presentation mode from the
- * request's own negotiation. The begin reason defaults to the typed
- * violation name the validator answers, so a step-up begun from the
- * post-solve flow carries its coherent reason. That name is
+ * The context inputs are server-owned: the principal pseudonym comes
+ * from the resolver, the target pseudonym and the return path from
+ * request attributes the application sets, and the presentation mode
+ * from the request's own negotiation. The begin reason defaults to the
+ * typed violation name the validator answers, so a step-up begun from
+ * the post-solve flow carries its coherent reason. That name is
  * {@see \BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED}.
+ *
+ * Every begin under this controller mints the demand record of the
+ * login plane and threads its id into the context, so the handler
+ * binds its challenge to a demand through the same mechanism every
+ * factor uses. There is no custom lane around it. A completion answers
+ * a proof only. The controller runs the shared demand finalizer before
+ * anything answers success, and only an authorized settlement lets the
+ * completion redirect, restore the pending login or report the
+ * completion credit. See
+ * {@see StepUpDemandFinalizer::mintLoginDemand()} and
+ * {@see StepUpDemandFinalizer::finalizeLogin()}.
  */
 final class StepUpController
 {
     private const DEFAULT_REASON = 'post_solve_step_up_required';
+
+    /** The lifetime of the login plane's demand record. */
+    private const DEMAND_TTL_SECS = 900;
 
     public function __construct(
         private readonly KiwiStepUpHandlerRegistry $registry,
@@ -76,6 +92,7 @@ final class StepUpController
         private readonly ?PrincipalResolverInterface $principalResolver = null,
         private readonly ?\Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface $tokenStorage = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp $emailOwnership = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer $demandFinalizer = null,
     ) {
     }
 
@@ -95,8 +112,9 @@ final class StepUpController
         }
 
         try {
+            $principal = $this->identityFactory->principalId($rawPrincipal);
             $context = new StepUpContext(
-                $this->identityFactory->principalId($rawPrincipal),
+                $principal,
                 $this->targetPseudonym($request),
                 $this->scopeOf(),
                 \is_string($returnPath) && $returnPath !== '' ? $returnPath : null,
@@ -108,7 +126,51 @@ final class StepUpController
             return self::plain($e->getMessage(), Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
+        // The demand of the login plane: every begin under this
+        // controller mints the demand record its challenge binds to,
+        // under the login binding kind and the principal recipe, so the
+        // proof can only ever finalize the demand of this very browser
+        // session. The minted demand takes the exact identity the
+        // current pending token was wrapped under, so the completed
+        // proof names the demand of exactly this login and the restore
+        // can hold the session to it. A failed mint refuses the begin
+        // outright: a challenge without its demand could only end in
+        // the unbound refusal at the completion.
+        $demandId = $this->demandFinalizer?->mintLoginDemand(
+            $context->scope,
+            $principal,
+            StepUpChallenge::sessionHash(StepUpSessionBinding::sessionId($request)),
+            self::DEMAND_TTL_SECS,
+            $this->pendingDemandId(),
+        );
+        if ($demandId === null) {
+            return self::plain('The step-up demand could not be recorded; try again.', Response::HTTP_SERVICE_UNAVAILABLE);
+        }
+        $context = new StepUpContext(
+            $principal,
+            $context->targetPseudonym,
+            $context->scope,
+            $context->returnPath,
+            $context->reason,
+            $context->mode,
+            $context->targetOwned,
+            $demandId,
+        );
+
         return $handler->begin($request, $context);
+    }
+
+    /**
+     * The exact demand identity the current pending token carries: the
+     * mint the first-attempt gate stamped at wrap time. Null when the
+     * current token is not pending or carries no usable identity, in
+     * which case the login demand mints its own unguessable id.
+     */
+    private function pendingDemandId(): ?string
+    {
+        $token = $this->tokenStorage?->getToken();
+
+        return $token instanceof StepUpPendingToken ? $token->demandId() : null;
     }
 
     public function complete(Request $request): Response
@@ -135,6 +197,15 @@ final class StepUpController
         StepUpSessionBinding::bind($request, $boundPrincipal);
         $result = $handler->complete($request);
 
+        // The proof is the factor's verdict only. The authorization is
+        // the demand finalization's: the demand is completed atomically
+        // with the proof, reassessed, settled terminally and, only when
+        // authorized, credited and the pending login restored (the
+        // restore runs inside the finalizer, after the authorization).
+        if ($result->status === StepUpResultStatus::Succeeded) {
+            $result = $this->authorize($result, $request);
+        }
+
         if ($this->mode($request) === StepUpContext::MODE_JSON) {
             return new Response(
                 (string) json_encode($result->toArray(), JSON_UNESCAPED_SLASHES),
@@ -154,6 +225,42 @@ final class StepUpController
             StepUpResultStatus::Pending => 'That code was not accepted; try again with the current code.',
             default => 'This verification can no longer be completed; begin a fresh challenge.',
         }, self::statusOf($result));
+    }
+
+    /**
+     * The authorization of one verified factor proof through the shared
+     * demand finalizer. An unbound proof (a challenge that named no
+     * demand, a finalizer the deployment never wired) refuses, fail
+     * closed: the demand architecture has no bypass lane. A refused
+     * finalization answers the typed failure the flow answers; a store
+     * failure surfaces as the retryable outcome-unavailable verdict.
+     */
+    private function authorize(StepUpResult $proof, Request $request): StepUpResult
+    {
+        $finalizer = $this->demandFinalizer;
+        if ($finalizer === null) {
+            return StepUpResult::failed(StepUpResult::FAIL_DEMAND_UNBOUND, $proof->challengeId);
+        }
+        try {
+            // The booking scope is the same one the begin booked under:
+            // the pending token's stamped scope with the configured
+            // fallback, so the demand's operation identity is rerun in
+            // exactly the scope it was minted in.
+            $finalization = $finalizer->finalizeLogin($proof, $this->scopeOf(), $request);
+        } catch (\Throwable) {
+            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $proof->challengeId);
+        }
+        if ($finalization->authorized) {
+            return StepUpResult::succeeded(true, $proof->targetOwned && $proof->targetPseudonym !== null);
+        }
+        if ($finalization->reason === StepUpFinalization::REFUSED_UNBOUND) {
+            return StepUpResult::failed(StepUpResult::FAIL_DEMAND_UNBOUND, $proof->challengeId);
+        }
+        if ($finalization->reason === StepUpFinalization::REFUSED_DENIED) {
+            return StepUpResult::failed(StepUpResult::FAIL_DEMAND_REFUSED, $proof->challengeId);
+        }
+
+        return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $proof->challengeId);
     }
 
     /**
@@ -212,16 +319,23 @@ final class StepUpController
      * pending token is put back: a begin, or a failed complete, never
      * upgrades the session. Only a completed factor does, through
      * {@see StepUpSessionBinding} and the session restorer.
+     *
+     * The scope the resolver books under is the same scope the
+     * challenge books under: {@see self::scopeOf()}, the pending
+     * token's stamped scope with the configured fallback. Resolving
+     * the principal under a different scope than the challenge would
+     * split the step-up's identity context across two scopes.
      */
     private function unwrapPendingToken(Request $request): ?string
     {
+        $scope = $this->scopeOf();
         $token = $this->tokenStorage?->getToken();
         $pending = $token instanceof StepUpPendingToken ? $token : null;
         if ($pending !== null) {
             $this->tokenStorage?->setToken($pending->getWrapped());
         }
         try {
-            return $this->principalResolver?->resolve($request, $this->scope);
+            return $this->principalResolver?->resolve($request, $scope);
         } finally {
             if ($pending !== null) {
                 $this->tokenStorage?->setToken($pending);

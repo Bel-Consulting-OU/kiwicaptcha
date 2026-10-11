@@ -125,6 +125,138 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return $demand;
     }
 
+    public function completeDemand(string $demandId, int $now, int $ttlSecs): ?StepUpDemand
+    {
+        $entry = $this->demands[$demandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$demandId]);
+
+            return null;
+        }
+        if (!$entry['record']->state->isOpen()) {
+            return null;
+        }
+        $completed = $entry['record']->withState(StepUpDemandState::Completed, $now);
+        $this->demands[$demandId] = [
+            'record' => $completed,
+            'expiresAt' => $now + max(1, $ttlSecs),
+        ];
+
+        return $completed;
+    }
+
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, string $completedFactor, ?string $sessionHash = null): ?StepUpFactorCompletion
+    {
+        if (!FactorRequirement::isFamily($completedFactor)) {
+            throw new \InvalidArgumentException('The completed factor of an atomic completion must be a family of the assurance ladder');
+        }
+        // The same gate order the Redis script runs: presence, decode
+        // (the records round-trip through the strict wire decode at
+        // write time here), identity, state, liveness, binding.
+        $challenge = $this->live($challengeId);
+        if ($challenge === null) {
+            return null;
+        }
+        $demand = $this->liveDemand($demandId);
+        if ($demand === null) {
+            return null;
+        }
+        if ($challenge->demandId !== $demandId || $demand->id !== $demandId) {
+            return null;
+        }
+        if (!$demand->state->isOpen()) {
+            return null;
+        }
+        if ($challenge->expired($now) || $demand->expired($now)) {
+            return null;
+        }
+        $bound = ($challenge->sessionHash !== null && $challenge->sessionHash === $presentedBindingHash)
+            || ($challenge->clientSecretHash !== null && $challenge->clientSecretHash === $presentedBindingHash);
+        if (!$bound) {
+            return null;
+        }
+        // The transition: consume the challenge, complete the demand,
+        // record the escalation marker, all or nothing.
+        unset($this->challenges[$challengeId]);
+        $completed = $demand->withState(StepUpDemandState::Completed, $now);
+        $this->demands[$demandId] = ['record' => $completed, 'expiresAt' => $demand->expiresAt];
+        if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash) {
+            $this->completedIndex[$sessionHash] = [
+                'value' => $challenge->scope.'|'.$completedFactor.'|'.$demand->expiresAt,
+                'expiresAt' => $demand->expiresAt,
+            ];
+        }
+
+        return StepUpFactorCompletion::fromRecords($challenge, $completed, $completedFactor);
+    }
+
+    /** @var array<string, array{value: string, expiresAt: int}> session hash -> escalation marker */
+    private array $completedIndex = [];
+
+    public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
+    {
+        if (preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
+            return null;
+        }
+        $entry = $this->completedIndex[$sessionHash] ?? null;
+        if ($entry === null || $now >= $entry['expiresAt']) {
+            unset($this->completedIndex[$sessionHash]);
+
+            return null;
+        }
+        $parts = explode('|', $entry['value']);
+        if (\count($parts) !== 3 || $parts[0] !== $scope) {
+            return null;
+        }
+
+        return FactorRequirement::isFamily($parts[1]) ? $parts[1] : null;
+    }
+
+    public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand
+    {
+        $entry = $this->demands[$demandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$demandId]);
+
+            return null;
+        }
+        $state = $entry['record']->state;
+        if ($state === StepUpDemandState::Finalizing) {
+            // A claim inside its window is untouchable; a stale claim
+            // (an owner that died inside the window) is retaken.
+            $claimedAt = $entry['record']->stateAt;
+            if ($claimedAt !== null && ($now - $claimedAt) < max(1, $claimSecs)) {
+                return null;
+            }
+        } elseif ($state !== StepUpDemandState::Completed) {
+            return null;
+        }
+        $claimed = $entry['record']->withState(StepUpDemandState::Finalizing, $now);
+        $this->demands[$demandId] = ['record' => $claimed, 'expiresAt' => $entry['expiresAt']];
+
+        return $claimed;
+    }
+
+    public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand
+    {
+        $entry = $this->demands[$demandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$demandId]);
+
+            return null;
+        }
+        if ($entry['record']->state !== StepUpDemandState::Finalizing) {
+            return null;
+        }
+        if (!$state->isTerminal()) {
+            throw new \InvalidArgumentException('A step-up demand finalization settles to a terminal state only');
+        }
+        $settled = $entry['record']->withState($state, $now, $factor);
+        $this->demands[$demandId] = ['record' => $settled, 'expiresAt' => $entry['expiresAt']];
+
+        return $settled;
+    }
+
     private function liveDemand(string $demandId): ?StepUpDemand
     {
         $entry = $this->demands[$demandId] ?? null;
@@ -138,6 +270,199 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
 
         return $entry['record'];
+    }
+
+    /** @var array<string, string> operation digest -> the family tip's demand id */
+    private array $operationIndex = [];
+
+    public function demandIdForOperation(string $operationDigest): ?string
+    {
+        $tipId = $this->operationIndex[$operationDigest] ?? null;
+        if ($tipId === null) {
+            return null;
+        }
+        // An expired tip leaves no family: the index dies with it.
+        if (!$this->liveDemand($tipId) instanceof StepUpDemand) {
+            unset($this->operationIndex[$operationDigest]);
+
+            return null;
+        }
+
+        return $tipId;
+    }
+
+    public function createRootDemand(StepUpDemand $demand, int $ttlSecs): string
+    {
+        // One atomic decision, single-process by construction here: a
+        // live family tip stands, a dead one is replaced. A standing
+        // tip is answered as-is, never refreshed.
+        $live = $this->demandIdForOperation($demand->operationDigest);
+        if ($live !== null) {
+            return $live;
+        }
+        $this->createDemand($demand, $ttlSecs);
+        $this->operationIndex[$demand->operationDigest] = $demand->id;
+
+        return $demand->id;
+    }
+
+    public function supersedeDemandWithChild(string $parentDemandId, StepUpDemand $child): ?StepUpDemand
+    {
+        $entry = $this->demands[$parentDemandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$parentDemandId]);
+
+            return null;
+        }
+        $parent = $entry['record'];
+        if ($parent->superseded()) {
+            return null;
+        }
+        if (isset($this->demands[$child->id])) {
+            return null;
+        }
+        // The child inherits the parent's remaining lifetime and its
+        // exact authorization deadline: any other shape refuses.
+        if ($child->expiresAt !== $parent->expiresAt || $child->parentDemandId !== $parent->id) {
+            return null;
+        }
+        $expiresAt = $entry['expiresAt'];
+        // The single atomic move: write the child, mark the parent,
+        // repoint the family index. No intermediate state can lose the
+        // child while the parent is already superseded.
+        $this->demands[$child->id] = [
+            'record' => StepUpDemand::fromJson((string) json_encode($child->toArray(), JSON_UNESCAPED_SLASHES))
+                ?? throw new \RuntimeException('The step-up demand record could not be persisted (undecodable shape)'),
+            'expiresAt' => $expiresAt,
+        ];
+        $this->demands[$parentDemandId] = ['record' => $parent->supersededBy($child->id), 'expiresAt' => $expiresAt];
+        $this->operationIndex[$child->operationDigest] = $child->id;
+
+        return $this->demands[$parentDemandId]['record'];
+    }
+
+    public function claimDemandSendLease(string $demandId, int $resendAfterSecs, int $leaseSecs): ?StepUpDemandSendLease
+    {
+        $entry = $this->demands[$demandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$demandId]);
+
+            return null;
+        }
+        $now = $this->now();
+        $record = $entry['record'];
+        if (!$record->state->isOpen() || $record->superseded() || $record->expired($now)) {
+            return null;
+        }
+        $nowMs = $now * 1000;
+        $leaseUntil = $record->leaseUntilMs ?? 0;
+        if ($leaseUntil > $nowMs) {
+            // Another worker's live lease: nobody else claims now.
+            return null;
+        }
+        $recovered = $leaseUntil > 0;
+        $priorSends = $record->sends;
+        $priorLastSentAt = $record->lastSentAt;
+        if (!$recovered) {
+            if (!$record->canSend()) {
+                return null;
+            }
+            if ($record->nextSendIsResend() && $priorLastSentAt !== null && ($now - $priorLastSentAt) < $resendAfterSecs) {
+                return null;
+            }
+            $record = $record->withSend($now);
+        }
+        $claimed = $record->withLease($nowMs + max(1, $leaseSecs) * 1000);
+        $this->demands[$demandId] = ['record' => $claimed, 'expiresAt' => $entry['expiresAt']];
+
+        return new StepUpDemandSendLease($claimed, $now, $claimed->leaseUntilMs ?? 0, $priorSends, $priorLastSentAt, $recovered);
+    }
+
+    public function settleDemandSendLease(StepUpDemandSendSettlement $settlement): bool
+    {
+        $entry = $this->demands[$settlement->demandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            return false;
+        }
+        $record = $entry['record'];
+        // The compare-and-set: only the worker whose lease (and claim)
+        // still stamps the record settles it. A recovered slot refuses
+        // the crashed claimant's late outcome.
+        if ($record->leaseUntilMs !== $settlement->leaseUntilMs) {
+            return false;
+        }
+        $settled = $settlement->delivered
+            ? $record
+            : $record->withSends($settlement->priorSends, $settlement->priorLastSentAt);
+        $this->demands[$settlement->demandId] = ['record' => $settled->withLease(null), 'expiresAt' => $entry['expiresAt']];
+
+        return true;
+    }
+
+    /** @var array<string, int> budget key -> fixed-window count */
+    private array $mailBudgets = [];
+
+    /** @var array<string, array{keys: list<string>, leaseUntil: int}> reservation id -> its live reservation */
+    private array $mailReservations = [];
+
+    public function reserveMailQuota(string $reservationId, array $budgetKeys, array $limits, int $windowSecs, int $leaseSecs): bool
+    {
+        $budgetKeys = array_values($budgetKeys);
+        $limits = array_values($limits);
+        if (\count($budgetKeys) !== \count($limits) || $budgetKeys === []) {
+            throw new \InvalidArgumentException('A mail quota reservation names a limit for every budget key');
+        }
+        $now = $this->now();
+        // All or nothing: the whole reservation rolls back when any
+        // budget is over its limit, so a refusal reserves nothing.
+        $touched = [];
+        foreach ($budgetKeys as $i => $key) {
+            $entry = $this->mailBudgets[$key] ?? null;
+            $count = ($entry['count'] ?? 0) + 1;
+            $windowExpires = ($entry['windowExpires'] ?? 0) > $now ? $entry['windowExpires'] : $now + max(1, $windowSecs);
+            $this->mailBudgets[$key] = ['count' => $count, 'windowExpires' => $windowExpires];
+            $touched[] = $key;
+            if ($count > $limits[$i]) {
+                foreach ($touched as $touchedKey) {
+                    $current = $this->mailBudgets[$touchedKey];
+                    $this->mailBudgets[$touchedKey] = ['count' => max(0, $current['count'] - 1), 'windowExpires' => $current['windowExpires']];
+                }
+
+                return false;
+            }
+        }
+        $this->mailReservations[$reservationId] = ['keys' => array_values($budgetKeys), 'leaseUntil' => $now + max(1, $leaseSecs)];
+
+        return true;
+    }
+
+    public function commitMailQuota(string $reservationId): void
+    {
+        // Committed-by-default on lease expiry: an unknown reservation
+        // commits trivially, the counters already carry the spend.
+        unset($this->mailReservations[$reservationId]);
+    }
+
+    public function releaseMailQuota(string $reservationId): bool
+    {
+        $reservation = $this->mailReservations[$reservationId] ?? null;
+        if ($reservation === null) {
+            return false;
+        }
+        unset($this->mailReservations[$reservationId]);
+        if ($this->now() > $reservation['leaseUntil']) {
+            // Past its lease the reservation committed by default; a
+            // late release never refunds a possibly-delivered message.
+            return false;
+        }
+        foreach ($reservation['keys'] as $key) {
+            $current = $this->mailBudgets[$key] ?? null;
+            if ($current !== null && $current['count'] > 0) {
+                $this->mailBudgets[$key] = ['count' => $current['count'] - 1, 'windowExpires' => $current['windowExpires']];
+            }
+        }
+
+        return true;
     }
 
     public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void

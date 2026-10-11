@@ -36,7 +36,9 @@ module KiwiCaptcha
       'AuthenticationSuccess' => 10,
       'AuthenticationFailure' => 11,
       'ConfirmedLegitimate' => 12,
-      'ConfirmedAbuse' => 13
+      'ConfirmedAbuse' => 13,
+      # The dedicated step-up completion event (22), NOT 18 (the honeypot kind).
+      'StepUpCompleted' => 22
     }.freeze
 
     OutcomeHandle = Struct.new(:dimension, :id, keyword_init: true)
@@ -56,7 +58,7 @@ module KiwiCaptcha
         may_subtract_risk: true, accepted_handles: EVERY_DIMENSION
       ),
       'stepUpCompleted' => OutcomeMapping.new(
-        outcome: 'stepUpCompleted', channel: RISK_EVENT_KINDS['ProtectedActionSuccess'],
+        outcome: 'stepUpCompleted', channel: RISK_EVENT_KINDS['StepUpCompleted'],
         ledger_legitimate: nil, writes_abuse_mark: false, server_confirmed: true,
         may_subtract_risk: true, accepted_handles: IDENTITY_DIMENSIONS
       ),
