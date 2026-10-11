@@ -77,6 +77,8 @@ public static class Outcomes
     public const int ChannelAuthenticationFailure = 11;
     public const int ChannelProtectedActionFailure = 9;
     public const int ChannelConfirmedAbuse = 13;
+    /// <summary>The dedicated step-up completion event (22), NOT 18 (the honeypot kind).</summary>
+    public const int ChannelStepUpCompleted = 22;
 
     /// <summary>The subject-address dimensions.</summary>
     public enum HandleDimension
@@ -212,7 +214,7 @@ public static class Outcomes
             [Outcome.ConfirmedLegitimate] = new(Outcome.ConfirmedLegitimate,
                 ChannelConfirmedLegitimate, true, false, true, true, HandleDimensionOrder),
             [Outcome.StepUpCompleted] = new(Outcome.StepUpCompleted,
-                ChannelProtectedActionSuccess, null, false, true, true, IdentityDimensions),
+                ChannelStepUpCompleted, null, false, true, true, IdentityDimensions),
             [Outcome.AuthenticationSuccess] = new(Outcome.AuthenticationSuccess,
                 ChannelAuthenticationSuccess, null, false, true, true, IdentityDimensions),
             [Outcome.AuthenticationFailure] = new(Outcome.AuthenticationFailure,

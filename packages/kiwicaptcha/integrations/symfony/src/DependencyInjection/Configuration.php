@@ -730,6 +730,11 @@ final class Configuration implements ConfigurationInterface
                                         ->min(0)
                                         ->max(1000)
                                     ->end()
+                                    ->enumNode('operation_identity_source')
+                                        ->info('THE SERVER-AUTHORITATIVE OPERATION IDENTITY SOURCE of this scope\'s step-up binding (default null = none). "request_attribute" binds the step-up to the server-owned logical operation id the application places under KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE (the idempotency key it mints itself — never a raw client value alone), HMAC-split into operationIdentityDigest plus operationContentDigest over the canonical amount/currency/recipient contents. A financial_action scope left on null FAILs the doctor: a high-value config without a server-authoritative operation identity source cannot refuse cross-authorization (a step-up for tx-001 must never authorize tx-002).')
+                                        ->values(['request_attribute', null])
+                                        ->defaultNull()
+                                    ->end()
                                 ->end()
                             ->end()
                             ->defaultValue([
@@ -738,7 +743,7 @@ final class Configuration implements ConfigurationInterface
                                 'login' => ['id' => null, 'base_risk' => 120, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
                                 'password_reset' => ['id' => null, 'base_risk' => 180, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
                                 'admin_login' => ['id' => null, 'base_risk' => 300, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true, 'value_class' => 'standard'],
-                                'financial_action' => ['value_class' => 'high', 'carrier' => 'totp'],
+                                'financial_action' => ['value_class' => 'high', 'carrier' => 'totp', 'operation_identity_source' => 'request_attribute'],
                             ])
                         ->end()
                         ->arrayNode('login_scopes')

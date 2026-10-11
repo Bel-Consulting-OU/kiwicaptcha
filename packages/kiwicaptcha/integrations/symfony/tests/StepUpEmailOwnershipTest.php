@@ -11,6 +11,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipCodeSenderInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipDeliveryMetadata;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
@@ -684,25 +685,5 @@ final class StepUpEmailOwnershipTest extends TestCase
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => $scope]));
 
         return $engine->validate($dto);
-    }
-}
-
-/**
- * The capturing delivery seam of the tests: records every code so the
- * journey can complete the factor without a mailer.
- */
-final class CapturingEmailOwnershipSender implements EmailOwnershipCodeSenderInterface
-{
-    /** @var list<string> */
-    public array $codes = [];
-
-    public function send(string $email, string $code, int $ttlSecs): void
-    {
-        $this->codes[] = $code;
-    }
-
-    public function lastCode(): ?string
-    {
-        return $this->codes === [] ? null : $this->codes[\count($this->codes) - 1];
     }
 }

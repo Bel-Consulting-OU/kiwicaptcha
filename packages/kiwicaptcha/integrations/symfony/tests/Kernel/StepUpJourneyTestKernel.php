@@ -84,7 +84,7 @@ final class StepUpJourneyTestKernel extends TestKernel
                 if ($container->hasDefinition(EmailOtpStepUpHandler::class)) {
                     $container->setDefinition('step_up_code_capturer', (new Definition(CapturingStepUpCodeSender::class))->setPublic(true));
                     $container->getDefinition(EmailOtpStepUpHandler::class)
-                        ->replaceArgument(3, new Reference('step_up_code_capturer'));
+                        ->replaceArgument(2, new Reference('step_up_code_capturer'));
                 }
                 // The risk state store and the principal-network store
                 // stay exactly as the extension wired them: the real

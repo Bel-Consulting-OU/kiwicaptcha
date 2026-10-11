@@ -38,6 +38,8 @@ use KiwiCaptcha\Storage\RedisStorage;
 function kiwiHealthProbe(RedisStorage $storage): array
 {
     $now = time();
+    $salt = base64_encode(random_bytes(16));
+    $challenge = 'healthz';
     $record = new ChallengeRecord(
         nonce: base64_encode(random_bytes(32)),
         scope: 'healthz',
@@ -49,9 +51,9 @@ function kiwiHealthProbe(RedisStorage $storage): array
         t: 1,
         p: 1,
         targetBits: 8,
-        salt: base64_encode(random_bytes(16)),
-        prefix: 'healthz',
-        challenge: 'healthz',
+        salt: $salt,
+        prefix: $challenge.'|'.$salt.'|',
+        challenge: $challenge,
         minDurationMs: 0,
         issuedAtNs: (int) (microtime(true) * 1_000_000),
         protocolVersion: 2,

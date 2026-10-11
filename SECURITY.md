@@ -270,7 +270,13 @@ The security Redis (challenge storage, replay guards, rate/outstanding counters,
 ## What KiwiCaptcha explicitly does NOT protect against
 
 KiwiCaptcha is anti-abuse protection with a bounded, honest threat model.
-The following are **outside its guarantees**:
+The core value is measurable computational friction on cheap abuse plus
+adaptive self-hosted enforcement (step-up / quarantine / deny) with an
+auditable decision trail — not "proof-of-work cost alone", and not a
+secret algorithm. Attackers can read the source; the algorithms and
+defaults are public, auditable constants. Each deployment keeps its own
+policy and thresholds private (weights, escalation bands, trap
+placement). The following are **outside its guarantees**:
 
 - Proof-of-work outsourcing. The protocol verifies that *some* client paid the computational cost; it cannot verify the cost was paid locally.
   Farms, click services, and device pools that solve on behalf of others pass, and open-source solvers make custom clients trivial.

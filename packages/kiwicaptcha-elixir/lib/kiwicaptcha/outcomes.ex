@@ -85,8 +85,10 @@ defmodule Kiwicaptcha.Outcomes do
     %{
       "confirmedLegitimate" =>
         row("confirmedLegitimate", 12, true, false, true, true, @every_dimension),
+      # Step-up completion rides the dedicated event 22 (NOT 18, the
+      # honeypot kind): server-confirmed trust, same credit as event 8.
       "stepUpCompleted" =>
-        row("stepUpCompleted", 8, nil, false, true, true, @identity_dimensions),
+        row("stepUpCompleted", 22, nil, false, true, true, @identity_dimensions),
       "authenticationSuccess" =>
         row("authenticationSuccess", 10, nil, false, true, true, @identity_dimensions),
       "authenticationFailure" =>

@@ -56,7 +56,7 @@ final class StepUpTestKernel extends TestKernel
                     // test can present the delivered code.
                     $container->setDefinition('step_up_code_capturer', (new Definition(CapturingStepUpCodeSender::class))->setPublic(true));
                     $container->getDefinition(EmailOtpStepUpHandler::class)
-                        ->replaceArgument(3, new Reference('step_up_code_capturer'));
+                        ->replaceArgument(2, new Reference('step_up_code_capturer'));
                 }
             }
         });

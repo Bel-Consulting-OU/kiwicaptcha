@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests\Kernel;
 
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipCodeSenderInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipDeliveryMetadata;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp;
 use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
@@ -92,7 +93,7 @@ final class EmailJourneyCapturingSender implements EmailOwnershipCodeSenderInter
     /** @var list<string> */
     public array $codes = [];
 
-    public function send(string $email, string $code, int $ttlSecs): void
+    public function send(string $email, string $code, int $ttlSecs, EmailOwnershipDeliveryMetadata $delivery): void
     {
         $this->codes[] = $code;
     }

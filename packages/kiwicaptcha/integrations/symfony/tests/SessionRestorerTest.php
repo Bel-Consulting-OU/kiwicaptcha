@@ -50,16 +50,18 @@ final class SessionRestorerTest extends TestCase
     /**
      * A successful step-up restores the wrapped token (the session is
      * no longer pending) and records the network bucket under the
-     * challenge's principal pseudonym.
+     * challenge's principal pseudonym. The restore names the exact
+     * demand the completed factor finalizes, and the pending token
+     * carries the same identity, so the equality opens the session.
      */
     public function testASuccessfulStepUpRestoresTheTokenAndRecordsTheNetwork(): void
     {
-        [$tokenStorage, $wrapped] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, $wrapped, $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         $sessionIdBefore = (string) $request->getSession()->getId();
         $restorer = $this->restorer($tokenStorage);
 
-        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pending->demandId());
 
         $token = $tokenStorage->getToken();
         self::assertSame($wrapped, $token, 'the wrapped token is restored: the session is no longer pending');
@@ -73,17 +75,71 @@ final class SessionRestorerTest extends TestCase
     }
 
     /**
+     * The exact-demand gate: two sequential pending logins of one
+     * session hold two demands. Completing the factor of demand A
+     * finalizes demand A, and the pending token of login B (demand B)
+     * must never unwrap, however equal the principal, the scope and
+     * the session look. The refusal skips every effect: no unwrap, no
+     * rotation, no trust write, no device mint.
+     */
+    public function testCompletingOneDemandNeverUnwrapsASecondPendingLogin(): void
+    {
+        [, , $pendingA] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, $wrappedB, $pendingB] = $this->pendingTokenStorage(self::RAW_USER);
+        self::assertNotSame($pendingA->demandId(), $pendingB->demandId(), 'two pending logins hold two distinct demands');
+        $request = $this->request('203.0.113.10', 'session-original-000000000001');
+        $sessionIdBefore = (string) $request->getSession()->getId();
+        $restorer = $this->restorer($tokenStorage);
+
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pendingA->demandId());
+
+        self::assertInstanceOf(StepUpPendingToken::class, $tokenStorage->getToken(), 'the completion of demand A never unwraps the pending token of demand B');
+        self::assertSame($wrappedB, $tokenStorage->getToken()?->getWrapped(), 'the second login keeps its own wrapped token');
+        self::assertSame([], $this->networks->writes, 'a refused restore records nothing');
+        self::assertSame($sessionIdBefore, (string) $request->getSession()->getId(), 'a refused restore rotates nothing');
+    }
+
+    /**
+     * The gate fails closed on every unprovable shape: a restore that
+     * names no demand, a pending token stripped of its identity, and a
+     * non-pending session are each handled without upgrading anything.
+     */
+    public function testTheDemandGateFailsClosedOnAnUnprovableShape(): void
+    {
+        // A completion that names no demand never unwraps a pending
+        // session, even for the right principal.
+        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        $request = $this->request('203.0.113.10', 'session-original-000000000001');
+        $this->restorer($tokenStorage)->restore($this->identity->principalId(self::RAW_USER), $request, null);
+        self::assertInstanceOf(StepUpPendingToken::class, $tokenStorage->getToken(), 'an unnamed demand unwraps nothing');
+        self::assertSame([], $this->networks->writes, 'a refused restore records nothing');
+
+        // A token whose identity attribute was lost (a mangled session
+        // payload) can never prove the equality.
+        [$tokenStorage2, , $pending2] = $this->pendingTokenStorage(self::RAW_USER);
+        $pending2->setAttributes([]);
+        $this->restorer($tokenStorage2)->restore($this->identity->principalId(self::RAW_USER), $request, StepUpPendingToken::mintDemandId());
+        self::assertInstanceOf(StepUpPendingToken::class, $tokenStorage2->getToken(), 'an identity-less token unwraps nothing');
+
+        // The demand identity survives the session round-trip.
+        [, , $pending3] = $this->pendingTokenStorage(self::RAW_USER);
+        $roundTrip = unserialize(serialize($pending3));
+        self::assertInstanceOf(StepUpPendingToken::class, $roundTrip);
+        self::assertSame($pending3->demandId(), $roundTrip->demandId(), 'the demand identity is serialized with the token');
+    }
+
+    /**
      * The pending token's principal must be the one that completed the
      * step-up: a stolen ticket for another account can never upgrade
      * this session, and nothing is recorded.
      */
     public function testTheRestoreRefusesAStolenTicketForAnotherAccount(): void
     {
-        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, , $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         $restorer = $this->restorer($tokenStorage);
 
-        $restorer->restore($this->identity->principalId('someone-else@example.com'), $request);
+        $restorer->restore($this->identity->principalId('someone-else@example.com'), $request, $pending->demandId());
 
         self::assertInstanceOf(StepUpPendingToken::class, $tokenStorage->getToken(), 'a mismatched principal never restores');
         self::assertSame([], $this->networks->writes, 'a refused restore records nothing');
@@ -96,7 +152,7 @@ final class SessionRestorerTest extends TestCase
      */
     public function testARawIdentifierNeverMatchesTheChallengePseudonym(): void
     {
-        [$tokenStorage, $wrapped] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, $wrapped, $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         $restorer = new SessionRestorer(
             tokenStorage: $tokenStorage,
@@ -105,7 +161,7 @@ final class SessionRestorerTest extends TestCase
             identityFactory: $this->identity(),
         );
 
-        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pending->demandId());
 
         self::assertNotSame($wrapped, $tokenStorage->getToken(), 'no identity factory: the pseudonym never equals the raw identifier');
         self::assertInstanceOf(StepUpPendingToken::class, $tokenStorage->getToken());
@@ -118,7 +174,7 @@ final class SessionRestorerTest extends TestCase
      */
     public function testTheSessionRotatesEvenWhenTheCallerOmittedTheRequest(): void
     {
-        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, , $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         $sessionIdBefore = (string) $request->getSession()->getId();
         $stack = new RequestStack();
@@ -130,7 +186,7 @@ final class SessionRestorerTest extends TestCase
             identityFactory: $this->identity,
         );
 
-        $restorer->restore($this->identity->principalId(self::RAW_USER));
+        $restorer->restore($this->identity->principalId(self::RAW_USER), null, $pending->demandId());
 
         self::assertNotInstanceOf(StepUpPendingToken::class, $tokenStorage->getToken());
         self::assertNotSame($sessionIdBefore, (string) $request->getSession()->getId(), 'the rotation runs after the request-stack fallback');
@@ -143,7 +199,7 @@ final class SessionRestorerTest extends TestCase
      */
     public function testTheAsnTagUsesTheEngineSpelling(): void
     {
-        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, , $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('10.1.2.3', 'session-original-000000000001');
         $asn = AsnDataset::open($this->asnFixturePath());
         $restorer = new SessionRestorer(
@@ -153,22 +209,23 @@ final class SessionRestorerTest extends TestCase
             identityFactory: $this->identity,
         );
 
-        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pending->demandId());
 
         $principal = $this->identity->principalId(self::RAW_USER);
         self::assertTrue($this->networks->principalNetworkSeen($principal, 'asn:64512'), 'the ASN tag matches the engine\'s lookup spelling');
     }
 
     /**
-     * @return array{0: TokenStorage, 1: UsernamePasswordToken}
+     * @return array{0: TokenStorage, 1: UsernamePasswordToken, 2: StepUpPendingToken}
      */
     private function pendingTokenStorage(string $rawUser): array
     {
         $wrapped = new UsernamePasswordToken(new InMemoryUser($rawUser, null, ['ROLE_USER']), 'main');
         $tokenStorage = new TokenStorage();
-        $tokenStorage->setToken(new StepUpPendingToken($wrapped));
+        $pending = new StepUpPendingToken($wrapped);
+        $tokenStorage->setToken($pending);
 
-        return [$tokenStorage, $wrapped];
+        return [$tokenStorage, $wrapped, $pending];
     }
 
     private function request(string $ip, string $sessionId): Request
@@ -194,7 +251,7 @@ final class SessionRestorerTest extends TestCase
 
     public function testACustomCookieNameIsHonored(): void
     {
-        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, , $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         $continuity = new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie(name: 'custom-session');
         $cookieValue = $continuity->mint();
@@ -205,7 +262,7 @@ final class SessionRestorerTest extends TestCase
             identityFactory: $this->identity,
             continuity: $continuity,
         );
-        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pending->demandId());
         $pseudonym = $this->identity->sessionId($cookieValue);
         self::assertTrue(
             $this->networks->principalNetworkSeen($this->identity->principalId(self::RAW_USER), 'session:'.$pseudonym),
@@ -215,7 +272,7 @@ final class SessionRestorerTest extends TestCase
 
     public function testAMalformedCookieRecordsNothing(): void
     {
-        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, , $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         // Array-shaped cookie and non-hex value both record nothing.
         $request->cookies->set('__Host-kiwi-session', ['x']);
@@ -226,7 +283,7 @@ final class SessionRestorerTest extends TestCase
             identityFactory: $this->identity,
             continuity: $continuity,
         );
-        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pending->demandId());
         foreach ($this->networks->writes as [$p, $tag]) {
             self::assertStringNotContainsString('session:', $tag, 'a malformed cookie records no session tag');
         }
@@ -234,7 +291,7 @@ final class SessionRestorerTest extends TestCase
 
     public function testBothCookiesRecordBothTags(): void
     {
-        [$tokenStorage] = $this->pendingTokenStorage(self::RAW_USER);
+        [$tokenStorage, , $pending] = $this->pendingTokenStorage(self::RAW_USER);
         $request = $this->request('203.0.113.10', 'session-original-000000000001');
         $continuity = new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie();
         $device = new \BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie();
@@ -249,7 +306,7 @@ final class SessionRestorerTest extends TestCase
             continuity: $continuity,
             device: $device,
         );
-        $restorer->restore($this->identity->principalId(self::RAW_USER), $request);
+        $restorer->restore($this->identity->principalId(self::RAW_USER), $request, $pending->demandId());
         $principal = $this->identity->principalId(self::RAW_USER);
         self::assertTrue($this->networks->principalNetworkSeen($principal, 'session:'.$this->identity->sessionId($sessionValue)), 'session tag recorded');
         self::assertTrue($this->networks->principalNetworkSeen($principal, 'device:'.$this->identity->deviceId($deviceValue)), 'device tag recorded under the device context derivation');

@@ -909,8 +909,8 @@ final class RiskGateway implements LoginDecisionGate
      * verified outcome, computed from the unforgeable issuedAtNs receipt
      * time, never the client-reported durationMs. The risk-v1/v2
      * feedback surface is categorical: RiskEventKind is a fixed
-     * cross-language contract, values 1..21 byte-identical with the Rust
-     * mirror and the canonical risk.lua. The risk-v2 context carries
+     * cross-language contract, values 1..22 byte-identical with the Rust
+     * mirror and the canonical risk.lua (22 = StepUpCompleted). The risk-v2 context carries
      * only categorical fields, honeypot bool and context/TLS tags, and
      * its numeric 0..1000 signals are derived inside the engine, never
      * caller-supplied. A graded fast-solve bucket, e.g. below a

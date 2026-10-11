@@ -17,6 +17,7 @@ use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
+use Symfony\Component\Security\Core\Exception\BadCredentialsException;
 
 /**
  * The post-credential, pre-session first-attempt gate (P0-1).
@@ -231,6 +232,19 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
 
                 return;
             }
+            // A terminal Deny refuses the login outright. It must never
+            // mint a step-up: the pending token is the step-up mint, and
+            // a Deny that a factor can solve is not a Deny. The refusal
+            // runs before the always-policy below so a scope configured
+            // for forced step-up still keeps its Denies terminal.
+            if ($decision->action === RiskAction::Deny) {
+                $this->logger?->info('kiwi first-attempt gate denies the login (terminal)', [
+                    'scope' => $scope,
+                    'decision_id' => $decision->decisionId,
+                    'action' => $decision->action->value,
+                ]);
+                throw new BadCredentialsException('The login was denied.');
+            }
             // The always step-up policy: the decision is recorded (its
             // evidence and reasons still flow) but never grants the
             // session. The pending path is completable through the
@@ -246,7 +260,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
 
                 return;
             }
-            if ($decision->action === RiskAction::Deny || $decision->action === RiskAction::StepUp) {
+            if ($decision->action === RiskAction::StepUp) {
                 $this->logger?->info('kiwi first-attempt gate withholds the session (step-up pending)', [
                     'scope' => $scope,
                     'decision_id' => $decision->decisionId,
@@ -264,6 +278,11 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             if ($deviceValue !== null) {
                 $request->attributes->set(self::DEVICE_MINT_ATTRIBUTE, $deviceValue);
             }
+        } catch (BadCredentialsException $e) {
+            // A terminal deny: never fail closed to a solvable
+            // step-up. The refusal surfaces to the authentication
+            // failure handler, exactly like a wrong password.
+            throw $e;
         } catch (\Throwable $e) {
             // Fail Closed: a gate error must never hand out a full
             // session. The pending token is the conservative outcome,
@@ -459,24 +478,14 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
      */
     private function targetFieldValues(Request $request, string $scope): array
     {
-        $fields = [];
-        foreach ($this->targetFieldsByScope[$scope] ?? [] as $name) {
-            $value = null;
-            try {
-                // getPayload()->all() merges the request body whatever
-                // its content type (form, JSON, XML); on Symfony builds
-                // without the payload bag the form body remains.
-                $payload = $request->getPayload();
-                $value = $payload->all()[$name] ?? null;
-            } catch (\Throwable) {
-                $value = $request->request->get($name);
-            }
-            if (\is_string($value) && $value !== '') {
-                $fields[$name] = $value;
-            }
-        }
-
-        return $fields;
+        // Nesting-aware: a Symfony form nests its data under the form
+        // name, so a flat request-key read would miss every nested
+        // submission. A non-scalar or ambiguous value resolves no
+        // target instead of throwing inside the guard.
+        return \BelConsulting\KiwiCaptchaBundle\Http\RequestFieldResolver::targetFields(
+            $request,
+            $this->targetFieldsByScope[$scope] ?? [],
+        );
     }
 
     private function requestOf(object $event): ?Request

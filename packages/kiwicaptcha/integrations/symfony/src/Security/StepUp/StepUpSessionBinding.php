@@ -110,4 +110,32 @@ final class StepUpSessionBinding
 
         return false;
     }
+
+    /**
+     * The presented binding hash of a completion: the SHA-256 of the
+     * bound session id for a session-bound challenge, of the presented
+     * client secret for a stateless one. This is the material the
+     * store's atomic factor completion compares against the stored
+     * hashes, so the binding check runs inside the script and never
+     * from a caller's word. Null when the request presents nothing the
+     * challenge could be bound to, fail closed.
+     */
+    public static function presentedBindingHash(Request $request, StepUpChallenge $challenge): ?string
+    {
+        if ($challenge->sessionHash !== null && $challenge->sessionHash !== '') {
+            $requestSession = self::sessionId($request);
+            if ($requestSession === '') {
+                return null;
+            }
+
+            return StepUpChallenge::sessionHash($requestSession);
+        }
+        if ($challenge->clientSecretHash !== null && $challenge->clientSecretHash !== '') {
+            $presented = (string) $request->request->get(self::CLIENT_SECRET_FIELD, '');
+
+            return $presented === '' ? null : StepUpChallenge::clientSecretHash($presented);
+        }
+
+        return null;
+    }
 }

@@ -1,8 +1,9 @@
 //! Typed outcomes API and the long-memory mark surface: the eight
 //! application-reported outcomes, the sealed handle set that addresses
 //! their subjects, and the one versioned mapping table that resolves
-//! every outcome onto the existing risk-v1 event channels, the
-//! always-on outcome ledger and the marks.
+//! every outcome onto the risk-v1 event channels (including the
+//! step-up-completion channel 22), the always-on outcome ledger and the
+//! marks.
 //!
 //! The trust polarity lives in the table and is enforced by property
 //! tests: only the server-confirmed trust outcomes may subtract risk,
@@ -358,7 +359,11 @@ pub fn mapping(outcome: Outcome) -> OutcomeMapping {
         },
         Outcome::StepUpCompleted => OutcomeMapping {
             outcome,
-            channel: RiskEventKind::ProtectedActionSuccess,
+            // The dedicated step-up completion event (22), NOT the shared
+            // ProtectedActionSuccess channel: a completed step-up is its
+            // own server-confirmed trust kind (same credit as event 8 in
+            // the state script). NOT 18 (the honeypot kind).
+            channel: RiskEventKind::StepUpCompleted,
             ledger_legitimate: None,
             writes_abuse_mark: false,
             server_confirmed: true,
@@ -1083,7 +1088,12 @@ mod tests {
         }
         channels.sort_unstable();
         channels.dedup();
-        assert_eq!(channels, vec![8, 9, 10, 11, 12, 13]);
+        // The vocabulary maps onto the risk-v1 pressure/auth channels
+        // plus the step-up-completion channel (22). Event 8
+        // (ProtectedActionSuccess) remains a valid state-script channel
+        // but the table no longer selects it: step-up completion has its
+        // own kind at 22.
+        assert_eq!(channels, vec![9, 10, 11, 12, 13, 22]);
     }
 
     #[test]
@@ -1115,11 +1125,11 @@ mod tests {
                 );
             }
             // The channel polarity: trust rows map only onto the trust
-            // channels (8, 10, 12); every other row maps only onto the
+            // channels (8, 10, 12, 22); every other row maps only onto the
             // pressure channels (9, 11, 13).
             if row.may_subtract_risk {
                 assert!(
-                    [8, 10, 12].contains(&row.channel.as_u8()),
+                    [8, 10, 12, 22].contains(&row.channel.as_u8()),
                     "{name} trust channel"
                 );
             } else {

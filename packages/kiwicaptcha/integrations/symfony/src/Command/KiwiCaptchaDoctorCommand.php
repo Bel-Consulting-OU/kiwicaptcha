@@ -171,6 +171,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Risk scope policy' => $this->checkScopePolicy(),
             'Value-class pricing' => $this->checkValueClassPricing(),
             'Carrier factors' => $this->checkCarrierFactors(),
+            'Operation identity' => $this->checkOperationIdentity(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
             'Decoy escalation gate' => $this->checkDecoyEscalationGate(),
@@ -1179,6 +1180,56 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['PASS', sprintf('every named carrier names an enabled factor with a real delivery seam and a completion path (%d scope(s))', \count($carriers))];
+    }
+
+    /**
+     * The server-authoritative operation identity source of the
+     * high-value scopes. A financial_action scope (or any scope whose
+     * declared value class is high/critical and that names a step-up
+     * carrier) must configure
+     * risk.scopes.<name>.operation_identity_source as
+     * request_attribute. That value is the server-owned logical
+     * operation id the application mints and places under
+     * KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, never a raw client
+     * value alone. Without it the split operation binding
+     * (operationIdentityDigest + operationContentDigest) cannot be
+     * minted, so a step-up for one logical operation could authorize
+     * another. The failure is hard: a high-value config without that
+     * server-authoritative identity source refuses to run.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkOperationIdentity(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false)) {
+            return ['PASS', 'risk disabled: the operation identity binding is inactive'];
+        }
+        $missing = [];
+        foreach (($risk['scopes'] ?? []) as $name => $scope) {
+            if (!\is_array($scope)) {
+                continue;
+            }
+            $valueClass = (string) ($scope['value_class'] ?? 'standard');
+            $isHighValue = \in_array($valueClass, ['high', 'critical'], true)
+                || (string) $name === 'financial_action';
+            if (!$isHighValue) {
+                continue;
+            }
+            $source = $scope['operation_identity_source'] ?? null;
+            if ($source !== 'request_attribute') {
+                $missing[] = (string) $name;
+            }
+        }
+        if ($missing !== []) {
+            return ['FAIL', sprintf(
+                '%d high-value scope(s) carry no server-authoritative operation identity source (%s): set risk.scopes.<name>.operation_identity_source to request_attribute so the application\'s server-owned logical operation id (KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE) binds the step-up — without it a step-up for one transfer can authorize another',
+                \count($missing),
+                implode(', ', $missing),
+            )];
+        }
+
+        return ['PASS', 'every high-value scope names a server-authoritative operation identity source'];
     }
 
     /**

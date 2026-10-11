@@ -30,10 +30,12 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RedisChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\RedisPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\FactorRequirement;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingEmailOwnershipCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpOwnerNotifier;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\MailerEmailOwnershipCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\MailerStepUpCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
@@ -41,6 +43,8 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpBootstrapGate;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandViewRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpLockoutGuard;
@@ -2097,12 +2101,31 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
                     ->addTag('security.voter')
                     ->setPublic(true));
+                // The completion credit of the finalizer: the internal
+                // effect that reports the stepUpCompleted outcome for an
+                // authorized demand. Nothing else invokes it, and the
+                // factor handlers hold no reference to it: a factor
+                // completion books nothing by itself.
                 $container->setDefinition(StepUpCompletionCredit::class, (new Definition(StepUpCompletionCredit::class, [
                     new Reference(OutcomeReporterInterface::class),
                     $stepUpMaster,
+                ]))->setPublic(true));
+                // The demand finalizer: the one authorization path of the
+                // step-up plane. The validator's grant lane and the login
+                // completion lane both call it; it owns the reassessment,
+                // the terminal settlement, the outcome credit and the
+                // pending-login restore, in that order, so the restore
+                // only ever receives an already-authorized demand.
+                $container->setDefinition(StepUpDemandFinalizer::class, (new Definition(StepUpDemandFinalizer::class, [
+                    new Reference('kiwi_captcha.step_up.store'),
+                    new Reference(StepUpCompletionCredit::class),
+                    new Reference(SessionRestorer::class),
                 ]))
-                    ->setArgument('$sessionRestorer', new Reference(SessionRestorer::class))
+                    ->setArgument('$risk', new Reference(RiskGateway::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
+                    ->setArgument('$continuity', new Reference(ContinuityCookie::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    ->setArgument('$logger', $loggerRef)
                     ->setPublic(true));
 
                 // The cross-challenge brute-force budget: escalating
@@ -2202,14 +2225,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     } elseif ($mailerAvailable) {
                         // The mailer adapter resolves the recipient from
                         // the pending login's authenticated user (the
-                        // wrapped token behind the pending one), so a
-                        // deployment whose principal identifier is the
-                        // delivery address needs no custom sender.
+                        // wrapped token behind the pending one): a
+                        // conventional email accessor on the user, a
+                        // wired PrincipalEmailResolverInterface, or an
+                        // email-shaped identifier. A username-based
+                        // principal therefore still resolves a delivery
+                        // address without a custom sender.
                         $container->setDefinition(MailerStepUpCodeSender::class, (new Definition(MailerStepUpCodeSender::class, [
                             new Reference('mailer.mailer'),
                             $mailerFrom,
                             new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE),
                             $loggerRef,
+                            new Reference(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\PrincipalEmailResolverInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE),
                         ]))->setPublic(true));
                         $senderRef = new Reference(MailerStepUpCodeSender::class);
                     } else {
@@ -2226,7 +2253,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $container->setDefinition(EmailOtpStepUpHandler::class, (new Definition(EmailOtpStepUpHandler::class, [
                         new Reference('kiwi_captcha.step_up.store'),
                         new Reference(StepUpTicket::class),
-                        new Reference(StepUpCompletionCredit::class),
                         $senderRef,
                         $stepUpMaster,
                         $stepUpConfig['challenge_ttl_secs'],
@@ -2244,7 +2270,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $container->setDefinition(TotpStepUpHandler::class, (new Definition(TotpStepUpHandler::class, [
                         new Reference('kiwi_captcha.step_up.store'),
                         new Reference(StepUpTicket::class),
-                        new Reference(StepUpCompletionCredit::class),
                         $stepUpHandlerConfig['totp']['algorithm'],
                         $stepUpHandlerConfig['totp']['digits'] ?? $policyDigits,
                         $stepUpHandlerConfig['totp']['window'],
@@ -2281,7 +2306,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $container->setDefinition(WebAuthnStepUpHandler::class, (new Definition(WebAuthnStepUpHandler::class, [
                         new Reference('kiwi_captcha.step_up.store'),
                         new Reference(StepUpTicket::class),
-                        new Reference(StepUpCompletionCredit::class),
                         $registryDefinition === null ? null : new Reference(WebAuthnCredentialRegistry::class),
                         $stepUpMaster,
                         $stepUpConfig['challenge_ttl_secs'],
@@ -2313,6 +2337,28 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $stepUpHandlers,
                     $stepUpDefault,
                 ]))->setPublic(true));
+                // The factor requirement source: every demand snapshots
+                // the factor it requires, escalated strictly past the
+                // factor the family's completion history holds. The
+                // resolver serves the built-in assurance ladder only; a
+                // default handler outside the ladder runs without the
+                // snapshot rather than failing the container.
+                $resolverDefault = null;
+                foreach (array_merge([$stepUpDefault], ['webauthn', 'totp', 'email_otp']) as $candidate) {
+                    if (\is_string($candidate) && FactorRequirement::isFamily($candidate)) {
+                        $resolverDefault = $candidate;
+                        break;
+                    }
+                }
+                if ($resolverDefault !== null) {
+                    $container->setDefinition(StepUpFactorResolver::class, (new Definition(StepUpFactorResolver::class, [
+                        $resolverDefault,
+                    ]))->setPublic(true));
+                    $container->getDefinition(StepUpDemandFinalizer::class)->setArgument('$factorResolver', new Reference(StepUpFactorResolver::class));
+                    if ($emailOwnershipRef !== null) {
+                        $container->getDefinition(EmailOwnershipStepUp::class)->setArgument('$factorResolver', new Reference(StepUpFactorResolver::class));
+                    }
+                }
                 $container->setDefinition(StepUpController::class, (new Definition(StepUpController::class, [
                     new Reference(KiwiStepUpHandlerRegistry::class),
                     new Reference('kiwi_captcha.risk.identity_factory'),
@@ -2321,6 +2367,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$principalResolver', $container->has(PrincipalResolverInterface::class) ? new Reference(PrincipalResolverInterface::class) : null)
                     ->setArgument('$tokenStorage', new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$emailOwnership', $emailOwnershipRef)
+                    // The demand finalizer: the login plane's demand mint
+                    // and the one authorization path of a completed
+                    // factor proof.
+                    ->setArgument('$demandFinalizer', new Reference(StepUpDemandFinalizer::class))
                     ->addTag('controller.service_arguments')
                     ->setPublic(true));
             }
@@ -2973,12 +3023,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // follows the stage composition's evidence arm (the profile
         // matrix plus the risk.evidence.telemetry knob); the
         // request_binding option follows the static risk.request_binding
-        // default.
+        // default. The step-up demand view registry routes every minted
+        // demand to exactly the form field whose validation raised it.
+        $container->setDefinition(StepUpDemandViewRegistry::class, (new Definition(StepUpDemandViewRegistry::class, [
+            new Reference('request_stack'),
+        ]))->setPublic(true));
         $container->setDefinition(KiwiCaptchaType::class, (new Definition(KiwiCaptchaType::class, [
             new Reference(KiwiCaptchaRuntime::class),
             '%kiwi_captcha.route_prefix%',
             $composition['telemetry'],
             $config['risk']['request_binding'],
+            new Reference(StepUpDemandViewRegistry::class),
         ]))->addTag('form.type'));
 
         // Post-solve disposition store (final-disposition durability). The
@@ -3131,6 +3186,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$emailOwnership', $emailOwnershipRef)
             ->setArgument('$emailCarrierScopes', self::emailCarrierScopeMap($riskConfig))
             ->setArgument('$emailFieldsByScope', self::emailFieldMap($riskConfig))
+            // The shared demand finalizer of the step-up plane: the
+            // redeemed grant's demand is authorized here and nowhere
+            // else (null when the carrier plane is off, and the grant
+            // surface is then absent too).
+            ->setArgument('$stepUpFinalizer', $emailOwnershipRef !== null ? new Reference(StepUpDemandFinalizer::class) : null)
+            // The per-form demand routing: a minted demand is filed
+            // under the validating field's constraint instance, and the
+            // form type's finishView() claims exactly that entry (the
+            // registry is always wired; its table lives on the request
+            // attributes, so an unwired validator just files nothing).
+            ->setArgument('$stepUpDemandViews', new Reference(StepUpDemandViewRegistry::class))
             ->addTag('validator.constraint_validator'));
 
         // Twig widget runtime + twig function (embeds the shared widget

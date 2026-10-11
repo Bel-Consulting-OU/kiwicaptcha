@@ -161,7 +161,7 @@ final class TargetPseudonymSpellingTest extends TestCase
             'hash',
             targetOwned: true,
         );
-        $credit->credit($challenge->id, $challenge);
+        $credit->report($challenge->id, $challenge->principalPseudonym, $challenge->targetPseudonym, $challenge->targetOwned);
         self::assertCount(2, $reporter->reports);
         self::assertSame($target, $reporter->reports[1]['handle']->id, 'the target credit carries the canonical digest');
 
@@ -183,9 +183,12 @@ final class TargetPseudonymSpellingTest extends TestCase
         $handler = new EmailOtpStepUpHandler(
             $store,
             new StepUpTicket(self::MASTER),
-            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             new CapturingStepUpCodeSender(),
             self::MASTER,
+        );
+        $finalizer = new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer(
+            $store,
+            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
         );
 
         return new StepUpController(
@@ -193,6 +196,9 @@ final class TargetPseudonymSpellingTest extends TestCase
             $this->identityFactory(),
             self::SCOPE,
             new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePrincipalResolver('user-42'),
+            null,
+            null,
+            $finalizer,
         );
     }
 }
