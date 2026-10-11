@@ -66,6 +66,14 @@ final class MarksEscalation
     public const TARGET_ATTACK_THRESHOLD = 5;
 
     /**
+     * The distinct-source count at which the target spread signal
+     * saturates (Rust mirror: marks::TARGET_SPREAD_SATURATION); the
+     * fail-closed target picture reads the threshold failure count
+     * with the spread saturated on both axes.
+     */
+    public const TARGET_SPREAD_SATURATION = 20;
+
+    /**
      * The scope failure-ratio pressure floor for first-attempt login
      * escalation (Rust mirror: marks::`SCOPE_PRESSURE`_FLOOR): at/above
      * this global_pressure signal (or global level

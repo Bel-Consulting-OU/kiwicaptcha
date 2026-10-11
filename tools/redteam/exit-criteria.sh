@@ -191,9 +191,14 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     # The shared writer (write-run.mjs) records the source fingerprint
     # and the engine method and refuses any path outside engine/runs.
     # An inline writer without those fields is how runs went stale
-    # silently — never again.
+    # silently — never again. The RUNTIME line (driver=<class>
+    # container_overrides=<n>) is the product-method provenance the
+    # ledger checks for method:product campaigns.
+    runtime_line=$(grep '^RUNTIME:' "$log" | tail -n 1)
+    runtime_driver=$(printf '%s' "$runtime_line" | sed -n 's/^RUNTIME: driver=\([^ ]*\).*/\1/p')
+    runtime_overrides=$(printf '%s' "$runtime_line" | sed -n 's/^RUNTIME:.*container_overrides=\([0-9]*\).*/\1/p')
     if ! node "$RT_DIR/engine/write-run.mjs" \
-        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$([ "$verdict" = PASS ] && echo 0 || echo 1)" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}"; then
+        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$([ "$verdict" = PASS ] && echo 0 || echo 1)" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}" "$runtime_driver" "$runtime_overrides"; then
         echo "exit-criteria: campaign $campaign failed to write its run document" >&2
     fi
 done
@@ -683,8 +688,15 @@ else
 fi
 
 # ---------- campaign lint (P3 gate: no product seams in campaigns) ----------
+# The P3 gate is never excusable: a SKIP of this row closes the release
+# gate RED even under KIWI_EC_ALLOW_SKIP=1. A driver seam that escapes
+# the lint is exactly the fixture-measurement the gate exists to catch,
+# so there is no operator knob that waives it — the lint must RUN and
+# hold, or the gate is closed.
+CAMPAIGN_LINT_SKIPPED=0
 if [ "${KIWI_EC_SKIP_LINT:-0}" = 1 ]; then
-    record campaign-lint gates SKIP "skipped"
+    CAMPAIGN_LINT_SKIPPED=1
+    record campaign-lint gates SKIP "skipped: the P3 gate is never excusable, the release gate stays RED"
 else
     if sh tools/redteam/lint-campaigns.sh >"$GATE_DIR/campaign-lint.log" 2>&1; then
         record campaign-lint gates GREEN "no product-seam implementations in campaign code"
@@ -839,9 +851,12 @@ printf 'exit-criteria: non-green rows present (red=%d toolchain-absent=%d skip=%
     "$red_count" "$absent_count" "$skip_count"
 
 # KIWI_EC_ALLOW_SKIP=1 may accept SKIP rows only: a red or
-# toolchain-absent row is never excused. Skipped rows stay non-green
-# in the table above even when the operator accepts them.
-if [ "${KIWI_EC_ALLOW_SKIP:-0}" = 1 ] && [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -gt 0 ]; then
+# toolchain-absent row is never excused, and the campaign lint (the P3
+# gate) is never excusable at all — a skip of that row keeps the gate
+# closed. Skipped rows stay non-green in the table above even when the
+# operator accepts them.
+if [ "${KIWI_EC_ALLOW_SKIP:-0}" = 1 ] && [ "$CAMPAIGN_LINT_SKIPPED" != 1 ] \
+    && [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -gt 0 ]; then
     printf 'exit-criteria: gate open ONLY because KIWI_EC_ALLOW_SKIP=1 accepted %d skip row(s); those rows remain non-green and were not measured\n' \
         "$skip_count"
     exit 0

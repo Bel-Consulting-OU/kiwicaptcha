@@ -24,7 +24,10 @@ namespace KiwiCaptcha\Risk\Storage;
  *    with their trust flags.
  *  - TTLs: `session:` 2x the continuity cookie TTL (default 3600 s);
  *    `device:` the trusted-device TTL (default 90 days); `net:`/`asn:`
- *    400 days. A read past the class TTL answers "not seen".
+ *    400 days. Every read carries the caller's configured class TTL and
+ *    answers "not seen" past it — never past the class maximum, so a
+ *    stored value can never vouch server-side past the lifetime the
+ *    deployment actually configured.
  *  - Fail-closed errors: any storage failure throws
  *    {@see RiskStoreException}. The implementation never returns "not
  *    seen" on error (which would read as "novel" and price users out

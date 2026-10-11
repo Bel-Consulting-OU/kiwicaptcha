@@ -10,7 +10,6 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeTrustGateInterface;
-use BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Outcomes\Outcome;
 use KiwiCaptcha\Risk\Outcomes\OutcomeHandle;
@@ -291,14 +290,14 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * The target handle. The engine derives the full 32-byte digest of
-     * the normalized identifier (the canonical 64-hex target
-     * pseudonym). The outcomes API addresses target marks under the
-     * 128-bit handle spelling, so the one projection lives in
-     * {@see TargetMarkKey::of()}. Never a try-both fallback here.
-     * Authentication outcomes write no target marks of their own, so
-     * the projection cannot split a mark key; anything else is a skip
-     * with a debug log.
+     * The target handle: the engine's full 32-byte digest of the
+     * normalized identifier (the canonical 64-hex target pseudonym).
+     * The canonical spelling is what the engine's consolidated
+     * assessment addresses: the target failure counter and spread the
+     * login decision reads. The outcomes layer projects the digest to
+     * the 128-bit mark-key spelling where marks are written. Never a
+     * try-both fallback here, and never a raw identifier: anything
+     * else is a skip with a debug log.
      */
     private function targetHandle(string $rawUsername): ?OutcomeHandle
     {
@@ -309,11 +308,10 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             return null;
         }
         try {
-            return OutcomeHandle::target(TargetMarkKey::of($digest));
+            return OutcomeHandle::target($digest);
         } catch (\Throwable) {
-            // The projection refused a non-canonical digest (or the
-            // handle gate refused the derived key): the report is
-            // skipped, never sent under a raw identifier.
+            // The handle gate refused a non-canonical digest: the
+            // report is skipped, never sent under a raw identifier.
         }
         $this->debug('target handle rejected the derived pseudonym shape; the report is skipped, never raw');
         $this->countSkip('raw_identifier_rejected');
@@ -342,8 +340,11 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
      * The report context of one lane: the configured scope, the
      * canonical client IP, the (gate-gated) session raw value and no
      * principal (a failure asserts no authenticated principal, and a
-     * success's principal rides the handle pseudonym). Null when the
-     * request or its IP cannot anchor an observation.
+     * success's principal rides the handle pseudonym). The context
+     * never carries the claimed identifier: raw identifiers stay out
+     * of every report, and the target dimension books through the
+     * handle path (the target's own registerTargetFailure write).
+     * Null when the request or its IP cannot anchor an observation.
      */
     private function context(RiskEventKind $event, ?Request $request, ?string $sessionRaw): ?RiskContext
     {

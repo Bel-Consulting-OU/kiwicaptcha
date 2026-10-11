@@ -373,14 +373,19 @@ fn sharded_store_maintains_the_target_dimension() {
     assert_eq!(state.spread_asns, 1);
     assert!(state.fails >= 5);
 
-    // The state lives on the target family's own slot, in both modes
-    // byte-identically: the classic keyspace builder's keys exist.
+    // The state lives on the target family's own tag: the sharded
+    // keyspace builder's keys exist (each family slot stays owned by
+    // the routed dispatch of the sharded store).
     let mut conn = redis::Client::open(url.as_str())
         .unwrap()
         .get_connection()
         .unwrap();
     use redis::Commands;
-    let keys = kiwicaptcha_risk::keyspace::target_state_keys(&namespace, &target_id);
+    let keys = kiwicaptcha_risk::keyspace::target_state_keys(
+        &namespace,
+        &target_id,
+        kiwicaptcha_risk::keyspace::KeyspaceMode::Sharded,
+    );
     for key in &keys {
         let exists: i64 = conn.exists(key).expect("exists");
         assert_eq!(exists, 1, "target key {key} must exist");

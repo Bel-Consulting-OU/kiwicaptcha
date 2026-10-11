@@ -174,7 +174,7 @@ fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
 /// fleets during a rollout. A model revision that materially affects
 /// security requires a `policy_version` bump in the operator policy
 /// snapshot (see [`crate::policy::RiskPolicy`]).
-pub const RISK_MODEL_REVISION: u32 = 17;
+pub const RISK_MODEL_REVISION: u32 = 18;
 
 /// Immutable risk decision produced by the engine.
 ///
@@ -1229,7 +1229,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         reply.target_spread_asns,
                     )
                 });
-                (reply.observed, v2_signals, registration.is_some())
+                (reply.observed, v2_signals, registration.is_some(), false)
             }
             Ok(None) => {
                 // Store without the consolidated capability: the plain
@@ -1253,16 +1253,32 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 self.metrics
                     .add_store_latency_us(start.elapsed().as_micros() as u64);
                 self.breaker.record_success();
+                let mut target_evidence_unavailable = false;
                 let v2_signals = v2.map(|v2ctx| {
                     // The fallback path has no consolidated reply: the
                     // live target state is read directly (the same state
-                    // the outcome bridge maintains), degrading to the
-                    // neutral zero counts on a store miss, exactly like
-                    // the session-tag record reads.
+                    // the outcome bridge maintains). A store miss
+                    // degrades to the neutral zero counts, exactly like
+                    // the session-tag record reads; a failed read fails
+                    // closed: the counts return saturated at the attack
+                    // picture (the threshold failure count, the spread
+                    // saturated on both axes), so a target under attack
+                    // never reads as clean because the store hiccuped.
+                    // The first-attempt stage then carries the
+                    // evidence-unavailable reason, whose enforce-mode
+                    // verdict is the interactive step-up (always
+                    // completable).
                     let (target_failures, spread_sources, spread_asns) = match &target_id {
                         Some(id) => match self.store.read_target_state(id) {
                             Ok(state) => (state.fails, state.spread_sources, state.spread_asns),
-                            Err(_) => (0, 0, 0),
+                            Err(_) => {
+                                target_evidence_unavailable = true;
+                                (
+                                    crate::marks::TARGET_ATTACK_THRESHOLD,
+                                    crate::marks::TARGET_SPREAD_SATURATION,
+                                    crate::marks::TARGET_SPREAD_SATURATION,
+                                )
+                            }
                         },
                         None => (0, 0, 0),
                     };
@@ -1275,11 +1291,11 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         spread_asns,
                     )
                 });
-                (observed, v2_signals, false)
+                (observed, v2_signals, false, target_evidence_unavailable)
             }
         };
 
-        let (observed, v2_signals, outcome_registered) = outcome;
+        let (observed, v2_signals, outcome_registered, target_evidence_unavailable) = outcome;
         // When global pressure is disabled, the signal, the level
         // and the cooldown are ALL zeroed before any policy or
         // cooldown-deny check: the global channel is inert (the
@@ -1357,8 +1373,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         // wired). Novel-network and scope-pressure evidence are
         // login-shaped (AuthenticationSuccess / first login); the
         // breached-credential flag rides the v2 context like honeypot.
-        let first_attempt =
-            self.first_attempt_evidence(&ctx, &observation, v2, &vector, global_level);
+        let first_attempt = self.first_attempt_evidence(
+            &ctx,
+            &observation,
+            v2,
+            &vector,
+            global_level,
+            target_evidence_unavailable,
+        );
         // allow.
         if let Some(reader) = self.marks_reader.as_ref() {
             let request = crate::marks::MarksRequest {
@@ -1541,6 +1563,14 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
     ///   [`crate::marks::SCOPE_PRESSURE_FLOOR`] /
     ///   [`crate::marks::SCOPE_PRESSURE_LEVEL`] — every first-attempt
     ///   login escalates, not only the attacked target's.
+    /// - `evidence_unavailable` also fires when
+    ///   `target_evidence_unavailable` is passed: a failed live target
+    ///   read on the fallback path is the same fail-closed verdict, so
+    ///   the decision carries the reason and enforce mode treats the
+    ///   login as novel.
+    /// - `would_step_up_under_enforce`: the novelty verdict before the
+    ///   enforcement mask is applied, for the caller's post-Allow trust
+    ///   minting decision.
     ///
     /// The ASN bucket of a source address for the novel-network gate:
     /// the ASN number as a decimal string when the dataset resolved
@@ -1556,6 +1586,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn first_attempt_evidence(
         &self,
         ctx: &RiskContext<'_>,
@@ -1563,12 +1594,17 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         v2: Option<&RiskV2Context>,
         vector: &crate::signals::SignalVector,
         global_level: u8,
+        target_evidence_unavailable: bool,
     ) -> crate::marks::FirstAttemptEvidence {
         use crate::marks::FirstAttemptEvidence;
 
         let is_login = ctx.event == RiskEventKind::AuthenticationSuccess
             || ctx.event == RiskEventKind::AuthenticationFailure;
         let mut evidence = FirstAttemptEvidence::zero();
+        // A failed live target read (the fallback path) is evidence
+        // unavailable from the start: unreadable state cannot vouch for
+        // the login, whatever probe failed.
+        evidence.evidence_unavailable = target_evidence_unavailable;
         let mut scope_pressure = false;
 
         if is_login {
@@ -1592,7 +1628,7 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 // error arms the fail-closed flag instead of reading as
                 // neutral: unreadable history cannot vouch for the
                 // login, so the request counts as novel.
-                let mut evidence_unavailable = false;
+                let mut evidence_unavailable = evidence.evidence_unavailable;
                 let asn_seen = if asn.is_empty() || asn == "0" {
                     None
                 } else {
@@ -1679,6 +1715,11 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                     scope_pressure = false;
                 }
 
+                // The unmasked novelty verdict, recorded before the
+                // enforcement mask: the post-Allow trust minting reads
+                // it to decide whether this Allow may mint session and
+                // device trust.
+                evidence.would_step_up_under_enforce = is_novel;
                 // Evidence is read-only: the network tag is recorded
                 // only after the decision (post-Allow binding), never
                 // during evaluation. Recording here would write the
@@ -4404,7 +4445,7 @@ mod tests {
         // policy_version, model_revision, global_level, retry_after_ms,
         // band.
         assert_eq!(json.as_object().unwrap().len(), 9);
-        assert_eq!(json["model_revision"], 17);
+        assert_eq!(json["model_revision"], 18);
     }
 
     #[test]

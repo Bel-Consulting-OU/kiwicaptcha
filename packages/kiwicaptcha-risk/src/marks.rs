@@ -75,6 +75,11 @@ pub const CORROBORATION_FLOOR: u16 = 300;
 /// login claiming it sees the interactive step-up (never a lockout).
 pub const TARGET_ATTACK_THRESHOLD: u32 = 5;
 
+/// The distinct-source count at which the target spread signal
+/// saturates: the fail-closed target picture reads the threshold
+/// failure count with the spread saturated on both axes.
+pub const TARGET_SPREAD_SATURATION: u32 = 20;
+
 /// The scope failure-ratio pressure floor for first-attempt login
 /// escalation: at/above this `global_pressure` signal (or global level
 /// [`SCOPE_PRESSURE_LEVEL`]) every login escalates to the interactive
@@ -272,6 +277,12 @@ pub struct FirstAttemptEvidence {
     pub breached_credential: bool,
     pub scope_pressure: bool,
     pub evidence_unavailable: bool,
+    /// The unmasked novelty verdict, recorded before the enforcement
+    /// mode is applied. The post-Allow trust minting reads it: an Allow
+    /// that enforce mode would have stepped up records its session and
+    /// device bindings without trust, so learn mode's leniency can
+    /// never leave a trusted device under the victim.
+    pub would_step_up_under_enforce: bool,
 }
 
 impl FirstAttemptEvidence {

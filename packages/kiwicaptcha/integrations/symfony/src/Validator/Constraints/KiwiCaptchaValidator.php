@@ -265,6 +265,25 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
          * surface absent (the flag still rides the request attribute).
          */
         private readonly ?QuarantineMarkerInterface $quarantineMarker = null,
+        /**
+         * The anonymous email-ownership factor (the step_up_email scope
+         * carrier). When wired, a submission whose value is a completed
+         * grant instead of a solved token is honored when the grant
+         * redeems: the factor is the second proof the step-up demand
+         * asked for. Null keeps the surface absent (a grant then
+         * verifies as a malformed token, fail closed).
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp $emailOwnership = null,
+        /**
+         * Application scope name to the configured target form field name
+         * (risk.scopes.<scope>.target_field). When the validated scope
+         * declares a target field, its submitted form value rides the
+         * post-solve decision's context as the target dimension input,
+         * exactly like the first-attempt gate and the outcome bridge.
+         *
+         * @var array<string, string>
+         */
+        private readonly array $targetFieldsByScope = [],
     ) {
     }
 
@@ -368,6 +387,25 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         }
         if (!\is_string($value)) {
             throw new UnexpectedTypeException($value, 'string');
+        }
+
+        // The email-ownership grant path: a value carrying the grant
+        // prefix is never a solution token. The grant redeems in place
+        // of a solved token when it verifies, binds to this request and
+        // consumes single-use: the completed email factor is the second
+        // proof the step-up demand asked for. Anything else (forged,
+        // expired, spent, wrong scope, wrong session, wrong chain)
+        // answers the standing step-up violation, never a silent pass.
+        if ($this->emailOwnership !== null
+            && str_starts_with($value, \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::GRANT_PREFIX.'.')
+        ) {
+            $this->acceptEmailOwnershipGrant(
+                $value,
+                $constraint,
+                $request ?? $this->requestStack->getMainRequest(),
+            );
+
+            return;
         }
 
         // The security-policy epoch is refreshed before the verification
@@ -1569,15 +1607,52 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         // zero adaptive friction (mirrors the fail-safe degraded rule
         // on the pre-issue path).
         $postSolveKey = 'postsolve:'.hash('sha256', $nonce);
+        $targetFields = $this->submittedTargetFields($constraint->scope);
         try {
             $postSolve = $v2 !== null
-                ? $this->risk->postSolveDecisionV2($constraint->scope, $ip, $session, null, $postSolveKey, $v2)
-                : $this->risk->postSolveDecision($constraint->scope, $ip, $session, null, $postSolveKey);
+                ? $this->risk->postSolveDecisionV2($constraint->scope, $ip, $session, null, $postSolveKey, $v2, null, $targetFields)
+                : $this->risk->postSolveDecision($constraint->scope, $ip, $session, null, $postSolveKey, $targetFields);
         } catch (\InvalidArgumentException) {
             $postSolve = $this->risk->degradedDecisionForScope($this->risk->scopeId($constraint->scope));
         }
 
         return $this->mapPostSolveDecision($token, $outcome, $constraint, $nonce, $postSolve, $canonicalBinding, $requirement);
+    }
+
+    /**
+     * The submitted values of the validated scope's configured target
+     * field, keyed by field name: the exact input shape the engine's
+     * target resolver reads, so the post-solve assessment carries the
+     * target dimension like every other decision-bearing path. Empty
+     * when the scope declares no target field, no request is in scope,
+     * or the request submitted none (an absent or non-scalar value
+     * under the field name contributes nothing).
+     *
+     * @return array<string, string>
+     */
+    private function submittedTargetFields(string $scope): array
+    {
+        $field = $this->targetFieldsByScope[$scope] ?? null;
+        if ($field === null || $field === '') {
+            return [];
+        }
+        $request = $this->requestStack->getMainRequest();
+        if ($request === null) {
+            return [];
+        }
+        try {
+            $value = $request->request->get($field);
+        } catch (BadRequestException) {
+            // A non-scalar (array-shaped) parameter under the field
+            // name: no usable target value — the context carries no
+            // target dimension instead of a 500.
+            return [];
+        }
+        if (!\is_string($value) || $value === '') {
+            return [];
+        }
+
+        return [$field => $value];
     }
 
     /**
@@ -2164,6 +2239,42 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      * second operation, see the bundle README. Also exports the Ed25519 result
      * receipt when signing is configured.
      */
+    /**
+     * The email-ownership redemption: the grant must verify (signature,
+     * expiry), name this constraint's scope, bind to the presenting
+     * browser (session hash, or the stateless binding), re-present a
+     * bound chain id when it carries one, and consume single-use. The
+     * redeemed grant answers like a pass: the verified-jti attribute
+     * carries the grant id so the application can key its idempotency.
+     * A refused grant answers the standing step-up violation: the
+     * demand is exactly why the visitor holds a grant at all.
+     */
+    private function acceptEmailOwnershipGrant(string $grant, KiwiCaptcha $constraint, ?Request $request): void
+    {
+        $presentedChain = $request?->request->get(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::CHAIN_FIELD);
+        $payload = $request === null ? null : $this->emailOwnership?->redeem(
+            $grant,
+            $constraint->scope,
+            $request,
+            \is_string($presentedChain) && $presentedChain !== '' ? $presentedChain : null,
+        );
+        if ($payload === null) {
+            $this->logger?->info('KiwiCaptcha: email-ownership grant refused', [
+                'scope' => $constraint->scope,
+            ]);
+            $this->context->buildViolation($constraint->message)
+                ->setCode(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED)
+                ->addViolation();
+
+            return;
+        }
+        $this->lastVerifiedJti = 'emg:'.$payload['grantId'];
+        $request?->attributes->set(self::VERIFIED_JTI_ATTRIBUTE, $this->lastVerifiedJti);
+        $this->logger?->info('KiwiCaptcha: email-ownership grant accepted in place of a solved token', [
+            'scope' => $constraint->scope,
+        ]);
+    }
+
     private function finishSuccessfulApplicationVerification(string $value, VerifyOutcome $outcome, ?Request $request): void
     {
         $jti = null;

@@ -524,10 +524,17 @@ final class AdaptiveRiskEngine
         // record reads. The v2 weights are the operator override when
         // given, else the default weights (byte-identical scores to today).
         $v2Signals = null;
+        // True when the fallback path's live target read failed: the
+        // evidence-unavailable verdict the first-attempt stage folds
+        // into its fail-closed judgment below.
+        $targetEvidenceUnavailable = false;
         if ($v2 !== null) {
-            $v2Signals = $this->store instanceof ConsolidatedAssessmentStoreInterface
-                ? $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpreadSources, $targetSpreadAsns)
-                : $this->buildV2Signals($v2, $c, $observation, ...$this->liveTargetCounts($targetId));
+            if ($this->store instanceof ConsolidatedAssessmentStoreInterface) {
+                $v2Signals = $this->deriveV2SignalsFromRecords($v2, $c, $existingContextTag, $existingTlsTag, $targetFailures, $targetSpreadSources, $targetSpreadAsns);
+            } else {
+                [$targetFailures, $targetSpreadSources, $targetSpreadAsns, $targetEvidenceUnavailable] = $this->liveTargetCounts($targetId);
+                $v2Signals = $this->buildV2Signals($v2, $c, $observation, $targetFailures, $targetSpreadSources, $targetSpreadAsns);
+            }
         }
         $score = $v2Signals !== null
             ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
@@ -555,9 +562,13 @@ final class AdaptiveRiskEngine
         // The decisive attacker stage: additive, after the plain policy
         // decision, and only when a marks reader is wired. An unreadable
         // marks surface floors the request at the maximum challenge rung
-        // fail-closed instead of fabricating a deny.
+        // fail-closed instead of fabricating a deny. The stage also
+        // returns the first-attempt evidence it derived, so the
+        // post-Allow binding below can read the unmasked novelty
+        // verdict when it decides whether to mint trust.
+        $firstAttempt = null;
         if ($this->marksReader !== null) {
-            $decision = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs, $targetId);
+            [$decision, $firstAttempt] = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs, $targetId, $targetEvidenceUnavailable);
         }
 
         // The decoy escalation stage: additive, after the marks stage,
@@ -610,27 +621,39 @@ final class AdaptiveRiskEngine
         // or attacker-minted cookie has no binding and cannot vouch
         // for anyone. Pending (step-up) logins bind at restore.
         //
-        // The device pseudonym binds the same way with the trust flag
-        // minted: an Allow is a trust-minting event, and the trusted
-        // device cookie outlives the session window, so the sliding
-        // refresh happens here on every Allow that carries the cookie.
+        // The trust flag on the session and the device binding follows
+        // the enforcement verdict: the trust is minted when the Allow
+        // is one enforce mode would also have allowed (a known
+        // network, readable history). An Allow that enforce mode would
+        // have stepped up (a genuinely novel network, or unreadable
+        // history) records the session and the device without the
+        // trust flag, even in learn mode: the step-up demand is only
+        // deferred there, so an attacker with stolen credentials can
+        // never leave a trusted device under the victim by riding the
+        // rollout window. The trusted device cookie outlives the
+        // session window, so the sliding refresh happens here on every
+        // minting Allow that carries the cookie.
         //
         // The same Allow also records the network bucket and the ASN
-        // bucket with the trust flag minted, so the novelty gate's
-        // trusted history accrues from the logins that earned it. Each
-        // write stands alone: one failed record never masks the others,
-        // and no binding write ever breaks the login.
+        // bucket with the trust flag minted (the learn history: the
+        // novelty gate's seen-ness accrues from every granted login,
+        // which is what keeps a known carrier from stepping up every
+        // future mobile login). Each write stands alone: one failed
+        // record never masks the others, and no binding write ever
+        // breaks the login.
         if (
             $c->event === RiskEventKind::AuthenticationSuccess
             && $decision->action === RiskAction::Allow
             && $this->principalNetworks !== null
             && $observation->principalId !== null
         ) {
+            $mintTrust = !($firstAttempt?->wouldStepUpUnderEnforce ?? false);
             if ($observation->sessionId !== null && $observation->sessionId !== '') {
                 try {
                     $this->principalNetworks->recordPrincipalNetworkTag(
                         $observation->principalId,
                         'session:'.$observation->sessionId,
+                        trusted: $mintTrust,
                     );
                 } catch (\Throwable) {
                     // Best effort: the binding write never breaks login.
@@ -641,7 +664,7 @@ final class AdaptiveRiskEngine
                     $this->principalNetworks->recordPrincipalNetworkTag(
                         $observation->principalId,
                         'device:'.$observation->deviceId,
-                        trusted: true,
+                        trusted: $mintTrust,
                     );
                 } catch (\Throwable) {
                     // Best effort: the binding write never breaks login.
@@ -711,6 +734,12 @@ final class AdaptiveRiskEngine
      * decision plane's posture: a server-confirmed spam identity with a
      * clean request quarantines instead of escalating, wire-identical
      * to allow.
+     *
+     * Returns the composed decision together with the first-attempt
+     * evidence it derived, so the caller's post-Allow binding can read
+     * the unmasked novelty verdict from the same evaluation.
+     *
+     * @return array{0: RiskDecision, 1: FirstAttemptEvidence}
      */
     private function applyMarksStage(
         RiskDecision $decision,
@@ -720,7 +749,8 @@ final class AdaptiveRiskEngine
         ?RiskV2Context $v2,
         int $nowMs,
         ?string $targetId = null,
-    ): RiskDecision {
+        bool $targetEvidenceUnavailable = false,
+    ): array {
         $request = new MarksRequest(
             scope: $c->scope,
             sourceIp: $c->sourceIp,
@@ -729,11 +759,11 @@ final class AdaptiveRiskEngine
             target: $targetId,
         );
         $decoyEvidence = $c->event->isHoneypot() || ($v2?->honeypotHit ?? false);
-        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision);
+        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision, $targetEvidenceUnavailable);
         try {
             $view = $this->marksReader->requestMarks($request);
         } catch (\Throwable) {
-            return MarksEscalation::applyUnreadable($decision, $nowMs, $c->resources);
+            return [MarksEscalation::applyUnreadable($decision, $nowMs, $c->resources), $firstAttempt];
         }
 
         $result = MarksEscalation::apply(
@@ -815,23 +845,33 @@ final class AdaptiveRiskEngine
                     0,
                     $nowMs,
                 );
+                // The unreadable-evidence verdict survives the
+                // exemption: the decision keeps reporting why the
+                // evidence plane could not vouch for the login (the
+                // stage's prepend order, capped at 4).
+                $exemptReasons = $preStorm->reasons;
+                if ($firstAttempt->evidenceUnavailable
+                    && !in_array(RiskReason::EvidenceUnavailable, $exemptReasons, true)) {
+                    array_unshift($exemptReasons, RiskReason::EvidenceUnavailable);
+                    $exemptReasons = array_slice($exemptReasons, 0, 4);
+                }
                 if ($preStorm->action !== RiskAction::Deny) {
-                    return new RiskDecision(
+                    return [new RiskDecision(
                         score: $preStorm->score,
                         action: $preStorm->action,
-                        reasons: $preStorm->reasons,
+                        reasons: $exemptReasons,
                         policyVersion: $preStorm->policyVersion,
                         globalLevel: $preStorm->globalLevel,
                         retryAfterMs: $preStorm->retryAfterMs,
                         band: $preStorm->band,
                         decisionId: $decision->decisionId,
                         modelRevision: $preStorm->modelRevision,
-                    );
+                    ), $firstAttempt];
                 }
             }
         }
 
-        return $result;
+        return [$result, $firstAttempt];
     }
 
     /**
@@ -851,7 +891,9 @@ final class AdaptiveRiskEngine
      *   evidence-unavailable reason; learn mode stays on Allow while
      *   still carrying the reason and the degraded:evidence metric).
      *   A store without the record surface is not a failure and keeps
-     *   the neutral degradation above.
+     *   the neutral degradation above. Any error class counts: a store
+     *   outage, a rejected tag or a type violation all mean the same
+     *   thing, that no readable history vouches for the login.
      * - breachedCredential: the caller's v2 context asserts a
      *   known-breached credential (the same step-up-worthy shape as
      *   honeypot evidence).
@@ -860,6 +902,16 @@ final class AdaptiveRiskEngine
      *   MarksEscalation::`SCOPE_PRESSURE`_FLOOR / `SCOPE_PRESSURE`_LEVEL —
      *   every first-attempt login escalates, not only the attacked
      *   target's.
+     * - wouldStepUpUnderEnforce: the novelty verdict before the
+     *   enforcement mask is applied. The post-Allow binding reads it to
+     *   decide whether the login may mint session and device trust.
+     *
+     * @param bool $targetEvidenceUnavailable true when the assessment's
+     *                                        live target-state read
+     *                                        failed on the fallback
+     *                                        path; the same fail-closed
+     *                                        verdict as a failed
+     *                                        trusted-history probe
      */
     private function firstAttemptEvidence(
         RiskContext $c,
@@ -867,12 +919,14 @@ final class AdaptiveRiskEngine
         SignalVector $vector,
         ?RiskV2Context $v2,
         RiskDecision $decision,
+        bool $targetEvidenceUnavailable = false,
     ): FirstAttemptEvidence {
         $isLogin = $c->event === RiskEventKind::AuthenticationSuccess
             || $c->event === RiskEventKind::AuthenticationFailure;
         $novelNetwork = false;
+        $wouldStepUpUnderEnforce = false;
         $scopePressure = false;
-        $evidenceUnavailable = false;
+        $evidenceUnavailable = $targetEvidenceUnavailable;
         if ($isLogin) {
             // Scope pressure is judged first: it is an independent
             // first-attempt signal and also the override that keeps a
@@ -900,35 +954,30 @@ final class AdaptiveRiskEngine
                 // unless device continuity vouches for the browser.
                 $network = self::networkBucket($c->sourceIp);
                 $asn = $this->asnBucketOf($c->sourceIp);
-                // Each probe stands alone in its own try: one failed
-                // read must not neutralize the other two (a single
-                // shared catch would wipe all three to null and fail
-                // open on every branch below).
+                // Each probe stands alone in its own try, and every
+                // failure mode fails closed: one failed read must not
+                // neutralize the others, and no error class reads as
+                // neutral (an unreadable history cannot vouch for the
+                // login, whatever threw).
                 try {
                     $asnSeen = $asn !== '' && $asn !== '0'
                         ? $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn)
                         : null;
-                } catch (RiskStoreException) {
+                } catch (\Throwable) {
                     $evidenceUnavailable = true;
                     $asnSeen = false;
-                } catch (\Throwable) {
-                    $asnSeen = null;
                 }
                 try {
                     $trusted = $this->principalNetworks->principalHasTrustedNetwork($observation->principalId);
-                } catch (RiskStoreException) {
+                } catch (\Throwable) {
                     $evidenceUnavailable = true;
                     $trusted = false;
-                } catch (\Throwable) {
-                    $trusted = null;
                 }
                 try {
                     $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
-                } catch (RiskStoreException) {
+                } catch (\Throwable) {
                     $evidenceUnavailable = true;
                     $netSeen = false;
-                } catch (\Throwable) {
-                    $netSeen = null;
                 }
                 // Device continuity: the session or the device pseudonym
                 // was bound to this principal with the trust flag
@@ -944,10 +993,8 @@ final class AdaptiveRiskEngine
                         && $this->principalNetworks->tagIsTrusted($observation->principalId, 'session:'.$observation->sessionId) === true)
                         || ($observation->deviceId !== null && $observation->deviceId !== ''
                         && $this->principalNetworks->tagIsTrusted($observation->principalId, 'device:'.$observation->deviceId) === true);
-                } catch (RiskStoreException) {
-                    $evidenceUnavailable = true;
-                    $deviceContinuity = false;
                 } catch (\Throwable) {
+                    $evidenceUnavailable = true;
                     $deviceContinuity = false;
                 }
                 $newPrefix = ($netSeen === false);
@@ -986,6 +1033,12 @@ final class AdaptiveRiskEngine
                 if ($scopePressure && $deviceContinuity && !$isNovel) {
                     $scopePressure = false;
                 }
+                // The unmasked novelty verdict, recorded before the
+                // enforcement mask: the post-Allow binding reads it to
+                // decide whether this Allow may mint session and device
+                // trust. A login that enforce mode would have stepped up
+                // stays trust-free even where learn mode allows it.
+                $wouldStepUpUnderEnforce = $isNovel;
                 // Evidence is read-only: the network tag is recorded
                 // only after the decision (post-Allow binding), never
                 // during evaluation. Recording here would write the
@@ -1000,6 +1053,7 @@ final class AdaptiveRiskEngine
             breachedCredential: $v2?->breachedCredential ?? false,
             scopePressure: $scopePressure,
             evidenceUnavailable: $evidenceUnavailable,
+            wouldStepUpUnderEnforce: $wouldStepUpUnderEnforce,
         );
     }
 
@@ -1621,27 +1675,41 @@ final class AdaptiveRiskEngine
      * The live target-dimension counts of one resolved target, for the
      * fallback path without a consolidated reply: the same state the
      * outcome bridge maintains, read through the store's target
-     * surface. A store without the capability (or a failed read)
-     * degrades to the neutral zero counts, exactly like the
-     * session-tag record reads.
+     * surface. A store without the capability degrades to the neutral
+     * zero counts, exactly like the session-tag record reads. A failed
+     * read fails closed: the counts return the saturated attack
+     * picture (the threshold failure count, the spread saturated on
+     * both axes) and the fourth element marks the evidence
+     * unavailable. A target under attack never reads as clean because
+     * the store hiccuped. The saturated signals raise the score, and
+     * the first-attempt stage carries the evidence-unavailable reason,
+     * whose enforce-mode verdict is the interactive step-up (always
+     * completable).
      *
-     * @return array{0: int, 1: int, 2: int} failures, source spread, asn spread
+     * @return array{0: int, 1: int, 2: int, 3: bool} failures, source
+     *         spread, asn spread, evidence-unavailable flag
      */
     private function liveTargetCounts(?string $targetId): array
     {
         if ($targetId === null || !$this->store instanceof TargetStateStoreInterface) {
-            return [0, 0, 0];
+            return [0, 0, 0, false];
         }
         try {
             $state = $this->store->readTargetState($targetId);
         } catch (\Throwable) {
-            return [0, 0, 0];
+            return [
+                MarksEscalation::TARGET_ATTACK_THRESHOLD,
+                MarksEscalation::TARGET_SPREAD_SATURATION,
+                MarksEscalation::TARGET_SPREAD_SATURATION,
+                true,
+            ];
         }
 
         return [
             (int) ($state['fails'] ?? 0),
             (int) ($state['spread_sources'] ?? 0),
             (int) ($state['spread_asns'] ?? 0),
+            false,
         ];
     }
 

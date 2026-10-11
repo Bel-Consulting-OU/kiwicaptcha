@@ -63,8 +63,8 @@ rt_assert_eq "$ACCEPTED" "3" "honest baseline: three honest solves verified end-
 # escalation advice naming the enforcement knob (risk.scopes.<name>
 # .minimum), and the same scope with the step_up minimum set draws the
 # verified pass.
-ESC_JSON=$(REPO_ROOT="$REPO_ROOT" php -r '
-require getenv("REPO_ROOT")."/tools/redteam/campaigns/lib/rt-risk-prelude.php";
+ESC_JSON=$(REPO_ROOT="$REPO_ROOT" KIWI_RT_RISK_REDIS_URL="$REDIS_URL" php -r '
+require getenv("REPO_ROOT")."/tools/redteam/campaigns/lib/rt.kernel.php";
 // The bundle"s own Symfony Config tree, so the shipped defaults are
 // read from the product — never a literal list.
 $bundleAutoload = getenv("REPO_ROOT")."/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php";
@@ -78,78 +78,116 @@ $verified = ValueClassCeiling::verdict("critical", "step_up", $beyond);
 $shipped = ValueClassCeiling::verdict("critical", "allow");
 $processor = new \Symfony\Component\Config\Definition\Processor();
 $config = new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration();
-$processed = $processor->processConfiguration($config, \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::stack([["secret_key" => str_repeat("a", 32), "protection_profile" => "abuse_first"]]));
-$scopes = $processed["risk"]["scopes"] ?? [];
-$defaultMinimums = [];
-$defaultScopeClasses = [];
-foreach ($scopes as $name => $scope) {
-    $defaultMinimums[$name] = $scope["minimum"] ?? "allow";
-    $defaultScopeClasses[$name] = $scope["value_class"] ?? "standard";
-}
-$shippedEscalates = false;
-foreach ($defaultMinimums as $min) {
-    if ($min === "step_up" || $min === "deny") {
-        $shippedEscalates = true;
-        break;
+
+// The per-profile posture: the carrier table is measured per profile,
+// never assumed uniform. The step-up plane counts as a carrier ONLY
+// when the matching factor is enabled: a step_up minimum with no
+// enabled handler (email_otp, totp, webauthn or a custom map) is a
+// dead end the deployment cannot actually complete.
+$hasEnabledFactor = static function (array $risk): bool {
+    if (!($risk["step_up"]["enabled"] ?? false)) {
+        return false;
     }
-}
+    $handlers = $risk["step_up"]["handlers"] ?? [];
+    foreach (["email_otp", "totp", "webauthn"] as $factor) {
+        if (($handlers[$factor]["enabled"] ?? false) === true) {
+            return true;
+        }
+    }
+
+    return ($handlers["custom"] ?? []) !== [];
+};
+
 // The abuse_first risk-gated carrier: novelty_enforcement=enforce
-// covers login-class scopes (login, password_reset, admin_login) only.
-// Non-login scopes (financial_action, signup, contact) have no
-// first-attempt carrier — they need action_novelty or step_up/deny
-// minimums. The carrier is NOT uniform across classes.
-$abuseFirst = \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::defaultsFor("abuse_first");
-$abuseFirstNovelty = $abuseFirst["risk"]["novelty_enforcement"] ?? "learn";
-$loginScopes = ["login", "password_reset", "admin_login"];
-$abuseFirstEscalates = ($abuseFirstNovelty === "enforce");
-// Per-class carrier map: novelty covers login scopes; every other
-// scope needs a step_up/deny minimum to carry its class.
-$abuseFirstMinimums = [];
-if (isset($abuseFirst["risk"]["scopes"])) {
-    foreach ($abuseFirst["risk"]["scopes"] as $name => $scope) {
-        $min = is_array($scope) ? ($scope["minimum"] ?? "allow") : "allow";
-        $abuseFirstMinimums[$name] = $min;
-    }
-}
+// covers the login scopes the gate actually assesses (login,
+// admin_login). Non-login scopes (financial_action, signup, contact,
+// password_reset) have no first-attempt carrier — they need
+// action_novelty or an enforcable step_up/deny minimum. The carrier
+// is NOT uniform across classes, and a class is covered only when
+// EVERY scope of that class is covered (any-vs-all: one covered scope
+// never vouches for its class).
+$loginScopes = ["login", "admin_login"];
+$profiles = [];
 $classCarrier = [];
-foreach ($defaultScopeClasses as $name => $cls) {
-    $min = $defaultMinimums[$name] ?? "allow";
-    $isLogin = in_array($name, $loginScopes, true);
-    $covered = ($isLogin && $abuseFirstNovelty === "enforce")
-        || in_array($min, ["step_up", "deny"], true);
-    $classCarrier[$cls] = ($classCarrier[$cls] ?? false) || $covered;
+foreach (["abuse_first", "balanced"] as $profileName) {
+    $processed = $processor->processConfiguration($config, \BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults::stack([["secret_key" => str_repeat("a", 32), "protection_profile" => $profileName]]));
+    $risk = $processed["risk"] ?? [];
+    $scopes = $risk["scopes"] ?? [];
+    $minimums = [];
+    $scopeClasses = [];
+    foreach ($scopes as $name => $scope) {
+        $minimums[$name] = $scope["minimum"] ?? "allow";
+        $scopeClasses[$name] = $scope["value_class"] ?? "standard";
+    }
+    $novelty = $risk["novelty_enforcement"] ?? "learn";
+    $factorEnabled = $hasEnabledFactor($risk);
+    $allCovered = true;
+    $classCovered = [];
+    foreach ($scopeClasses as $name => $cls) {
+        $min = $minimums[$name] ?? "allow";
+        $isLogin = in_array($name, $loginScopes, true);
+        $covered = ($isLogin && $novelty === "enforce")
+            || $min === "deny"
+            || ($min === "step_up" && $factorEnabled);
+        $classCovered[$cls] = ($classCovered[$cls] ?? true) && $covered;
+        $allCovered = $allCovered && $covered;
+    }
+    $profiles[$profileName] = [
+        "escalates" => $novelty === "enforce",
+        "novelty" => $novelty,
+        "minimums" => $minimums,
+        "factor_enabled" => $factorEnabled,
+        "scope_value_classes" => $scopeClasses,
+        // ALL scopes of a class must be covered, or the class is not.
+        "class_carrier" => $classCovered,
+    ];
+    if ($profileName === "abuse_first") {
+        $classCarrier = $classCovered;
+    }
 }
 echo json_encode([
     "advised" => $advised,
     "verified" => $verified,
     "shipped_default" => $shipped,
-    "shipped_escalates" => $shippedEscalates,
-    "shipped_minimums" => $defaultMinimums,
-    "abuse_first_escalates" => $abuseFirstEscalates,
-    "abuse_first_novelty" => $abuseFirstNovelty,
-    "abuse_first_minimums" => $abuseFirstMinimums,
-    "scope_value_classes" => $defaultScopeClasses,
+    "profiles" => $profiles,
     "class_carrier" => $classCarrier,
-    "carrier" => $abuseFirstEscalates ? "novelty_enforcement=enforce (login scopes only)" : "scope_minimums",
+    "carrier" => ($profiles["abuse_first"]["escalates"] ?? false) ? "novelty_enforcement=enforce (login scopes only)" : "scope_minimums",
 ]), "\n";
+
+// The runtime proof (method: product): the posture verdicts above are
+// read from the product-own config tree INSIDE a booted real kernel
+// (FrameworkBundle + SecurityBundle + KiwiCaptchaBundle, the shipped
+// abuse_first profile, zero container overrides). The RUNTIME line is
+// the provenance the run ledger checks.
+$kernel = new \KiwiRt\RtCampaignKernel();
+$kernel->boot();
+if (!($kernel instanceof \Symfony\Component\HttpKernel\Kernel)) {
+    fwrite(STDERR, "d3.3: the product kernel did not boot\n");
+    exit(3);
+}
+printf("RUNTIME: driver=%s container_overrides=0 kernel=yes\n", get_class($kernel));
 ')
 printf '%s\n' "$ESC_JSON" | python3 -c '
 import json, sys
 doc = json.loads(sys.stdin.read())
 out_path = sys.argv[1]
 store = json.load(open(out_path))
+profiles = doc.get("profiles", {})
+abuse = profiles.get("abuse_first", {})
 store["critical_stakes_escalation"] = {
     "beyond_ceiling_stake_usd_per_1000": 10.0,
     "advised": {"status": doc["advised"][0], "detail": doc["advised"][1]},
     "verified_with_step_up_minimum": {"status": doc["verified"][0], "detail": doc["verified"][1]},
     "shipped_default": {"status": doc["shipped_default"][0], "detail": doc["shipped_default"][1]},
-    "shipped_escalates": doc.get("shipped_escalates", False),
-    "shipped_minimums": doc.get("shipped_minimums", {}),
-    "abuse_first_escalates": doc.get("abuse_first_escalates", False),
-    "abuse_first_novelty": doc.get("abuse_first_novelty", "learn"),
-    "abuse_first_minimums": doc.get("abuse_first_minimums", {}),
-    "scope_value_classes": doc.get("scope_value_classes", {}),
+    "shipped_escalates": abuse.get("escalates", False),
+    "shipped_minimums": abuse.get("minimums", {}),
+    "abuse_first_escalates": abuse.get("escalates", False),
+    "abuse_first_novelty": abuse.get("novelty", "learn"),
+    "abuse_first_minimums": abuse.get("minimums", {}),
+    "abuse_first_factor_enabled": abuse.get("factor_enabled", False),
+    "scope_value_classes": abuse.get("scope_value_classes", {}),
     "class_carrier": doc.get("class_carrier", {}),
+    "profiles": profiles,
     "carrier": doc.get("carrier", "none"),
 }
 json.dump(store, open(out_path, "w"), indent=2)
@@ -163,7 +201,18 @@ ok = (doc["advised"][0] == "WARN"
       and "risk.scopes" in doc["advised"][1]
       and "step_up" in doc["advised"][1]
       and doc["verified"][0] == "PASS")
-shipped = doc.get("shipped_escalates", False) or doc.get("abuse_first_escalates", False)
+shipped = bool(abuse.get("escalates", False))
+# The honest per-profile carrier table: one row per profile, the
+# Profile column first, so the abuse_first and balanced postures are
+# never collapsed into one cell.
+for name in ("abuse_first", "balanced"):
+    row = profiles.get(name, {})
+    carrier = row.get("class_carrier", {})
+    classes = ",".join("%s=%s" % (c, "yes" if carrier.get(c) else "no")
+                       for c in ("low", "standard", "high", "critical"))
+    print("CLASS-CARRIER: profile=%s novelty=%s factor=%s %s"
+          % (name, row.get("novelty", "?"),
+             "enabled" if row.get("factor_enabled") else "disabled", classes))
 print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s carrier=%s"
       % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0], doc.get("carrier", "none")))
 raise SystemExit(0 if ok else 1)

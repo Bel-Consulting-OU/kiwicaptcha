@@ -170,9 +170,10 @@ final class TargetDecisionTest extends TestCase
         self::assertSame(RiskAction::StepUp, $decision->action, 'an attacked target steps up');
         self::assertTrue($decision->hasReason(RiskReason::TargetUnderAttack), 'the step-up carries the reason');
 
-        // Cleanup: the target family keys of the run.
+        // Cleanup: the target state keys of the run (the legacy family
+        // carries the shared namespace tag).
         $client = RedisRiskStateStore::createClient($url);
-        $keys = $client->keys('{kiwi:' . $namespace . ':target:56}*');
+        $keys = $client->keys('{kiwi:' . $namespace . ':*}');
         if ($keys !== []) {
             $client->del(...$keys);
         }
@@ -220,10 +221,10 @@ final class TargetDecisionTest extends TestCase
             'the sprayed target must outscore the control',
         );
 
-        // Cleanup: the target family keys of the run.
+        // Cleanup: the target state keys of the run (the legacy family
+        // carries the shared namespace tag).
         $client = RedisRiskStateStore::createClient($url);
-        $prefix = '{kiwi:' . $namespace . ':target:' . substr($targetId, 0, 2) . '}';
-        $keys = $client->keys($prefix . '*');
+        $keys = $client->keys('{kiwi:' . $namespace . ':*}');
         if ($keys !== []) {
             $client->del(...$keys);
         }
@@ -233,7 +234,7 @@ final class TargetDecisionTest extends TestCase
      * The sharded layout maintains the same target dimension: the read
      * rides the assessment batch, a failure observation writes through
      * the second phase, and the outcome bridge lands on the target
-     * family slot in both modes byte-identically.
+     * family slot through the same routed dispatch.
      */
     public function testShardedStoreMaintainsTheTargetDimension(): void
     {
@@ -285,10 +286,10 @@ final class TargetDecisionTest extends TestCase
         $state = $store->readTargetState($targetId);
         self::assertSame(1, $state['spread_sources']);
 
-        // The state lives on the target family's own slot, byte-identical
-        // keys with the classic keyspace builder.
+        // The state lives on the target family's own tag: the sharded
+        // keyspace builder's keys exist.
         $client = RedisRiskStateStore::createClient($url);
-        foreach (KeyspaceMode::targetStateKeys($store->namespace(), $targetId) as $key) {
+        foreach (KeyspaceMode::targetStateKeys($store->namespace(), $targetId, KeyspaceMode::Sharded) as $key) {
             self::assertSame(1, (int) $client->exists($key), "target key $key must exist");
         }
 

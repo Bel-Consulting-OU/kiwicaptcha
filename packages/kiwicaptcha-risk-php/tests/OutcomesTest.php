@@ -21,6 +21,7 @@ use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\SignalVector;
 use KiwiCaptcha\Risk\Storage\OutcomeMarksStoreInterface;
+use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -447,6 +448,69 @@ final class OutcomesTest extends TestCase
         self::assertNotNull($store->readMark('principal', self::PRINCIPAL), 'other dimensions stay');
         self::assertSame(0, $outcomes->forget(OutcomeHandle::target(self::TARGET)), 'a second forget is a no-op');
         self::assertSame(0, $outcomes->forget(OutcomeHandle::decisionId(self::DECISION)), 'a ledger handle names no mark');
+    }
+
+    public function testForgetDevicesForUserDerivesThroughTheIdentityFactory(): void
+    {
+        $store = new class extends RiskStateStoreStub implements PrincipalNetworkTagStoreInterface {
+            /** @var list<string> */
+            public array $forgotten = [];
+
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+
+            public function principalNetworkSeen(string $principalId, string $network): ?bool
+            {
+                return null;
+            }
+
+            public function recordPrincipalNetworkTag(string $principalId, string $network, bool $trusted = false): bool
+            {
+                return true;
+            }
+
+            public function principalHasTrustedNetwork(string $principalId): ?bool
+            {
+                return null;
+            }
+
+            public function tagIsTrusted(string $principalId, string $network): ?bool
+            {
+                return null;
+            }
+
+            public function forgetDevices(string $principalId): void
+            {
+                $this->forgotten[] = $principalId;
+            }
+        };
+        $factory = new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat(chr(0x42), 32)));
+        $outcomes = new KiwiOutcomes($this->engine($store), $store, $store, $factory);
+
+        $outcomes->forgetDevicesForUser('user-42');
+
+        self::assertSame(
+            [$factory->principalId('user-42')],
+            $store->forgotten,
+            'the raw user identifier derives through the one keyed identity factory before the store call',
+        );
+    }
+
+    public function testForgetDevicesForUserRefusesToRunUnwired(): void
+    {
+        $store = new class extends RiskStateStoreStub {
+            public function observe(RiskObservation $observation): SignalVector
+            {
+                return SignalVector::zero();
+            }
+        };
+        // Both nullable seams absent: a silent no-op would leave a
+        // revoked user's devices trusted.
+        $outcomes = new KiwiOutcomes($this->engine($store), $store);
+        $this->expectException(\LogicException::class);
+        $outcomes->forgetDevicesForUser('user-42');
     }
 
     public function testOutcomeFeedbackRidesHandlePseudonymsThroughTheEngine(): void

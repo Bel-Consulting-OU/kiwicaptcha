@@ -163,6 +163,18 @@ final class ProtectionProfileDefaults
                 'hard_limits' => ['process_per_second' => 5000],
                 'max_outstanding_challenges' => 10,
                 'max_outstanding_challenges_global' => 250000,
+                // The step-up plane is on: the signup scope names the
+                // step_up_email carrier, and a named carrier demands a
+                // completable factor (the doctor's carrier-factor
+                // check). The email-ownership factor rides the plane
+                // (default on when the plane is on) and answers the
+                // signup carrier as the default handler.
+                'step_up' => [
+                    'enabled' => true,
+                    'scope' => 'signup',
+                    'default_handler' => 'email_otp',
+                    'handlers' => ['email_otp' => ['enabled' => true]],
+                ],
                 'weights' => [
                     // The abuse-evidence weights rise so proven abuse
                     // outvotes trust signals sooner; the remaining ten
@@ -172,22 +184,28 @@ final class ProtectionProfileDefaults
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                // No always-on step_up floor on ordinary login scopes:
-                // a scope minimum is the floor of every decision and
-                // would force every login through a second factor. The
-                // risk-gated carrier for login is novelty_enforcement=
-                // enforce plus the scope-pressure override. The scopes
-                // whose declared stake exceeds any proof-of-work rung
-                // (financial, signup, the critical admin_login) carry
-                // step_up directly: the doctor's value-class pricing
-                // check hard-fails a critical stake priced on a rung.
+                // No always-on step_up floor on any scope: a scope
+                // minimum is the floor of every issuance decision, so a
+                // step_up minimum refuses issuance with the typed step-up 403 at
+                // issuance, before any widget renders, and blocks every
+                // anonymous visitor. Each protected scope carries its
+                // completable enforcement instead. The critical
+                // admin_login names login_step_up always: the
+                // post-credential gate withholds every session until a
+                // principal factor completes. The low signup names the
+                // step_up_email carrier: an anonymous visitor proves
+                // address ownership through the email grant. The low
+                // contact carries step_up_above: only a scored decision
+                // above the rung escalates. financial_action keeps the
+                // step_up minimum: it is a post-solve, principal-bound
+                // surface, never an anonymous issuance.
                 'scopes' => [
                     'financial_action' => ['minimum' => 'step_up', 'value_class' => 'high'],
-                    'admin_login' => ['minimum' => 'step_up', 'value_class' => 'critical'],
+                    'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],
-                    'signup' => ['minimum' => 'step_up', 'value_class' => 'low'],
-                    'contact' => ['minimum' => 'step_up', 'value_class' => 'low'],
+                    'signup' => ['value_class' => 'low', 'carrier' => 'step_up_email'],
+                    'contact' => ['value_class' => 'low', 'step_up_above' => 600],
                 ],
             ],
         ],
@@ -222,28 +240,46 @@ final class ProtectionProfileDefaults
                 'hard_limits' => ['process_per_second' => 5000],
                 'max_outstanding_challenges' => 10,
                 'max_outstanding_challenges_global' => 250000,
+                // The step-up plane is on: the signup scope names the
+                // step_up_email carrier, and a named carrier demands a
+                // completable factor (the doctor's carrier-factor
+                // check). The email-ownership factor rides the plane
+                // (default on when the plane is on) and answers the
+                // signup carrier as the default handler.
+                'step_up' => [
+                    'enabled' => true,
+                    'scope' => 'signup',
+                    'default_handler' => 'email_otp',
+                    'handlers' => ['email_otp' => ['enabled' => true]],
+                ],
                 'weights' => [
                     'bad_proof' => 320,
                     'malformed' => 340,
                     'replay' => 380,
                     'action_failure' => 160,
                 ],
-                // No always-on step_up floor on ordinary login scopes:
-                // a scope minimum is the floor of every decision and
-                // would force every login through a second factor. The
-                // risk-gated carrier for login is novelty_enforcement=
-                // enforce plus the scope-pressure override. The scopes
-                // whose declared stake exceeds any proof-of-work rung
-                // (financial, signup, the critical admin_login) carry
-                // step_up directly: the doctor's value-class pricing
-                // check hard-fails a critical stake priced on a rung.
+                // No always-on step_up floor on any scope: a scope
+                // minimum is the floor of every issuance decision, so a
+                // step_up minimum refuses issuance with the typed step-up 403 at
+                // issuance, before any widget renders, and blocks every
+                // anonymous visitor. Each protected scope carries its
+                // completable enforcement instead. The critical
+                // admin_login names login_step_up always: the
+                // post-credential gate withholds every session until a
+                // principal factor completes. The low signup names the
+                // step_up_email carrier: an anonymous visitor proves
+                // address ownership through the email grant. The low
+                // contact carries step_up_above: only a scored decision
+                // above the rung escalates. financial_action keeps the
+                // step_up minimum: it is a post-solve, principal-bound
+                // surface, never an anonymous issuance.
                 'scopes' => [
                     'financial_action' => ['minimum' => 'step_up', 'value_class' => 'high'],
-                    'admin_login' => ['minimum' => 'step_up', 'value_class' => 'critical'],
+                    'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],
-                    'signup' => ['minimum' => 'step_up', 'value_class' => 'low'],
-                    'contact' => ['minimum' => 'step_up', 'value_class' => 'low'],
+                    'signup' => ['value_class' => 'low', 'carrier' => 'step_up_email'],
+                    'contact' => ['value_class' => 'low', 'step_up_above' => 600],
                 ],
             ],
         ],
@@ -372,6 +408,21 @@ final class ProtectionProfileDefaults
         $defaults = self::defaultsFor(self::selectedProfile($configs));
         if ($defaults === []) {
             return $configs;
+        }
+        // An explicit risk.enabled=false wins over the whole profile,
+        // the step-up plane included: the plane stores its records in
+        // the risk Redis, so a disabled risk layer must not carry the
+        // profile's enabled step-up default into the tree validation
+        // (enabled plane, disabled engine). The last explicit layer
+        // value is the effective one, exactly like the merge order.
+        $riskEnabled = null;
+        foreach ($configs as $layer) {
+            if (\is_array($layer) && \array_key_exists('enabled', $layer['risk'] ?? [])) {
+                $riskEnabled = (bool) $layer['risk']['enabled'];
+            }
+        }
+        if ($riskEnabled === false) {
+            unset($defaults['risk']['step_up']);
         }
 
         return array_merge([$defaults], $configs);

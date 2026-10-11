@@ -348,9 +348,46 @@ final class Configuration implements ConfigurationInterface
                     ->min(10)
                     ->max(Config::MAX_TTL_SECS)
                 ->end()
-                ->scalarNode('storage')
-                    ->info('Service id implementing KiwiCaptcha\StorageInterface. Defaults to the in-memory ArrayStorage, which is only allowed in test/dev environments — in prod a shared storage is required or the container fails to compile. production verification also REQUIRES an atomic backend (KiwiCaptcha\AtomicStorageInterface — e.g. RedisStorage) so strict single-use holds under concurrency; the explicitly-named allow_best_effort_storage: true option is the escape hatch for deliberately weaker semantics. Siteverify additionally ALWAYS requires an atomic backend when siteverify_secrets is configured (its one-success provider contract depends on it).')
+                ->variableNode('storage')
+                    ->info('Service id implementing KiwiCaptcha\StorageInterface (the string form, e.g. "kiwicaptcha.storage.redis"), or the object form of the bundled APCu adapter: storage: { apcu: { single_process_cli: true|false } } builds KiwiCaptcha\Storage\ApcuStorage. Defaults to the in-memory ArrayStorage, which is only allowed in test/dev environments — in prod a shared storage is required or the container fails to compile. production verification also REQUIRES an atomic backend (KiwiCaptcha\AtomicStorageInterface — e.g. RedisStorage) so strict single-use holds under concurrency; the explicitly-named allow_best_effort_storage: true option is the escape hatch for deliberately weaker semantics. Siteverify additionally ALWAYS requires an atomic backend when siteverify_secrets is configured (its one-success provider contract depends on it). On the APCu object form: single_process_cli is the single-process acknowledgement for a CLI host, valid ONLY for one long-lived process (a Swoole server that initialised APCu before fork; RoadRunner never qualifies — every request hops worker processes, so records land in foreign private segments), and apc.enable_cli=1 stays the separate ini precondition that gives a CLI process a segment at all. Under the web SAPI the adapter builds one shared segment per host and the flag stays false.')
                     ->defaultValue('kiwi_captcha.storage.array')
+                    ->validate()
+                        ->always()
+                        ->then(static function (mixed $value): mixed {
+                            // The string form: a service id, possibly a
+                            // %parameter% placeholder. The object form:
+                            // exactly {apcu: {single_process_cli: bool}},
+                            // normalized here so the extension receives
+                            // one shape.
+                            if (\is_string($value)) {
+                                if (trim($value) === '') {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage must be a non-empty service id string, or the object form storage: { apcu: { single_process_cli: bool } }');
+                                }
+
+                                return $value;
+                            }
+                            if (\is_array($value)) {
+                                if (array_keys($value) !== ['apcu']) {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage object form accepts exactly the key "apcu" (a string value is a service id)');
+                                }
+                                $apcu = $value['apcu'];
+                                if (!\is_array($apcu)) {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage.apcu must be a map with the optional boolean key single_process_cli');
+                                }
+                                $unknown = array_diff(array_keys($apcu), ['single_process_cli']);
+                                if ($unknown !== []) {
+                                    throw new InvalidConfigurationException(sprintf('kiwi_captcha.storage.apcu accepts only the key single_process_cli (got "%s")', implode(', ', array_map('strval', $unknown))));
+                                }
+                                $flag = $apcu['single_process_cli'] ?? false;
+                                if (!\is_bool($flag)) {
+                                    throw new InvalidConfigurationException('kiwi_captcha.storage.apcu.single_process_cli must be a boolean: true acknowledges the one-long-lived-process CLI segment (Swoole with APCu initialised before fork), false keeps the web-tier shared segment');
+                                }
+
+                                return ['apcu' => ['single_process_cli' => $flag]];
+                            }
+                            throw new InvalidConfigurationException('kiwi_captcha.storage must be a service id string, or the object form storage: { apcu: { single_process_cli: bool } }');
+                        })
+                    ->end()
                 ->end()
                 ->booleanNode('allow_best_effort_storage')
                     ->info('explicitly-named escape hatch accepting non-atomic storage semantics (e.g. Psr6Storage, whose consume is NOT atomic under concurrency — two racing requests can both win). Default false: production verification requires KiwiCaptcha\AtomicStorageInterface. NEVER set true for Siteverify — its one-success contract is impossible on a non-atomic backend and the container refuses the combination regardless.')
@@ -668,6 +705,22 @@ final class Configuration implements ConfigurationInterface
                                         ->info('The value class of this scope\'s protected action (low, standard, high, critical; default standard): what a solved request on this scope is worth to the deployment. The continuous pricing stage multiplies the risk score by the class weight (800, 1000, 1200, 1400 per mille) before quantizing onto the challenge ladder, so the same score prices a critical action (admin login, money movement) onto a stronger rung than a low one. The class only ever raises the composed action; the plain policy floors keep applying underneath. The calibrated declared abuse values (the solver reference table, measured attacker cost per 1000 over the 10x calibration margin) are: low 0.00005, standard 0.0001, high 0.0001, critical 0.0002 dollars per 1000 solves. A scope whose declared stake exceeds its rung\'s measured ceiling cannot be priced by raw proof of work at any difficulty. The doctor\'s verdict then says exactly that and points at the enforcement knob: escalate this scope\'s disposition policy by setting risk.scopes.<name>.minimum to step_up or deny.')
                                         ->defaultValue('standard')
                                         ->values(['low', 'standard', 'high', 'critical'])
+                                    ->end()
+                                    ->enumNode('login_step_up')
+                                        ->info('The post-credential step-up policy of this scope when a firewall login resolves to it (default "risk": only a StepUp-or-stronger engine decision withholds the session). "always" withholds the session on EVERY interactive login under the scope, an Allow included, until a principal factor (totp, email_otp, webauthn) completes; the first-attempt gate reads this knob, never the challenge endpoint, so issuance stays a widget flow. Scope "minimum" is deliberately not usable for this: it would demand step-up at issuance and block every login before any credential check.')
+                                        ->defaultValue('risk')
+                                        ->values(['risk', 'always'])
+                                    ->end()
+                                    ->enumNode('carrier')
+                                        ->info('The factor that carries this scope\'s step-up demand when one is raised (default null = no named carrier). "step_up_email" is the anonymous-completable email-ownership grant: the 403 step-up body advertises the begin path and the validator honors the completed grant in place of a solved token. The named factor must be enabled: the doctor FAILs a carrier whose factor the container never wires.')
+                                        ->defaultNull()
+                                        ->values(['step_up_email', 'email_otp', 'totp', 'webauthn'])
+                                    ->end()
+                                    ->integerNode('step_up_above')
+                                        ->info('The decision-score rung above which this scope\'s assessment escalates to the step-up carrier (default null = the composed action alone decides; 0..1000 fixed point). Below the rung the scope stays a plain proof-of-work flow, so an ordinary low-risk submission is never asked for a second factor. The doctor\'s value-class verdict accepts this knob as the escalation carrier for a low-class scope.')
+                                        ->defaultNull()
+                                        ->min(0)
+                                        ->max(1000)
                                     ->end()
                                 ->end()
                             ->end()
@@ -997,9 +1050,10 @@ final class Configuration implements ConfigurationInterface
                                     ->cannotBeEmpty()
                                 ->end()
                                 ->integerNode('ttl_secs')
-                                    ->info("Cookie lifetime (default 30 minutes; the spec 15-30 minute window; 0 = session cookie, no Max-Age). This is the BROWSER cookie lifetime only: the server-side risk-state TTL is risk.session_state_ttl_secs and is always positive.")
+                                    ->info("Cookie lifetime (default 30 minutes; the spec 15-30 minute window; 0 = session cookie, no Max-Age). This is the BROWSER cookie lifetime only: the server-side risk-state TTL is risk.session_state_ttl_secs and is always positive. Bounded 0..43200 (12 h): the server-side session tags live 2x this value, and 24 h is the canonical session-tag class ceiling.")
                                     ->defaultValue(1800)
                                     ->min(0)
+                                    ->max(43_200)
                                 ->end()
                                 ->scalarNode('path')
                                     ->defaultValue('/')
@@ -1045,9 +1099,10 @@ final class Configuration implements ConfigurationInterface
                                     ->cannotBeEmpty()
                                 ->end()
                                 ->integerNode('ttl')
-                                    ->info('Cookie lifetime in seconds (default 90 days).')
+                                    ->info('Cookie lifetime in seconds (default 90 days). Bounded 60..31536000 (365 d): the server-side device tags live exactly this long, and a zero or sub-minute device binding would either never vouch or outlive its class ceiling — 0 is deliberately forbidden (a disabled trusted-device cookie is an operator decision, not a degenerate TTL).')
                                     ->defaultValue(7_776_000)
-                                    ->min(0)
+                                    ->min(60)
+                                    ->max(31_536_000)
                                 ->end()
                                 ->scalarNode('path')
                                     ->defaultValue('/')
@@ -1304,6 +1359,26 @@ final class Configuration implements ConfigurationInterface
                                             ->defaultValue(900)
                                             ->min(60)
                                             ->max(3600)
+                                        ->end()
+                                    ->end()
+                                ->end()
+                                ->arrayNode('email_ownership')
+                                    ->info('The anonymous email-ownership factor behind the step_up_email scope carrier (default on when the plane is on): begin answers a 6-digit code delivered to the presented address (10-minute TTL, only an HMAC-derived pseudonym stored), complete answers a single-use grant bound to (scope, continuity session, chain id) that the validator honors in place of a solved token when the step-up demand stands. Its own begin bound applies: 3 per hour per (scope, address) and 10 per hour per source. The routes are application-registered at StepUpController::emailBegin / emailComplete; the begin path is the one the step-up 403 body advertises.')
+                                    ->addDefaultsIfNotSet()
+                                    ->children()
+                                        ->booleanNode('enabled')
+                                            ->info('The factor is on whenever the plane is on (default true); disabling it leaves the step_up_email carrier without its factor, so the doctor FAILs any scope that still names the carrier.')
+                                            ->defaultTrue()
+                                        ->end()
+                                        ->scalarNode('sender')
+                                            ->info('Service id of the EmailOwnershipCodeSenderInterface the application binds (the code delivery to the raw presented address; there is no account record to look up). Null (default) wires the logging sender, so a deployment must bind a real one before the carrier carries real traffic.')
+                                            ->defaultNull()
+                                        ->end()
+                                        ->integerNode('code_ttl_secs')
+                                            ->info('Lifetime of the emailed code, its challenge record and the issued grant in seconds (default 600, bounded 60..1800).')
+                                            ->defaultValue(600)
+                                            ->min(60)
+                                            ->max(1800)
                                         ->end()
                                     ->end()
                                 ->end()

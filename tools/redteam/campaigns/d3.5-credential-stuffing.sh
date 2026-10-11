@@ -162,10 +162,22 @@ KIWI_RT_D35_OUT="$SUMMARY_FILE" \
     php -d memory_limit=512M "$RT_DIR/campaigns/lib/d35.kernel.php" >"$SUMMARY_FILE" 2>"$RT_DIR/runs/env/d35-engine.err"
 ENGINE_RC=$?
 cat "$SUMMARY_FILE"
+grep '^RUNTIME:' "$RT_DIR/runs/env/d35-engine.err" | tail -n 1
 [ "$ENGINE_RC" -eq 0 ] || {
     rt_report_fail "the engine plane failed (see runs/env/d35-engine.err)"
     rt_finish
 }
+# The product-method provenance: the booted driver must be a Kernel
+# subclass with zero container overrides (the ledger refuses GREEN
+# without it).
+RUNTIME_DRIVER=$(grep '^RUNTIME:' "$RT_DIR/runs/env/d35-engine.err" | tail -n 1 | sed -n 's/^RUNTIME: driver=\([^ ]*\).*/\1/p')
+RUNTIME_OVERRIDES=$(grep '^RUNTIME:' "$RT_DIR/runs/env/d35-engine.err" | tail -n 1 | sed -n 's/^RUNTIME:.*container_overrides=\([0-9]*\).*/\1/p')
+case "$RUNTIME_DRIVER" in
+    *Kernel) ;;
+    *) rt_report_fail "the engine plane did not boot a Kernel-subclass driver (got $RUNTIME_DRIVER)" ;;
+esac
+[ "$RUNTIME_OVERRIDES" = "0" ] || rt_report_fail "the engine plane booted with container_overrides=$RUNTIME_OVERRIDES (the product contract is 0)"
+printf 'RUNTIME: driver=%s container_overrides=%s\n' "$RUNTIME_DRIVER" "$RUNTIME_OVERRIDES"
 
 for key in escalated_within_n all_sessions_escalated; do
     val=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))[sys.argv[2]]).lower())' "$SUMMARY_FILE" "$key")
@@ -264,7 +276,7 @@ rt_metric "rows=$ROWS wire_sample=$WIRE_SAMPLE blocked_valid=$BLOCKED compromise
 # economics verdict and measured numbers into it so the ledger and the
 # gate rows carry them. the_engine_path names the real call; the breach
 # checker is honestly absent.
-rt_metric "downscale=rows_are_100000 engine=AdaptiveRiskEngine.reassess(AuthenticationSuccess) novelty=enforce breach_checker=not_shipped_not_credited valid_rate=1percent $ECON"
+rt_metric "downscale=rows_are_100000 engine=form_login_firewall->FirstAttemptLoginGuard->RiskGateway::loginDecision novelty=enforce breach_checker=not_shipped_not_credited valid_rate=1percent driver=$RUNTIME_DRIVER container_overrides=$RUNTIME_OVERRIDES $ECON"
 printf 'ECONOMIC: %s %s cost_per_compromised_account=%s spend_usd=%s blocked_valid_prevented=%s cost_per_prevented_compromise=%s compromised_valid_rate=%s\n' \
     "$RT_CAMPAIGN" "$RT_PROFILE" "$COST_COMPROMISED" "$SPEND" "$BLOCKED" "$COST_PREVENTED" \
     "$(printf '%s' "$ECON" | sed -n 's/.*compromised_valid_rate=\([0-9.]*\).*/\1/p')"

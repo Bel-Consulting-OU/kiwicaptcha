@@ -6,7 +6,12 @@
  * the source fingerprint once and records the engine method so the
  * ledger's method note is never a hard-coded fallback.
  *
- * Usage: node write-run.mjs <doc-path> <campaign> <class> <seed> <started> <duration> <rc> <verdict> <detail> <metric> <economic> <shaUs> <method>
+ * Usage: node write-run.mjs <doc-path> <campaign> <class> <seed> <started> <duration> <rc> <verdict> <detail> <metric> <economic> <shaUs> <method> [driver] [containerOverrides]
+ *
+ * The optional `driver` and `containerOverrides` arguments carry the
+ * product-method provenance the ledger checks: for a method:product
+ * campaign the driver must name a Kernel subclass and the override
+ * count must be present and zero, or the ledger refuses GREEN.
  *
  * The document path MUST be the first argument and MUST live under
  * engine/runs/. A path outside that directory is refused: a shifted
@@ -50,6 +55,10 @@ if (resolvedDoc !== resolvedRuns && !resolvedDoc.startsWith(resolvedRuns + sep))
 
 const fingerprint = sourceFingerprint();
 const methodField = method && method !== "" ? method : "offline-grammar (no local model consulted)";
+// The product-method provenance (optional 14th/15th arguments): the
+// booted driver class and its container override count.
+const driverField = args[13] && args[13] !== "" ? args[13] : null;
+const overridesField = args[14] !== undefined && args[14] !== "" ? Number(args[14]) : null;
 
 mkdirSync(RUNS_DIR, { recursive: true });
 writeFileSync(
@@ -67,6 +76,8 @@ writeFileSync(
             detail,
             source_fingerprint: fingerprint,
             method: methodField,
+            driver: driverField,
+            container_overrides: overridesField,
             metrics: { raw: metric, sha16_solve_us: shaUs ? Number(shaUs) : null },
             economic,
         },

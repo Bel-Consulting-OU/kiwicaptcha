@@ -93,9 +93,10 @@ final class StepUpHandlersTest extends TestCase
         self::assertSame(OutcomeHandleDimension::Principal, $this->reporter->reports[0]['handle']->dimension);
         self::assertSame(self::PRINCIPAL, $this->reporter->reports[0]['handle']->id);
         self::assertSame(OutcomeHandleDimension::Target, $this->reporter->reports[1]['handle']->dimension);
-        // The target handle carries the one derived mark key (the
-        // leading 128 bits of the canonical 64-hex pseudonym).
-        self::assertSame(self::TARGET_MARK_KEY, $this->reporter->reports[1]['handle']->id);
+        // The target handle carries the canonical 64-hex digest the
+        // challenge record stores, so the risk-side clear lands on the
+        // target state keys the engine's consolidated assessment reads.
+        self::assertSame(self::TARGET, $this->reporter->reports[1]['handle']->id);
         self::assertNotSame($this->reporter->reports[0]['idempotencyKey'], $this->reporter->reports[1]['idempotencyKey']);
 
         // The replayed completion is rejected and credits nothing.

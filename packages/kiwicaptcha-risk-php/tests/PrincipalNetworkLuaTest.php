@@ -133,6 +133,80 @@ final class PrincipalNetworkLuaTest extends TestCase
         self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010203'));
     }
 
+    /**
+     * F6/N11: the read paths honor the configured class TTL, never the
+     * class maximum. A stored (backdated) device tag past the store's
+     * configured device TTL answers "not seen" and "not trusted" even
+     * though it sits far inside the canonical 365-day class ceiling.
+     * A stolen device value cannot vouch server-side past the lifetime
+     * the deployment actually configured.
+     */
+    public function testAReadPastTheConfiguredTtlDoesNotVouch(): void
+    {
+        $store = new RedisPrincipalNetworkTagStore(
+            $this->client,
+            'pnet-test-'.bin2hex(random_bytes(4)),
+            sessionTtlMs: 3_600_000,
+            deviceTtlMs: 60_000, // one minute: the device class floor
+            netCap: 64,
+        );
+        $tag = 'device:cccc0000000000000000000000000006';
+        self::assertTrue($store->recordPrincipalNetworkTag(self::PRINCIPAL, $tag, trusted: true));
+
+        // Backdate the last-use two minutes: past the configured 60 s
+        // device TTL, deep inside the 365-day class ceiling.
+        $key = $store->tagKey(self::PRINCIPAL);
+        $backdated = (string) ((int) floor(microtime(true) * 1000) - 120_000);
+        $this->client->hset($key, $tag, $backdated);
+
+        self::assertFalse(
+            $store->principalNetworkSeen(self::PRINCIPAL, $tag),
+            'past the configured device TTL the stored value must not vouch seen',
+        );
+        self::assertFalse(
+            $store->tagIsTrusted(self::PRINCIPAL, $tag),
+            'past the configured device TTL the trust flag must not vouch',
+        );
+
+        // The contrast: the same record inside the configured TTL still
+        // vouches. The rewrite is not "newly created" (SET NX semantics,
+        // false for an existing tag) but refreshes the last-use.
+        self::assertFalse($store->recordPrincipalNetworkTag(self::PRINCIPAL, $tag));
+        self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, $tag));
+        self::assertTrue($store->tagIsTrusted(self::PRINCIPAL, $tag), 'the trust mirror survives the rewrite and reads trusted inside the TTL');
+    }
+
+    /**
+     * The configured class TTL is mandatory on every read: the script
+     * refuses a TTL outside the class range, and a deployment could
+     * not sneak a 365-day vouching lifetime for a session tag past
+     * the tree bounds. A read with no TTL at all is refused too.
+     */
+    public function testTheScriptRefusesReadsOutsideTheClassRange(): void
+    {
+        $script = file_get_contents(dirname(__DIR__).'/resources/principal_networks.lua');
+        self::assertIsString($script);
+        $key = 'pnet-refusal-'.bin2hex(random_bytes(4));
+        $refused = 0;
+        foreach (
+            [
+                ['seen', 'device:dddd0000000000000000000000000007', '31536000001'],
+                ['seen', 'device:dddd0000000000000000000000000007', '59999'],
+                ['has_trusted', 'session:eeee0000000000000000000000000008', '86400001'],
+                ['seen', 'device:dddd0000000000000000000000000007'],
+            ] as $args
+        ) {
+            try {
+                $this->client->eval($script, 1, $key, ...$args);
+                self::fail(sprintf('the %s read with [%s] must be refused by the script', $args[0], implode(', ', array_slice($args, 1))));
+            } catch (\Throwable $e) {
+                self::assertStringContainsString('ttl_ms outside the class range', $e->getMessage());
+                $refused++;
+            }
+        }
+        self::assertSame(4, $refused, 'every out-of-range or missing read TTL is refused');
+    }
+
     public function testInvalidTagIsRefused(): void
     {
         $store = $this->store();

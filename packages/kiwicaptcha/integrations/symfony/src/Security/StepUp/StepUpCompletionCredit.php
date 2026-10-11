@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeReporterInterface;
-use BelConsulting\KiwiCaptchaBundle\Risk\TargetMarkKey;
 use KiwiCaptcha\Risk\Outcomes\Outcome;
 use KiwiCaptcha\Risk\Outcomes\OutcomeHandle;
 
@@ -70,11 +69,16 @@ final class StepUpCompletionCredit
         // Target credit (and the risk-side failure clear) only runs when
         // the challenge asserts the principal owns the target. A
         // challenge that merely *named* a victim target must never
-        // clear that target's failure counter or lockout.
+        // clear that target's failure counter or lockout. The handle
+        // carries the canonical 64-hex digest the challenge record
+        // stores, so the clear lands on exactly the target state keys
+        // the engine's consolidated assessment reads (the outcomes
+        // layer projects the digest to the mark spelling where marks
+        // are written).
         if ($challenge->targetPseudonym !== null && $challenge->targetOwned) {
             $this->reporter->report(
                 Outcome::StepUpCompleted,
-                OutcomeHandle::target(TargetMarkKey::of($challenge->targetPseudonym)),
+                OutcomeHandle::target($challenge->targetPseudonym),
                 $this->idempotencyKey('target', $challengeId),
             );
             $creditedTarget = true;

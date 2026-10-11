@@ -30,10 +30,25 @@ use Symfony\Component\HttpFoundation\Response;
  *
  *   kiwi_step_up_begin:
  *     path: /kiwi/step-up/begin
- *     controller: StepUpController::begin
+ *     controller: StepUpController::begin.
+ *
  *   kiwi_step_up_complete:
  *     path: /kiwi/step-up/complete
- *     controller: StepUpController::complete
+ *     controller: StepUpController::complete.
+ *
+ * The anonymous email-ownership carrier (risk.step_up.email_ownership)
+ * registers its own pair, reachable without any principal:
+ *
+ *   kiwi_step_up_email_begin:
+ *     path: /kiwi/step-up/email/begin
+ *     controller: StepUpController::emailBegin.
+ *
+ *   kiwi_step_up_email_complete:
+ *     path: /kiwi/step-up/email/complete
+ *     controller: StepUpController::emailComplete.
+ *
+ * The begin path is the one the step-up 403 body advertises, so the
+ * anonymous visitor the body addresses can always reach the factor.
  *
  * The paths must equal risk.step_up.begin_path and complete_path, or
  * those knobs must be set to the application's own paths. The reason:
@@ -60,6 +75,7 @@ final class StepUpController
         private readonly string $scope,
         private readonly ?PrincipalResolverInterface $principalResolver = null,
         private readonly ?\Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface $tokenStorage = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp $emailOwnership = null,
     ) {
     }
 
@@ -138,6 +154,31 @@ final class StepUpController
             StepUpResultStatus::Pending => 'That code was not accepted; try again with the current code.',
             default => 'This verification can no longer be completed; begin a fresh challenge.',
         }, self::statusOf($result));
+    }
+
+    /**
+     * The anonymous email-ownership begin: no principal is resolved or
+     * required, the factor IS the identity proof. The action refuses
+     * with 404 when the carrier is not wired, so the route can exist
+     * unconditionally.
+     */
+    public function emailBegin(Request $request): Response
+    {
+        if ($this->emailOwnership === null) {
+            return self::plain('The email-ownership factor is not available on this deployment.', Response::HTTP_NOT_FOUND);
+        }
+
+        return $this->emailOwnership->begin($request);
+    }
+
+    /** The anonymous email-ownership complete: answers the grant. */
+    public function emailComplete(Request $request): Response
+    {
+        if ($this->emailOwnership === null) {
+            return self::plain('The email-ownership factor is not available on this deployment.', Response::HTTP_NOT_FOUND);
+        }
+
+        return $this->emailOwnership->complete($request);
     }
 
     /**
