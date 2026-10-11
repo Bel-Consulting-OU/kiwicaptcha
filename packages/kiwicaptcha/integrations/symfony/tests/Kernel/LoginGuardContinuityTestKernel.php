@@ -81,6 +81,7 @@ final class LoginGuardContinuityTestKernel extends TestKernel
                     'redis_service' => 'kiwi_e2e_redis',
                     'namespace' => self::NAMESPACE_RAW,
                     'novelty_enforcement' => 'enforce',
+                    'login_scopes' => ['main' => 'login'],
                     'asn' => ['dataset_path' => StepUpJourneyTestKernel::asnFixturePath()],
                     'scopes' => [
                         'login' => ['id' => 10, 'target_field' => 'username'],

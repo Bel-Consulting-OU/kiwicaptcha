@@ -18,7 +18,11 @@ use Predis\Client;
  * carries the whole principal identity, so one principal's records
  * live on their own Cluster slot instead of every principal colliding
  * on the shared `{kiwi:<ns>}` slot (a hot slot under the record
- * rate). Each tag
+ * rate). Deployments that already recorded under the older
+ * `pnet:{kiwi:<ns>}:<principal_hex>` spelling keep their history: a
+ * read-through migration probes the legacy key on a seen or
+ * has_trusted miss, copies its fields into the current key and
+ * deletes the legacy one. Each tag
  * (`net:<hex>`, `asn:<decimal|u4/prefix|u6/prefix>`, `session:<hex>`,
  * `device:<hex>`) is a hash field whose value is the last-use ms (Redis
  * TIME, never a client clock). The asn class carries a listed decimal
@@ -29,6 +33,9 @@ use Predis\Client;
  * so the engine follows its existing fail-closed path. The store never
  * returns "not seen" on error (which would read as "novel" and price
  * users out without a signal) and never "seen" (which would fail open).
+ * The one-time migration is auxiliary to the read it rides: a failed
+ * probe or copy skips the migration for that read (the miss already
+ * answered) and the next miss retries it.
  */
 final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInterface
 {
@@ -49,17 +56,15 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
     private readonly string $namespace;
     private string $scriptSha = '';
 
+    /** @var array<string, true> principals whose legacy key was already migrated or found absent */
+    private array $legacyChecked = [];
+
     /**
      * Production store over Redis.
      *
-     * @param Client $client
-     * @param string $namespace
-     * @param int $sessionTtlMs
-     * @param int $deviceTtlMs
-     * @param int $sessionCap
-     * @param int $deviceCap
-     * @param int $netCap
-     * @param int $namespaceKeyVersion
+     * @param bool $migrateLegacy read-through migration of the legacy
+     *                            shared-tag key form; default true for
+     *                            one minor release
      */
     public function __construct(
         private readonly Client $client,
@@ -70,6 +75,7 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         private readonly int $deviceCap = self::DEFAULT_DEVICE_CAP,
         private readonly int $netCap = self::DEFAULT_NET_CAP,
         int $namespaceKeyVersion = DeploymentNamespace::VERSION_LEGACY,
+        private readonly bool $migrateLegacy = true,
     ) {
         if ($namespace === '' || preg_match('/[{}]/', $namespace)) {
             throw new \InvalidArgumentException('Risk namespace must be non-empty and free of braces');
@@ -91,6 +97,14 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         return "pnet:{kiwi:{$this->namespace}:{$principalId}}";
     }
 
+    /** The pre-cluster-slot legacy hash key of one principal's tag set. */
+    public function legacyTagKey(string $principalId): string
+    {
+        self::assertPrincipal($principalId);
+
+        return "pnet:{kiwi:{$this->namespace}}:{$principalId}";
+    }
+
     public function principalNetworkSeen(string $principalId, string $network): ?bool
     {
         $this->assertTag($network);
@@ -101,8 +115,17 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         [, $ttlMs] = $this->classOf($network);
         try {
             $result = $this->runScript([$this->tagKey($principalId)], ['seen', $network, (string) $ttlMs]);
+            $seen = (int) $result === 1;
+            if (!$seen) {
+                // A miss under the current key may still be history
+                // under the pre-cluster-slot spelling: migrate once,
+                // then re-read the migrated state.
+                $this->migrateLegacyKey($principalId);
+                $result = $this->runScript([$this->tagKey($principalId)], ['seen', $network, (string) $ttlMs]);
+                $seen = (int) $result === 1;
+            }
 
-            return (int) $result === 1;
+            return $seen;
         } catch (\Throwable $e) {
             throw new RiskStoreException('principal network seen probe failed: '.$e->getMessage(), 0, $e);
         }
@@ -126,10 +149,14 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
 
     public function principalHasTrustedNetwork(string $principalId): ?bool
     {
-        // Any trusted tag counts: the script's has_any_trusted op walks
-        // the trust mirrors atomically inside the script (a live bare
-        // tag behind the mirror answers true), so the "any" variant no
-        // longer side-channels a whole-hash read around the script.
+        // A trusted network counts only the network classes: the
+        // script's has_any_trusted op walks the trust mirrors atomically
+        // inside the script and answers for net, asn and the engine's
+        // bare-hex bucket spelling. Session and device mirrors are the
+        // continuity plane's evidence and never make an account
+        // network-trusted (a live bare tag behind the mirror answers
+        // true, so the "any" variant no longer side-channels a
+        // whole-hash read around the script).
         try {
             $result = $this->runScript([$this->tagKey($principalId)], ['has_any_trusted', '']);
 
@@ -148,8 +175,17 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         [, $ttlMs] = $this->classOf($network);
         try {
             $result = $this->runScript([$this->tagKey($principalId)], ['has_trusted', $network, (string) $ttlMs]);
+            $trusted = (int) $result === 1;
+            if (!$trusted) {
+                // A miss under the current key may still be history
+                // under the pre-cluster-slot spelling: migrate once,
+                // then re-read the migrated state.
+                $this->migrateLegacyKey($principalId);
+                $result = $this->runScript([$this->tagKey($principalId)], ['has_trusted', $network, (string) $ttlMs]);
+                $trusted = (int) $result === 1;
+            }
 
-            return (int) $result === 1;
+            return $trusted;
         } catch (\Throwable $e) {
             throw new RiskStoreException('tag trust probe failed: '.$e->getMessage(), 0, $e);
         }
@@ -169,6 +205,66 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
             $this->runScript([$this->tagKey($principalId)], ['forget_devices']);
         } catch (\Throwable $e) {
             throw new RiskStoreException('forget devices failed: '.$e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Read-through migration of the legacy shared-tag history. The
+     * legacy `pnet:{kiwi:<ns>}:<principal>` hash (the spelling the
+     * store wrote before the hash tag carried the principal) is probed
+     * once per principal per process. When it exists, its fields are
+     * copied into the current key and the legacy key is deleted.
+     *
+     * The two keys live on different Cluster slots, so the copy cannot
+     * be one atomic script; it runs client-side over `HSCAN` with NX
+     * writes, so a fresher value already written under the current key
+     * is never clobbered by stale history. The legacy key is deleted
+     * only after the copy answered. A failure at any step skips the
+     * migration for this read (the miss already answered) and the next
+     * miss retries it.
+     */
+    private function migrateLegacyKey(string $principalId): void
+    {
+        if (!$this->migrateLegacy) {
+            return;
+        }
+        if (isset($this->legacyChecked[$principalId])) {
+            return;
+        }
+        $this->legacyChecked[$principalId] = true;
+        try {
+            $legacyKey = $this->legacyTagKey($principalId);
+            if ((int) $this->client->exists($legacyKey) !== 1) {
+                return;
+            }
+            $newKey = $this->tagKey($principalId);
+            $cursor = '0';
+            $copied = 0;
+            do {
+                $reply = $this->client->hscan($legacyKey, $cursor, ['COUNT' => 500]);
+                $cursor = (string) ($reply[0] ?? '0');
+                // Predis parses the `HSCAN` reply into field => value pairs.
+                foreach ($reply[1] ?? [] as $field => $value) {
+                    $field = (string) $field;
+                    // NX: a field the current key already carries is the
+                    // newer write (the record path upserts under the
+                    // current key), so stale history never overwrites it.
+                    if ((int) $this->client->hsetnx($newKey, $field, (string) $value) === 1) {
+                        $copied++;
+                    }
+                }
+            } while ($cursor !== '0');
+            if ($copied > 0) {
+                // The copied history must not outlive the store's own
+                // longest class ceiling (the next record recomputes the
+                // precise per-class expiry).
+                $this->client->pexpire($newKey, self::DEFAULT_NET_TTL_MS);
+            }
+            $this->client->del($legacyKey);
+        } catch (\Throwable) {
+            // Best effort: the migration rides a read that already
+            // answered; a failed probe or copy is retried by the next
+            // miss and never surfaces as a read error.
         }
     }
 

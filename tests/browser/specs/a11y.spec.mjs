@@ -760,4 +760,128 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     expect(de.retryText).toBe('Erneut');
     expect(de.overflowX).toBe(false);
   });
+
+  test('step-up dialog (email ownership): named dialog, labelled inputs, one-time-code field, axe-clean, keyboard completable', async ({ page }) => {
+    // The typed 403 refusal opens the in-widget dialog:
+    // the address stage, then the 6-digit code stage; the answered
+    // grant rides the token field and the success callback exactly
+    // like a completed proof of work. The route fakes stand in for
+    // the begin/complete endpoints the 403 advertises.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: {
+            code: 'STEP_UP_REQUIRED',
+            message: 'Additional verification is required for this request.',
+            step_up: { kind: 'email_ownership', begin: '/kiwi/step-up/email/begin', demand: 'a11y-demand-id' },
+          },
+        }),
+      });
+    });
+    await page.route('**/kiwi/step-up/email/begin', async (route) => {
+      const body = route.request().postDataJSON();
+      expect(body.demand).toBe('a11y-demand-id');
+      expect(body.scope).toBeTruthy();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          kind: 'email_ownership',
+          challenge: 'a11y-ticket',
+          expires_in: 600,
+          complete_path: '/kiwi/step-up/email/complete',
+          scope: body.scope,
+        }),
+      });
+    });
+    await page.route('**/kiwi/step-up/email/complete', async (route) => {
+      const body = route.request().postDataJSON();
+      expect(body.kiwi_step_up_ticket).toBe('a11y-ticket');
+      expect(body.kiwi_step_up_code).toMatch(/^[0-9]{6}$/);
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'succeeded', grant: 'kiwiemg1.a1b2c3d4e5f6g7h8i9j0.sig', expires_in: 600, scope: 'login' }),
+      });
+    });
+
+    await page.goto('/');
+    const dialog = page.locator('[data-kiwi-stepup] [role="dialog"]');
+    await expect(dialog).toBeVisible({ timeout: 30_000 });
+    // The verified listener rides the live document (the dialog is up
+    // before any completion, so the grant event cannot predate it).
+    const verified = page.evaluate(() => new Promise((resolve) => {
+      document.addEventListener('kiwi:verified', (ev) => resolve(ev.detail), { once: true });
+    }));
+
+    // The dialog is named (aria-labelledby -> visible title), the
+    // address input is labelled, and axe stays clean with the dialog
+    // open.
+    const named = await dialog.evaluate((d) => {
+      const title = document.getElementById(d.getAttribute('aria-labelledby'));
+      const email = d.querySelector('input[type="email"]');
+      const label = email ? d.querySelector(`label[for="${email.id}"]`) : null;
+      return {
+        labelled: Boolean(title && title.textContent),
+        titleVisible: Boolean(title && title.offsetHeight > 0),
+        emailLabelled: Boolean(label && label.textContent),
+        modal: d.getAttribute('aria-modal'),
+      };
+    });
+    expect(named.labelled, 'the dialog carries a real name').toBe(true);
+    expect(named.titleVisible).toBe(true);
+    expect(named.emailLabelled, 'the email input carries a visible label').toBe(true);
+    expect(named.modal).toBe('true');
+    const violations = await new AxeBuilder({ page }).withRules(AXE_RULES).analyze();
+    expect(violations.violations, JSON.stringify(violations.violations, null, 2)).toEqual([]);
+
+    // Stage 1 -> stage 2: the code field is the 6-digit one-time-code
+    // input (inputmode numeric, autocomplete one-time-code), still
+    // labelled, and axe stays clean with it open too.
+    await dialog.locator('input[type="email"]').fill('visitor@example.com');
+    await dialog.locator('button[type="submit"]').first().click();
+    const codeInput = dialog.locator('input[autocomplete="one-time-code"]');
+    await expect(codeInput).toBeVisible();
+    const codeShape = await codeInput.evaluate((el) => ({
+      inputmode: el.getAttribute('inputmode'),
+      maxLength: el.getAttribute('maxlength'),
+      pattern: el.getAttribute('pattern'),
+      labelled: Boolean(el.labels && el.labels.length && el.labels[0].textContent),
+    }));
+    expect(codeShape.inputmode).toBe('numeric');
+    expect(codeShape.maxLength).toBe('6');
+    expect(codeShape.pattern).toBe('[0-9]{6}');
+    expect(codeShape.labelled, 'the code input carries a visible label').toBe(true);
+    const codeViolations = await new AxeBuilder({ page }).withRules(AXE_RULES).analyze();
+    expect(codeViolations.violations, JSON.stringify(codeViolations.violations, null, 2)).toEqual([]);
+
+    // The completed grant lands in the token field and the callback
+    // event, the dialog closes, and the widget reads as done.
+    await codeInput.fill('123456');
+    await codeInput.press('Enter');
+    const detail = await verified;
+    expect(detail.token, 'the verified event carries the grant').toMatch(/^kiwiemg1\./);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 30_000 });
+    const grant = await page.locator('[data-kiwi-token]').inputValue();
+    expect(grant, 'the token field carries the grant').toMatch(/^kiwiemg1\./);
+
+    // Escape dismisses a fresh dialog and restores no leftover overlay.
+    await page.route('**/kiwi/step-up/email/begin', async (route) => {
+      await route.fulfill({ status: 429, contentType: 'application/json', body: JSON.stringify({ error: 'step_up_rate_limited', message: 'later' }) });
+    });
+    await page.evaluate(() => {
+      const w = document.querySelector('[data-kiwi-widget]');
+      delete w.dataset.kiwiStarted;
+      window.__kiwiCaptchaCore.core.scan(document);
+    });
+    await expect(dialog).toBeVisible({ timeout: 30_000 });
+    await dialog.locator('input[type="email"]').fill('visitor@example.com');
+    await dialog.locator('button[type="submit"]').first().click();
+    await expect(dialog.locator('[data-kiwi-stepup-msg], [role="status"]').last()).not.toBeEmpty();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+  });
 });

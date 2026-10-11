@@ -78,6 +78,9 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, array<string, float|string>> hashes (hincrbyfloat calibration buckets + hset policy fields) */
     public array $hashes = [];
 
+    /** @var array<string, array<string, true>> the target-dimension spread sets (the HLL fakes) */
+    public array $targetSpreadSets = [];
+
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
 
@@ -543,6 +546,99 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
+     * The target dimension (target_failure.lua) over the fake's own
+     * state: the leaky failure counter in the target hash, the two
+     * spread sets as plain distinct-element sets, the window TTL on
+     * every write. Answers the Lua's five-slot list.
+     *
+     * @param list<string> $keys [target hash, source spread, asn spread]
+     * @param list<string> $args [op, source element, asn element, ttl]
+     *
+     * @return list<int>
+     */
+    private function fakeTargetFailure(array $keys, array $args): array
+    {
+        $op = $args[0] ?? 'read';
+        $source = $args[1] ?? '';
+        $asn = $args[2] ?? '';
+        $now = (int) $this->clockMs;
+        $hash = $this->hashes[$keys[0]] ?? [];
+        $ts = (int) ($hash['ts'] ?? 0);
+        $fails = (int) ($hash['fails'] ?? 0);
+        // The leak: one failure per elapsed whole minute since the
+        // watermark; the watermark advances only by whole leaked
+        // minutes (the sub-minute remainder stays armed).
+        if ($ts !== 0) {
+            $leaked = intdiv(max(0, $now - $ts), 60000);
+            $fails = max(0, $fails - $leaked);
+            $ts = $ts + $leaked * 60000;
+        }
+        $spreadKey = 'target-spread:'.$keys[0];
+        $set = $this->targetSpreadSets[$spreadKey] ?? [];
+        if ($op === 'fail') {
+            ++$fails;
+            if ($ts === 0) {
+                $ts = $now;
+            }
+            $this->hashes[$keys[0]] = [
+                'ts' => (string) $ts,
+                'fails' => (string) $fails,
+                'last_ms' => (string) $now,
+                'first_ms' => (string) ($hash['first_ms'] ?? $now),
+            ];
+            $this->expirations[$keys[0]] = ((int) ($args[3] ?? 0)) * 1000;
+            if ($source !== '') {
+                $set['src:'.$source] = true;
+            }
+            if ($asn !== '') {
+                $set['asn:'.$asn] = true;
+            }
+            $this->targetSpreadSets[$spreadKey] = $set;
+            $this->expirations[$spreadKey] = ((int) ($args[3] ?? 0)) * 1000;
+
+            return [
+                $fails,
+                $this->countSpread($set, 'src:'),
+                $this->countSpread($set, 'asn:'),
+                (int) $this->hashes[$keys[0]]['first_ms'],
+                $now,
+            ];
+        }
+        if ($op === 'clear') {
+            $this->hashes[$keys[0]] = ['ts' => (string) $now, 'fails' => '0'];
+
+            return [
+                0,
+                $this->countSpread($set, 'src:'),
+                $this->countSpread($set, 'asn:'),
+                (int) ($hash['first_ms'] ?? 0),
+                $now,
+            ];
+        }
+
+        return [
+            $fails,
+            $this->countSpread($set, 'src:'),
+            $this->countSpread($set, 'asn:'),
+            (int) ($hash['first_ms'] ?? 0),
+            (int) ($hash['last_ms'] ?? 0),
+        ];
+    }
+
+    /** @param array<string, true> $set */
+    private function countSpread(array $set, string $prefix): int
+    {
+        $count = 0;
+        foreach (array_keys($set) as $element) {
+            if (str_starts_with($element, $prefix)) {
+                ++$count;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
      * `EVALSHA`: resolve the sha back to its body through the `SCRIPT` `LOAD`
      * registry and run it through the same interpreter as EVAL. An
      * unknown sha raises the same `NOSCRIPT` ServerException the server
@@ -576,6 +672,18 @@ final class FakePredisClient extends \Predis\Client
         // so a later `EVALSHA` for the same script succeeds.
         $this->scriptsBySha[sha1($script)] = $script;
 
+        if (str_contains($script, 'Target-account protection state')) {
+            // The target dimension (target_failure.lua): keys[1] the
+            // target state hash, keys[2]/keys[3] the source and asn
+            // spread sets, argv[1] the op, argv[2]/argv[3] the spread
+            // elements and argv[4] the window TTL. The failure counter
+            // leaks one per minute; the spreads are plain distinct
+            // element sets (the HLL cardinality of a set is its size).
+            return $this->fakeTargetFailure(
+                array_map('strval', $keys),
+                array_map('strval', $rest),
+            );
+        }
         if (str_contains($script, 'Step-up attempt accounting')) {
             // RedisStepUpChallengeStore::recordFailure: keys[1] the
             // challenge record JSON string; argv[1] the attempt cap.

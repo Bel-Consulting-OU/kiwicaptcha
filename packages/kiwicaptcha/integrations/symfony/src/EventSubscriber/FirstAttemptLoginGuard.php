@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\EventSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\LoginDecisionGate;
+use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use KiwiCaptcha\Risk\RiskAction;
@@ -33,13 +34,27 @@ use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
  * (novel network, breached credential, scope pressure) can fire. The
  * feedback paths never reach that code.
  *
- * A scope that configures login_step_up always (risk.scopes.<name>.
- * login_step_up) withholds the session on every interactive login, an
- * Allow included: the map $loginStepUpByScope (scope name to the
- * configured mode) is resolved from the same scope table the
- * authenticator wiring reads, and the guard consults its own scope key.
- * The pending path stays completable through the principal factors, so
- * a critical scope never grants a session on credentials alone.
+ * The scope resolves per event: the request's _firewall_context
+ * attribute names the firewall (the security.firewall.map.context.
+ * prefix stripped off), and the risk.login_scopes map translates the
+ * firewall name into the risk scope the guard assesses and books
+ * under. One container with a user firewall and an admin firewall
+ * therefore carries two independent login policies. An event whose
+ * firewall has no entry is out of the guard's mandate: it is skipped
+ * and counted under {@see self::UNMAPPED_COUNTER}, so a deployment can
+ * see how many logins bypass the gate through a missing mapping.
+ *
+ * A mapped scope that configures login_step_up always
+ * (risk.scopes.<name>.login_step_up) withholds the session on every
+ * interactive login, an Allow included. The map $loginStepUpByScope
+ * (scope name to the configured mode) is resolved from the same scope
+ * table the authenticator wiring reads, and the guard consults the
+ * entry of the scope it resolved for the event. The pending path stays
+ * completable through the principal factors, so a critical scope never
+ * grants a session on credentials alone. The resolved scope rides the
+ * pending token, exposed through {@see StepUpPendingToken::scope()},
+ * so the step-up flow books its challenge under the same scope the
+ * demand was raised in.
  *
  * The browser's continuity identities ride the same decision: the
  * continuity cookie read and the trusted-device cookie read flow into
@@ -74,10 +89,32 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
     /** Request attribute carrying the device value to (re)issue as a cookie. */
     public const DEVICE_MINT_ATTRIBUTE = '_kiwi_device_mint';
 
+    /**
+     * The exporter series counting the token-created events the guard
+     * skipped because no risk.login_scopes entry covered their
+     * firewall. A growing series with an enforcing posture means the
+     * map is missing entries.
+     */
+    public const UNMAPPED_COUNTER = 'kiwi_login_guard_unmapped_total';
+
+    /** The request attribute the firewall listener stamps with the context key. */
+    private const FIREWALL_CONTEXT_ATTRIBUTE = '_firewall_context';
+
+    /** The context-key prefix, stripped to recover the bare firewall name. */
+    private const FIREWALL_CONTEXT_PREFIX = 'security.firewall.map.context.';
+
     public function __construct(
         private readonly LoginDecisionGate $gateway,
         private readonly RiskIdentityFactory $identityFactory,
-        private readonly string $scope,
+        /**
+         * Firewall name to risk scope name (the risk.login_scopes
+         * map). The scope of an event resolves here per event; an
+         * unmapped firewall skips the gate and counts
+         * {@see self::UNMAPPED_COUNTER}.
+         *
+         * @var array<string, string>
+         */
+        private readonly array $loginScopes,
         private readonly ?ClientIpResolver $clientIpResolver = null,
         private readonly ?LoggerInterface $logger = null,
         private readonly bool $enabled = true,
@@ -87,24 +124,31 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         /**
          * Scope name to the configured login_step_up mode ('risk' or
          * 'always'). Resolved from the risk.scopes table the extension
-         * hands the authenticator wiring; the guard reads its own
-         * scope's entry. 'always' withholds the session on every
-         * interactive login under the scope, an Allow included.
+         * hands the authenticator wiring; the guard reads the entry of
+         * the scope it resolved for the event. 'always' withholds the
+         * session on every interactive login under the scope, an Allow
+         * included.
          *
          * @var array<string, string>
          */
         private readonly array $loginStepUpByScope = [],
         /**
-         * The login scope's configured target form field names (F14):
-         * their submitted values ride the decision, so the engine's
-         * target resolver books the target dimension (failure counter
-         * and spread) on the first-attempt path, exactly like the
-         * outcome bridge does. Empty when the scope declares no target
-         * field: the assessment then carries no target.
+         * The configured target form field names (F14) per resolved
+         * scope name: their submitted values ride the decision, so the
+         * engine's target resolver books the target dimension (failure
+         * counter and spread) on the first-attempt path, exactly like
+         * the outcome bridge does. A scope without an entry (or without
+         * a target_field) carries no target.
          *
-         * @var list<string>
+         * @var array<string, list<string>>
          */
-        private readonly array $targetFields = [],
+        private readonly array $targetFieldsByScope = [],
+        /**
+         * The exporter's cross-worker counter store; only the unmapped
+         * skip is counted here (the decision paths book through the
+         * engine's own metrics).
+         */
+        private readonly ?MetricsCounterStore $counters = null,
     ) {
     }
 
@@ -123,6 +167,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         if (!$this->enabled) {
             return;
         }
+        $resolvedScope = null;
         try {
             $token = $this->tokenOf($event);
             if ($token === null || $token instanceof StepUpPendingToken) {
@@ -136,21 +181,28 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             }
             $request = $this->requestOf($event);
             if ($request === null) {
-                // Fail closed: without a request there is no IP to
-                // assess and no way to justify a full session.
-                $this->withhold($event, $token, 'no_request');
+                // No request means no firewall context either, so the
+                // scope cannot resolve and the guard has no mandate.
+                $this->skipUnmapped(null, 'no_request');
 
                 return;
             }
+            $scope = $this->resolveScope($request);
+            if ($scope === null) {
+                $this->skipUnmapped($request, 'no_scope_mapping');
+
+                return;
+            }
+            $resolvedScope = $scope;
             $identifier = $this->tokenIdentifier($token);
             if ($identifier === null || $identifier === '') {
-                $this->withhold($event, $token, 'unresolvable_identifier');
+                $this->withhold($event, $token, $scope, 'unresolvable_identifier');
 
                 return;
             }
             $ip = $this->resolveIp($request);
             if ($ip === '') {
-                $this->withhold($event, $token, 'empty_client_ip');
+                $this->withhold($event, $token, $scope, 'empty_client_ip');
 
                 return;
             }
@@ -166,16 +218,16 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             $presentedDevice = $this->device?->read($request);
             $deviceValue = $presentedDevice ?? $this->device?->mint();
             $decision = $this->gateway->loginDecision(
-                $this->scope,
+                $scope,
                 $ip,
                 $sessionCookie,
                 $identifier,
                 null,
                 $deviceValue,
-                $this->targetFieldValues($request),
+                $this->targetFieldValues($request, $scope),
             );
             if ($decision === null) {
-                $this->withhold($event, $token, 'no_decision');
+                $this->withhold($event, $token, $scope, 'no_decision');
 
                 return;
             }
@@ -184,23 +236,23 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             // session. The pending path is completable through the
             // principal factors, so every login under the scope pays
             // the second factor.
-            if (($this->loginStepUpByScope[$this->scope] ?? 'risk') === 'always') {
+            if (($this->loginStepUpByScope[$scope] ?? 'risk') === 'always') {
                 $this->logger?->info('kiwi first-attempt gate withholds the session (login_step_up always)', [
-                    'scope' => $this->scope,
+                    'scope' => $scope,
                     'decision_id' => $decision->decisionId,
                     'action' => $decision->action->value,
                 ]);
-                $this->replaceToken($event, new StepUpPendingToken($token));
+                $this->replaceToken($event, $this->pendingToken($token, $scope));
 
                 return;
             }
             if ($decision->action === RiskAction::Deny || $decision->action === RiskAction::StepUp) {
                 $this->logger?->info('kiwi first-attempt gate withholds the session (step-up pending)', [
-                    'scope' => $this->scope,
+                    'scope' => $scope,
                     'decision_id' => $decision->decisionId,
                     'action' => $decision->action->value,
                 ]);
-                $this->replaceToken($event, new StepUpPendingToken($token));
+                $this->replaceToken($event, $this->pendingToken($token, $scope));
 
                 return;
             }
@@ -214,14 +266,18 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             }
         } catch (\Throwable $e) {
             // Fail Closed: a gate error must never hand out a full
-            // session. The pending token is the conservative outcome.
+            // session. The pending token is the conservative outcome,
+            // stamped with the scope the event resolved to (when it
+            // did) so the completion still books the right scope.
             $this->logger?->error('kiwi first-attempt gate failed closed on an unexpected error: {message}', [
                 'message' => $e->getMessage(),
             ]);
             try {
                 $token = $this->tokenOf($event);
                 if ($token !== null && !$token instanceof StepUpPendingToken) {
-                    $this->replaceToken($event, new StepUpPendingToken($token));
+                    $this->replaceToken($event, $resolvedScope !== null
+                        ? $this->pendingToken($token, $resolvedScope)
+                        : new StepUpPendingToken($token));
                 }
             } catch (\Throwable) {
                 // Last resort: the original token stands, but the error
@@ -230,17 +286,65 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         }
     }
 
+    /**
+     * The risk scope of the event's firewall: the request's
+     * _firewall_context attribute (the framework stamps it before the
+     * authenticator runs) minus the context-key prefix, translated
+     * through the risk.login_scopes map. Null when the attribute is
+     * absent or the firewall has no entry.
+     */
+    private function resolveScope(Request $request): ?string
+    {
+        $context = $request->attributes->get(self::FIREWALL_CONTEXT_ATTRIBUTE);
+        if (!\is_string($context) || !str_starts_with($context, self::FIREWALL_CONTEXT_PREFIX)) {
+            return null;
+        }
+        $firewall = substr($context, \strlen(self::FIREWALL_CONTEXT_PREFIX));
+
+        return $this->loginScopes[$firewall] ?? null;
+    }
+
+    /** Count and log the unmapped skip; the token stays untouched. */
+    private function skipUnmapped(?Request $request, string $reason): void
+    {
+        $this->counters?->increment(self::UNMAPPED_COUNTER);
+        $this->logger?->debug('kiwi first-attempt gate skipped an unmapped firewall', [
+            'firewall' => $request === null ? null : self::firewallNameOf($request),
+            'reason' => $reason,
+        ]);
+    }
+
+    /** The bare firewall name behind the request's context attribute. */
+    private static function firewallNameOf(Request $request): ?string
+    {
+        $context = $request->attributes->get(self::FIREWALL_CONTEXT_ATTRIBUTE);
+        if (!\is_string($context) || !str_starts_with($context, self::FIREWALL_CONTEXT_PREFIX)) {
+            return null;
+        }
+
+        return substr($context, \strlen(self::FIREWALL_CONTEXT_PREFIX));
+    }
+
     /** Withhold the session with a named reason (always logged). */
-    private function withhold(object $event, object $token, string $reason): void
+    private function withhold(object $event, object $token, string $scope, string $reason): void
     {
         $this->logger?->warning('kiwi first-attempt gate withholds the session', [
-            'scope' => $this->scope,
+            'scope' => $scope,
             'reason' => $reason,
         ]);
         if ($token instanceof StepUpPendingToken) {
             return;
         }
-        $this->replaceToken($event, new StepUpPendingToken($token));
+        $this->replaceToken($event, $this->pendingToken($token, $scope));
+    }
+
+    /** The pending token, stamped with the scope the demand was raised under. */
+    private function pendingToken(object $token, string $scope): StepUpPendingToken
+    {
+        $pending = new StepUpPendingToken($token);
+        $pending->setAttribute(StepUpPendingToken::SCOPE_ATTRIBUTE, $scope);
+
+        return $pending;
     }
 
     /**
@@ -288,7 +392,7 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             }
             if (method_exists($passport, 'getBadges')) {
                 foreach ($passport->getBadges() as $badge) {
-                    if (is_object($badge) && (is_a($badge, self::PASSWORD_CREDENTIALS)
+                    if (\is_object($badge) && (is_a($badge, self::PASSWORD_CREDENTIALS)
                         || str_ends_with($badge::class, 'PasswordCredentials'))) {
                         return true;
                     }
@@ -341,19 +445,32 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
     }
 
     /**
-     * The submitted values of the scope's configured target fields,
-     * keyed by field name: the exact input shape the engine's target
-     * resolver reads. Absent or empty fields are left out, so a login
-     * form that omits the target field simply carries no target
-     * dimension instead of resolving an empty identifier.
+     * The submitted values of the resolved scope's configured target
+     * fields, keyed by field name: the exact input shape the engine's
+     * target resolver reads. The values come from the request's full
+     * payload (form bodies and json_login bodies alike), so a JSON
+     * login that omits the target field simply carries no target
+     * dimension instead of silently losing it. Absent or empty fields
+     * are left out, and a non-string value (an array or object under
+     * the field name) is skipped: a malformed shape resolves no target
+     * instead of throwing inside the guard.
      *
      * @return array<string, string>
      */
-    private function targetFieldValues(Request $request): array
+    private function targetFieldValues(Request $request, string $scope): array
     {
         $fields = [];
-        foreach ($this->targetFields as $name) {
-            $value = $request->request->get($name);
+        foreach ($this->targetFieldsByScope[$scope] ?? [] as $name) {
+            $value = null;
+            try {
+                // getPayload()->all() merges the request body whatever
+                // its content type (form, JSON, XML); on Symfony builds
+                // without the payload bag the form body remains.
+                $payload = $request->getPayload();
+                $value = $payload->all()[$name] ?? null;
+            } catch (\Throwable) {
+                $value = $request->request->get($name);
+            }
             if (\is_string($value) && $value !== '') {
                 $fields[$name] = $value;
             }

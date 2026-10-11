@@ -17,7 +17,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
  * transition that removes the record when the attempt cap is reached.
  * countBegin() is the store-backed rate bound of begin(), a fixed
  * per-principal window counter whose admission the handler compares
- * against the configured cap.
+ * against the configured cap. The demand family (createDemand /
+ * readDemand / consumeDemand) holds the same contract for the
+ * step-up demand records the email factor requires before it sends.
  *
  * The lockout budget is the cross-challenge brute-force bound: one
  * fixed-window failure counter and one lockout deadline per
@@ -72,6 +74,30 @@ interface StepUpChallengeStore
      * refuses begin() while the count exceeds its configured cap.
      */
     public function countBegin(string $principalPseudonym, int $windowSecs): int;
+
+    /**
+     * Persist a fresh step-up demand record under its own unguessable
+     * id (the id the 403 body hands to the visitor) and answer that id.
+     * The record expires after the given TTL. An id colliding with a
+     * live demand refuses rather than overwriting it.
+     */
+    public function createDemand(StepUpDemand $demand, int $ttlSecs): string;
+
+    /**
+     * The live demand of a demand id, or null when absent, expired or
+     * undecodable. Non-consuming. A corrupt record reads as absent,
+     * fail-closed: a demand the store cannot decode never funds a
+     * code delivery.
+     */
+    public function readDemand(string $demandId): ?StepUpDemand;
+
+    /**
+     * Atomically answer and remove the demand of a demand id: the
+     * single-use consumption (the send-credit claim, or the completion
+     * consumption). Exactly one caller of a concurrent pair receives
+     * the record; every other caller receives null.
+     */
+    public function consumeDemand(string $demandId): ?StepUpDemand;
 
     /**
      * Persist the enrollment secret of the time-based handler for the

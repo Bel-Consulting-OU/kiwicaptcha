@@ -73,6 +73,7 @@ final class TargetProtectionTestKernel extends TestKernel
                     'redis_service' => 'kiwi_e2e_redis',
                     'namespace' => self::NAMESPACE_RAW,
                     'novelty_enforcement' => 'enforce',
+                    'login_scopes' => ['main' => 'login'],
                     'scopes' => [
                         'login' => ['id' => 10, 'target_field' => 'username'],
                     ],

@@ -15,6 +15,7 @@ use KiwiCaptcha\Risk\Marks\FirstAttemptEvidence;
 use KiwiCaptcha\Risk\Marks\MarksEscalation;
 use KiwiCaptcha\Risk\Marks\MarksReaderInterface;
 use KiwiCaptcha\Risk\Marks\MarksRequest;
+use KiwiCaptcha\Risk\Marks\MarksView;
 use KiwiCaptcha\Risk\Metrics\RiskMetrics;
 use KiwiCaptcha\Risk\Network\NetworkClassifierInterface;
 use KiwiCaptcha\Risk\Pricing\PriceContextSourceInterface;
@@ -559,16 +560,63 @@ final class AdaptiveRiskEngine
             clientKey: $observation->sessionId ?? $observation->sourceId,
         );
 
-        // The decisive attacker stage: additive, after the plain policy
-        // decision, and only when a marks reader is wired. An unreadable
-        // marks surface floors the request at the maximum challenge rung
-        // fail-closed instead of fabricating a deny. The stage also
-        // returns the first-attempt evidence it derived, so the
-        // post-Allow binding below can read the unmasked novelty
-        // verdict when it decides whether to mint trust.
-        $firstAttempt = null;
+        // The named-carrier raise (post-solve only): a scope whose
+        // step-up demand rides a carrier (risk.scopes.<name>.carrier)
+        // and that carries no step_up_above rung answers its post-solve
+        // assessment with the interactive step-up, so the demand appears
+        // where a principal exists while issuance stays a plain
+        // proof-of-work flow. The pre-issue path never runs this raise:
+        // a carrier minimum would refuse issuance with the typed 403
+        // before any widget renders. The raise is additive: a Deny
+        // stays Deny, stronger composed actions stay as they are, and a
+        // later stage may still raise further.
+        if (
+            $c->event === RiskEventKind::SolveSuccess
+            && $this->policy->carrier($c->scope) !== null
+            && $this->policy->stepUpAbove($c->scope) === null
+            && $decision->action->rank() < RiskAction::StepUp->rank()
+        ) {
+            $decision = new RiskDecision(
+                score: $decision->score,
+                action: RiskAction::StepUp,
+                reasons: $decision->reasons,
+                policyVersion: $decision->policyVersion,
+                globalLevel: $decision->globalLevel,
+                retryAfterMs: $decision->retryAfterMs,
+                band: $decision->band,
+                decisionId: $decision->decisionId,
+                modelRevision: $decision->modelRevision,
+                quarantined: $decision->quarantined,
+            );
+            $decision = $this->dropQuarantineOnEscalation($decision);
+        }
+
+        // The first-attempt prevention evidence (P0-1), derived for every
+        // assessment: with a marks reader wired the marks stage composes
+        // it into the decision, and without one the fallback below still
+        // enforces it, so the gate never silently disappears with the
+        // reader. The post-Allow trust binding below reads the unmasked
+        // novelty verdict either way.
+        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision, $targetEvidenceUnavailable);
         if ($this->marksReader !== null) {
-            [$decision, $firstAttempt] = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs, $targetId, $targetEvidenceUnavailable);
+            [$decision, $firstAttempt] = $this->applyMarksStage($decision, $c, $observation, $vector, $v2, $nowMs, $targetId, $firstAttempt);
+        } elseif ($firstAttempt->requiresStepUp() || $firstAttempt->evidenceUnavailable) {
+            // No marks reader: the first-attempt gate runs on its own.
+            // A step-up-worthy first attempt (novel network in enforce
+            // mode, a breached credential, scope pressure) escalates to
+            // the interactive step-up exactly like the marks stage's
+            // own rule, and unreadable trusted history still reports
+            // why no read could vouch for the login. The empty view
+            // carries no marks of its own, so nothing but the attached
+            // evidence can escalate here.
+            $decision = MarksEscalation::apply(
+                $decision,
+                MarksView::empty()->withFirstAttempt($firstAttempt),
+                false,
+                $nowMs,
+                MarksEscalation::DEFAULT_MARK_TTL_MS,
+                $c->resources,
+            );
         }
 
         // The decoy escalation stage: additive, after the marks stage,
@@ -736,8 +784,9 @@ final class AdaptiveRiskEngine
      * to allow.
      *
      * Returns the composed decision together with the first-attempt
-     * evidence it derived, so the caller's post-Allow binding can read
-     * the unmasked novelty verdict from the same evaluation.
+     * evidence the caller derived before the stage (the pipeline
+     * computes it once for every assessment, with or without a wired
+     * reader).
      *
      * @return array{0: RiskDecision, 1: FirstAttemptEvidence}
      */
@@ -748,8 +797,8 @@ final class AdaptiveRiskEngine
         SignalVector $vector,
         ?RiskV2Context $v2,
         int $nowMs,
-        ?string $targetId = null,
-        bool $targetEvidenceUnavailable = false,
+        ?string $targetId,
+        FirstAttemptEvidence $firstAttempt,
     ): array {
         $request = new MarksRequest(
             scope: $c->scope,
@@ -759,7 +808,6 @@ final class AdaptiveRiskEngine
             target: $targetId,
         );
         $decoyEvidence = $c->event->isHoneypot() || ($v2?->honeypotHit ?? false);
-        $firstAttempt = $this->firstAttemptEvidence($c, $observation, $vector, $v2, $decision, $targetEvidenceUnavailable);
         try {
             $view = $this->marksReader->requestMarks($request);
         } catch (\Throwable) {

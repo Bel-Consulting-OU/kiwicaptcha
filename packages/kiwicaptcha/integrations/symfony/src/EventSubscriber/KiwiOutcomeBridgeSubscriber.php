@@ -93,6 +93,12 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     /** The CheckPassport lane runs before the framework's checkers so it observes the resolution error first. */
     private const CHECK_PASSPORT_PRIORITY = 1024;
 
+    /** The request attribute the firewall listener stamps with the context key. */
+    private const FIREWALL_CONTEXT_ATTRIBUTE = '_firewall_context';
+
+    /** The context-key prefix, stripped to recover the bare firewall name. */
+    private const FIREWALL_CONTEXT_PREFIX = 'security.firewall.map.context.';
+
     private readonly string $idempotencyKey;
 
     public function __construct(
@@ -109,6 +115,33 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
         private readonly ?LoggerInterface $logger = null,
         private readonly bool $trustRequestIdHeader = false,
         private readonly ?AuthOutcomeWindowInterface $authWindow = null,
+        /**
+         * Firewall name to risk scope id (risk.login_scopes resolved
+         * against the scope table): the report context books under the
+         * scope of the event's firewall, so a user login and an admin
+         * login book their outcomes under their own policies. A request
+         * outside the map falls back to the configured scope id above.
+         *
+         * @var array<string, int>
+         */
+        private readonly array $scopeIdsByFirewall = [],
+        /**
+         * Whether the scope of the event's firewall carries a
+         * configured target field (the same per-event resolution). A
+         * scope without an entry falls back to the configured flag
+         * above.
+         *
+         * @var array<string, bool>
+         */
+        private readonly array $targetFieldByFirewall = [],
+        /**
+         * The kernel's request stack: the request of a security event
+         * that carries none of its own. The CheckPassportEvent of this
+         * Symfony line exposes no request, so without the stack its
+         * lane could not see the login request at all and the claimed
+         * identifier it observed would never reach the failure lane.
+         */
+        private readonly ?\Symfony\Component\HttpFoundation\RequestStack $requestStack = null,
     ) {
         $this->idempotencyKey = self::deriveIdempotencyKey($idempotencyMaster);
     }
@@ -215,7 +248,7 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
             $idempotencyKey = $this->idempotencyKeyOf($request);
 
-            if ($this->targetFieldConfigured && $username !== null) {
+            if ($this->targetFieldConfiguredOf($request) && $username !== null) {
                 $handle = $this->targetHandle($username);
                 if ($handle !== null) {
                     $this->report(Outcome::AuthenticationFailure, $handle, $idempotencyKey, $context);
@@ -258,7 +291,7 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
                     $this->authWindow?->recordFailure($this->identityFactory->sessionId($sessionRaw));
                 }
                 $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
-                $handle = $username !== null && $this->targetFieldConfigured
+                $handle = $username !== null && $this->targetFieldConfiguredOf($request)
                     ? $this->targetHandle($username)
                     : $this->sessionHandle($request);
                 if ($handle !== null) {
@@ -337,14 +370,15 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     }
 
     /**
-     * The report context of one lane: the configured scope, the
-     * canonical client IP, the (gate-gated) session raw value and no
-     * principal (a failure asserts no authenticated principal, and a
-     * success's principal rides the handle pseudonym). The context
+     * The report context of one lane: the resolved scope (the event
+     * firewall's login scope, the configured scope as the fallback),
+     * the canonical client IP, the (gate-gated) session raw value and
+     * no principal. A failure asserts no authenticated principal, and
+     * a success's principal rides the handle pseudonym. The context
      * never carries the claimed identifier: raw identifiers stay out
-     * of every report, and the target dimension books through the
-     * handle path (the target's own registerTargetFailure write).
-     * Null when the request or its IP cannot anchor an observation.
+     * of every report. The target dimension books through the handle
+     * path (the target's own registerTargetFailure write). Null when
+     * the request or its IP cannot anchor an observation.
      */
     private function context(RiskEventKind $event, ?Request $request, ?string $sessionRaw): ?RiskContext
     {
@@ -357,7 +391,7 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
         }
 
         return new RiskContext(
-            scope: $this->scopeId,
+            scope: $this->scopeIdOf($request),
             sourceIp: $ip,
             sessionId: $sessionRaw,
             principalId: null,
@@ -365,6 +399,47 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             networkFlags: $this->classifier?->classify($ip) ?? new \KiwiCaptcha\Risk\Network\NetworkFlags(),
             resources: new ResourcePressure(1000, 1000),
         );
+    }
+
+    /**
+     * The scope id of the request's firewall: the risk.login_scopes
+     * target of the firewall when it is mapped and configured, the
+     * configured scope id otherwise.
+     */
+    private function scopeIdOf(Request $request): int
+    {
+        $firewall = self::firewallNameOf($request);
+        if ($firewall !== null && \array_key_exists($firewall, $this->scopeIdsByFirewall)) {
+            return $this->scopeIdsByFirewall[$firewall];
+        }
+
+        return $this->scopeId;
+    }
+
+    /**
+     * Whether the request's firewall resolves to a scope with a
+     * configured target field: the per-event map first, the configured
+     * flag as the fallback.
+     */
+    private function targetFieldConfiguredOf(?Request $request): bool
+    {
+        $firewall = $request === null ? null : self::firewallNameOf($request);
+        if ($firewall !== null && \array_key_exists($firewall, $this->targetFieldByFirewall)) {
+            return $this->targetFieldByFirewall[$firewall];
+        }
+
+        return $this->targetFieldConfigured;
+    }
+
+    /** The bare firewall name behind the request's context attribute. */
+    private static function firewallNameOf(Request $request): ?string
+    {
+        $context = $request->attributes->get(self::FIREWALL_CONTEXT_ATTRIBUTE);
+        if (!\is_string($context) || !str_starts_with($context, self::FIREWALL_CONTEXT_PREFIX)) {
+            return null;
+        }
+
+        return substr($context, \strlen(self::FIREWALL_CONTEXT_PREFIX));
     }
 
     /**
@@ -468,7 +543,11 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
     /**
      * The claimed identifier of a failure: the CheckPassport lane's
      * observation of the same request first, the framework's
-     * last-username attribute second.
+     * last-username request attribute second, and the session's
+     * last-username entry third. form_login writes the failed
+     * identifier into the session (attribute '_security.last_username'
+     * lives in the session store there), so an unstarted session is
+     * the only state this lane cannot read.
      */
     private function claimedIdentifier(?Request $request): ?string
     {
@@ -479,6 +558,15 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             $value = $request->attributes->get($attribute);
             if (\is_string($value) && $value !== '') {
                 return $value;
+            }
+        }
+        if ($request->hasSession()) {
+            $session = $request->getSession();
+            if ($session->isStarted()) {
+                $value = $session->get('_security.last_username');
+                if (\is_string($value) && $value !== '') {
+                    return $value;
+                }
             }
         }
 
@@ -602,14 +690,24 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
         return $this->continuityCookie->read($request);
     }
 
+    /**
+     * The request of a security event: the event's own request when it
+     * exposes one, else the kernel's main request off the request
+     * stack. The CheckPassportEvent of this Symfony line carries no
+     * request (the constructor takes only the authenticator and the
+     * passport), so the stack is the only way that lane can anchor its
+     * observation to the login request.
+     */
     private function requestOf(object $event): ?Request
     {
-        if (!method_exists($event, 'getRequest')) {
-            return null;
+        if (method_exists($event, 'getRequest')) {
+            $request = $event->getRequest();
+            if ($request instanceof Request) {
+                return $request;
+            }
         }
-        $request = $event->getRequest();
 
-        return $request instanceof Request ? $request : null;
+        return $this->requestStack?->getMainRequest();
     }
 
     private function countSkip(string $reason): void

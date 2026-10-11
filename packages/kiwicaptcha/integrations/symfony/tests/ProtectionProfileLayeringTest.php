@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
@@ -51,21 +52,24 @@ final class ProtectionProfileLayeringTest extends TestCase
         $container->register('fake_redis', FakePredisClient::class);
         // The abuse posture requires the ASN dataset path (the
         // novel-network gate is judged on the ASN bucket first): the
-        // fixture supplies what the profile requires when the layers
-        // select it without a dataset.
-        foreach ($layers as $i => $layer) {
-            $profile = $layer['protection_profile'] ?? null;
-            if (\in_array($profile, ['abuse_first', 'high_abuse'], true)) {
-                $covered = false;
-                foreach ($layers as $other) {
-                    if (isset($other['risk']['asn']['dataset_path'])) {
-                        $covered = true;
-                        break;
-                    }
+        // fixture supplies what the profile requires when the final
+        // stack selects it without a dataset. The entry rides the last
+        // layer, deliberately: the risk node is a Symfony canBeEnabled
+        // node, so a partial risk array in an overridden (earlier)
+        // layer would itself re-enable the engine during the merge and
+        // defeat the profile-presence semantics these tests guard.
+        $selected = ProtectionProfileDefaults::selectedProfile($layers);
+        if (\in_array($selected, ['abuse_first', 'high_abuse'], true)) {
+            $covered = false;
+            foreach ($layers as $other) {
+                if (isset($other['risk']['asn']['dataset_path'])) {
+                    $covered = true;
+                    break;
                 }
-                if (!$covered) {
-                    $layers[$i]['risk']['asn']['dataset_path'] = \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskStageMatrixTestKernel::asnFixturePath();
-                }
+            }
+            if (!$covered) {
+                $last = array_key_last($layers);
+                $layers[$last]['risk']['asn']['dataset_path'] = \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskStageMatrixTestKernel::asnFixturePath();
             }
         }
         (new KiwiCaptchaExtension())->load($layers, $container);

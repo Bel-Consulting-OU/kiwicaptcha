@@ -69,6 +69,7 @@ final class FirstAttemptNoveltyTest extends TestCase
         bool $failingReads = false,
         bool $failingTargetReads = false,
         string $failureClass = \KiwiCaptcha\Risk\Storage\RiskStoreException::class,
+        bool $withMarksReader = true,
     ): AdaptiveRiskEngine {
         // The same identity factory as setUp: the tag store is keyed by
         // the hashed principal, so the engine and the seed must agree.
@@ -188,7 +189,7 @@ final class FirstAttemptNoveltyTest extends TestCase
             enableGlobalPressure: true,
             noveltyEnforcement: $noveltyEnforcement,
             principalNetworks: $networks,
-            marksReader: $marksReader,
+            marksReader: $withMarksReader ? $marksReader : null,
             asnDataset: AsnDataset::open($this->asnFixture),
             targetResolver: new \KiwiCaptcha\Risk\FormFieldTargetResolver([1 => 'username']),
         );
@@ -571,6 +572,76 @@ final class FirstAttemptNoveltyTest extends TestCase
         self::assertFalse(
             $decision->hasReason(\KiwiCaptcha\Risk\RiskReason::NovelNetwork),
             'learn mode never reports the novelty signal as enforcing',
+        );
+    }
+
+    /**
+     * The gate exists without the marks reader: a deployment that never
+     * wired the marks stage (or turned it off) still escalates a
+     * genuinely novel login in enforce mode. The pipeline derives the
+     * first-attempt evidence for every assessment and enforces it on
+     * its own when no reader composes it.
+     */
+    public function testEnforceWithoutMarksReaderStillStepsUpNovelLogins(): void
+    {
+        $engine = $this->buildEngine($this->homeTags(), 'enforce', withMarksReader: false);
+        $decision = $engine->reassess($this->loginContext(self::ATTACKER_OTHER_ASN, null));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::StepUp,
+            $decision->action,
+            'enforce mode steps a novel login up even with no marks reader wired',
+        );
+        self::assertTrue(
+            $decision->hasReason(\KiwiCaptcha\Risk\RiskReason::NovelNetwork),
+            'the escalation carries the novelty reason',
+        );
+
+        // The same engine stays silent for the owner's known network:
+        // the fallback enforces the verdict, it does not widen it.
+        $control = $this->buildEngine($this->homeTags(), 'enforce', withMarksReader: false);
+        $known = $control->reassess($this->loginContext(self::HOME_IP, self::SESSION));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::Allow,
+            $known->action,
+            'a known network on a bound session stays an Allow without a marks reader',
+        );
+    }
+
+    /**
+     * Trust is never minted from a novel Allow when no marks reader is
+     * wired: learn mode defers the step-up demand, so the post-Allow
+     * binding records the session and the device without the trust
+     * flag, exactly like the wired-reader path. An attacker riding the
+     * rollout window leaves no trusted device behind.
+     */
+    public function testNoMarksReaderNovelAllowMintsNoTrust(): void
+    {
+        $engine = $this->buildEngine([], 'learn', withMarksReader: false);
+        $sessionTag = 'session:'.$this->identity->sessionId(self::SESSION);
+        $deviceTag = 'device:'.$this->identity->deviceId(self::DEVICE);
+        $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
+
+        $decision = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION, self::DEVICE));
+        self::assertSame(
+            \KiwiCaptcha\Risk\RiskAction::Allow,
+            $decision->action,
+            'learn mode stays on Allow for a novel first login',
+        );
+        self::assertTrue(
+            $this->networks->principalNetworkSeen($this->principalHex, $deviceTag),
+            'the binding still records the device pseudonym',
+        );
+        self::assertFalse(
+            $this->networks->tagIsTrusted($this->principalHex, $deviceTag),
+            'a novel Allow with no marks reader mints no device trust',
+        );
+        self::assertFalse(
+            $this->networks->tagIsTrusted($this->principalHex, $sessionTag),
+            'a novel Allow with no marks reader mints no session trust either',
+        );
+        self::assertTrue(
+            $this->networks->tagIsTrusted($this->principalHex, $networkBucket),
+            'the learn history accrues as it does with a reader',
         );
     }
 }

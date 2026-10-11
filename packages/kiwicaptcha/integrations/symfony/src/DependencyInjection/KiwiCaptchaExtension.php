@@ -19,6 +19,7 @@ use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaMigrateCommand;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\DeviceCookieSubscriber;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiCredentialsChangedSubscriber;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
@@ -33,6 +34,8 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingEmailOwnershipCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpOwnerNotifier;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\MailerEmailOwnershipCodeSender;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\MailerStepUpCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
@@ -1170,6 +1173,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ? new Reference('logger')
             : null;
         $riskConfig = $config['risk'];
+        // A sparse scope row (the shipped financial_action default
+        // carries only its value class and its carrier) fills the
+        // policy-critical children from the tree's own defaults,
+        // exactly like the config merge does for an explicitly declared
+        // scope. Every consumer below reads the four policy keys
+        // directly, so no scope row can reach them half-filled.
+        foreach ($riskConfig['scopes'] as $scopeName => $scopeSpec) {
+            if (\is_array($scopeSpec)) {
+                $riskConfig['scopes'][$scopeName] = $scopeSpec + [
+                    'id' => null,
+                    'base_risk' => 100,
+                    'minimum' => 'allow',
+                    'degraded' => 'allow',
+                    'post_solve_check' => false,
+                ];
+            }
+        }
         // The profile-driven stage composition (change.md Part 5),
         // resolved once for the whole load: the protection profile
         // decides which decision stages ride the engine, an explicit
@@ -1206,6 +1226,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $chainStoreRef = null;
         $agentsVerifierRef = null;
         $emailOwnershipRef = null;
+        $emailOwnershipSenderDoctorRef = null;
+        $emailOtpSenderDoctorRef = null;
         $bindingAuthorityRef = $riskConfig['request_binding_authority'] !== null
             ? new Reference($riskConfig['request_binding_authority'])
             : null;
@@ -1328,7 +1350,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ]))
                 ->setArgument('$sessionTtlMs', max(60_000, 2 * (int) $riskConfig['continuity_cookie']['ttl_secs'] * 1000))
                 ->setArgument('$deviceTtlMs', (int) $riskConfig['trusted_device']['ttl'] * 1000)
-                ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion));
+                ->setArgument('$namespaceKeyVersion', $namespaceKeyVersion)
+                ->setArgument('$migrateLegacy', $riskConfig['principal_networks']['migrate_legacy']));
 
             // In-process emergency limiter (cheap admission before the
             // risk engine): one honest per-process window from
@@ -1817,8 +1840,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $outcomesScopeName = $outcomesConfig['scope'];
             $stepUpConfig = $riskConfig['step_up'];
             $bridgeArms = $outcomesConfig['auto_bridge'] && $outcomesSurfaceExists && \is_string($outcomesScopeName);
-            if ($outcomesConfig['auto_bridge'] && $outcomesSurfaceExists && $outcomesScopeName === null && !$stepUpConfig['enabled']) {
-                $container->log(new KiwiConfigAdvisoryPass(), 'kiwi_captcha.risk.outcomes.auto_bridge is true and the risk engine is on, but risk.outcomes.scope is not configured, so the security auto-bridge stays unregistered. Set risk.outcomes.scope to the risk scope the framework auth events book under (e.g. "login") to arm the bridge.');
+            if ($outcomesConfig['auto_bridge'] && $outcomesSurfaceExists && $outcomesScopeName === null) {
+                $container->log(new KiwiConfigAdvisoryPass(), 'kiwi_captcha.risk.outcomes.auto_bridge is true and the risk engine is on, but risk.outcomes.scope is not configured, so the security auto-bridge stays unregistered. Set risk.outcomes.scope to the risk scope the framework auth events book under (e.g. "login") to arm the bridge. The first-attempt gate is independent of this knob: it follows risk.login_scopes.');
             }
             // The outcomes facade + the reporter seam serve three
             // consumers: the Symfony security auto-bridge, the
@@ -1855,6 +1878,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $container->setDefinition(OutcomeReporterInterface::class, new Definition(KiwiOutcomeReporter::class, [
                         new Reference('kiwi_captcha.risk.outcomes'),
                     ]));
+                    // The revocation lane: the subscriber that turns the
+                    // application's credential-change events (and the
+                    // logout-everywhere attribute) into
+                    // forgetDevicesForUser calls, so the facade's
+                    // revocation surface has a wired caller.
+                    $container->setDefinition(KiwiCredentialsChangedSubscriber::class, (new Definition(KiwiCredentialsChangedSubscriber::class, [
+                        new Reference('kiwi_captcha.risk.outcomes'),
+                    ]))
+                        ->setArgument('$logger', $loggerRef)
+                        ->addTag('kernel.event_subscriber'));
                 }
             }
             if ($bridgeArms) {
@@ -1879,6 +1912,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 } else {
                     $container->setDefinition(OutcomeTrustGateInterface::class, new Definition(FailClosedOutcomeTrustGate::class));
                 }
+                // The per-event scope resolution (risk.login_scopes):
+                // firewall name to scope id and to the target-field flag
+                // of that scope, so each firewall's auth events book
+                // under their own scope policy. Unmapped requests fall
+                // back to the configured outcomes scope above.
+                $scopeIdsByFirewall = [];
+                $targetFieldByFirewall = [];
+                foreach ($riskConfig['login_scopes'] as $loginFirewall => $loginScopeName) {
+                    if (\array_key_exists($loginScopeName, $scopeIds)) {
+                        $scopeIdsByFirewall[(string) $loginFirewall] = $scopeIds[$loginScopeName];
+                        $targetFieldByFirewall[(string) $loginFirewall] = $riskConfig['scopes'][$loginScopeName]['target_field'] !== null;
+                    }
+                }
                 $container->setDefinition(KiwiOutcomeBridgeSubscriber::class, (new Definition(KiwiOutcomeBridgeSubscriber::class, [
                     new Reference(OutcomeReporterInterface::class),
                     new Reference('kiwi_captcha.risk.identity_factory'),
@@ -1898,27 +1944,61 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$logger', $loggerRef)
                     ->setArgument('$trustRequestIdHeader', (bool) ($riskConfig['outcomes']['trust_request_id_header'] ?? false))
                     ->setArgument('$authWindow', $authWindowRef)
+                    ->setArgument('$scopeIdsByFirewall', $scopeIdsByFirewall)
+                    ->setArgument('$targetFieldByFirewall', $targetFieldByFirewall)
+                    // The kernel's request stack: the request of a
+                    // security event that carries none of its own (the
+                    // CheckPassportEvent of this Symfony line), so the
+                    // bridge always anchors its reports to the login
+                    // request.
+                    ->setArgument('$requestStack', new Reference('request_stack', ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
+            }
 
-                // The post-credential, pre-session first-attempt gate
-                // (P0-1): runs the engine pipeline on
-                // AuthenticationTokenCreatedEvent so novel-network /
-                // breached-credential / scope-pressure can demand step-up
-                // before the token is stored. Registered only when the
-                // security component is present. The per-scope
-                // login_step_up map rides along: a scope configured
+            // The post-credential, pre-session first-attempt gate
+            // (P0-1): runs the engine pipeline on
+            // AuthenticationTokenCreatedEvent so novel-network /
+            // breached-credential / scope-pressure can demand step-up
+            // before the token is stored. Registered whenever the risk
+            // plane is on and the login_scopes map is non-empty, so the
+            // gate arms independently of the outcomes bridge: a minimal
+            // abuse-profile install (no outcomes scope configured)
+            // still enforces novelty and the login_step_up policies.
+            // The scope of an event resolves per event through the map,
+            // so a deployment with a user firewall and an admin
+            // firewall carries two independent login policies.
+            if ($riskConfig['login_scopes'] !== [] && class_exists(FirstAttemptLoginGuard::TOKEN_CREATED_EVENT)) {
+                foreach ($riskConfig['login_scopes'] as $loginFirewall => $loginScopeName) {
+                    if (!\array_key_exists($loginScopeName, $scopeIds)) {
+                        throw new \InvalidArgumentException(sprintf(
+                            'kiwi_captcha.risk.login_scopes[%s] names "%s" which is not a configured risk scope — the first-attempt gate assesses each login under its mapped scope policy (add the scope to risk.scopes or fix the name)',
+                            $loginFirewall,
+                            $loginScopeName,
+                        ));
+                    }
+                }
+                // The per-scope login_step_up map and the per-scope
+                // target-field lists ride along: a scope configured
                 // always withholds the session on every interactive
-                // login under it, an Allow included.
-                if (class_exists(FirstAttemptLoginGuard::TOKEN_CREATED_EVENT)) {
+                // login under it, an Allow included, and the guard
+                // pulls the mapped scope's target field from the
+                // request so the first-attempt decision books the
+                // target dimension exactly like the outcome bridge
+                // does.
                 $loginStepUpByScope = [];
                 foreach ($riskConfig['scopes'] as $scopeName => $scopeSpec) {
                     $loginStepUpByScope[(string) $scopeName] = (string) ($scopeSpec['login_step_up'] ?? 'risk');
                 }
+                $targetFieldsByScope = [];
+                foreach (array_unique($riskConfig['login_scopes']) as $mappedScopeName) {
+                    $field = $riskConfig['scopes'][$mappedScopeName]['target_field'] ?? null;
+                    $targetFieldsByScope[(string) $mappedScopeName] = \is_string($field) && $field !== '' ? [$field] : [];
+                }
                 $container->setDefinition(FirstAttemptLoginGuard::class, (new Definition(FirstAttemptLoginGuard::class, [
                     new Reference(RiskGateway::class),
                     new Reference('kiwi_captcha.risk.identity_factory'),
-                    $outcomesScopeName,
+                    $riskConfig['login_scopes'],
                 ]))
                     ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setArgument('$logger', $loggerRef)
@@ -1931,16 +2011,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     // continuity identities from every login decision.
                     ->setArgument('$continuity', new Reference(ContinuityCookie::class))
                     ->setArgument('$device', new Reference(TrustedDeviceCookie::class))
-                    // The login scope's target field (F14): the guard
-                    // pulls its submitted value from the request so the
-                    // first-attempt decision books the target dimension
-                    // exactly like the outcome bridge does. Empty when
-                    // the scope declares no target field.
-                    ->setArgument('$targetFields', (static function () use ($riskConfig, $outcomesScopeName): array {
-                        $field = $riskConfig['scopes'][$outcomesScopeName]['target_field'] ?? null;
-
-                        return \is_string($field) && $field !== '' ? [$field] : [];
-                    })())
+                    ->setArgument('$targetFieldsByScope', $targetFieldsByScope)
+                    ->setArgument('$counters', new Reference('kiwi_captcha.metrics_counters'))
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
 
@@ -1952,7 +2024,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ]))
                     ->addTag('kernel.event_subscriber')
                     ->setPublic(true));
-                }
             }
 
             // The step-up plane (risk.step_up.*): reference handlers
@@ -1967,7 +2038,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // master / captcha secret fallback otherwise, the same
             // fallback order as every other risk secret).
             if ($stepUpConfig['enabled']) {
-                $stepUpScope = (string) $stepUpConfig['scope'];
+                // The fallback booking scope: the configured scope when
+                // set, the first login_scopes target otherwise, the
+                // canonical login scope as the last resort (always a key
+                // of the scope table). The principal plane needs no
+                // configured scope: the first-attempt gate stamps the
+                // per-event scope onto the pending token and the
+                // controller books under it.
+                $stepUpScope = \is_string($stepUpConfig['scope']) && $stepUpConfig['scope'] !== ''
+                    ? (string) $stepUpConfig['scope']
+                    : (string) (array_values($riskConfig['login_scopes'])[0] ?? 'login');
                 if (!\array_key_exists($stepUpScope, $scopeIds)) {
                     throw new \InvalidArgumentException(sprintf(
                         'kiwi_captcha.risk.step_up.scope "%s" is not a configured risk scope — the step-up flow derives every challenge context under a configured scope policy (add the scope to risk.scopes or fix the name)',
@@ -1975,6 +2055,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ));
                 }
                 $stepUpMaster = $stepUpConfig['hmac_secret'] ?? $riskConfig['master_secret'] ?? $config['secret_key'];
+                // The deployment seam of the two mailer adapters: the
+                // canonical public origin supplies the From identity at
+                // build time, so no adapter ever trusts the request Host
+                // header with a mail header value.
+                $mailerFromHost = \is_string($config['public_base_url']) && $config['public_base_url'] !== ''
+                    ? (string) (parse_url($config['public_base_url'], \PHP_URL_HOST) ?: 'kiwi.local')
+                    : 'kiwi.local';
+                $mailerFrom = 'no-reply@'.$mailerFromHost;
+                $mailerAvailable = $container->has('mailer.mailer');
+                // The purpose-separated redaction key of the logging
+                // senders: addresses and delivery handles reach a log
+                // line only as a truncated HMAC of this key, never raw.
+                $senderLogKey = hash_hkdf('sha256', $stepUpMaster, 32, 'kiwi/v5/sender-log-hash', 'kiwicaptcha/deploy-salt/v1');
                 $container->setDefinition('kiwi_captcha.step_up.store', (new Definition(RedisStepUpChallengeStore::class, [
                     $riskRedis,
                     sprintf('{kiwi:%s}:stepup:', $namespace),
@@ -2029,16 +2122,40 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // The anonymous email-ownership carrier (the step_up_email
                 // scope carrier): on whenever the plane is on, unless the
                 // operator disabled it. Its own delivery seam receives
-                // the raw presented address; the logging sender is the
-                // default and a deployment binds a real mailer over it.
-                // The source bound is four times the per-address bound,
+                // the raw presented address; the sender resolves to the
+                // explicit binding, the mailer adapter (when the mailer
+                // component is installed) or the logging default, and a
+                // production build refuses the logging default. The
+                // source bound is four times the per-address bound,
                 // so one busy address cannot exhaust a shared source.
+                // The carrier map bounds the factor to the scopes that
+                // named it; a code leaves the deployment only for a
+                // demand minted on one of them.
                 $emailOwnershipRef = null;
+                $emailOwnershipSenderDoctorRef = null;
                 if ($stepUpConfig['email_ownership']['enabled']) {
                     $emailOwnershipSenderId = $stepUpConfig['email_ownership']['sender'];
-                    $emailOwnershipSenderRef = \is_string($emailOwnershipSenderId) && $emailOwnershipSenderId !== ''
-                        ? new Reference($emailOwnershipSenderId)
-                        : new Definition(LoggingEmailOwnershipCodeSender::class, [$loggerRef]);
+                    if (\is_string($emailOwnershipSenderId) && $emailOwnershipSenderId !== '') {
+                        $emailOwnershipSenderRef = new Reference($emailOwnershipSenderId);
+                    } elseif ($mailerAvailable) {
+                        $container->setDefinition(MailerEmailOwnershipCodeSender::class, (new Definition(MailerEmailOwnershipCodeSender::class, [
+                            new Reference('mailer.mailer'),
+                            $mailerFrom,
+                            $senderLogKey,
+                            $loggerRef,
+                        ]))->setPublic(true));
+                        $emailOwnershipSenderRef = new Reference(MailerEmailOwnershipCodeSender::class);
+                    } else {
+                        if (!\in_array($this->environment($container), ['test', 'dev'], true)) {
+                            throw new \LogicException('kiwi_captcha.risk.step_up.email_ownership is enabled in the '.$this->environment($container).' environment without a delivery seam: the default logs the code instead of delivering it, so the grant can never complete. Install symfony/mailer (the bundle then auto-wires its mailer delivery adapter) or bind an EmailOwnershipCodeSenderInterface service under risk.step_up.email_ownership.sender.');
+                        }
+                        $container->setDefinition('kiwi_captcha.step_up.email_ownership.sender', (new Definition(LoggingEmailOwnershipCodeSender::class, [
+                            $loggerRef,
+                            $senderLogKey,
+                        ]))->setPublic(true));
+                        $emailOwnershipSenderRef = new Reference('kiwi_captcha.step_up.email_ownership.sender');
+                    }
+                    $emailOwnershipSenderDoctorRef = $emailOwnershipSenderRef;
                     $container->setDefinition(EmailOwnershipStepUp::class, (new Definition(EmailOwnershipStepUp::class, [
                         new Reference('kiwi_captcha.step_up.store'),
                         new Reference(StepUpTicket::class),
@@ -2052,7 +2169,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $stepUpConfig['rate_limit']['max_begins'],
                         $stepUpConfig['rate_limit']['max_begins'] * 4,
                         $stepUpConfig['rate_limit']['window_secs'],
-                    ]))->setPublic(true));
+                    ]))
+                        // The carrier scopes: a demand (and therefore a
+                        // delivered code) exists only for these.
+                        ->setArgument('$emailCarrierScopes', self::emailCarrierScopeMap($riskConfig))
+                        // The hourly per-domain begin bound
+                        // (email_ownership.max_per_domain).
+                        ->setArgument('$maxBeginsPerDomain', $stepUpConfig['email_ownership']['max_per_domain'])
+                        // The hourly deployment-wide begin budget.
+                        ->setArgument('$maxBeginsGlobal', 1000)
+                        // The minimum spacing of the two deliveries one
+                        // demand funds (initial code, then one resend).
+                        ->setArgument('$resendAfterSecs', 60)
+                        ->setArgument('$logger', $loggerRef)
+                        ->setPublic(true));
                     $emailOwnershipRef = new Reference(EmailOwnershipStepUp::class);
                 }
 
@@ -2064,11 +2194,35 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
                 $stepUpHandlers = [];
                 $stepUpHandlerConfig = $stepUpConfig['handlers'];
+                $emailOtpSenderDoctorRef = null;
                 if ($stepUpHandlerConfig['email_otp']['enabled']) {
                     $senderId = $stepUpHandlerConfig['email_otp']['sender'];
-                    $senderRef = \is_string($senderId) && $senderId !== ''
-                        ? new Reference($senderId)
-                        : new Definition(LoggingStepUpCodeSender::class, [$loggerRef]);
+                    if (\is_string($senderId) && $senderId !== '') {
+                        $senderRef = new Reference($senderId);
+                    } elseif ($mailerAvailable) {
+                        // The mailer adapter resolves the recipient from
+                        // the pending login's authenticated user (the
+                        // wrapped token behind the pending one), so a
+                        // deployment whose principal identifier is the
+                        // delivery address needs no custom sender.
+                        $container->setDefinition(MailerStepUpCodeSender::class, (new Definition(MailerStepUpCodeSender::class, [
+                            new Reference('mailer.mailer'),
+                            $mailerFrom,
+                            new Reference('security.token_storage', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+                            $loggerRef,
+                        ]))->setPublic(true));
+                        $senderRef = new Reference(MailerStepUpCodeSender::class);
+                    } else {
+                        if (!\in_array($this->environment($container), ['test', 'dev'], true)) {
+                            throw new \LogicException('kiwi_captcha.risk.step_up.handlers.email_otp is enabled in the '.$this->environment($container).' environment without a delivery seam: the default logs the code instead of delivering it, so the codes are handed to nobody and the factor can never complete. Install symfony/mailer (the bundle then auto-wires its mailer delivery adapter) or bind a StepUpCodeSenderInterface service under risk.step_up.handlers.email_otp.sender.');
+                        }
+                        $container->setDefinition('kiwi_captcha.step_up.email_otp.sender', (new Definition(LoggingStepUpCodeSender::class, [
+                            $loggerRef,
+                            'debug',
+                        ]))->setPublic(true));
+                        $senderRef = new Reference('kiwi_captcha.step_up.email_otp.sender');
+                    }
+                    $emailOtpSenderDoctorRef = $senderRef;
                     $container->setDefinition(EmailOtpStepUpHandler::class, (new Definition(EmailOtpStepUpHandler::class, [
                         new Reference('kiwi_captcha.step_up.store'),
                         new Reference(StepUpTicket::class),
@@ -2503,9 +2657,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // flow ignored).
             ->setArgument('$agentsVerifier', $agentsVerifierRef)
             // The anonymous email-ownership carrier's begin path: when
-            // the factor is wired, every step-up 403 advertises it, so
-            // the visitor the body addresses can complete the factor.
+            // the factor is wired, the step-up 403 of a carrier scope
+            // advertises it together with the minted demand id, so the
+            // visitor the body addresses can complete the factor.
             ->setArgument('$stepUpEmailBeginPath', ($riskConfig['step_up']['enabled'] && ($riskConfig['step_up']['email_ownership']['enabled'] ?? false)) ? \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::BEGIN_PATH : null)
+            // The email-ownership factor and its carrier scopes: the
+            // step-up 403 mints the demand record and names it in the
+            // body only for the scopes that named the carrier.
+            ->setArgument('$emailOwnership', $emailOwnershipRef)
+            ->setArgument('$emailCarrierScopes', self::emailCarrierScopeMap($riskConfig))
             // The server-owned scope allowlist: when non-empty, issuance
             // outside it is refused (422 `SCOPE_NOT_ALLOWED`) before
             // risk/quota, making the per-scope quota namespace
@@ -2964,8 +3124,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$targetFieldsByScope', self::targetFieldMap($riskConfig))
             // The anonymous email-ownership factor: a completed grant
             // redeems in place of a solved token (the step_up_email
-            // carrier's completion path; null = the plane is off).
+            // carrier's completion path; null = the plane is off). The
+            // carrier map gates the redemption to the scopes that named
+            // the carrier; the email field map binds each redeemed
+            // grant to the address the scope's form actually submits.
             ->setArgument('$emailOwnership', $emailOwnershipRef)
+            ->setArgument('$emailCarrierScopes', self::emailCarrierScopeMap($riskConfig))
+            ->setArgument('$emailFieldsByScope', self::emailFieldMap($riskConfig))
             ->addTag('validator.constraint_validator'));
 
         // Twig widget runtime + twig function (embeds the shared widget
@@ -3033,6 +3198,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $authorityGuardRefs,
         ]))
             ->setArgument('$principalNetworks', new Reference('kiwi_captcha.risk.principal_networks', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+            // The wiring the delivery and gate checks audit: the
+            // first-attempt gate instance (null when the login_scopes
+            // map armed nothing) and the resolved code senders of the
+            // enabled delivery factors (null when the factor is off).
+            ->setArgument('$firstAttemptGuard', new Reference(FirstAttemptLoginGuard::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
+            ->setArgument('$emailOtpSender', $emailOtpSenderDoctorRef)
+            ->setArgument('$emailOwnershipSender', $emailOwnershipSenderDoctorRef)
+            // The carrier answerability and route audits: the
+            // application's principal resolver and the plane's lockout
+            // guard (null when the application registered neither),
+            // and the router the advertised step-up begin path must be
+            // registered in.
+            ->setArgument('$principalResolver', new Reference(\BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
+            ->setArgument('$stepUpGuard', new Reference(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpLockoutGuard::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
+            ->setArgument('$router', new Reference('router', ContainerInterface::NULL_ON_INVALID_REFERENCE))
             ->addTag('console.command')
             ->setPublic(true));
 
@@ -3830,6 +4010,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 'post_solve_check' => $spec['post_solve_check'],
                 'degraded' => $spec['degraded'],
             ];
+            // The step-up knobs ride the policy row only when the
+            // operator set them: an absent key keeps the canonical
+            // policy hash byte-identical for deployments that do not
+            // use them (the engine treats an absent row as null).
+            if (($spec['step_up_above'] ?? null) !== null) {
+                $policyConfig['scopes'][$id]['step_up_above'] = $spec['step_up_above'];
+            }
+            if (($spec['carrier'] ?? null) !== null) {
+                $policyConfig['scopes'][$id]['carrier'] = $spec['carrier'];
+            }
         }
         ksort($policyConfig['scopes']);
 
@@ -4429,6 +4619,55 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         foreach ($riskConfig['scopes'] as $name => $spec) {
             $field = \is_array($spec) ? ($spec['target_field'] ?? null) : null;
             if (\is_string($field) && $field !== '') {
+                $map[(string) $name] = $field;
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * The scopes whose step-up demands the anonymous email factor
+     * carries: the configured scopes naming carrier step_up_email,
+     * keyed scope name => true. The validator, the challenge controller
+     * and the factor itself read this one map, so the carrier surface
+     * (the 403 step_up object, the grant redemption, the demand minting)
+     * exists only where the operator named the carrier.
+     *
+     * @param array<string, mixed> $riskConfig the processed risk config
+     *
+     * @return array<string, true>
+     */
+    private static function emailCarrierScopeMap(array $riskConfig): array
+    {
+        $map = [];
+        foreach ($riskConfig['scopes'] as $name => $spec) {
+            $carrier = \is_array($spec) ? ($spec['carrier'] ?? null) : null;
+            if ($carrier === 'step_up_email') {
+                $map[(string) $name] = true;
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * The configured email form field names, keyed by application scope
+     * name: the map the validator reads to bind a redeemed email grant
+     * to the address the submission actually uses. Scopes without a
+     * configured email_field are absent (the validator then applies the
+     * default field name).
+     *
+     * @param array<string, mixed> $riskConfig the processed risk config
+     *
+     * @return array<string, string>
+     */
+    private static function emailFieldMap(array $riskConfig): array
+    {
+        $map = [];
+        foreach ($riskConfig['scopes'] as $name => $spec) {
+            $field = \is_array($spec) ? ($spec['email_field'] ?? null) : null;
+            if (\is_string($field) && $field !== '' && $field !== 'email') {
                 $map[(string) $name] = $field;
             }
         }

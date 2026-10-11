@@ -177,6 +177,53 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return (int) $answer;
     }
 
+    public function createDemand(StepUpDemand $demand, int $ttlSecs): string
+    {
+        $key = $this->demandKey($demand->id);
+        $json = (string) json_encode($demand->toArray(), JSON_UNESCAPED_SLASHES);
+        // NX: a minted id colliding with a live demand refuses rather
+        // than overwriting it; the caller mints a fresh id and retries.
+        $stored = $this->redis->set($key, $json, 'EX', max(1, $ttlSecs), 'NX');
+        if (!$this->isAffirmativeSetReply($stored)) {
+            throw new \RuntimeException('The step-up demand record could not be persisted (id collision or backend refusal)');
+        }
+
+        return $demand->id;
+    }
+
+    public function readDemand(string $demandId): ?StepUpDemand
+    {
+        return $this->decodeDemand($this->redis->get($this->demandKey($demandId)));
+    }
+
+    public function consumeDemand(string $demandId): ?StepUpDemand
+    {
+        // GETDEL: the atomic single-use boundary of the demand (the
+        // send-credit claim, or the completion consumption). Exactly one
+        // caller of a concurrent pair receives the record.
+        return $this->decodeDemand($this->redis->getdel($this->demandKey($demandId)));
+    }
+
+    private function demandKey(string $demandId): string
+    {
+        if (preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
+            throw new \InvalidArgumentException('The step-up demand id must be the base64url id shape');
+        }
+
+        return $this->prefix.'emd:'.$demandId;
+    }
+
+    private function decodeDemand(mixed $raw): ?StepUpDemand
+    {
+        if (!\is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        // A record the strict decode refuses reads as an absent demand,
+        // fail-closed: corrupt state never funds a code delivery.
+        return StepUpDemand::fromJson($raw);
+    }
+
     public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void
     {
         // Durable enrollment: no TTL.

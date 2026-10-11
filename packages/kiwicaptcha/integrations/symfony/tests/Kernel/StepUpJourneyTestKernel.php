@@ -133,6 +133,7 @@ final class StepUpJourneyTestKernel extends TestKernel
                     'enabled' => true,
                     'redis_service' => 'journey_redis',
                     'novelty_enforcement' => 'enforce',
+                    'login_scopes' => ['main' => 'login'],
                     'asn' => ['dataset_path' => self::asnFixturePath()],
                     'scopes' => [
                         'login' => ['id' => 10, 'target_field' => 'username'],

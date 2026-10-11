@@ -148,13 +148,17 @@ if op == 'forget_devices' then
 end
 
 if op == 'has_any_trusted' then
-    -- Whether ANY tag of this principal carries a minted trust flag
-    -- whose bare tag is still live: the "no prior trusted network"
-    -- half of the novel-network gate, answered inside the script so
-    -- the read stays atomic and the field walk stays bounded by the
-    -- script's own cardinality ceiling. Takes no tag and no TTL: it
-    -- is an any-class probe, judged against each field's own class
-    -- ceiling (a probe can never vouch past the class lifetime).
+    -- Whether ANY network-class tag of this principal carries a minted
+    -- trust flag whose bare tag is still live: the "no prior trusted
+    -- network" half of the novel-network gate, answered inside the
+    -- script so the read stays atomic and the field walk stays bounded
+    -- by the script's own cardinality ceiling. Takes no tag and no
+    -- TTL: it is an any-network probe, judged against each field's own
+    -- class ceiling (a probe can never vouch past the class lifetime).
+    -- Session and device mirrors are the continuity plane's evidence:
+    -- a bound cookie vouches for a browser, never for a network, so
+    -- only net, asn and the engine's bare-hex bucket spelling count
+    -- toward a trusted NETWORK.
     local time = redis.call('TIME')
     local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
     local fields = redis.call('HGETALL', KEYS[1])
@@ -167,9 +171,13 @@ if op == 'has_any_trusted' then
                 local last = tonumber(v)
                 if last ~= nil then
                     local fclass = classify(bare)
-                    local class_ttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net
-                    if now - last <= class_ttl then
-                        return 1
+                    local isNetworkClass = fclass == 'net' or fclass == 'asn'
+                        or (fclass == nil and string.match(bare, '^[0-9a-f]+$') ~= nil)
+                    if isNetworkClass then
+                        local class_ttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net
+                        if now - last <= class_ttl then
+                            return 1
+                        end
                     end
                 end
             end
