@@ -1298,4 +1298,130 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('forces the Secure flag', $display);
         self::assertStringNotContainsString('[WARN] Continuity cookie', $display);
     }
+
+    /**
+     * The APCu adapter over the do-nothing backend seam: the injected
+     * backend skips the storage's own cli detection, so both flag
+     * variants construct under the cli SAPI phpunit runs in, and the
+     * doctor verdict is the only thing under test.
+     */
+    private function apcuStorageForDoctor(bool $allowPrivateCliSegment): \KiwiCaptcha\Storage\ApcuStorage
+    {
+        $backend = new class implements \KiwiCaptcha\Storage\ApcuBackendInterface {
+            public function fetch(string $key): \KiwiCaptcha\Storage\ApcuFetchOutcome
+            {
+                return \KiwiCaptcha\Storage\ApcuFetchOutcome::notFound();
+            }
+
+            public function store(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function add(string $key, mixed $value, int $ttlSecs): bool
+            {
+                return true;
+            }
+
+            public function delete(string $key): bool
+            {
+                return true;
+            }
+        };
+
+        return new \KiwiCaptcha\Storage\ApcuStorage($backend, 'kiwi-doctor-apcu', 5000, 60, null, null, $allowPrivateCliSegment);
+    }
+
+    private function doctorForApcuStorage(\KiwiCaptcha\Storage\ApcuStorage $storage, string $environment, ?\Closure $apcEnableCli = null): CommandTester
+    {
+        $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
+            new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
+            [['secret_key' => str_repeat('a', 32)]],
+        );
+        self::assertIsArray($config);
+        $redis = new FakePredisClient();
+        $command = new KiwiCaptchaDoctorCommand(
+            $environment,
+            $config,
+            $storage,
+            new \KiwiCaptcha\Config(secretKey: str_repeat('b', 32)),
+            new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+                new \KiwiCaptcha\Verifier(new \KiwiCaptcha\Storage\ArrayStorage()),
+                $redis,
+                'doctor-apcu',
+                1,
+                300,
+            ),
+            $redis,
+            null,
+            null,
+            null,
+            null,
+            null,
+            $apcEnableCli,
+        );
+
+        return new CommandTester($command);
+    }
+
+    public function testDoctorFailsOnApcuStorageUnderCliWithoutTheAcknowledgement(): void
+    {
+        // phpunit runs under the cli SAPI, so the wired APCu adapter
+        // without the single-process acknowledgement is exactly the
+        // wiring that cannot serve: a RoadRunner worker would store
+        // records in its own private segment. Production fails the
+        // gate with the remediation named.
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(false), 'prod');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString(''.self::failTag().' APCu SAPI', $display);
+        self::assertStringContainsString('storage.apcu.single_process_cli', $display);
+        self::assertStringContainsString('Redis/SQLite', $display);
+    }
+
+    public function testDoctorWarnsOnApcuStorageUnderCliWithTheAcknowledgement(): void
+    {
+        // The declared one-long-lived-process wiring: the per-process
+        // segment hazard stays a warning, and the warn names the
+        // topology bound (Swoole initialised before fork qualifies,
+        // RoadRunner never does).
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(true), 'prod', static fn (): string => '1');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('[WARN] APCu SAPI', $display);
+        self::assertStringContainsString('one long-lived process', $display);
+        self::assertStringContainsString('RoadRunner never qualifies', $display);
+        self::assertStringNotContainsString(''.self::failTag().' APCu SAPI', $display);
+    }
+
+    public function testDoctorFailsWhenTheAcknowledgementLacksTheIniPrecondition(): void
+    {
+        // The flag without apc.enable_cli=1: no ini, no segment at all,
+        // so the wiring cannot serve and the gate fails even though the
+        // acknowledgement was declared.
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(true), 'prod', static fn (): string => '0');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString(''.self::failTag().' APCu SAPI', $display);
+        self::assertStringContainsString('apc.enable_cli', $display);
+    }
+
+    public function testDoctorWarnsInsteadOfFailsOutsideProductionWithoutTheAcknowledgement(): void
+    {
+        // test and dev keep the warning so local tooling still boots;
+        // the fail gate is a production verdict.
+        $tester = $this->doctorForApcuStorage($this->apcuStorageForDoctor(false), 'test');
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('[WARN] APCu SAPI', $display);
+        self::assertStringNotContainsString(''.self::failTag().' APCu SAPI', $display);
+    }
 }

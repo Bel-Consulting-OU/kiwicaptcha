@@ -35,13 +35,13 @@ impl RiskKeys {
     pub const INFO_EVENT: &'static [u8] = b"event";
     pub const INFO_TARGET: &'static [u8] = b"target";
 
-    /// The minimum master-secret length: the same 16-byte core contract
-    /// the PHP `RiskKeys::fromMaster` enforces.
+    /// The minimum master-secret length: the same 32-byte floor the
+    /// PHP `RiskKeys::fromMaster` enforces.
     pub const MIN_MASTER_BYTES: usize = 32;
 
     /// Derives the five keys with hkdf-sha256 (salt `kiwicaptcha-risk-v1`,
     /// 32-byte output per info), refusing a master shorter than the
-    /// 16-byte minimum at the derivation boundary.
+    /// 32-byte minimum at the derivation boundary.
     ///
     /// # Errors
     ///
@@ -59,11 +59,11 @@ impl RiskKeys {
     ///
     /// # Panics
     ///
-    /// Panics when the master is shorter than the 16-byte minimum; use
+    /// Panics when the master is shorter than the 32-byte minimum; use
     /// [`RiskKeys::try_from_master`] for a fallible path.
     pub fn from_master(master: &[u8]) -> RiskKeys {
         Self::try_from_master(master)
-            .expect("the risk master secret must be at least 16 bytes; use try_from_master for a fallible path")
+            .expect("the risk master secret must be at least 32 bytes; use try_from_master for a fallible path")
     }
 
     fn derive(master: &[u8]) -> RiskKeys {

@@ -572,14 +572,14 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
      * The canonical target_failure.lua ops, routed to the target
      * family's own slot (never the shared namespace tag): the
      * outcome-bridge write path of target-account protection in the
-     * sharded layout. The target failure hash and its spread HLLs live
-     * at the same target family keys in both modes, so the canonical
-     * script runs on whichever endpoint owns that family.
+     * sharded layout. The sharded key derivation gives the target
+     * failure hash and its spread HLLs their own family tag, so the
+     * canonical script runs on whichever endpoint owns that family.
      */
     private function runTargetOp(string $op, string $targetId, string $source, string $asn): array
     {
         RedisRiskStateStore::assertKeySafeIdentifier('targetId', $targetId);
-        $keys = KeyspaceMode::targetStateKeys($this->namespace, $targetId);
+        $keys = KeyspaceMode::targetStateKeys($this->namespace, $targetId, KeyspaceMode::Sharded);
         $script = self::shardedScript('target_failure.lua');
         $replies = $this->dispatch([[
             'endpoint' => $this->endpointForKey($keys[0]),
@@ -822,7 +822,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             && $registration->targetId !== null
             && $registration->targetId !== '' ? $registration->targetId : null;
         if ($targetId !== null) {
-            $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId);
+            $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId, KeyspaceMode::Sharded);
             $targetScript = self::shardedScript('target_failure.lua');
             $units[] = [
                 'endpoint' => $this->endpointForKey($targetKeys[0]),
@@ -928,7 +928,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             $targetSpreadSources = max(0, self::scriptInteger($targetReply[1], 'target spread sources'));
             $targetSpreadAsns = max(0, self::scriptInteger($targetReply[2], 'target spread asns'));
             if ($observation->event === RiskEventKind::AuthenticationFailure && !$isDuplicate) {
-                $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId);
+                $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId, KeyspaceMode::Sharded);
                 $failScript = self::shardedScript('target_failure.lua');
                 $failReply = $this->dispatch([[
                     'endpoint' => $this->endpointForKey($targetKeys[0]),

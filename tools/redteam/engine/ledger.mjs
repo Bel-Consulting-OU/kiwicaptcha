@@ -123,6 +123,40 @@ function isStaleRun(run) {
     }
 }
 
+/**
+ * The campaigns whose measured result claims to be the product
+ * itself (method: product). For these the run document must carry
+ * the product-method provenance: a `driver` naming a Kernel subclass
+ * and a `container_overrides` count that is present and zero. A run
+ * whose harness booted no kernel, or booted one with overrides, is a
+ * fixture measurement and can never be GREEN here — the audit that
+ * found the D3.5 "kernel" driver booting no kernel is the reason
+ * this refusal exists.
+ */
+const PRODUCT_METHOD_CAMPAIGNS = new Set([
+    "d3.5-credential-stuffing",
+    "d3.3-pow-economics",
+]);
+
+function productMethodGap(run) {
+    if (!PRODUCT_METHOD_CAMPAIGNS.has(run.campaign)) {
+        return null;
+    }
+    const driver = run.driver ?? run.driver_class ?? null;
+    const overrides = run.container_overrides;
+    if (typeof driver !== "string" || driver === "" || !driver.endsWith("Kernel")) {
+        return `driver is ${driver === null ? "missing" : `"${driver}"`} — not a Kernel subclass`;
+    }
+    if (overrides === undefined || overrides === null) {
+        return "container_overrides is missing";
+    }
+    if (Number(overrides) !== 0) {
+        return `container_overrides is ${overrides} (the product contract is 0)`;
+    }
+
+    return null;
+}
+
 function statusOf(run) {
     if (!run) return { status: "NOT RUN", verdict: "no recorded run under tools/redteam/engine/runs/", evidence: "NOT RUN: this environment has no run document for this campaign; it is not a pass" };
     if (isStaleRun(run)) {
@@ -130,6 +164,14 @@ function statusOf(run) {
             status: "RED",
             verdict: "stale run: the recorded source fingerprint does not match the current tree",
             evidence: "STALE: the run document's source fingerprint does not match the current tree. Re-run the campaign against the current tree; a leftover run is never a pass.",
+        };
+    }
+    const gap = productMethodGap(run);
+    if (gap !== null) {
+        return {
+            status: "RED",
+            verdict: `product-method provenance refused: ${gap}`,
+            evidence: "METHOD: the run claims the product itself (method: product) but does not carry a Kernel-subclass driver with container_overrides=0. Re-run through the real product kernel; a fixture measurement is never a pass.",
         };
     }
     if (run.result === "PASS") {
@@ -149,6 +191,10 @@ function d35Row(run) {
     const evidence = scaleNote(run);
     if (!run) {
         return "| D3.5 credential stuffing | no measured economics | NOT RUN | NOT RUN: no run document; not a pass |";
+    }
+    const gap = productMethodGap(run);
+    if (gap !== null) {
+        return `| D3.5 credential stuffing | product-method provenance refused: ${gap} | RED | METHOD: the run claims the product itself but carries no Kernel-subclass driver with container_overrides=0. Re-run through the real product kernel. |`;
     }
     const text = `${run.economic ?? ""} ${run.metrics?.raw ?? ""}`;
     const rate = /compromised_valid_rate=([0-9.]+)/.exec(text);

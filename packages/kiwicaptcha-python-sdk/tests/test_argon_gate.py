@@ -11,6 +11,7 @@ sys.path.insert(0, ".")
 from tests.support import (
     CLIENT_IP,
     NOW,
+    SECRET,
     minimal_program_b64,
     mint_v2_record,
     solve_sha,
@@ -114,8 +115,10 @@ class BackendAdmissionTest(unittest.TestCase):
 
     The flag is simulated: the refusal contract is what the test pins.
     Derivation refuses with the actionable message, the default gate
-    and the default verifier config refuse at construction, and the
-    sidecar-admitted constructions boot and delegate.
+    refuses to build, the default verifier config constructs lazily and
+    its SHA records verify, an argon2id record answers the typed
+    unsupported-params refuse, and the sidecar-admitted constructions
+    boot and delegate.
     """
 
     MESSAGE = (
@@ -166,10 +169,79 @@ class BackendAdmissionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ArgonAdmissionGate(sidecar_url="   ")
 
-    def test_default_verifier_config_refuses_to_construct(self):
-        with self.assertRaises(ValueError) as caught:
-            VerifierConfig()
-        self.assertEqual(self.MESSAGE, str(caught.exception))
+    def test_default_verifier_config_constructs_without_binding(self):
+        # The lazy gate: construction stores the parameters and builds
+        # nothing, so a SHA-only deployment on a binding-less runtime
+        # boots and reports its posture through the readiness seam
+        # instead of raising.
+        config = VerifierConfig()
+        self.assertFalse(config.argon_backend_ready())
+        self.assertIsNone(config.argon_sidecar_url)
+        self.assertFalse(config.argon_backend_ready())
+
+    def test_sha_record_verifies_without_binding(self):
+        # The work the stdlib can check stays verifiable: a SHA-256
+        # record verifies end to end on a config whose default gate was
+        # never built, because the binding was never needed.
+        record = mint_v2_record(
+            secret=SECRET,
+            algorithm="sha256",
+            target_bits=4,
+        )
+        storage = MemoryStorage(now=lambda: NOW)
+        storage.store(record)
+        verifier = Verifier(storage, VerifierConfig(now_provider=lambda: NOW))
+        token = SolutionToken.create(
+            record.nonce,
+            solve_sha(record.prefix, record.salt, record.target_bits),
+            5000,
+            {},
+        ).encode()
+        outcome = verifier.verify(
+            token,
+            VerifyOptions(
+                secret_key=SECRET,
+                expected_scope="login",
+                client_ip=CLIENT_IP,
+            ),
+        )
+        self.assertTrue(outcome.is_ok(), outcome.code)
+        self.assertFalse(outcome.from_stored_result)
+
+    def test_argon_record_denies_unsupported_params_without_a_raise(self):
+        # An argon2id record on a binding-less runtime without a
+        # sidecar: the typed refuse, logged once per process, and the
+        # gate property is never read, so verification never raises.
+        record = mint_v2_record(
+            secret=SECRET,
+            algorithm="argon2id",
+            m_kib=64,
+            t=3,
+            p=1,
+            target_bits=1,
+        )
+        storage = MemoryStorage(now=lambda: NOW)
+        storage.store(record)
+        verifier = Verifier(storage, VerifierConfig(now_provider=lambda: NOW))
+        token = SolutionToken.create(record.nonce, 0, 5000, {}).encode()
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.ArgonAdmissionGate",
+            side_effect=AssertionError("the default gate was built"),
+        ):
+            outcome = verifier.verify(
+                token,
+                VerifyOptions(
+                    secret_key=SECRET,
+                    expected_scope="login",
+                    client_ip=CLIENT_IP,
+                ),
+            )
+        self.assertFalse(outcome.is_ok())
+        self.assertEqual(VerifyError.UNSUPPORTED_ARGON2_PARAMS, outcome.code)
+        # The refusal sits before the consume, exactly like the budget
+        # and capacity refuses: the record stays intact, so a fixed
+        # deployment (the binding installed) verifies it.
+        self.assertIsNotNone(storage.find(record.nonce))
 
     def test_verifier_config_admits_through_the_sidecar(self):
         config = VerifierConfig(argon_sidecar_url="http://127.0.0.1:7371")
@@ -200,6 +272,27 @@ class BackendAdmissionTest(unittest.TestCase):
             argon_sidecar_url="http://127.0.0.1:7371",
         )
         self.assertEqual("http://127.0.0.1:7371", settings.argon_sidecar_url)
+
+    def test_risk_ladder_with_argon_requires_binding_at_boot(self):
+        # The work ladder escalates to the argon rungs under attack, so
+        # an issuer profile that can reach one must prove the runtime
+        # can verify it: boot refuses with the actionable message, the
+        # sidecar is the other admission path, and the standard profile
+        # (pure SHA rungs) never needs either.
+        from kiwicaptcha.config import Settings, argon_rung_verifiable
+
+        self.assertFalse(argon_rung_verifiable(16 * 1024, 3))
+        self.assertFalse(argon_rung_verifiable(64 * 1024, 3))
+        with self.assertRaises(ValueError) as caught:
+            Settings(secret="k" * 32, profile="argon16")
+        self.assertIn("never silently", str(caught.exception))
+        self.assertIn("pip install kiwicaptcha[argon2]", str(caught.exception))
+        Settings(
+            secret="k" * 32,
+            profile="argon32",
+            argon_sidecar_url="http://127.0.0.1:7371",
+        )
+        Settings(secret="k" * 32, profile="standard")
 
 
 class ArgonSidecarDelegationTest(unittest.TestCase):

@@ -345,8 +345,33 @@ final class ChallengeController
          * attributed to its agent id.
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentsVerifier $agentsVerifier = null,
+        /**
+         * The begin path of the anonymous email-ownership carrier
+         * (risk.step_up.email_ownership). When set, every step-up 403
+         * carries the typed step_up object naming the carrier kind and
+         * that begin path, so the anonymous visitor the body addresses
+         * can complete the factor. Null keeps the plain body.
+         */
+        private readonly ?string $stepUpEmailBeginPath = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+    }
+
+    /**
+     * The step-up 403 body: the typed code, plus the step_up carrier
+     * object when the email-ownership factor is wired. The object is
+     * machine-readable: kind names the factor, begin its entry point.
+     *
+     * @return array<string, mixed>
+     */
+    private function stepUpRequiredBody(): array
+    {
+        $body = ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']];
+        if ($this->stepUpEmailBeginPath !== null) {
+            $body['error']['step_up'] = ['kind' => \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::KIND, 'begin' => $this->stepUpEmailBeginPath];
+        }
+
+        return $body;
     }
 
     /**
@@ -1607,7 +1632,7 @@ final class ChallengeController
                     $this->releaseChain($chainId, $chainOwner);
 
                     return $this->privateJson(
-                        ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']],
+                        $this->stepUpRequiredBody(),
                         Response::HTTP_FORBIDDEN,
                         $request,
                         $riskSession,
@@ -2878,7 +2903,7 @@ final class ChallengeController
                 // no challenge issuance can follow. A later request for the
                 // same transaction re-encounters this terminal state.
                 return $this->privateJson(
-                    ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']],
+                    $this->stepUpRequiredBody(),
                     Response::HTTP_FORBIDDEN,
                     $request,
                     $riskSession,
@@ -3708,7 +3733,7 @@ final class ChallengeController
                 }
 
                 return $this->privateJson(
-                    ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']],
+                    $this->stepUpRequiredBody(),
                     Response::HTTP_FORBIDDEN,
                     $request,
                     $riskSession,

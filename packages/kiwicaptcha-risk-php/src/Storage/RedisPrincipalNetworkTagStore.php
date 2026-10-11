@@ -14,7 +14,11 @@ use Predis\Client;
  * the in-memory fixtures in tests are named fakes and never wired into
  * the container.
  *
- * The hash key is `pnet:{kiwi:<ns>}:<principal_hex>`. Each tag
+ * The hash key is `pnet:{kiwi:<ns>:<principal_hex>}`: the hash tag
+ * carries the whole principal identity, so one principal's records
+ * live on their own Cluster slot instead of every principal colliding
+ * on the shared `{kiwi:<ns>}` slot (a hot slot under the record
+ * rate). Each tag
  * (`net:<hex>`, `asn:<decimal|u4/prefix|u6/prefix>`, `session:<hex>`,
  * `device:<hex>`) is a hash field whose value is the last-use ms (Redis
  * TIME, never a client clock). The asn class carries a listed decimal
@@ -84,14 +88,19 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
     {
         self::assertPrincipal($principalId);
 
-        return "pnet:{kiwi:{$this->namespace}}:{$principalId}";
+        return "pnet:{kiwi:{$this->namespace}:{$principalId}}";
     }
 
     public function principalNetworkSeen(string $principalId, string $network): ?bool
     {
         $this->assertTag($network);
+        // The configured class TTL rides every read (F6/N11): the script
+        // answers "not seen" past the caller's TTL, never past the class
+        // maximum, so a stored value cannot vouch past the lifetime the
+        // deployment actually configured.
+        [, $ttlMs] = $this->classOf($network);
         try {
-            $result = $this->runScript([$this->tagKey($principalId)], ['seen', $network]);
+            $result = $this->runScript([$this->tagKey($principalId)], ['seen', $network, (string) $ttlMs]);
 
             return (int) $result === 1;
         } catch (\Throwable $e) {
@@ -117,23 +126,14 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
 
     public function principalHasTrustedNetwork(string $principalId): ?bool
     {
-        // Any trusted tag counts: probe the principal's own hash for a
-        // `t:` field. The script's has_trusted needs a specific tag; the
-        // interface's hasTrustedNetwork is the "any" variant. A non-empty
-        // hash with at least one `t:` field answers true.
+        // Any trusted tag counts: the script's has_any_trusted op walks
+        // the trust mirrors atomically inside the script (a live bare
+        // tag behind the mirror answers true), so the "any" variant no
+        // longer side-channels a whole-hash read around the script.
         try {
-            $key = $this->tagKey($principalId);
-            $all = $this->client->hgetall($key);
-            if (!\is_array($all) || $all === []) {
-                return false;
-            }
-            foreach (array_keys($all) as $field) {
-                if (str_starts_with((string) $field, 't:')) {
-                    return true;
-                }
-            }
+            $result = $this->runScript([$this->tagKey($principalId)], ['has_any_trusted', '']);
 
-            return false;
+            return (int) $result === 1;
         } catch (\Throwable $e) {
             throw new RiskStoreException('principal trusted-network probe failed: '.$e->getMessage(), 0, $e);
         }
@@ -142,8 +142,12 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
     public function tagIsTrusted(string $principalId, string $network): ?bool
     {
         $this->assertTag($network);
+        // The configured class TTL rides the trust probe too (F6/N11):
+        // a trust flag past the deployment's device/session TTL answers
+        // "not trusted", never the script's class-ceiling lifetime.
+        [, $ttlMs] = $this->classOf($network);
         try {
-            $result = $this->runScript([$this->tagKey($principalId)], ['has_trusted', $network]);
+            $result = $this->runScript([$this->tagKey($principalId)], ['has_trusted', $network, (string) $ttlMs]);
 
             return (int) $result === 1;
         } catch (\Throwable $e) {
@@ -151,27 +155,18 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         }
     }
 
-    /** Deletes every session and device tag for a principal (revocation). */
+    /**
+     * Deletes every session and device tag for a principal (revocation).
+     * The deletion runs inside the canonical script's atomic
+     * `forget_devices` operation: one hash deletion removes the tags
+     * and their trust mirrors, so a record racing the revocation cannot
+     * survive half-deleted.
+     */
     public function forgetDevices(string $principalId): void
     {
         self::assertPrincipal($principalId);
         try {
-            $key = $this->tagKey($principalId);
-            $all = $this->client->hgetall($key);
-            if (!\is_array($all) || $all === []) {
-                return;
-            }
-            $fields = [];
-            foreach (array_keys($all) as $field) {
-                $field = (string) $field;
-                if (str_starts_with($field, 'session:') || str_starts_with($field, 'device:')
-                    || str_starts_with($field, 't:session:') || str_starts_with($field, 't:device:')) {
-                    $fields[] = $field;
-                }
-            }
-            if ($fields !== []) {
-                $this->client->hdel($key, ...$fields);
-            }
+            $this->runScript([$this->tagKey($principalId)], ['forget_devices']);
         } catch (\Throwable $e) {
             throw new RiskStoreException('forget devices failed: '.$e->getMessage(), 0, $e);
         }
@@ -202,8 +197,15 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         }
         try {
             return $this->client->evalsha($sha, \count($keys), ...$keys, ...$callArgs);
-        } catch (\Throwable) {
-            // NOSCRIPT: reload and retry once.
+        } catch (\Predis\Response\ServerException $e) {
+            // Only the NOSCRIPT miss reloads and retries once. Every
+            // other failure propagates: a retry on a non-NOSCRIPT
+            // error re-executes a command the server may already have
+            // applied (the script's writes are not idempotent in
+            // aggregate — the LRU evictions and the last-use touches).
+            if (!str_contains($e->getMessage(), 'NOSCRIPT')) {
+                throw $e;
+            }
             $this->scriptSha = $this->loadSha($script);
 
             return $this->client->evalsha($this->scriptSha, \count($keys), ...$keys, ...$callArgs);

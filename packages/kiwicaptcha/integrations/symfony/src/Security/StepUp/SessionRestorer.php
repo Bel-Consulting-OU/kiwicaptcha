@@ -23,6 +23,9 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInt
  */
 final class SessionRestorer
 {
+    /** The restore-failure counter the metrics exporter carries. */
+    public const RESTORE_FAILURES_METRIC = 'kiwi_step_up_restore_failures_total';
+
     public function __construct(
         private readonly RiskIdentityFactory $identityFactory,
         private readonly ?TokenStorageInterface $tokenStorage = null,
@@ -33,6 +36,7 @@ final class SessionRestorer
         private readonly ?AsnDataset $asnDataset = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie $continuity = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie $device = null,
+        private readonly ?\KiwiCaptcha\Risk\Metrics\RiskMetrics $metrics = null,
     ) {
     }
 
@@ -52,10 +56,21 @@ final class SessionRestorer
                 // The token carries the raw user identifier; the
                 // challenge carries the 32-hex principal pseudonym.
                 // Compare like with like or every restore fails.
+                // An empty pseudonym on either side is a refusal, not
+                // a pass-through: an unresolvable challenge principal
+                // or an unresolvable pending identifier cannot be
+                // proven equal, and unwrapping anyway would hand the
+                // session to whoever the challenge could not name.
                 $pendingRaw = $token->getUserIdentifier();
                 $pendingPrincipal = $this->identityFactory->principalId($pendingRaw);
-                if ($principalPseudonym !== '' && $pendingPrincipal !== ''
-                    && !hash_equals($pendingPrincipal, $principalPseudonym)) {
+                if ($principalPseudonym === '' || $pendingPrincipal === '') {
+                    $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
+                    $this->logger?->warning('kiwi step-up session restore refused: empty pseudonym');
+
+                    return;
+                }
+                if (!hash_equals($pendingPrincipal, $principalPseudonym)) {
+                    $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
                     $this->logger?->warning('kiwi step-up session restore refused: principal mismatch');
 
                     return;

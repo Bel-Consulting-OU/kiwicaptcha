@@ -69,6 +69,10 @@ final class NewIntegratorSmokeKernel extends TestKernel
                 // profile-default algorithm.
                 $config['rsw_modulus_n'] = RswFixture::MODULUS_N_B64;
                 $config['rsw_lambda'] = RswFixture::LAMBDA_B64;
+                // The profile also requires the ASN dataset (the
+                // novel-network gate is judged on the ASN bucket
+                // first); the smoke fixture stages the shared file.
+                $config['risk']['asn']['dataset_path'] = RiskStageMatrixTestKernel::asnFixturePath();
             }
             if ($this->storageServiceId !== null) {
                 // The advanced escape hatch: an explicit storage service

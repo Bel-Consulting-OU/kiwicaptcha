@@ -809,7 +809,7 @@ impl ShardedRedisRiskStateStore {
         let target_id = registration.and_then(|reg| reg.target_id.as_deref());
         let target_id = target_id.filter(|id| !id.is_empty());
         if let Some(target) = target_id {
-            let keys = crate::keyspace::target_state_keys(ns, target);
+            let keys = crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded);
             units.push(BatchUnit {
                 endpoint: self.endpoint_for_key(&keys[0]),
                 eval: target_evalsha(
@@ -866,7 +866,7 @@ impl ShardedRedisRiskStateStore {
                 _ => ("read", "", ""),
             };
             if records_failure {
-                let keys = crate::keyspace::target_state_keys(ns, target);
+                let keys = crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded);
                 let mut eval = redis_crate::cmd("EVALSHA");
                 eval.arg(self.target_script.get_hash())
                     .arg(3)
@@ -949,7 +949,11 @@ impl ShardedRedisRiskStateStore {
                 hex::encode(target_id)
             )));
         }
-        let keys = crate::keyspace::target_state_keys(&self.encoded_namespace, target_id);
+        let keys = crate::keyspace::target_state_keys(
+            &self.encoded_namespace,
+            target_id,
+            KeyspaceMode::Sharded,
+        );
         let replies = self.dispatch(vec![BatchUnit {
             endpoint: self.endpoint_for_key(&keys[0]),
             eval: target_evalsha(

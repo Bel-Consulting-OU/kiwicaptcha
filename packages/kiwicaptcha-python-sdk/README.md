@@ -9,27 +9,33 @@ network service.
 
 The core is pure standard library. SHA-256 and the optional RSW
 time-lock algorithm are implemented in-tree, and Argon2id (RFC 9106)
-ships as the optional `[argon2]` extra: the `argon2-cffi` binding
-derives the 16-64 MiB rungs in milliseconds, while the in-tree pure
-implementation is retained only as the RFC-vector oracle and is never
-reachable for argon2id verification. Admission is explicit: without
-the binding, argon2id derivation refuses with an actionable error, and
-the default admission gate requires the native binding or an explicit
-sidecar URL at construction. The Redis store adapter is the other
-optional extra: it speaks RESP through a narrow client surface and
-runs the exact Lua transition scripts of the PHP adapter.
+verifies through the `argon2-cffi` native binding, which ships as a
+core dependency and derives the 16-64 MiB rungs in milliseconds. The
+in-tree pure implementation is retained only as the RFC-vector oracle
+and is never reachable for argon2id verification. Admission stays
+explicit: on a runtime where the binding is unusable (a `--no-deps`
+install, a stripped deployment), argon2id derivation refuses with an
+actionable error, the default admission gate requires the native
+binding or an explicit sidecar URL, and an issuer profile that can
+reach an Argon rung refuses to boot without one of them. The Redis
+store adapter is the other optional extra: it speaks RESP through a
+narrow client surface and runs the exact Lua transition scripts of the
+PHP adapter.
 
 ## Install
 
 ```
-pip install "kiwicaptcha[argon2]"  # the native Argon2id binding (recommended)
-pip install "kiwicaptcha[redis]"   # add the Redis client for redis:// stores
+pip install kiwicaptcha           # every algorithm, the binding included
+pip install "kiwicaptcha[redis]"  # add the Redis client for redis:// stores
 ```
 
-A bare `pip install kiwicaptcha` verifies SHA-256 and RSW records on
-the standard library alone. Argon2id records need the `[argon2]`
-extra, or a local kiwicaptcha-verifier sidecar passed as
-`argon_sidecar_url` (see the delegation section below).
+`[argon2]` remains as an empty alias extra, so the historical
+`pip install "kiwicaptcha[argon2]"` spelling keeps working. A runtime
+without an importable binding (a broken or `--no-deps` install)
+verifies SHA-256 and RSW records on the standard library alone and
+answers argon2id records with `unsupported_argon2_params`; a local
+kiwicaptcha-verifier sidecar passed as `argon_sidecar_url` delegates
+those records instead (see the delegation section below).
 
 ## Quickstart
 

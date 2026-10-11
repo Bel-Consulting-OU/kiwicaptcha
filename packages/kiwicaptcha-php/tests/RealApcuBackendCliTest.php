@@ -11,21 +11,34 @@ use PHPUnit\Framework\TestCase;
  * The cli-refusal decision of the real APCu backend. A CLI process
  * (RoadRunner worker, queue consumer) owns a private APCu segment
  * invisible to the web tier. Construction therefore refuses the cli
- * SAPI while the apc.enable_cli opt-in is off. The ini flag is the
- * operator's explicit opt-in to a CLI segment.
+ * SAPI unless the apc.enable_cli precondition AND the
+ * allowPrivateCliSegment acknowledgement hold together. The ini gives
+ * a CLI process a segment; it never says the segment is safe. Granting
+ * it alone would let every RoadRunner worker construct against a
+ * foreign private segment, where (N-1)/N of the solves fail at random.
  */
 final class RealApcuBackendCliTest extends TestCase
 {
-    public function testTheCliSapiRefusesWhileTheEnableCliOptInIsOff(): void
+    public function testTheCliSapiRefusesWithoutPreconditionAndAcknowledgement(): void
     {
+        // Each input alone refuses: the ini without the flag leaves
+        // every CLI worker on its own private segment, the flag
+        // without the ini leaves no segment at all.
         self::assertTrue(RealApcuBackend::cliConstructionRefused('cli', false));
+        self::assertTrue(RealApcuBackend::cliConstructionRefused('cli', true));
+        self::assertTrue(RealApcuBackend::cliConstructionRefused('cli', false, true));
     }
 
-    public function testTheEnableCliOptInAndTheWebSapisConstruct(): void
+    public function testThePreconditionAndTheAcknowledgementTogetherConstruct(): void
     {
-        self::assertFalse(RealApcuBackend::cliConstructionRefused('cli', true));
+        self::assertFalse(RealApcuBackend::cliConstructionRefused('cli', true, true));
+    }
+
+    public function testTheWebSapisSkipTheCheck(): void
+    {
         self::assertFalse(RealApcuBackend::cliConstructionRefused('fpm-fcgi', false));
-        self::assertFalse(RealApcuBackend::cliConstructionRefused('apache2handler', false));
+        self::assertFalse(RealApcuBackend::cliConstructionRefused('fpm-fcgi', false, true));
+        self::assertFalse(RealApcuBackend::cliConstructionRefused('apache2handler', true, false));
     }
 
     public function testTheEnableCliIniParsesAsABoolean(): void

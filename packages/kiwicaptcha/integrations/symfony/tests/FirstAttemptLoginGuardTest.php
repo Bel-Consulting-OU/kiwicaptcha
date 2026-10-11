@@ -42,8 +42,41 @@ final class FirstAttemptLoginGuardTest extends TestCase
      */
     private function event(): object
     {
-        $request = $this->request();
-        $token = new class implements TokenInterface {
+        return $this->eventFor($this->request());
+    }
+
+    /** The same event shape over a caller-supplied request. */
+    private function eventFor(Request $request): object
+    {
+        return new class ($request, $this->token()) {
+            private ?object $token;
+
+            public function __construct(private readonly Request $request, object $token)
+            {
+                $this->token = $token;
+            }
+
+            public function getRequest(): Request
+            {
+                return $this->request;
+            }
+
+            public function getAuthenticatedToken(): ?object
+            {
+                return $this->token;
+            }
+
+            public function setAuthenticatedToken(object $token): void
+            {
+                $this->token = $token;
+            }
+        };
+    }
+
+    /** The duck-typed authenticated token the events carry. */
+    private function token(): TokenInterface
+    {
+        return new class implements TokenInterface {
             private array $attributes = [];
 
             public function __toString(): string
@@ -105,30 +138,6 @@ final class FirstAttemptLoginGuardTest extends TestCase
                 $this->attributes = $data['attributes'] ?? [];
             }
         };
-
-        return new class ($request, $token) {
-            private ?object $token;
-
-            public function __construct(private readonly Request $request, object $token)
-            {
-                $this->token = $token;
-            }
-
-            public function getRequest(): Request
-            {
-                return $this->request;
-            }
-
-            public function getAuthenticatedToken(): ?object
-            {
-                return $this->token;
-            }
-
-            public function setAuthenticatedToken(object $token): void
-            {
-                $this->token = $token;
-            }
-        };
     }
 
     private function decision(RiskAction $action): RiskDecision
@@ -146,12 +155,15 @@ final class FirstAttemptLoginGuardTest extends TestCase
     private function stubGateway(?RiskDecision $result, bool $throw = false): LoginDecisionGate
     {
         return new class ($result, $throw) implements LoginDecisionGate {
+            public ?array $seenTargetFields = null;
+
             public function __construct(private readonly ?RiskDecision $result, private readonly bool $throw)
             {
             }
 
-            public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null): ?RiskDecision
+            public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null, array $targetFields = []): ?RiskDecision
             {
+                $this->seenTargetFields = $targetFields;
                 if ($this->throw) {
                     throw new \RuntimeException('redis down');
                 }
@@ -195,5 +207,37 @@ final class FirstAttemptLoginGuardTest extends TestCase
             $event->getAuthenticatedToken(),
             'a gate error must fail closed to the pending token, never hand out a full session',
         );
+    }
+
+    public function testConfiguredTargetFieldRidesTheLoginDecision(): void
+    {
+        $gateway = $this->stubGateway($this->decision(RiskAction::Allow));
+        $guard = new FirstAttemptLoginGuard($gateway, $this->identity(), '1', targetFields: ['username']);
+
+        $request = Request::create('https://example.com/login', 'POST', ['username' => 'victim@example.com'], [], [], [self::remoteKey => '203.0.113.10']);
+        $guard->onTokenCreated($this->eventFor($request));
+
+        self::assertSame(
+            ['username' => 'victim@example.com'],
+            $gateway->seenTargetFields,
+            'the guard must pass the submitted target-field value into the decision so the target dimension books on the first-attempt path',
+        );
+    }
+
+    public function testAnEmptyOrUnconfiguredTargetFieldPassesNothing(): void
+    {
+        $gateway = $this->stubGateway($this->decision(RiskAction::Allow));
+        $guard = new FirstAttemptLoginGuard($gateway, $this->identity(), '1', targetFields: ['username']);
+
+        $request = Request::create('https://example.com/login', 'POST', ['username' => ''], [], [], [self::remoteKey => '203.0.113.10']);
+        $guard->onTokenCreated($this->eventFor($request));
+
+        self::assertSame([], $gateway->seenTargetFields, 'an empty submitted field carries no target dimension');
+
+        // No configured target field at all: the same empty shape.
+        $plainGateway = $this->stubGateway($this->decision(RiskAction::Allow));
+        $plain = new FirstAttemptLoginGuard($plainGateway, $this->identity(), '1');
+        $plain->onTokenCreated($this->eventFor($this->request()));
+        self::assertSame([], $plainGateway->seenTargetFields);
     }
 }

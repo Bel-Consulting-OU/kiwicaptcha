@@ -49,6 +49,7 @@ final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKerne
             'execution_allow_downgrade' => $this->allowDowngrade,
             'protocol_rollout' => ['mode' => $this->rolloutMode],
             'risk' => [
+                    'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                 'namespace' => 'doctor-v3',
                 'redis_service' => self::FAKE_REDIS_ID,
             ],

@@ -26,6 +26,12 @@ namespace KiwiCaptcha\Risk\Marks;
  *   request counts as novel under enforcement, while learn mode stays
  *   on Allow; the decision carries the evidence-unavailable reason in
  *   both modes.
+ * - wouldStepUpUnderEnforce: the unmasked novelty verdict, recorded
+ *   before the enforcement mode is applied. The post-Allow binding
+ *   reads it to decide whether the login may mint session and device
+ *   trust. An Allow that enforce mode would have stepped up records
+ *   its bindings without trust, so learn mode's leniency can never
+ *   leave a trusted device under the victim.
  *
  * Rust mirror: marks::FirstAttemptEvidence.
  */
@@ -36,6 +42,7 @@ final class FirstAttemptEvidence
         public readonly bool $breachedCredential = false,
         public readonly bool $scopePressure = false,
         public readonly bool $evidenceUnavailable = false,
+        public readonly bool $wouldStepUpUnderEnforce = false,
     ) {
     }
 

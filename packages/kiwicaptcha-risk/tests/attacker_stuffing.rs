@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use kiwicaptcha_risk::action::RiskAction;
-use kiwicaptcha_risk::context::RiskContext;
+use kiwicaptcha_risk::context::{RiskContext, RiskV2Context};
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::keys::RiskKeys;
 use kiwicaptcha_risk::marks::{MarksView, TARGET_ATTACK_THRESHOLD};
@@ -389,6 +389,7 @@ impl PrincipalNetworkTagStore for FailingNetworks {
         &self,
         _principal_id: &str,
         _network: &str,
+        _trusted: bool,
     ) -> Result<bool, RiskStoreError> {
         Err(RiskStoreError::BackendUnavailable(
             "record outage".to_string(),
@@ -510,7 +511,11 @@ impl kiwicaptcha_risk::store::PrincipalNetworkTagStore for SimNetworks {
         &self,
         principal_id: &str,
         network: &str,
+        trusted: bool,
     ) -> Result<bool, RiskStoreError> {
+        // The trust flag participates in the pair identity: a trusted
+        // binding and a bare seen-record are different evidence.
+        let _ = trusted;
         Ok(self
             .pairs
             .lock()
@@ -703,6 +708,152 @@ impl OutcomeMarksStore for SimStore {
     }
 }
 
+/// The target-read outage fake: every probe succeeds, only the live
+/// target-state read fails like a backend outage. Unit-only: proves
+/// the fail-closed fallback target picture without any Redis round
+/// trip.
+#[derive(Default)]
+struct ThrowingTargetStore {
+    inner: SimStore,
+}
+
+impl RiskStateStore for ThrowingTargetStore {
+    fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+        self.inner.observe(o)
+    }
+    fn register_outcome(
+        &self,
+        decision_id: &str,
+        scope: u32,
+        decision_hour: i64,
+        score: u32,
+    ) -> Result<bool, RiskStoreError> {
+        self.inner
+            .register_outcome(decision_id, scope, decision_hour, score)
+    }
+    fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
+        self.inner.confirm_outcome(decision_id, legitimate)
+    }
+    fn correct_outcome(&self, decision_id: &str, legitimate: bool) -> Result<bool, RiskStoreError> {
+        self.inner.correct_outcome(decision_id, legitimate)
+    }
+    fn register_target_failure(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        self.inner.register_target_failure(target_id, source, asn)
+    }
+    fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
+        self.inner.clear_target_failures(target_id)
+    }
+    fn read_target_state(&self, _target_id: &str) -> Result<TargetState, RiskStoreError> {
+        Err(RiskStoreError::BackendUnavailable(
+            "target state outage".to_string(),
+        ))
+    }
+}
+
+impl kiwicaptcha_risk::store::SessionContextTagStore for ThrowingTargetStore {}
+impl kiwicaptcha_risk::store::SessionTlsTagStore for ThrowingTargetStore {}
+
+/// A failed live target read never reads as clean: the fallback path
+/// returns the saturated attack picture (the threshold failure count
+/// with the spread saturated on both axes), the decision carries the
+/// evidence-unavailable reason, and enforce mode steps the login up —
+/// the completable rung. The identical login on a readable store stays
+/// the plain allow, so the escalation comes from the failed read alone.
+#[test]
+fn failed_target_read_reads_saturated_and_steps_up() {
+    let identity =
+        kiwicaptcha_risk::identity::RiskIdentityFactory::new(RiskKeys::from_master(&[0x42; 32]));
+    let principal_bytes = [0xf6u8; 16];
+    let principal_hex = hex::encode(identity.principal_id(&principal_bytes));
+    let home_bucket = hex::encode(kiwicaptcha_risk::identity::masked_network(
+        "198.51.100.23".parse().unwrap(),
+        32,
+        64,
+    ));
+
+    // The established network vouches for the login on its own, so the
+    // escalation below comes from the failed target read alone.
+    let networks = Arc::new(SimNetworks::default());
+    networks
+        .pairs
+        .lock()
+        .unwrap()
+        .insert((principal_hex, home_bucket));
+
+    let mut resolver_map = HashMap::new();
+    resolver_map.insert(1u32, "username".to_string());
+    let resolver = Arc::new(kiwicaptcha_risk::target::FormFieldTargetResolver::new(
+        resolver_map,
+    ));
+
+    let fields = [("username", "victim@example.com")];
+    let ctx_for = || {
+        RiskContext::new(
+            1,
+            "198.51.100.23".parse().unwrap(),
+            None,
+            Some(&principal_bytes),
+            RiskEventKind::AuthenticationSuccess,
+            NetworkFlags::default(),
+            ResourcePressure::default(),
+        )
+    };
+    let ctx = || ctx_for().with_target_fields(&fields);
+
+    let engine = kiwicaptcha_risk::RiskEngine::new(
+        ThrowingTargetStore::default(),
+        CidrNetworkClassifier::from_entries(vec![]),
+        policy(),
+        RiskKeys::from_master(&[0x42; 32]),
+    )
+    .with_target_resolver(resolver.clone())
+    .with_principal_networks(networks.clone())
+    .with_novelty_enforcement(kiwicaptcha_risk::NoveltyEnforcement::Enforce);
+    let decision = engine
+        .reassess_v2(ctx(), &RiskV2Context::default(), None, None)
+        .expect("assess succeeds");
+    assert_eq!(
+        decision.action.as_str(),
+        "step_up",
+        "an unreadable target picture cannot read as clean: fail closed to the completable rung ({:?})",
+        decision.action
+    );
+    assert!(
+        decision.has_reason(RiskReason::EvidenceUnavailable),
+        "the step-up carries the evidence-unavailable reason ({:?})",
+        decision.reasons
+    );
+    assert_eq!(
+        decision.score, 360,
+        "the saturated counts land as the full target pressure and spread signals"
+    );
+
+    let healthy_engine = kiwicaptcha_risk::RiskEngine::new(
+        SimStore::default(),
+        CidrNetworkClassifier::from_entries(vec![]),
+        policy(),
+        RiskKeys::from_master(&[0x42; 32]),
+    )
+    .with_target_resolver(resolver)
+    .with_principal_networks(networks)
+    .with_novelty_enforcement(kiwicaptcha_risk::NoveltyEnforcement::Enforce);
+    let healthy = healthy_engine
+        .reassess_v2(ctx(), &RiskV2Context::default(), None, None)
+        .expect("healthy assess succeeds");
+    assert_eq!(
+        healthy.action.as_str(),
+        "allow",
+        "the same login on a readable store is the plain allow ({:?})",
+        healthy.action
+    );
+    assert_eq!(healthy.score, 100, "the healthy read stays clean");
+}
+
 fn victim_context() -> RiskContext<'static> {
     RiskContext::new(
         1,
@@ -846,6 +997,7 @@ fn stuffing_storm_over_real_redis_marks() {
     keys.extend(kiwicaptcha_risk::keyspace::target_state_keys(
         &namespace,
         &victim_target,
+        kiwicaptcha_risk::keyspace::KeyspaceMode::Legacy,
     ));
     let mut conn = ::redis::Client::open(url)
         .unwrap()

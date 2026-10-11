@@ -33,6 +33,14 @@ use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
  * (novel network, breached credential, scope pressure) can fire. The
  * feedback paths never reach that code.
  *
+ * A scope that configures login_step_up always (risk.scopes.<name>.
+ * login_step_up) withholds the session on every interactive login, an
+ * Allow included: the map $loginStepUpByScope (scope name to the
+ * configured mode) is resolved from the same scope table the
+ * authenticator wiring reads, and the guard consults its own scope key.
+ * The pending path stays completable through the principal factors, so
+ * a critical scope never grants a session on credentials alone.
+ *
  * The browser's continuity identities ride the same decision: the
  * continuity cookie read and the trusted-device cookie read flow into
  * the gate, so a returning browser on a rotated address is recognized.
@@ -76,6 +84,27 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         private readonly ?RequestStack $requestStack = null,
         private readonly ?ContinuityCookie $continuity = null,
         private readonly ?TrustedDeviceCookie $device = null,
+        /**
+         * Scope name to the configured login_step_up mode ('risk' or
+         * 'always'). Resolved from the risk.scopes table the extension
+         * hands the authenticator wiring; the guard reads its own
+         * scope's entry. 'always' withholds the session on every
+         * interactive login under the scope, an Allow included.
+         *
+         * @var array<string, string>
+         */
+        private readonly array $loginStepUpByScope = [],
+        /**
+         * The login scope's configured target form field names (F14):
+         * their submitted values ride the decision, so the engine's
+         * target resolver books the target dimension (failure counter
+         * and spread) on the first-attempt path, exactly like the
+         * outcome bridge does. Empty when the scope declares no target
+         * field: the assessment then carries no target.
+         *
+         * @var list<string>
+         */
+        private readonly array $targetFields = [],
     ) {
     }
 
@@ -136,9 +165,32 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
             $sessionCookie = $this->continuity?->read($request);
             $presentedDevice = $this->device?->read($request);
             $deviceValue = $presentedDevice ?? $this->device?->mint();
-            $decision = $this->gateway->loginDecision($this->scope, $ip, $sessionCookie, $identifier, null, $deviceValue);
+            $decision = $this->gateway->loginDecision(
+                $this->scope,
+                $ip,
+                $sessionCookie,
+                $identifier,
+                null,
+                $deviceValue,
+                $this->targetFieldValues($request),
+            );
             if ($decision === null) {
                 $this->withhold($event, $token, 'no_decision');
+
+                return;
+            }
+            // The always step-up policy: the decision is recorded (its
+            // evidence and reasons still flow) but never grants the
+            // session. The pending path is completable through the
+            // principal factors, so every login under the scope pays
+            // the second factor.
+            if (($this->loginStepUpByScope[$this->scope] ?? 'risk') === 'always') {
+                $this->logger?->info('kiwi first-attempt gate withholds the session (login_step_up always)', [
+                    'scope' => $this->scope,
+                    'decision_id' => $decision->decisionId,
+                    'action' => $decision->action->value,
+                ]);
+                $this->replaceToken($event, new StepUpPendingToken($token));
 
                 return;
             }
@@ -286,6 +338,28 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         }
 
         return (string) ($request->getClientIp() ?? '');
+    }
+
+    /**
+     * The submitted values of the scope's configured target fields,
+     * keyed by field name: the exact input shape the engine's target
+     * resolver reads. Absent or empty fields are left out, so a login
+     * form that omits the target field simply carries no target
+     * dimension instead of resolving an empty identifier.
+     *
+     * @return array<string, string>
+     */
+    private function targetFieldValues(Request $request): array
+    {
+        $fields = [];
+        foreach ($this->targetFields as $name) {
+            $value = $request->request->get($name);
+            if (\is_string($value) && $value !== '') {
+                $fields[$name] = $value;
+            }
+        }
+
+        return $fields;
     }
 
     private function requestOf(object $event): ?Request

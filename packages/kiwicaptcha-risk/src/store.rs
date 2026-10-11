@@ -391,6 +391,16 @@ pub trait SessionTlsTagStore {
 /// from that network), so a bare password check never vouches for the
 /// network and a retried stuffed login stays novel until the victim
 /// really proves themselves.
+///
+/// The full surface mirrors the PHP
+/// `PrincipalNetworkTagStoreInterface` and the canonical
+/// `principal_networks.lua` script: the trust flag (`trusted`) is
+/// minted only on an Allow or a completed step-up, `tag_is_trusted`
+/// reads the mirror (the strict continuity probe — bare seen-ness
+/// never vouches for a device), `forget_devices` revokes the session
+/// and device bindings (password change, sign-out-everywhere) and
+/// `principal_has_trusted_network` is the any-trusted-network half of
+/// the novel-network gate.
 pub trait PrincipalNetworkTagStore: Send + Sync {
     /// Whether the principal has been seen (established) from this
     /// network bucket: `Ok(Sometrue)` = seen before, `Ok(Somefalse)`
@@ -408,10 +418,12 @@ pub trait PrincipalNetworkTagStore: Send + Sync {
         Ok(None)
     }
 
-    /// Records the first-seen network tag for the (principal, network)
-    /// pair (SET NX, first write wins). Called when a session credit is
-    /// granted for a login from this network. Answers whether the record
-    /// was newly created.
+    /// Records the first-seen tag for the (principal, tag) pair (the
+    /// script's touch-upsert: the last-use refreshes, the answer says
+    /// whether the record was newly created). Called when a session
+    /// credit is granted for a login from this network. `trusted` =
+    /// `true` mints the trust flag: only an Allow or a completed
+    /// step-up may pass true — a Deny path can never mint trust.
     ///
     /// # Errors
     ///
@@ -420,6 +432,7 @@ pub trait PrincipalNetworkTagStore: Send + Sync {
         &self,
         _principal_id: &str,
         _network: &str,
+        _trusted: bool,
     ) -> Result<bool, RiskStoreError> {
         Ok(false)
     }
@@ -437,6 +450,33 @@ pub trait PrincipalNetworkTagStore: Send + Sync {
         _principal_id: &str,
     ) -> Result<Option<bool>, RiskStoreError> {
         Ok(None)
+    }
+
+    /// Whether this specific tag carries the minted trust flag (the
+    /// `t:` mirror): the strict device-continuity probe. `Ok(Sometrue)`
+    /// = trusted, `Ok(Somefalse)` = not trusted or not seen,
+    /// `Ok(None)` = no record surface.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn tag_is_trusted(
+        &self,
+        _principal_id: &str,
+        _network: &str,
+    ) -> Result<Option<bool>, RiskStoreError> {
+        Ok(None)
+    }
+
+    /// Deletes every session and device tag (and their trust flags)
+    /// for a principal. Wire this to password change, admin lockout
+    /// and explicit sign-out-everywhere.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn forget_devices(&self, _principal_id: &str) -> Result<(), RiskStoreError> {
+        Ok(())
     }
 }
 

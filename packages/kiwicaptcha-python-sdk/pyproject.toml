@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kiwicaptcha"
 version = "1.0.0"
-description = "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for Python. Zero third-party services or tracking; the SHA-256 and RSW proofs verify on the stdlib alone, Argon2id through the native [argon2] extra (or a local verifier sidecar)."
+description = "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for Python. Zero third-party services or tracking; the SHA-256 and RSW proofs verify on the stdlib alone, Argon2id through the bundled native binding (or a local verifier sidecar)."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Bel Consulting OU" }]
@@ -24,15 +24,20 @@ classifiers = [
     "Topic :: Security",
     "Topic :: Internet :: WWW/HTTP :: Session",
 ]
-dependencies = []
+dependencies = ["argon2-cffi>=23.1.0"]
 
 [project.optional-dependencies]
-argon2 = ["argon2-cffi>=23.1.0"]
+# The alias extra: argon2-cffi ships as a core dependency (it publishes
+# wheels for every major platform), so a plain `pip install kiwicaptcha`
+# verifies every rung the protocol can issue and a SHA-only deployment
+# constructs its verifier without any optional install. The extra stays
+# so the documented `pip install kiwicaptcha[argon2]` spelling keeps
+# working on every deployment that already uses it.
+argon2 = []
 redis = ["redis>=4.2"]
-# The test suite constructs default verifiers, so the native binding
-# must be importable when it runs (the no-binding refusals are tested
-# through a simulated flag, not a missing install).
-test = ["argon2-cffi>=23.1.0"]
+# Kept for the CI lanes and contributors that install `.[test]`; the
+# binding itself rides the core dependency now.
+test = []
 
 [project.urls]
 Homepage = "https://kiwicaptcha.dev"

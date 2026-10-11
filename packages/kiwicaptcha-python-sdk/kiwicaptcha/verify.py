@@ -21,6 +21,7 @@ armed record must never pass without it.
 import base64
 import hashlib
 import hmac
+import logging
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -83,6 +84,25 @@ MIN_PARALLELISM = 1
 MAX_PARALLELISM = 4
 
 _FINGERPRINT_HEX_LEN = 64
+
+_LOGGER = logging.getLogger(__name__)
+
+#: The once-per-process flag behind :func:`_log_argon_refusal_once`: a
+#: fleet of escalated records costs one warning, the per-record refuse
+#: still answers every record.
+_ARGON_REFUSAL_LOGGED = False
+
+
+def _log_argon_refusal_once() -> None:
+    """Log the no-backend argon2id refusal once per process."""
+    global _ARGON_REFUSAL_LOGGED
+    if _ARGON_REFUSAL_LOGGED:
+        return
+    _ARGON_REFUSAL_LOGGED = True
+    _LOGGER.warning(
+        "refusing an argon2id record without a derivation backend: %s",
+        BACKEND_REQUIRED_MESSAGE,
+    )
 
 
 def _is_hex64(value: str) -> bool:
@@ -286,11 +306,15 @@ class VerifierConfig:
     """The verifier construction options, mirroring the PHP constructor.
 
     ``argon_gate`` admits argon2id derivations; ``None`` installs the
-    shipped :class:`ArgonAdmissionGate` (a hard params budget plus
+    shipped :class:`ArgonAdmissionGate` lazily (a hard params budget plus
     bounded concurrency — never an ungated derivation). The default
     gate requires the native argon2 binding or, when
     ``argon_sidecar_url`` names a co-located verifier sidecar, admits
-    argon2id through that sidecar instead. ``now_provider``
+    argon2id through that sidecar instead. The install is deferred:
+    construction stores the parameters only, so a SHA-only deployment
+    on a runtime without the binding boots and verifies its records,
+    and :meth:`argon_backend_ready` answers False instead of raising.
+    ``now_provider``
     returns epoch seconds (float or int) and stands in
     for the wall clock in tests. ``secrets_by_kid`` maps positive integer
     kid values to secrets of at least 32 bytes; an empty map keeps the
@@ -345,9 +369,15 @@ class VerifierConfig:
             raise ValueError(
                 "tenant_id must be 1-64 characters of [A-Za-z0-9._:-] when set"
             )
-        self.argon_gate: AdmissionGate = argon_gate if argon_gate is not None else ArgonAdmissionGate(
-            sidecar_url=argon_sidecar_url
-        )
+        # The lazy gate: construction stores the parameters and never
+        # builds the default gate, so a runtime without the binding and
+        # without a sidecar still constructs a verifier (its SHA-256
+        # and rsw records verify on the stdlib alone). The gate builds
+        # on the first argon2id record of a capable runtime; on an
+        # incapable one the verifier refuses the record through
+        # :meth:`argon_backend_ready` before any build is attempted.
+        self._argon_gate: Optional[AdmissionGate] = argon_gate
+        self._argon_gate_lock = threading.Lock()
         self.argon_sidecar_url = (argon_sidecar_url or "").strip() or None
         self.now_provider = now_provider
         self.accept_legacy_v1 = accept_legacy_v1
@@ -395,6 +425,43 @@ class VerifierConfig:
             for identity in identities:
                 self._rsw_by_hash[identity] = trapdoor
                 self._rsw_modulus_by_hash[identity] = modulus_n
+
+    @property
+    def argon_gate(self) -> AdmissionGate:
+        """The installed argon2id admission gate, built on first use.
+
+        An explicitly passed gate answers as itself. The default gate
+        builds from the stored parameters on the first read, double
+        checked under a lock so concurrent readers install one gate.
+        On a runtime without the binding and without a sidecar the
+        build carries the gate's own actionable refusal: read
+        :meth:`argon_backend_ready` first (the verifier does), so the
+        error surfaces as a configuration-time signal, never inside a
+        verify call.
+        """
+        if self._argon_gate is None:
+            with self._argon_gate_lock:
+                if self._argon_gate is None:
+                    self._argon_gate = ArgonAdmissionGate(
+                        sidecar_url=self.argon_sidecar_url
+                    )
+        return self._argon_gate
+
+    def argon_backend_ready(self) -> bool:
+        """Whether an argon2id derivation is admissible on this config.
+
+        True when an explicit gate is installed, or the default gate's
+        prerequisites hold: the native binding importable, or a
+        sidecar URL to delegate to. Answers False (a clean per-record
+        refuse) instead of raising, so a SHA-only deployment on a
+        binding-less runtime keeps verifying its own rungs.
+        """
+        if self._argon_gate is not None:
+            return True
+        return (
+            argon2_backend.native_available()
+            or self.argon_sidecar_url is not None
+        )
 
     def rotate_deployment_expectations(
         self,
@@ -477,6 +544,11 @@ class Verifier:
         and trusted to the same standard as the verifier itself.
         """
         if record.algorithm != "argon2id":
+            return None
+        if not self.config.argon_backend_ready():
+            # No gate is buildable here; the admission section answers
+            # the typed unsupported-params refuse and the property is
+            # never read, so verification never raises.
             return None
         gate = self.config.argon_gate
         url = getattr(gate, "sidecar_url", None)
@@ -1205,6 +1277,13 @@ class Verifier:
 
         lease = None
         if peek.algorithm == "argon2id":
+            if not self.config.argon_backend_ready():
+                # The issuer guard refuses an unverifiable argon rung at
+                # boot; the per-record refuse stays typed and bounded:
+                # unsupported_argon2_params, logged once per process,
+                # never a raise and never a derivation.
+                _log_argon_refusal_once()
+                return VerifyOutcome.invalid(VerifyError.UNSUPPORTED_ARGON2_PARAMS)
             if not _gate_admits(self.config.argon_gate, peek):
                 # The record's signed parameters leave the gate's
                 # budget: refuse loudly, never derive and never

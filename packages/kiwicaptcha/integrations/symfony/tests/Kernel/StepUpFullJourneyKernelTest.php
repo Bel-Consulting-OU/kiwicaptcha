@@ -10,7 +10,6 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CapturingStepUpCodeSender;
-use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JourneyRiskStore;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -47,6 +46,18 @@ final class StepUpFullJourneyKernelTest extends TestCase
 
     private ?StepUpJourneyTestKernel $kernel = null;
 
+    protected function setUp(): void
+    {
+        // The journey runs on real Redis (KC_REDIS_URL, the real-Redis
+        // suite's env): without it there is no honest journey to walk.
+        if (StepUpJourneyTestKernel::redisUrl() === null) {
+            self::markTestSkipped('KC_REDIS_URL not set — the full step-up journey runs on real Redis and is skipped');
+        }
+        // A fresh database per test: the journey's first login must be
+        // novel, which stale principal-network history would defeat.
+        (new \Predis\Client(StepUpJourneyTestKernel::redisUrl()))->flushdb();
+    }
+
     protected function tearDown(): void
     {
         $this->kernel = null;
@@ -69,8 +80,10 @@ final class StepUpFullJourneyKernelTest extends TestCase
         $guard = $container->get(FirstAttemptLoginGuard::class);
         /** @var StepUpController $controller */
         $controller = $container->get(StepUpController::class);
-        /** @var JourneyRiskStore $riskStore */
-        $riskStore = $container->get('kiwi_captcha.risk.store');
+        // The real principal-network store the extension wired (the
+        // engine's novelty read and the restore's record address it).
+        $riskStore = $container->get('kiwi_captcha.risk.principal_networks');
+        self::assertInstanceOf(\KiwiCaptcha\Risk\Storage\RedisPrincipalNetworkTagStore::class, $riskStore);
         /** @var CapturingStepUpCodeSender $sender */
         $sender = $container->get('step_up_code_capturer');
 

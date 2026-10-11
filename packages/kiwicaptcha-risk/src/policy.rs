@@ -1500,7 +1500,7 @@ mod tests {
         assert_eq!(json["action"], "sha20");
         assert_eq!(json["policy_version"], 3);
         // The revision is exposed in the public JSON (bounded).
-        assert_eq!(json["model_revision"], 17);
+        assert_eq!(json["model_revision"], 18);
         assert_eq!(json["global_level"], 2);
         assert_eq!(json["retry_after_ms"], Value::Null);
         assert_eq!(json["band"], 5);
@@ -1510,7 +1510,7 @@ mod tests {
     /// The revision constant is a shared cross-language value.
     #[test]
     fn model_revision_constant_is_seventeen() {
-        assert_eq!(crate::RISK_MODEL_REVISION, 17);
+        assert_eq!(crate::RISK_MODEL_REVISION, 18);
     }
 
     /// Policy-level wiring: an oscillating boundary score

@@ -1,18 +1,40 @@
 -- Principal first-seen network tags: one atomic seen/record/trust.
 --
 -- SCRIPT BOUNDS — all bounded constants:
---   max keys touched:     1 (the principal's tag hash; {kiwi:<ns>} tag)
---   max Redis calls:      5 (1 TIME + 1 HGET/HGETALL + 1 HSET + 1 HDEL +
---                           1 PEXPIRE on the record path; strictly fewer
---                           on the read paths)
+--   max keys touched:     1 (the principal's tag hash; key form
+--                           pnet:{kiwi:<ns>:<principal_hex>}, the hash
+--                           tag carrying the whole principal identity,
+--                           so one principal owns one Cluster slot)
+--   max Redis calls:      6 + 2*evicted (1 TIME + 1 HGET + 1 HSET
+--                           [+ 1 HSET trust] + 1 HGETALL + up to 2
+--                           HDELs per evicted victim, bounded by the
+--                           cap ceiling + 1 PEXPIRE on the record
+--                           path; strictly fewer on the read paths;
+--                           the forget_devices and has_any_trusted
+--                           paths touch 2: 1 TIME + 1 HGETALL, plus
+--                           up to one HGET per trust mirror, bounded
+--                           by the cardinality ceiling)
 --   max collection cardinality: 224 hash fields (32 session + 16 device
 --                           + 64 net + 64 asn + 32+16+64+64 trust flags)
 --
--- KEYS[1] principal tag hash (key form kiwi:<ns>:pnet:{<principal_hex>}).
--- ARGV[1] operation: 'seen', 'record', or 'has_trusted'.
+-- KEYS[1] principal tag hash (key form pnet:{kiwi:<ns>:<principal_hex>}.
+-- The older spellings {kiwi:<ns>}:pnet:<principal> and
+-- kiwi:<ns>:pnet:{<principal_hex>} named two different key forms for
+-- the same hash in earlier headers; this one is canonical: the hash
+-- tag carries the whole principal, so a Cluster never routes two
+-- principals to one hot slot).
+-- ARGV[1] operation: 'seen', 'record', 'has_trusted', 'has_any_trusted',
+--         or 'forget_devices'.
 -- ARGV[2] tag (net:<hex>, asn:<decimal|u4/prefix|u6/prefix>,
---         session:<hex>, device:<hex>).
--- ARGV[3] class_ttl_ms (record only).
+--         session:<hex>, device:<hex>) — not read by forget_devices
+--         and has_any_trusted.
+-- ARGV[3] class_ttl_ms (REQUIRED for seen, record and has_trusted: the
+--         caller's CONFIGURED class TTL, validated against the class
+--         range. The read paths answer "not seen" past the caller's
+--         TTL, never past the class maximum — a stored value can never
+--         vouch past the lifetime the deployment actually configured.
+--         forget_devices and has_any_trusted need no TTL: one deletes,
+--         the other probes against each field's own class ceiling.)
 -- ARGV[4] class_cap (record only).
 -- ARGV[5] trust ('1' = mint trust on record, '' or absent = do not).
 --
@@ -20,7 +42,8 @@
 -- last-use ms (Redis TIME, never a client clock), and a `t:` prefixed
 -- mirror carries the trust flag ('1'). Trust is minted only on an Allow
 -- or a completed step-up — a Deny path can never create a `t:` field.
--- has_trusted checks both the bare tag (for expiry) and the trust flag.
+-- has_trusted checks both the bare tag (for expiry, against the
+-- caller's ARGV[3] TTL) and the trust flag.
 --
 -- Class policy (validated against the TTL/cap bounds below):
 --   session:  cap 32, TTL = 2x the continuity cookie TTL (default 3600 s)
@@ -29,16 +52,19 @@
 --
 -- LRU: the record path evicts the least-recently-used entries in the
 -- same class above the cap, reading the last-use value (never insertion
--- order). A trust flag is evicted with its tag.
+-- order). The tag just written is excluded from the eviction
+-- candidates: a same-millisecond tie must never evict the entry the
+-- caller just wrote (Lua's sort is not stable, so without the
+-- exclusion a tie would be free to pick it). A trust flag is evicted
+-- with its tag.
 --
--- PEXPIRE is set to the largest class TTL present after the write, so
--- the key expires when its oldest class would.
+-- PEXPIRE is computed AFTER the eviction, over the surviving fields,
+-- so the key expires when its oldest surviving class would.
 --
 -- Every argument is validated BEFORE the first write: a hostile tag,
 -- TTL or cap errors with the hash untouched. RESP2 false/nil is
 -- treated as absent, matching assess_v2.
 local EXPIRY_CEILING_MS = 2147483647 * 1000
-local MIN_TTL_MS = 1
 local MAX_CAP = 256
 
 -- Class bounds: the TTL range each class may request and its cap ceiling.
@@ -94,8 +120,63 @@ local function valid_tag(tag)
 end
 
 local op = ARGV[1]
-if op ~= 'seen' and op ~= 'record' and op ~= 'has_trusted' then
-    return redis.error_reply('pnet: op must be seen, record or has_trusted')
+if op ~= 'seen' and op ~= 'record' and op ~= 'has_trusted'
+    and op ~= 'has_any_trusted' and op ~= 'forget_devices' then
+    return redis.error_reply('pnet: op must be seen, record, has_trusted, has_any_trusted or forget_devices')
+end
+
+if op == 'forget_devices' then
+    -- Atomic revocation (F15): the session and device tags of the
+    -- principal and their trust mirrors go in one HDEL, so a record
+    -- racing the revocation cannot survive half-deleted. The op takes
+    -- no tag and no TTL: it deletes whole classes and never reads a
+    -- lifetime. Bare-hex and net/asn tags are the deployment's
+    -- long-memory network evidence and survive the revocation.
+    local all = redis.call('HGETALL', KEYS[1])
+    local doomed = {}
+    for i = 1, #all, 2 do
+        local f = all[i]
+        if string.sub(f, 1, 8) == 'session:' or string.sub(f, 1, 7) == 'device:'
+            or string.sub(f, 1, 10) == 't:session:' or string.sub(f, 1, 9) == 't:device:' then
+            doomed[#doomed + 1] = f
+        end
+    end
+    if #doomed > 0 then
+        redis.call('HDEL', KEYS[1], unpack(doomed))
+    end
+    return #doomed
+end
+
+if op == 'has_any_trusted' then
+    -- Whether ANY tag of this principal carries a minted trust flag
+    -- whose bare tag is still live: the "no prior trusted network"
+    -- half of the novel-network gate, answered inside the script so
+    -- the read stays atomic and the field walk stays bounded by the
+    -- script's own cardinality ceiling. Takes no tag and no TTL: it
+    -- is an any-class probe, judged against each field's own class
+    -- ceiling (a probe can never vouch past the class lifetime).
+    local time = redis.call('TIME')
+    local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+    local fields = redis.call('HGETALL', KEYS[1])
+    for i = 1, #fields, 2 do
+        local f = fields[i]
+        if string.sub(f, 1, 2) == 't:' then
+            local bare = string.sub(f, 3)
+            local v = redis.call('HGET', KEYS[1], bare)
+            if v then
+                local last = tonumber(v)
+                if last ~= nil then
+                    local fclass = classify(bare)
+                    local class_ttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net
+                    if now - last <= class_ttl then
+                        return 1
+                    end
+                end
+            end
+        end
+    end
+
+    return 0
 end
 
 local tag = ARGV[2]
@@ -111,6 +192,19 @@ local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 
 local trust_key = 't:' .. tag
 
+-- The caller's configured class TTL is REQUIRED on every read path:
+-- seen and has_trusted answer "not seen" past the caller's TTL, never
+-- past the class maximum. Without this a stolen device value would
+-- vouch server-side for the whole 365-day class ceiling even where the
+-- deployment configured days. Validated BEFORE any read, so an
+-- out-of-range TTL errors with the hash untouched.
+local ttl_ms = tonumber(ARGV[3])
+if ttl_ms == nil or ttl_ms ~= math.floor(ttl_ms)
+    or ttl_ms < (CLASS_TTL_MIN[class] or CLASS_TTL_MIN.net)
+    or ttl_ms > (CLASS_TTL_MAX[class] or CLASS_TTL_MAX.net) then
+    return redis.error_reply('pnet: ttl_ms outside the class range')
+end
+
 if op == 'seen' then
     local v = redis.call('HGET', KEYS[1], tag)
     if not v then
@@ -120,8 +214,7 @@ if op == 'seen' then
     if last == nil then
         return 0
     end
-    local class_ttl = CLASS_TTL_MAX[class] or CLASS_TTL_MAX.net
-    if now_ms - last > class_ttl then
+    if now_ms - last > ttl_ms then
         return 0
     end
     return 1
@@ -136,8 +229,7 @@ if op == 'has_trusted' then
     if last == nil then
         return 0
     end
-    local class_ttl = CLASS_TTL_MAX[class] or CLASS_TTL_MAX.net
-    if now_ms - last > class_ttl then
+    if now_ms - last > ttl_ms then
         return 0
     end
     local t = redis.call('HGET', KEYS[1], trust_key)
@@ -148,48 +240,47 @@ if op == 'has_trusted' then
 end
 
 -- op == 'record'
-local ttl_ms = tonumber(ARGV[3])
 local cap = tonumber(ARGV[4])
-if ttl_ms == nil or ttl_ms < MIN_TTL_MS or ttl_ms > EXPIRY_CEILING_MS or ttl_ms ~= math.floor(ttl_ms) then
-    return redis.error_reply('pnet: ttl_ms must be a positive integer within bounds')
-end
 if cap == nil or cap < 1 or cap > MAX_CAP or cap ~= math.floor(cap) then
     return redis.error_reply('pnet: cap must be a positive integer within bounds')
-end
-local class_min = CLASS_TTL_MIN[class] or CLASS_TTL_MIN.net
-local class_max = CLASS_TTL_MAX[class] or CLASS_TTL_MAX.net
-if ttl_ms < class_min or ttl_ms > class_max then
-    return redis.error_reply('pnet: ttl_ms outside the class range')
 end
 local trust = ARGV[5]
 if trust == nil then
     trust = '0'
 end
 
--- Upsert the tag (SET NX semantics: first write wins).
+-- Upsert the tag: the last-use ms refreshes on every record (the LRU
+-- touch), the trust flag only ever mints (never revokes), and the
+-- answer says whether the tag was newly created (0 = existed). This is
+-- a touch-upsert, not SET NX: the first WRITE wins the trust flag, the
+-- newest write wins the last-use.
 local existed = redis.call('HGET', KEYS[1], tag)
 redis.call('HSET', KEYS[1], tag, tostring(now_ms))
 if trust == '1' then
     redis.call('HSET', KEYS[1], trust_key, '1')
 end
 
--- LRU eviction within the class: collect class tags with their last-use,
--- evict the oldest above the cap.
+-- LRU eviction within the class: collect the OTHER class tags with
+-- their last-use, excluding the tag just written (a same-millisecond
+-- tie must never evict the entry the caller just wrote — Lua's sort is
+-- not stable, so without the exclusion a tie would be free to pick
+-- it), then evict the oldest above the cap together with their trust
+-- flags.
 local all = redis.call('HGETALL', KEYS[1])
 local class_tags = {}
 for i = 1, #all, 2 do
     local f = all[i]
-    if f ~= trust_key and string.sub(f, 1, 2) ~= 't:' then
+    if f ~= tag and f ~= trust_key and string.sub(f, 1, 2) ~= 't:' then
         local fclass = classify(f)
         if fclass == class then
             class_tags[#class_tags + 1] = { f, tonumber(all[i + 1]) or 0 }
         end
     end
 end
-if #class_tags > cap then
+if #class_tags + 1 > cap then
     -- Sort ascending by last-use (oldest first).
     table.sort(class_tags, function(a, b) return a[2] < b[2] end)
-    local to_evict = #class_tags - cap
+    local to_evict = #class_tags + 1 - cap
     for i = 1, to_evict do
         local victim = class_tags[i][1]
         redis.call('HDEL', KEYS[1], victim)
@@ -197,11 +288,15 @@ if #class_tags > cap then
     end
 end
 
--- PEXPIRE to the largest class TTL present.
+-- PEXPIRE computed AFTER the eviction, over the surviving fields: the
+-- key expires when its oldest surviving class would (an evicted
+-- victim's class TTL can no longer hold the key alive past its own
+-- eviction).
+local survivors = redis.call('HGETALL', KEYS[1])
 local max_class_ttl = ttl_ms
-for i = 1, #all, 2 do
-    local f = all[i]
-    if f ~= trust_key and string.sub(f, 1, 2) ~= 't:' then
+for i = 1, #survivors, 2 do
+    local f = survivors[i]
+    if string.sub(f, 1, 2) ~= 't:' then
         local fclass = classify(f)
         local fttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net
         if fttl > max_class_ttl then

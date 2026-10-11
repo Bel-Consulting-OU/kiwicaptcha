@@ -96,9 +96,9 @@ def check_store(store_url: str) -> CheckResult:
     try:
         config = VerifierConfig()
     except ValueError as exc:
-        # The admission gate refused the boot: without the native
-        # binding or a sidecar URL the verifier has no argon2id path,
-        # and the deployment must hear that from the doctor.
+        # Construction itself no longer builds the argon gate, so this
+        # catch is a defensive net; the argon2id posture of the runtime
+        # is reported by the profile check above.
         return CheckResult("store", False, f"the verifier did not construct: {exc}")
     verifier = Verifier(storage, config)
     record = _self_check_record()

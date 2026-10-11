@@ -62,6 +62,13 @@ final class KiwiCaptchaDoctorCommand extends Command
     private const SUPPORTED_PROTOCOL_MAX = KiwiHealthController::MAX_PROTOCOL_VERSION;
 
     /**
+     * The reserved probe principal: 64 zeros, a pseudonym shape the
+     * store accepts that no identity factory ever derives for a real
+     * account (every derivation is keyed HMAC output).
+     */
+    private const RESERVED_PROBE_PRINCIPAL = '0000000000000000000000000000000000000000000000000000000000000000';
+
+    /**
      * The SLO safety margin (ms) between the Argon admission lease and
      * the declared maximum verification runtime, mirroring the
      * extension's lease-safety margin: the lease must outlive the
@@ -96,6 +103,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         private readonly ?SiteVerifyIdempotencyStore $siteVerifyIdempotencyStore,
         private readonly ?array $authorityGuards = null,
         private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
+        private readonly ?\Closure $apcEnableCliProbe = null,
     ) {
         parent::__construct();
     }
@@ -129,9 +137,11 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Client-IP policy' => $this->checkClientIpPolicy(),
             'Continuity cookie' => $this->checkContinuityCookie(),
             'Risk Redis' => $this->checkRiskRedis(),
+            'ASN dataset' => $this->checkAsnDataset(),
             'Principal-network store' => $this->checkPrincipalNetworks(),
             'Risk scope policy' => $this->checkScopePolicy(),
             'Value-class pricing' => $this->checkValueClassPricing(),
+            'Carrier factors' => $this->checkCarrierFactors(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
             'Decoy escalation gate' => $this->checkDecoyEscalationGate(),
@@ -200,12 +210,17 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
-     * The APCu segment hazard flag: with apc.enable_cli=1 the adapter
-     * constructs under the cli SAPI (the operator's explicit opt-in to
-     * a per-process segment), and this check answers with the warning
-     * the opt-in owes the operator. Without the opt-in the adapter
-     * refuses construction before any doctor run, so a wired adapter
-     * under cli is always the deliberate case.
+     * The APCu cli-segment verdict. apc.enable_cli=1 is only the
+     * precondition that gives a cli process a segment at all, so the
+     * verdict keys on the adapter's single-process acknowledgement
+     * (the constructor flag, exposed in the bundle as
+     * storage.apcu.single_process_cli). Without it a wired adapter
+     * under cli cannot serve: every worker process would store into
+     * its own private segment, so records cross foreign segments and
+     * solves fail at random. Production fails the gate; test and
+     * dev warn so local tooling still boots. With it the wiring is
+     * the deliberate one-long-lived-process case, and the residual
+     * per-process segment hazard stays a warning.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
@@ -217,17 +232,27 @@ final class KiwiCaptchaDoctorCommand extends Command
         if (\PHP_SAPI !== 'cli') {
             return ['PASS', sprintf('APCu storage under the %s SAPI: one shared segment per host', \PHP_SAPI)];
         }
-        $optIn = RealApcuBackend::apcEnableCliIni(\ini_get('apc.enable_cli'));
-        $detail = 'APCu storage under the cli SAPI: every worker process owns a private APCu '
-            . 'segment, so a RoadRunner/queue worker stores records the web tier can never read '
-            . '(or the reverse). apc.enable_cli is '
-            . ($optIn
-                ? 'on: the adapter constructs by the operator\'s explicit opt-in, and each '
-                .'CLI worker sees only its own segment'
-                : 'off: the adapter refuses construction here, so this wiring cannot serve')
-            . '. Select the Redis/SQLite store for CLI hosts.';
+        if (!$this->storage->allowsPrivateCliSegment()) {
+            $detail = 'APCu storage under the cli SAPI without the single-process acknowledgement '
+                .'(storage.apcu.single_process_cli): this wiring cannot serve, because the adapter refuses '
+                .'cli construction without the flag and every RoadRunner/queue worker that bypassed it would '
+                .'store records in a private segment the web tier can never read. Select the Redis/SQLite '
+                .'store for CLI hosts, or declare storage.apcu.single_process_cli: true only for one '
+                .'long-lived process (a Swoole server that initialised APCu before fork; RoadRunner never '
+                .'qualifies), keeping apc.enable_cli=1 as the ini precondition.';
+            if (\in_array($this->environment, ['test', 'dev'], true)) {
+                return [self::LEVEL_WARN, $detail];
+            }
 
-        return ['WARN', $detail];
+            return ['FAIL', $detail];
+        }
+        if (!RealApcuBackend::apcEnableCliIni(
+            $this->apcEnableCliProbe !== null ? ($this->apcEnableCliProbe)() : \ini_get('apc.enable_cli'),
+        )) {
+            return ['FAIL', 'APCu storage under the cli SAPI with storage.apcu.single_process_cli declared, but apc.enable_cli is off: the ini is the precondition that gives a cli process a segment at all, so the adapter refuses this construction and the doctor observing it means the wiring cannot serve. Set apc.enable_cli=1 in php.ini of the CLI host.'];
+        }
+
+        return [self::LEVEL_WARN, 'APCu storage under the cli SAPI by the storage.apcu.single_process_cli acknowledgement: every process still owns a private APCu segment, valid only while this host runs exactly one long-lived process (a Swoole server that initialised APCu before fork). RoadRunner never qualifies: a restarted worker loses the segment and a multi-worker runtime fails a random share of the solves against foreign segments. Select the Redis/SQLite store for any multi-process CLI host.'];
     }
 
     /**
@@ -654,6 +679,47 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
+     * The ASN dataset of the novel-network gate. Under the abuse
+     * first posture the path is required: the gate is judged on the
+     * ASN bucket first. The file must exist and be fresher than 45
+     * days, because routing tables drift and a stale dataset
+     * mis-prices exactly the networks the posture prices first.
+     * Outside the posture the dataset stays optional (a configured
+     * file still gets the staleness verdict).
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkAsnDataset(): array
+    {
+        $path = $this->config['risk']['asn']['dataset_path'] ?? null;
+        $profile = $this->config['protection_profile'] ?? null;
+        $required = self::isAbuseFirstProfile($profile) && ($this->config['risk']['enabled'] ?? false);
+        $envPlaceholder = \is_string($path) && preg_match('/^%env\([^%]+\)%$/D', $path) === 1;
+        if (!\is_string($path) || $path === '') {
+            if ($required) {
+                return ['FAIL', sprintf('no ASN dataset is configured: %s requires risk.asn.dataset_path (the novel-network gate is judged on the ASN bucket first, and a missing dataset silently degrades the first-attempt defense)', self::abuseFirstProfileName($profile))];
+            }
+
+            return ['PASS', 'no ASN dataset configured (optional outside the abuse posture; the marks reader drops the asn dimension)'];
+        }
+        if ($envPlaceholder) {
+            // The path resolves at service construction; the doctor
+            // cannot stat it here without resolving the container's
+            // env. The dataset service IS the same fail-closed open.
+            return ['PASS', sprintf('ASN dataset path resolves from the environment (%s); the service opens it fail-closed at construction', $path)];
+        }
+        if (!is_file($path) || !is_readable($path)) {
+            return ['FAIL', sprintf('ASN dataset %s is not a readable file: the service refuses it at boot (fail closed), so this state means the wiring is broken', $path)];
+        }
+        $ageDays = (int) floor((time() - (int) filemtime($path)) / 86400);
+        if ($ageDays > 45) {
+            return ['FAIL', sprintf('ASN dataset %s is %d days old (freshness bound 45 days): routing tables drift, and a stale dataset mis-prices exactly the networks the posture prices first. Refresh the local IP-to-ASN dataset.', $path, $ageDays)];
+        }
+
+        return ['PASS', sprintf('ASN dataset %s, %d day(s) old (bound 45)', $path, $ageDays)];
+    }
+
+    /**
      * The principal-network store: novelty_enforcement (learn or
      * enforce) needs a real store. A null or non-interface store
      * silently disables the entire first-attempt defense.
@@ -677,8 +743,22 @@ final class KiwiCaptchaDoctorCommand extends Command
         if (!($store instanceof \KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface)) {
             return ['FAIL', 'the principal-network store does not implement PrincipalNetworkTagStoreInterface: the engine cannot read network history'];
         }
+        // The live probe: a seen read against the reserved all-zeros
+        // principal (never a real account's pseudonym, and the probe is
+        // read-only — the script's seen op never writes). A store that
+        // cannot answer a probe cannot answer the engine's novelty
+        // reads either; the engine degrades those to fail-closed
+        // novelty, so a broken backend must fail the check, not pass.
+        try {
+            $probe = $store->principalNetworkSeen(self::RESERVED_PROBE_PRINCIPAL, 'net:00');
+        } catch (\Throwable $e) {
+            return ['FAIL', sprintf('principal-network store probe failed on the reserved principal: %s (%s)', $e->getMessage(), get_class($store))];
+        }
+        if ($probe !== null && !\is_bool($probe)) {
+            return ['FAIL', 'principal-network store probe returned a non-boolean answer: the engine cannot read network history'];
+        }
 
-        return ['PASS', sprintf('principal-network store wired (%s), novelty_enforcement=%s', get_class($store), $novelty)];
+        return ['PASS', sprintf('principal-network store wired and probed (%s), novelty_enforcement=%s', get_class($store), $novelty)];
     }
 
     /**
@@ -740,11 +820,15 @@ final class KiwiCaptchaDoctorCommand extends Command
 
     /**
      * The value-class pricing check: every configured scope's declared
-     * stake must price inside its rung's measured ceiling, or the
-     * scope's disposition minimum (risk.scopes.<name>.minimum) must
-     * carry what raw proof of work cannot price. The verdict logic is
-     * the shared {@see ValueClassCeiling::verdict()}, so the doctor and
-     * the D3.3 campaign answer identically.
+     * stake must price inside its rung's measured ceiling, or a
+     * completable carrier must carry what raw proof of work cannot
+     * price. The carrying knobs: the disposition minimum (step_up or
+     * deny), login_step_up always for the critical and high classes
+     * (the post-credential gate withholds every session until a
+     * principal factor completes), and the step_up_email carrier for
+     * the low class (the anonymous completable grant). The verdict
+     * logic is the shared {@see ValueClassCeiling::verdict()}, so the
+     * doctor and the D3.3 campaign answer identically.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
@@ -769,29 +853,103 @@ final class KiwiCaptchaDoctorCommand extends Command
                 isset($scope['stake_usd']) ? (float) $scope['stake_usd'] : null,
             );
             if ($status !== 'PASS') {
-                $escalations[] = sprintf('%s: %s', $name, $detail);
-                // A critical or high stake sitting on a PoW rung is a
-                // A hard failure, not a warning: raw proof of work cannot carry
-                // it at any difficulty, and the scope protects
-                // something the deployment declared valuable.
-                if (\in_array($valueClass, ['critical', 'high'], true)
-                    && !\in_array($minimum, ['step_up', 'deny'], true)) {
-                    $hardFails[] = $name;
+                $carried = \in_array($minimum, ['step_up', 'deny'], true);
+                if (!$carried && \in_array($valueClass, ['critical', 'high'], true)
+                    && ($scope['login_step_up'] ?? null) === 'always') {
+                    // The post-credential gate is the carrier: every
+                    // session under the scope waits for a principal
+                    // factor, so no solved request is ever accepted on
+                    // the PoW rung alone.
+                    $carried = true;
+                }
+                if (!$carried && $valueClass === 'low'
+                    && ($scope['carrier'] ?? null) === 'step_up_email') {
+                    // The anonymous grant is the carrier: the step-up
+                    // demand is answered by proving address ownership,
+                    // never by a stronger proof of work.
+                    $carried = true;
+                }
+                if (!$carried) {
+                    $escalations[] = sprintf('%s: %s', $name, $detail);
+                    // A critical or high stake sitting on a PoW rung is a
+                    // A hard failure, not a warning: raw proof of work cannot carry
+                    // it at any difficulty, and the scope protects
+                    // something the deployment declared valuable.
+                    if (\in_array($valueClass, ['critical', 'high'], true)) {
+                        $hardFails[] = $name;
+                    }
                 }
             }
         }
         if ($hardFails !== []) {
             return ['FAIL', sprintf(
-                '%d high-value scope(s) priced below their declared stake on a PoW rung (%s): set risk.scopes.<name>.minimum to step_up or deny',
+                '%d high-value scope(s) priced below their declared stake on a PoW rung (%s): set risk.scopes.<name>.minimum to step_up or deny, or carry the stake with risk.scopes.<name>.login_step_up: always',
                 \count($hardFails),
                 implode(', ', $hardFails),
             )];
         }
         if ($escalations === []) {
-            return ['PASS', sprintf('every configured scope prices inside its rung ceiling or carries a step_up/deny minimum (%d scope(s))', \count($risk['scopes'] ?? []))];
+            return ['PASS', sprintf('every configured scope prices inside its rung ceiling or carries a step_up/deny minimum, the login_step_up carrier or the email grant (%d scope(s))', \count($risk['scopes'] ?? []))];
         }
 
         return [self::LEVEL_WARN, sprintf('%d scope(s) beyond their pricing ceiling: %s', \count($escalations), implode(' | ', $escalations))];
+    }
+
+    /**
+     * The carrier-factor check: a scope that names a carrier (risk.
+     * scopes.<name>.carrier) must name a factor the container actually
+     * wires. A carrier whose factor is absent leaves the scope's
+     * step-up demand unanswerable: the 403 advertises a dead end. The
+     * failure is a hard verdict, never a warning, for exactly that
+     * reason.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkCarrierFactors(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false)) {
+            return ['PASS', 'risk disabled: no scope names a carrier'];
+        }
+        $stepUp = $risk['step_up'] ?? [];
+        $carriers = [];
+        foreach (($risk['scopes'] ?? []) as $name => $scope) {
+            $carrier = \is_array($scope) ? ($scope['carrier'] ?? null) : null;
+            if (\is_string($carrier) && $carrier !== '') {
+                $carriers[(string) $name] = $carrier;
+            }
+        }
+        if ($carriers === []) {
+            return ['PASS', 'no scope names a step-up carrier'];
+        }
+        if (!($stepUp['enabled'] ?? false)) {
+            return ['FAIL', sprintf(
+                'scope(s) %s name a step-up carrier but the step-up plane is disabled (risk.step_up.enabled): the step-up demand has no completable factor',
+                implode(', ', array_keys($carriers)),
+            )];
+        }
+        $factors = [
+            'step_up_email' => (bool) ($stepUp['email_ownership']['enabled'] ?? false),
+            'email_otp' => (bool) ($stepUp['handlers']['email_otp']['enabled'] ?? false),
+            'totp' => (bool) ($stepUp['handlers']['totp']['enabled'] ?? false),
+            'webauthn' => (bool) ($stepUp['handlers']['webauthn']['enabled'] ?? false),
+        ];
+        $dead = [];
+        foreach ($carriers as $scope => $carrier) {
+            if (!\array_key_exists($carrier, $factors)) {
+                $dead[] = sprintf('%s names the unknown carrier "%s"', $scope, $carrier);
+
+                continue;
+            }
+            if (!$factors[$carrier]) {
+                $dead[] = sprintf('%s names "%s" but that factor is not enabled', $scope, $carrier);
+            }
+        }
+        if ($dead !== []) {
+            return ['FAIL', sprintf('%d carrier scope(s) name a factor that is not enabled (%s): enable the factor under risk.step_up or drop the carrier', \count($dead), implode('; ', $dead))];
+        }
+
+        return ['PASS', sprintf('every named carrier names an enabled factor (%d scope(s))', \count($carriers))];
     }
 
     private function checkProtocolFloor(): array

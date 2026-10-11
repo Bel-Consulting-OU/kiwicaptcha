@@ -551,8 +551,9 @@ final class RedisRiskStateStoreTest extends TestCase
             "{$tag}:risk:principal:" . str_repeat('0', 32),
             "{$tag}:risk:global",
             "{$tag}:risk:dedupe:" . str_repeat('c', 32),
-            // The target family rides its own tag: the guard accepts it.
-            '{kiwi:slot:target:5e}:risk:tgt:' . str_repeat('1', 32),
+            // The target state rides the same shared tag: the guard
+            // hashes every tag to the one slot.
+            "{$tag}:risk:tgt:" . str_repeat('1', 32),
         ];
         $store->assertSameSlot($keys); // must not throw
 

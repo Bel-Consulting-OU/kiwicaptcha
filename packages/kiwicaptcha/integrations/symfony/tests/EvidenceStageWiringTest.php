@@ -32,10 +32,22 @@ final class EvidenceStageWiringTest extends TestCase
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'test');
         $container->register('fake_redis', FakePredisClient::class);
-        (new KiwiCaptchaExtension())->load([array_merge([
+        $layers = [array_merge([
             'secret_key' => self::SECRET,
             'difficulty_bits' => 8,
-        ], $config)], $container);
+        ], $config)];
+        // The abuse posture requires the ASN dataset path (the
+        // novel-network gate is judged on the ASN bucket first): the
+        // fixture supplies what the profile requires when the layer
+        // selects it without a dataset.
+        foreach ($layers as $i => $layer) {
+            $profile = $layer['protection_profile'] ?? null;
+            if (\in_array($profile, ['abuse_first', 'high_abuse'], true)
+                && !isset($layer['risk']['asn']['dataset_path'])) {
+                $layers[$i]['risk']['asn']['dataset_path'] = \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\RiskStageMatrixTestKernel::asnFixturePath();
+            }
+        }
+        (new KiwiCaptchaExtension())->load($layers, $container);
 
         return $container;
     }
