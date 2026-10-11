@@ -643,6 +643,51 @@ final class RiskGateway implements LoginDecisionGate
     }
 
     /**
+     * The step-up completion assessment: a fresh reassessment of the
+     * same context under the completed-step-up event. The event
+     * vocabulary is fixed by the cross-language risk-v1 contract, so
+     * the completed second factor books through the server-confirmed
+     * protected-action channel, the channel the outcomes contract maps
+     * the stepUpCompleted outcome onto. The caller is the validator's
+     * email grant path: a redeemed grant answers the step-up demand,
+     * and this assessment proves the completed factor also satisfies
+     * the engine, on the same (scope, source, session, target) inputs
+     * the refused submission carried. The decision id is recorded on
+     * the request-local decision context, see {@see setCurrentDecisionId()}.
+     *
+     * $targetFields carries the request's submitted values for the
+     * scope's configured target field(s), exactly like
+     * {@see postSolveDecision()}. Null when the scope is unknown and
+     * the engine declines to evaluate.
+     *
+     * @param array<string, string> $targetFields submitted form field
+     *                                            values keyed by field
+     *                                            name
+     */
+    public function stepUpCompletedDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, array $targetFields = []): ?RiskDecision
+    {
+        $scopeId = $this->tryScopeId($scope);
+        if ($scopeId === null) {
+            return null;
+        }
+        $context = new RiskContext(
+            scope: $scopeId,
+            sourceIp: $ip,
+            sessionId: $session,
+            principalId: $principal ?? $this->resolvePrincipal($scope),
+            event: RiskEventKind::ProtectedActionSuccess,
+            networkFlags: $this->classifier->classify($ip),
+            resources: $this->resources(),
+            targetFields: $targetFields,
+        );
+        $decision = $this->engine->reassess($context, $idempotencyKey);
+        $this->setCurrentDecisionId($decision->decisionId);
+        $this->logDecision($scope, $decision);
+
+        return $decision;
+    }
+
+    /**
      * The risk-v2 client-context tag for the current request: a bounded,
      * ephemeral base36 tag derived from the coarse capability descriptor,
      * see {@see ClientContextTag::derive()}, keyed to the deployment

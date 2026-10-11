@@ -193,7 +193,7 @@ final class TargetProtectionKernelTest extends TestCase
         try {
             $patterns = [
                 '{kiwi:'.TargetProtectionTestKernel::NAMESPACE_RAW.'}:*',
-                'pnet:{kiwi:'.TargetProtectionTestKernel::NAMESPACE_RAW.'}:*',
+                'pnet:{kiwi:'.TargetProtectionTestKernel::NAMESPACE_RAW.':*}',
             ];
             foreach ($patterns as $pattern) {
                 $keys = $redis->keys($pattern);
@@ -274,6 +274,7 @@ final class TargetProtectionKernelTest extends TestCase
     private function request(string $ip, string $method = 'GET', array $body = [], array $attributes = [], ?Session $session = null, array $cookies = []): Request
     {
         $request = Request::create('https://app.example.com/login', $method, $body, $cookies, [], [self::remoteKey => $ip]);
+        $request->attributes->set('_firewall_context', 'security.firewall.map.context.main');
         foreach ($attributes as $name => $value) {
             $request->attributes->set($name, $value);
         }

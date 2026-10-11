@@ -25,6 +25,13 @@ abstract class DoctorCarrierTestKernel extends TestKernel
         parent::build($container);
         $container->register(self::FAKE_REDIS_ID, FakePredisClient::class)
             ->setPublic(true);
+        // The real delivery seams the carrier answerability audits: a
+        // named carrier passes only when its codes actually leave the
+        // deployment (never the logging dev sender).
+        $container->register('doctor.carrier.ownership_sender', \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\Fixtures\DoctorCarrierOwnershipSender::class)
+            ->setPublic(true);
+        $container->register('doctor.carrier.otp_sender', \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\Fixtures\DoctorCarrierOtpSender::class)
+            ->setPublic(true);
     }
 
     public function registerContainerConfiguration(LoaderInterface $loader): void
@@ -33,6 +40,9 @@ abstract class DoctorCarrierTestKernel extends TestKernel
             $container->loadFromExtension('framework', [
                 'secret' => 'test-secret',
                 'test' => true,
+                'router' => [
+                    'resource' => __DIR__.'/Fixtures/doctor_carrier_routes.php',
+                ],
             ]);
             $container->loadFromExtension('twig', [
                 'form_themes' => ['@KiwiCaptcha/form_div_layout.html.twig'],
@@ -46,7 +56,8 @@ abstract class DoctorCarrierTestKernel extends TestKernel
     /**
      * The shared scope matrix: the critical admin scope prices beyond
      * its rung and is carried by the login gate; the low signup scope
-     * is carried by the email grant.
+     * is carried by the email grant. Both code factors carry real
+     * senders, so a named carrier is answerable end to end.
      *
      * @return array<string, mixed>
      */
@@ -64,15 +75,21 @@ abstract class DoctorCarrierTestKernel extends TestKernel
                     'admin_login' => ['id' => 30, 'value_class' => 'critical', 'login_step_up' => 'always'],
                     'signup' => ['id' => 31, 'value_class' => 'low', 'carrier' => 'step_up_email'],
                 ],
+                // The gate check audits the guard the login map arms,
+                // and the default financial_action row names the totp
+                // carrier, so the plane carries both named factors.
+                'login_scopes' => ['main' => 'admin_login'],
                 'step_up' => [
                     'enabled' => true,
                     'scope' => 'signup',
                     'default_handler' => 'email_otp',
                     'handlers' => [
-                        'email_otp' => ['enabled' => true],
+                        'email_otp' => ['enabled' => true, 'sender' => 'doctor.carrier.otp_sender'],
+                        'totp' => ['enabled' => true],
                     ],
                     'email_ownership' => [
                         'enabled' => $emailOwnershipEnabled,
+                        'sender' => 'doctor.carrier.ownership_sender',
                     ],
                 ],
             ],

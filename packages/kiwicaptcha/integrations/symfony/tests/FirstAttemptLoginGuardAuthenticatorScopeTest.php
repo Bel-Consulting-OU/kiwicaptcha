@@ -109,12 +109,14 @@ final class FirstAttemptLoginGuardAuthenticatorScopeTest extends TestCase
             }
         };
         $stack = new RequestStack();
-        $stack->push(Request::create('https://example.com/login', 'POST', [], [], [], ['Remote_ADDR' => '203.0.113.10']));
+        $request = Request::create('https://example.com/login', 'POST', [], [], [], ['Remote_ADDR' => '203.0.113.10']);
+        $request->attributes->set('_firewall_context', 'security.firewall.map.context.main');
+        $stack->push($request);
 
         return new FirstAttemptLoginGuard(
             $gateway,
             new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x11", 32))),
-            'login',
+            ['main' => 'login'],
             requestStack: $stack,
         );
     }

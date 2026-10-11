@@ -191,7 +191,7 @@ final class LoginGuardContinuityKernelTest extends TestCase
             // an Allow, so every family goes.
             $patterns = [
                 '{kiwi:'.LoginGuardContinuityTestKernel::NAMESPACE_RAW.'}:*',
-                'pnet:{kiwi:'.LoginGuardContinuityTestKernel::NAMESPACE_RAW.'}:*',
+                'pnet:{kiwi:'.LoginGuardContinuityTestKernel::NAMESPACE_RAW.':*}',
             ];
             foreach ($patterns as $pattern) {
                 $keys = $redis->keys($pattern);
@@ -266,7 +266,10 @@ final class LoginGuardContinuityKernelTest extends TestCase
 
     private function request(string $ip, string $uri = '/login', string $method = 'GET', array $body = [], array $cookies = []): Request
     {
-        return Request::create('https://app.example.com'.$uri, $method, $body, $cookies, [], [self::remoteKey => $ip]);
+        $request = Request::create('https://app.example.com'.$uri, $method, $body, $cookies, [], [self::remoteKey => $ip]);
+        $request->attributes->set('_firewall_context', 'security.firewall.map.context.main');
+
+        return $request;
     }
 
     /**
@@ -394,7 +397,7 @@ final class LoginGuardContinuityKernelTest extends TestCase
         $haystack = [];
         $keys = array_merge(
             $redis->keys('{kiwi:'.LoginGuardContinuityTestKernel::NAMESPACE_RAW.'}:*'),
-            $redis->keys('pnet:{kiwi:'.LoginGuardContinuityTestKernel::NAMESPACE_RAW.'}:*'),
+            $redis->keys('pnet:{kiwi:'.LoginGuardContinuityTestKernel::NAMESPACE_RAW.':*}'),
         );
         foreach ($keys as $key) {
             $haystack[] = (string) $key;

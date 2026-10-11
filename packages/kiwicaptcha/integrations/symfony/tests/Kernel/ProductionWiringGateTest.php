@@ -202,20 +202,126 @@ final class ProductionWiringGateTest extends TestCase
     {
         $container = $this->boot('abuse_first');
         $guard = $container->get(FirstAttemptLoginGuard::class);
-        $targetFields = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'targetFields'))->getValue($guard);
+        $targetFieldsByScope = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'targetFieldsByScope'))->getValue($guard);
         self::assertSame(
-            ['username'],
-            $targetFields,
-            'the login scope declares target_field username, so the guard must pass non-empty targetFields (F14)',
+            ['login' => ['username']],
+            $targetFieldsByScope,
+            'the login scope declares target_field username, so the guard must carry it under the resolved scope (F14)',
         );
 
-        // The negative: a scope without a target field leaves the guard
-        // empty (the assessment then carries no target dimension), and
-        // the wiring must not invent a field name.
+        // The negative: a scope without a target field leaves the
+        // guard's entry empty (the assessment then carries no target
+        // dimension), and the wiring must not invent a field name.
         $container = $this->boot('abuse_first', 'no-target-field', withTargetField: false);
         $guard = $container->get(FirstAttemptLoginGuard::class);
-        $targetFields = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'targetFields'))->getValue($guard);
-        self::assertSame([], $targetFields, 'a scope without target_field wires no target fields');
+        $targetFieldsByScope = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'targetFieldsByScope'))->getValue($guard);
+        self::assertSame(['login' => []], $targetFieldsByScope, 'a scope without target_field wires an empty list');
+    }
+
+    /**
+     * The H1 regression: a minimal abuse_first install (no outcomes
+     * scope, no explicit login_scopes) must still arm the guard, and
+     * the profile-derived map must resolve the conventional main
+     * firewall to the login scope. The gate follows risk.login_scopes,
+     * never the outcomes bridge.
+     */
+    public function testMinimalAbuseFirstInstallArmsTheGuard(): void
+    {
+        $container = $this->boot('abuse_first', 'minimal');
+        self::assertTrue($container->has(FirstAttemptLoginGuard::class), 'the minimal abuse_first install must arm the first-attempt guard');
+        /** @var FirstAttemptLoginGuard $guard */
+        $guard = $container->get(FirstAttemptLoginGuard::class);
+        $loginScopes = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'loginScopes'))->getValue($guard);
+        self::assertSame(['main' => 'login'], $loginScopes, 'the profile defaults the main firewall to the login scope');
+
+        // The per-event resolution is live: an event whose firewall has
+        // no entry is outside the gate's mandate, so the token stays
+        // intact and the skip is counted (the enforcing posture must
+        // see how many logins bypass the gate).
+        $counters = $container->get('kiwi_captcha.metrics_counters');
+        $server = ['REMOTE_ADDR' => '203.0.113.10'];
+        $request = \Symfony\Component\HttpFoundation\Request::create('https://app.example.com/sso', 'POST', [], [], [], $server);
+        $request->attributes->set('_firewall_context', 'security.firewall.map.context.sso');
+        $stack = $container->get('request_stack');
+        $stack->push($request);
+        $event = new class ($this->wiredToken()) {
+            public function __construct(private object $token)
+            {
+            }
+
+            public function getAuthenticatedToken(): object
+            {
+                return $this->token;
+            }
+
+            public function setAuthenticatedToken(object $token): void
+            {
+                $this->token = $token;
+            }
+        };
+        $guard->onTokenCreated($event);
+        self::assertNotInstanceOf(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken::class, $event->getAuthenticatedToken(), 'an unmapped firewall is skipped, not withheld');
+        self::assertSame(1, $counters->all()['kiwi_login_guard_unmapped_total'] ?? 0, 'the unmapped skip is counted');
+    }
+
+    /**
+     * Two firewalls, two policies. The admin firewall resolves its
+     * own scope, and the always mode withholds its session on every
+     * login. The user firewall stays risk-gated: its Allow decisions
+     * grant the session, and its scope booking carries the standard
+     * value class.
+     */
+    public function testTwoFirewallsResolveTheirOwnScopes(): void
+    {
+        $container = $this->boot('abuse_first', 'two-firewalls');
+        /** @var FirstAttemptLoginGuard $guard */
+        $guard = $container->get(FirstAttemptLoginGuard::class);
+        $loginScopes = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'loginScopes'))->getValue($guard);
+        self::assertSame(['main' => 'login', 'admin' => 'admin_login'], $loginScopes, 'each firewall maps to its own scope');
+        $modes = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'loginStepUpByScope'))->getValue($guard);
+        self::assertSame('always', $modes['admin_login'] ?? 'risk', 'the admin scope configures login_step_up always');
+        self::assertSame('risk', $modes['login'] ?? 'risk', 'the user scope stays risk-gated');
+        $fields = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'targetFieldsByScope'))->getValue($guard);
+        self::assertSame(['username'], $fields['login'] ?? [], 'the user scope carries the target field under its own key');
+        self::assertSame([], $fields['admin_login'] ?? null, 'the admin scope declares no target field');
+
+        // Behavior: the admin firewall's login is withheld (always,
+        // whatever the engine decided) and the pending token stamps the
+        // admin scope, so the step-up flow books under it.
+        $stack = $container->get('request_stack');
+        $adminServer = ['REMOTE_ADDR' => '203.0.113.10'];
+        $adminRequest = \Symfony\Component\HttpFoundation\Request::create('https://app.example.com/admin/login', 'POST', [], [], [], $adminServer);
+        $adminRequest->attributes->set('_firewall_context', 'security.firewall.map.context.admin');
+        $stack->push($adminRequest);
+        $event = new class ($this->wiredToken()) {
+            public function __construct(private object $token)
+            {
+            }
+
+            public function getAuthenticatedToken(): object
+            {
+                return $this->token;
+            }
+
+            public function setAuthenticatedToken(object $token): void
+            {
+                $this->token = $token;
+            }
+        };
+        $guard->onTokenCreated($event);
+        $pending = $event->getAuthenticatedToken();
+        self::assertInstanceOf(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken::class, $pending, 'the admin firewall withholds the session under the always mode');
+        self::assertSame('admin_login', $pending->scope(), 'the admin login books the step-up under the admin scope');
+    }
+
+    /** A real token shape the guard can unwrap an identifier from. */
+    private function wiredToken(): \Symfony\Component\Security\Core\Authentication\Token\TokenInterface
+    {
+        return new \Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken(
+            new \Symfony\Component\Security\Core\User\InMemoryUser('wired-user', null, ['ROLE_USER']),
+            'main',
+            ['ROLE_USER'],
+        );
     }
 
     /**
@@ -456,12 +562,52 @@ final class ProductionWiringGateKernel extends Kernel
     {
         $profile = $this->profile;
         $withTargetField = $this->withTargetField;
-        $loader->load(function (ContainerBuilder $container) use ($profile, $withTargetField): void {
+        $variant = $this->variant;
+        $loader->load(function (ContainerBuilder $container) use ($profile, $withTargetField, $variant): void {
             $container->register('fake_redis', FakePredisClient::class)->setPublic(true);
             $container->loadFromExtension('framework', [
                 'secret' => 'test-secret',
                 'test' => true,
             ]);
+            // The minimal variant is the H1 regression surface: the
+            // profile alone (no outcomes scope, no explicit login map,
+            // no explicit risk.enabled) must arm the whole first-attempt
+            // defense.
+            if ($variant === 'minimal') {
+                $container->loadFromExtension('kiwi_captcha', [
+                    'secret_key' => '0123456789abcdef0123456789abcdef',
+                    'protection_profile' => $profile,
+                    'risk' => [
+                        'redis_service' => 'fake_redis',
+                        'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
+                    ],
+                ]);
+
+                return;
+            }
+            // The two-firewall variant: a user login and an admin login
+            // resolve their own scopes (the admin scope carries the
+            // always mode, the user scope stays risk-gated).
+            if ($variant === 'two-firewalls') {
+                $container->loadFromExtension('kiwi_captcha', [
+                    'secret_key' => '0123456789abcdef0123456789abcdef',
+                    'protection_profile' => $profile,
+                    'risk' => [
+                        'enabled' => true,
+                        'redis_service' => 'fake_redis',
+                        'namespace' => 'wiring-gate-two',
+                        'scopes' => [
+                            'login' => ['id' => 10, 'target_field' => 'username'],
+                            'admin_login' => ['id' => 30, 'value_class' => 'critical', 'login_step_up' => 'always'],
+                        ],
+                        'login_scopes' => ['main' => 'login', 'admin' => 'admin_login'],
+                        'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
+                        'outcomes' => ['scope' => 'login'],
+                    ],
+                ]);
+
+                return;
+            }
             $scope = ['id' => 10, 'value_class' => 'critical'];
             if ($withTargetField) {
                 $scope['target_field'] = 'username';
@@ -483,6 +629,7 @@ final class ProductionWiringGateKernel extends Kernel
                     'redis_service' => 'fake_redis',
                     'namespace' => 'wiring-gate',
                     'scopes' => ['login' => $scope],
+                    'login_scopes' => ['main' => 'login'],
                     'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                     'outcomes' => ['scope' => 'login'],
                 ],

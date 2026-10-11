@@ -52,6 +52,9 @@ final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKerne
                     'asn' => ['dataset_path' => RiskStageMatrixTestKernel::asnFixturePath()],
                 'namespace' => 'doctor-v3',
                 'redis_service' => self::FAKE_REDIS_ID,
+                // The gate check under a non-abuse profile: the login
+                // map arms the guard the enforcing posture demands.
+                'login_scopes' => ['main' => 'login'],
             ],
         ];
         if ($this->profile !== 'high_abuse') {

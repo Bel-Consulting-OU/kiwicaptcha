@@ -137,7 +137,12 @@ final class SessionRestorer
             try {
                 $network = self::networkBucket($ip);
                 if ($network !== '') {
-                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, $network);
+                    // The completed factor is the trust event: the
+                    // restore binds the network with the trust flag
+                    // minted, exactly like the engine's post-Allow
+                    // learn history, so the next login from this
+                    // network rides the established history.
+                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, $network, trusted: true);
                 }
             } catch (\Throwable $e) {
                 $this->logger?->warning('kiwi step-up session restore: network record failed: {message}', [
@@ -147,7 +152,7 @@ final class SessionRestorer
             try {
                 $asn = $this->asnBucket($ip);
                 if ($asn !== '') {
-                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'asn:'.$asn);
+                    $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, 'asn:'.$asn, trusted: true);
                 }
             } catch (\Throwable $e) {
                 $this->logger?->warning('kiwi step-up session restore: asn record failed: {message}', [

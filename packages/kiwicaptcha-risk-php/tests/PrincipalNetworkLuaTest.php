@@ -32,7 +32,7 @@ final class PrincipalNetworkLuaTest extends TestCase
         $this->client->ping();
     }
 
-    private function store(int $sessionCap = 32, int $deviceCap = 16): RedisPrincipalNetworkTagStore
+    private function store(int $sessionCap = 32, int $deviceCap = 16, bool $migrateLegacy = true): RedisPrincipalNetworkTagStore
     {
         return new RedisPrincipalNetworkTagStore(
             $this->client,
@@ -42,6 +42,7 @@ final class PrincipalNetworkLuaTest extends TestCase
             sessionCap: $sessionCap,
             deviceCap: $deviceCap,
             netCap: 64,
+            migrateLegacy: $migrateLegacy,
         );
     }
 
@@ -85,11 +86,30 @@ final class PrincipalNetworkLuaTest extends TestCase
         self::assertFalse($store->principalHasTrustedNetwork(self::PRINCIPAL));
     }
 
-    public function testHasTrustedNetworkIsTrueWithTrust(): void
+    public function testHasTrustedNetworkIsTrueWithATrustedNetworkTag(): void
+    {
+        $store = $this->store();
+        // A trusted network-class tag is what makes the account
+        // network-trusted (the novelty gate's fallback evidence).
+        $store->recordPrincipalNetworkTag(self::PRINCIPAL, 'asn:64496', trusted: true);
+        self::assertTrue($store->principalHasTrustedNetwork(self::PRINCIPAL));
+    }
+
+    /**
+     * The any-trusted probe counts only the network classes: session
+     * and device mirrors are the continuity plane's evidence, so a
+     * bound cookie vouches for a browser and never makes the account
+     * network-trusted.
+     */
+    public function testASessionOrDeviceMirrorAloneIsNotATrustedNetwork(): void
     {
         $store = $this->store();
         $store->recordPrincipalNetworkTag(self::PRINCIPAL, 'session:aaaa0000000000000000000000000003', trusted: true);
-        self::assertTrue($store->principalHasTrustedNetwork(self::PRINCIPAL));
+        $store->recordPrincipalNetworkTag(self::PRINCIPAL, 'device:bbbb0000000000000000000000000009', trusted: true);
+        self::assertFalse(
+            $store->principalHasTrustedNetwork(self::PRINCIPAL),
+            'a bound session or device is continuity evidence, never a trusted network',
+        );
     }
 
     public function testLruEvictsOldestSessionAboveCap(): void
@@ -205,6 +225,64 @@ final class PrincipalNetworkLuaTest extends TestCase
             }
         }
         self::assertSame(4, $refused, 'every out-of-range or missing read TTL is refused');
+    }
+
+    /**
+     * The read-through migration: history recorded under the legacy
+     * shared-tag key (the spelling deployments wrote before the
+     * principal moved into the hash tag) answers under the current key
+     * after the first miss migrates it, and the legacy key is deleted.
+     */
+    public function testLegacyKeyHistoryIsMigratedOnAMiss(): void
+    {
+        $store = $this->store();
+        $now = (string) (int) floor(microtime(true) * 1000);
+        $legacyKey = $store->legacyTagKey(self::PRINCIPAL);
+        $deviceTag = 'device:bbbb0000000000000000000000000010';
+        $this->client->hset($legacyKey, 'net:040a010203', $now);
+        $this->client->hset($legacyKey, 't:net:040a010203', '1');
+        $this->client->hset($legacyKey, $deviceTag, $now);
+        $this->client->hset($legacyKey, 't:'.$deviceTag, '1');
+
+        // The first miss under the current key migrates and re-reads.
+        self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010203'));
+        self::assertTrue($store->tagIsTrusted(self::PRINCIPAL, $deviceTag));
+        self::assertTrue($store->principalHasTrustedNetwork(self::PRINCIPAL));
+        // The legacy key is deleted after the copy.
+        self::assertSame(0, (int) $this->client->exists($legacyKey));
+    }
+
+    /**
+     * The migration probes the legacy key once per principal per
+     * process: a record written to the legacy key after the one-shot
+     * migration ran is never re-read by the same store instance.
+     */
+    public function testLegacyMigrationRunsOncePerPrincipal(): void
+    {
+        $store = $this->store();
+        $now = (string) (int) floor(microtime(true) * 1000);
+        $legacyKey = $store->legacyTagKey(self::PRINCIPAL);
+        $this->client->hset($legacyKey, 'net:040a010203', $now);
+        self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010203'));
+
+        // A late legacy write is not re-read: the probe is one-shot.
+        $this->client->hset($legacyKey, 'net:040a010204', $now);
+        self::assertFalse($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010204'));
+    }
+
+    /**
+     * With the migration turned off, a miss stays a miss and the
+     * legacy key stays untouched (the operator's off switch after the
+     * one-release window).
+     */
+    public function testTheMigrationCanBeTurnedOff(): void
+    {
+        $store = $this->store(migrateLegacy: false);
+        $now = (string) (int) floor(microtime(true) * 1000);
+        $legacyKey = $store->legacyTagKey(self::PRINCIPAL);
+        $this->client->hset($legacyKey, 'net:040a010203', $now);
+        self::assertFalse($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010203'));
+        self::assertSame(1, (int) $this->client->exists($legacyKey), 'the legacy key survives with the migration off');
     }
 
     public function testInvalidTagIsRefused(): void

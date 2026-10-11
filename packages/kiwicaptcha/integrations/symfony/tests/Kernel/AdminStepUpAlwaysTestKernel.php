@@ -83,6 +83,7 @@ final class AdminStepUpAlwaysTestKernel extends TestKernel
                     'scopes' => [
                         'admin_login' => ['id' => 30, 'login_step_up' => 'always'],
                     ],
+                    'login_scopes' => ['main' => 'admin_login'],
                     'outcomes' => [
                         'auto_bridge' => true,
                         'scope' => 'admin_login',

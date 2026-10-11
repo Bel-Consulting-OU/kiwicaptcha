@@ -169,7 +169,10 @@ final class AdminLoginStepUpJourneyTest extends TestCase
 
     private function request(string $ip, string $uri = '/login', string $method = 'GET', array $body = []): Request
     {
-        return Request::create('https://app.example.com'.$uri, $method, $body, [], [], [self::remoteKey => $ip]);
+        $request = Request::create('https://app.example.com'.$uri, $method, $body, [], [], [self::remoteKey => $ip]);
+        $request->attributes->set('_firewall_context', 'security.firewall.map.context.main');
+
+        return $request;
     }
 
     private function session(string $id): Session

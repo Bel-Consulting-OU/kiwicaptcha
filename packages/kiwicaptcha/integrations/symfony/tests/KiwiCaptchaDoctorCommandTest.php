@@ -1081,7 +1081,17 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
     {
         $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
             new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
-            [['secret_key' => str_repeat('a', 32), 'risk' => ['enabled' => true]]],
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'risk' => [
+                    'enabled' => true,
+                    // The gate check audits the guard the extension wires;
+                    // the direct constructions carry the armed wiring
+                    // explicitly, so the check under study stays the
+                    // subject of each assertion.
+                    'login_scopes' => ['main' => 'login'],
+                ],
+            ]],
         );
         self::assertIsArray($config);
         if ($mutate !== null) {
@@ -1104,6 +1114,24 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
             $redis,
             null,
             null,
+            null,
+            null,
+            null,
+            // The armed post-credential gate the login_scopes entry
+            // promises: the gate check then audits the posture against
+            // a real wiring instead of its absence.
+            new \BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard(
+                new class implements \BelConsulting\KiwiCaptchaBundle\Risk\LoginDecisionGate {
+                    public function loginDecision(string $scope, string $ip, ?string $session = null, ?string $principal = null, ?string $idempotencyKey = null, ?string $device = null, array $targetFields = []): ?\KiwiCaptcha\Risk\RiskDecision
+                    {
+                        return null;
+                    }
+                },
+                new \KiwiCaptcha\Risk\RiskIdentityFactory(
+                    \KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('b', 32)),
+                ),
+                ['main' => 'login'],
+            ),
         );
 
         return new CommandTester($command);

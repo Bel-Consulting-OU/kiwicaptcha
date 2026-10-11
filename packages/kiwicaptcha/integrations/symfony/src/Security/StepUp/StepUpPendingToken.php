@@ -21,6 +21,16 @@ final class StepUpPendingToken implements TokenInterface
     /** The only role the pending token grants. */
     public const ROLE = 'IS_KIWI_STEP_UP_PENDING';
 
+    /**
+     * The attribute carrying the risk scope the demand was raised
+     * under. The first-attempt gate stamps the scope it resolved for
+     * the login (the risk.login_scopes target of the event's firewall)
+     * onto the pending token. The step-up flow books its challenge
+     * under that scope per event. The attribute is serialized with the
+     * token, so the scope survives the session round-trip.
+     */
+    public const SCOPE_ATTRIBUTE = '_kiwi_step_up_scope';
+
     /** @var array<string, mixed> */
     private array $attributes = [];
 
@@ -32,6 +42,23 @@ final class StepUpPendingToken implements TokenInterface
     public function getWrapped(): TokenInterface
     {
         return $this->inner;
+    }
+
+    /**
+     * The risk scope the demand was raised under, null when the token
+     * carries none (a token built outside the guard).
+     */
+    public function scope(): ?string
+    {
+        $scope = $this->attributes[self::SCOPE_ATTRIBUTE] ?? null;
+        if (!\is_string($scope) || $scope === '') {
+            return null;
+        }
+        if (preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) !== 1) {
+            return null;
+        }
+
+        return $scope;
     }
 
     public function __toString(): string

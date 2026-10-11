@@ -1483,6 +1483,69 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             decision = drop_quarantine_on_escalation(decision);
         }
         self.record_decision_metrics(ctx.scope, &decision);
+        // Session-to-principal binding (post-Allow, mirrors the PHP
+        // AdaptiveRiskEngine block): a successful (non-pending) login
+        // records the session pseudonym under the principal so "device
+        // continuity" means "this session was used by this principal
+        // before", never "a cookie was presented". A fresh or
+        // attacker-minted cookie has no binding and cannot vouch for
+        // anyone. Pending (step-up) logins bind at restore.
+        //
+        // The trust flag on the session and the device binding follows
+        // the enforcement verdict: the trust is minted when the Allow
+        // is one enforce mode would also have allowed (a known
+        // network, readable history — the unmasked verdict the
+        // first-attempt stage carried out of the pipeline). An Allow
+        // that enforce mode would have stepped up (a genuinely novel
+        // network, or unreadable history) records the session and the
+        // device without the trust flag, even in learn mode: the
+        // step-up demand is only deferred there, so an attacker with
+        // stolen credentials can never leave a trusted device under
+        // the victim by riding the rollout window.
+        //
+        // The same Allow also records the network bucket and the ASN
+        // bucket with the trust flag minted (the learn history: the
+        // novelty gate's seen-ness accrues from every granted login,
+        // which is what keeps a known carrier from stepping up every
+        // future mobile login). Each write stands alone: one failed
+        // record never masks the others, and no binding write ever
+        // breaks the login.
+        if ctx.event == RiskEventKind::AuthenticationSuccess && decision.action == RiskAction::Allow
+        {
+            if let (Some(networks), Some(principal)) =
+                (&self.principal_networks, &observation.principal_id)
+            {
+                let principal_hex = hex::encode(principal);
+                let mint_trust = !first_attempt.would_step_up_under_enforce;
+                if let Some(session) = &observation.session_id {
+                    let _ = networks.record_principal_network_tag(
+                        &principal_hex,
+                        &format!("session:{}", hex::encode(session)),
+                        mint_trust,
+                    );
+                }
+                if let Some(device) = &observation.device_id {
+                    let _ = networks.record_principal_network_tag(
+                        &principal_hex,
+                        &format!("device:{}", hex::encode(device)),
+                        mint_trust,
+                    );
+                }
+                let _ = networks.record_principal_network_tag(
+                    &principal_hex,
+                    &network_bucket(ctx.source_ip),
+                    true,
+                );
+                let asn = self.asn_bucket_of(&ctx.source_ip);
+                if !asn.is_empty() && asn != "0" {
+                    let _ = networks.record_principal_network_tag(
+                        &principal_hex,
+                        &format!("asn:{asn}"),
+                        true,
+                    );
+                }
+            }
+        }
         Ok(self.finalize_decision(ctx.scope, decision, decision_id, outcome_registered))
     }
 
@@ -1657,17 +1720,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
 
                 // Device continuity: the session or the device pseudonym
                 // was bound to this principal with trust minted (an
-                // Allow or a completed step-up). A fresh or
-                // attacker-minted cookie is never continuity. Both
-                // identities are probed: the continuity cookie may have
-                // expired while the trusted-device cookie still vouches.
+                // Allow or a completed step-up). The strict probe reads
+                // the minted trust flag (`tag_is_trusted`), never the
+                // bare seen-ness: a fresh or attacker-minted cookie may
+                // have been *seen* (the learning history records every
+                // granted login), but only a trust-minting Allow or a
+                // completed step-up can vouch for it. Both identities
+                // are probed: the continuity cookie may have expired
+                // while the trusted-device cookie still vouches.
                 let mut device_continuity = false;
                 if let Some(sid) = &observation.session_id {
                     let sid_hex = hex::encode(sid);
-                    match networks
-                        .principal_network_seen(&principal_hex, &format!("session:{sid_hex}"))
-                    {
-                        Ok(seen) => device_continuity |= seen == Some(true),
+                    match networks.tag_is_trusted(&principal_hex, &format!("session:{sid_hex}")) {
+                        Ok(trusted) => device_continuity |= trusted == Some(true),
                         Err(_) => {
                             evidence_unavailable = true;
                         }
@@ -1675,10 +1740,8 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 }
                 if let Some(did) = &observation.device_id {
                     let did_hex = hex::encode(did);
-                    match networks
-                        .principal_network_seen(&principal_hex, &format!("device:{did_hex}"))
-                    {
-                        Ok(seen) => device_continuity |= seen == Some(true),
+                    match networks.tag_is_trusted(&principal_hex, &format!("device:{did_hex}")) {
+                        Ok(trusted) => device_continuity |= trusted == Some(true),
                         Err(_) => {
                             evidence_unavailable = true;
                         }

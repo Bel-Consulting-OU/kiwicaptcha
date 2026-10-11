@@ -145,6 +145,21 @@ final class StepUpHandlersTest extends TestCase
                 return $this->inner->countBegin($principalPseudonym, $windowSecs);
             }
 
+            public function createDemand(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand $demand, int $ttlSecs): string
+            {
+                return $this->inner->createDemand($demand, $ttlSecs);
+            }
+
+            public function readDemand(string $demandId): ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand
+            {
+                return $this->inner->readDemand($demandId);
+            }
+
+            public function consumeDemand(string $demandId): ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand
+            {
+                return $this->inner->consumeDemand($demandId);
+            }
+
             public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void
             {
                 $this->inner->saveTotpSecret($principalPseudonym, $secretRaw);

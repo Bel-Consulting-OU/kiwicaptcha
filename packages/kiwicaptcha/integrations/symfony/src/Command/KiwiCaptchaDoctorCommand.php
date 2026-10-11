@@ -7,11 +7,16 @@ namespace BelConsulting\KiwiCaptchaBundle\Command;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\RiskStageComposition;
 use BelConsulting\KiwiCaptchaBundle\Economics\ValueClassCeiling;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipCodeSenderInterface;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingEmailOwnershipCodeSender;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use Composer\InstalledVersions;
 use KiwiCaptcha\AtomicDeleteIfPendingInterface;
@@ -83,13 +88,30 @@ final class KiwiCaptchaDoctorCommand extends Command
     private const ARGON_MEMORY_CEILING_KIB = 65536;
 
     /**
-     * @param array<string, mixed>                     $config the effective processed
-     *        configuration (profile-derived defaults included), the
-     *        same array the extension consumed
+     * @param array<string, mixed> $config the effective processed
+     *        configuration, profile-derived defaults included. The
+     *        same array the extension consumed.
      * @param array<string, PinnedPrimaryAuthorityGuard>|null $authorityGuards
      *        the wired pinned-primary guards keyed by authority label
-     *        ("storage", "risk"), null/empty when ha_authority is not
-     *        pinned_primary
+     *        ("storage", "risk"). Null or empty when ha_authority is
+     *        not pinned_primary.
+     * @param FirstAttemptLoginGuard|null $firstAttemptGuard the wired
+     *        post-credential gate. Null when the risk.login_scopes map
+     *        armed nothing.
+     * @param StepUpCodeSenderInterface|null $emailOtpSender the resolved
+     *        delivery seam of the enabled email one-time-passcode
+     *        handler. Null when the factor is off.
+     * @param EmailOwnershipCodeSenderInterface|null $emailOwnershipSender
+     *        the resolved delivery seam of the enabled anonymous
+     *        email-ownership factor. Null when the factor is off.
+     * @param PrincipalResolverInterface|null $principalResolver the
+     *        application's step-up principal resolver. Null when the
+     *        application never registered one.
+     * @param StepUpLockoutGuard|null $stepUpGuard the step-up plane's
+     *        per-principal lockout guard. Null when the plane is not
+     *        wired.
+     * @param RouterInterface|null $router the application router. Null
+     *        when the container carries no router.
      */
     public function __construct(
         private readonly string $environment,
@@ -104,6 +126,12 @@ final class KiwiCaptchaDoctorCommand extends Command
         private readonly ?array $authorityGuards = null,
         private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
         private readonly ?\Closure $apcEnableCliProbe = null,
+        private readonly ?FirstAttemptLoginGuard $firstAttemptGuard = null,
+        private readonly ?StepUpCodeSenderInterface $emailOtpSender = null,
+        private readonly ?EmailOwnershipCodeSenderInterface $emailOwnershipSender = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface $principalResolver = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpLockoutGuard $stepUpGuard = null,
+        private readonly ?\Symfony\Component\Routing\RouterInterface $router = null,
     ) {
         parent::__construct();
     }
@@ -139,6 +167,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Risk Redis' => $this->checkRiskRedis(),
             'ASN dataset' => $this->checkAsnDataset(),
             'Principal-network store' => $this->checkPrincipalNetworks(),
+            'First-attempt gate' => $this->checkFirstAttemptGuard(),
             'Risk scope policy' => $this->checkScopePolicy(),
             'Value-class pricing' => $this->checkValueClassPricing(),
             'Carrier factors' => $this->checkCarrierFactors(),
@@ -146,6 +175,8 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Protocol-v3 writer' => $this->checkV3Writer(),
             'Decoy escalation gate' => $this->checkDecoyEscalationGate(),
             'Step-up bootstrap factor' => $this->checkStepUpBootstrap(),
+            'Step-up delivery' => $this->checkStepUpDelivery(),
+            'Step-up routes' => $this->checkStepUpRoutes(),
             'Execution versioning' => $this->checkExecutionVersioning(),
             'Argon memory envelope' => $this->checkArgonEnvelope(),
             'Argon concurrency' => $this->checkArgonConcurrency(),
@@ -757,8 +788,116 @@ final class KiwiCaptchaDoctorCommand extends Command
         if ($probe !== null && !\is_bool($probe)) {
             return ['FAIL', 'principal-network store probe returned a non-boolean answer: the engine cannot read network history'];
         }
+        // The marks stage off while novelty enforcement runs: the
+        // engine's fallback keeps the first-attempt gate alive without
+        // a reader, but every other marks protection (the Argon64
+        // floor on a marked identity, the deny on corroborated marks,
+        // the attacked-target escalation) exists only when a reader is
+        // wired. The state is legitimate (marks are a deliberate
+        // knob), so the posture gap is a warning, not a failure.
+        $marksEnabled = $this->config['risk']['marks']['enabled'] ?? null;
+        if ($marksEnabled === false) {
+            return [self::LEVEL_WARN, sprintf(
+                'novelty_enforcement is "%s" but the marks stage is off (risk.marks.enabled: false): the first-attempt gate still runs through the engine\'s own fallback, and no mark ever escalates, denies or protects an attacked target. Wire the marks reader (risk.marks.enabled: true) unless the plain pipeline is a deliberate posture',
+                $novelty,
+            )];
+        }
 
         return ['PASS', sprintf('principal-network store wired and probed (%s), novelty_enforcement=%s', get_class($store), $novelty)];
+    }
+
+    /**
+     * The post-credential gate versus the posture that demands it.
+     * Novelty enforcement (the first-attempt evidence path is the only
+     * writer of the network history it reads) holds only through the
+     * gate. Every login_step_up always scope holds only through the
+     * gate too. A posture carrying either without a wired gate is a
+     * defense that silently never runs. The mirror direction fails
+     * too: a scope configured always must be the target of a
+     * risk.login_scopes entry, or no firewall would ever withhold its
+     * sessions.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkFirstAttemptGuard(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false)) {
+            return ['PASS', 'risk engine disabled: the first-attempt gate is inactive'];
+        }
+        $loginScopes = array_map('strval', (array) ($risk['login_scopes'] ?? []));
+        $alwaysScopes = [];
+        foreach (($risk['scopes'] ?? []) as $name => $scope) {
+            if (\is_array($scope) && ($scope['login_step_up'] ?? null) === 'always') {
+                $alwaysScopes[] = (string) $name;
+            }
+        }
+        $unmappedAlways = array_values(array_diff($alwaysScopes, array_values($loginScopes)));
+        if ($unmappedAlways !== []) {
+            return ['FAIL', sprintf(
+                'scope(s) %s configure login_step_up always but no risk.login_scopes entry maps a firewall to them: the first-attempt gate would never withhold their sessions. Map each always scope to its login firewall (risk.login_scopes: {firewall: scope}).',
+                implode(', ', $unmappedAlways),
+            )];
+        }
+        if ($this->firstAttemptGuard !== null) {
+            return ['PASS', sprintf(
+                'the first-attempt gate is armed for %d firewall(s) (%s); novelty_enforcement=%s, login_step_up always on %d scope(s)',
+                \count($loginScopes),
+                implode(', ', array_keys($loginScopes)),
+                (string) ($risk['novelty_enforcement'] ?? 'learn'),
+                \count($alwaysScopes),
+            )];
+        }
+        $novelty = (string) ($risk['novelty_enforcement'] ?? 'learn');
+        if ($novelty === 'off' && $alwaysScopes === []) {
+            return ['PASS', 'novelty enforcement is off and no scope configures login_step_up always: the gate has nothing to hold, so it is unregistered'];
+        }
+
+        return ['FAIL', sprintf(
+            'novelty_enforcement is "%s" and %d scope(s) configure login_step_up always, but the first-attempt gate is not registered: no firewall maps to a risk scope (risk.login_scopes), so the novelty evidence never runs and the always scopes never withhold a session. Add at least one entry (risk.login_scopes: {firewall: scope}).',
+            $novelty,
+            \count($alwaysScopes),
+        )];
+    }
+
+    /**
+     * The delivery seam of every enabled code factor: a factor that
+     * resolves to the logging dev sender mints codes nobody receives,
+     * so the second factor can never complete and the demand it
+     * answers is a lockout. Production fails the gate; dev and test
+     * warn (the logging lane exists for exactly those environments).
+     * The mailer adapters the extension auto-wires over
+     * symfony/mailer pass this check by construction.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkStepUpDelivery(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false) || !($risk['step_up']['enabled'] ?? false)) {
+            return ['PASS', 'step-up is disabled: no code delivery to audit'];
+        }
+        $logging = [];
+        if (($risk['step_up']['handlers']['email_otp']['enabled'] ?? false)
+            && $this->emailOtpSender instanceof LoggingStepUpCodeSender) {
+            $logging[] = 'the email one-time-passcode handler';
+        }
+        if (($risk['step_up']['email_ownership']['enabled'] ?? false)
+            && $this->emailOwnershipSender instanceof LoggingEmailOwnershipCodeSender) {
+            $logging[] = 'the anonymous email-ownership factor';
+        }
+        if ($logging === []) {
+            return ['PASS', 'every enabled code factor resolves a real delivery seam (not the logging dev sender)'];
+        }
+        $detail = sprintf(
+            '%s deliver(s) through the logging dev sender: no code ever reaches a user, so the factor cannot complete. Install symfony/mailer (the bundle auto-wires its mailer delivery adapter) or bind a real sender service under the risk.step_up sender knobs.',
+            implode(' and ', $logging),
+        );
+        if (\in_array($this->environment, ['test', 'dev'], true)) {
+            return [self::LEVEL_WARN, $detail];
+        }
+
+        return ['FAIL', $detail];
     }
 
     /**
@@ -819,14 +958,52 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
+     * Why a named carrier cannot answer the step-up demands it raises.
+     * The factor must be enabled. Its code delivery must be real: the
+     * logging dev sender mints codes nobody receives. A principal
+     * factor additionally needs a completion path: the lockout guard
+     * or the application's principal resolver. Empty string when the
+     * carrier answers, the reason otherwise.
+     */
+    private function carrierGap(string $carrier): string
+    {
+        $stepUp = $this->config['risk']['step_up'] ?? [];
+        $factors = [
+            'step_up_email' => (bool) ($stepUp['email_ownership']['enabled'] ?? false),
+            'email_otp' => (bool) ($stepUp['handlers']['email_otp']['enabled'] ?? false),
+            'totp' => (bool) ($stepUp['handlers']['totp']['enabled'] ?? false),
+            'webauthn' => (bool) ($stepUp['handlers']['webauthn']['enabled'] ?? false),
+        ];
+        if (!\array_key_exists($carrier, $factors) || !$factors[$carrier]) {
+            return sprintf('the "%s" factor is not enabled under risk.step_up', $carrier);
+        }
+        $delivering = match ($carrier) {
+            'step_up_email' => !$this->emailOwnershipSender instanceof LoggingEmailOwnershipCodeSender,
+            'email_otp' => !$this->emailOtpSender instanceof LoggingStepUpCodeSender,
+            default => true,
+        };
+        if (!$delivering) {
+            return sprintf('the "%s" factor delivers through the logging dev sender, so no code ever reaches a user', $carrier);
+        }
+        if (\in_array($carrier, ['email_otp', 'totp', 'webauthn'], true)
+            && $this->principalResolver === null
+            && $this->stepUpGuard === null) {
+            return sprintf('no principal resolver or lockout guard is wired, so a "%s" demand has no principal-bound completion path', $carrier);
+        }
+
+        return '';
+    }
+
+    /**
      * The value-class pricing check: every configured scope's declared
      * stake must price inside its rung's measured ceiling, or a
      * completable carrier must carry what raw proof of work cannot
-     * price. The carrying knobs: the disposition minimum (step_up or
-     * deny), login_step_up always for the critical and high classes
-     * (the post-credential gate withholds every session until a
-     * principal factor completes), and the step_up_email carrier for
-     * the low class (the anonymous completable grant). The verdict
+     * price. The carrying knobs are three. The disposition minimum
+     * (step_up or deny). login_step_up always for the critical and
+     * high classes: the post-credential gate withholds every session
+     * until a principal factor completes. And a named carrier that
+     * answers: the factor enabled, real delivery, and for the
+     * principal factors a wired completion path. The verdict
      * logic is the shared {@see ValueClassCeiling::verdict()}, so the
      * doctor and the D3.3 campaign answer identically.
      *
@@ -854,6 +1031,8 @@ final class KiwiCaptchaDoctorCommand extends Command
             );
             if ($status !== 'PASS') {
                 $carried = \in_array($minimum, ['step_up', 'deny'], true);
+                $carrier = \is_string($scope['carrier'] ?? null) ? (string) $scope['carrier'] : null;
+                $gap = $carrier !== null ? $this->carrierGap($carrier) : null;
                 if (!$carried && \in_array($valueClass, ['critical', 'high'], true)
                     && ($scope['login_step_up'] ?? null) === 'always') {
                     // The post-credential gate is the carrier: every
@@ -862,14 +1041,28 @@ final class KiwiCaptchaDoctorCommand extends Command
                     // the PoW rung alone.
                     $carried = true;
                 }
+                if (!$carried && \in_array($valueClass, ['critical', 'high'], true)
+                    && \in_array($carrier, ['email_otp', 'totp', 'webauthn'], true)) {
+                    // A named principal factor is the carrier by
+                    // declaration: the scope's stake rides the factor,
+                    // never the PoW rung. The factor's wiring is the
+                    // carrier-factor check's subject, not this one: a
+                    // deployment whose plane is off learns that from
+                    // the warning there, while the stake's design stays
+                    // answerable the day the plane turns on.
+                    $carried = true;
+                }
                 if (!$carried && $valueClass === 'low'
-                    && ($scope['carrier'] ?? null) === 'step_up_email') {
+                    && $carrier === 'step_up_email' && $gap === '') {
                     // The anonymous grant is the carrier: the step-up
                     // demand is answered by proving address ownership,
                     // never by a stronger proof of work.
                     $carried = true;
                 }
                 if (!$carried) {
+                    if ($gap !== null && $gap !== '') {
+                        $detail .= ' (the named carrier does not answer: '.$gap.')';
+                    }
                     $escalations[] = sprintf('%s: %s', $name, $detail);
                     // A critical or high stake sitting on a PoW rung is a
                     // A hard failure, not a warning: raw proof of work cannot carry
@@ -923,10 +1116,35 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', 'no scope names a step-up carrier'];
         }
         if (!($stepUp['enabled'] ?? false)) {
-            return ['FAIL', sprintf(
-                'scope(s) %s name a step-up carrier but the step-up plane is disabled (risk.step_up.enabled): the step-up demand has no completable factor',
-                implode(', ', array_keys($carriers)),
-            )];
+            // The plane is off: no step-up demand can be raised at all.
+            // The anonymous carrier stays a hard failure (its begin path
+            // would be advertised as a dead end in the 403 body), while
+            // a named principal factor is the deployment's declared
+            // carrier for the day the plane turns on, never a dead end
+            // on the current one.
+            $anonymous = [];
+            $principal = [];
+            foreach ($carriers as $scope => $carrier) {
+                if ($carrier === 'step_up_email') {
+                    $anonymous[] = $scope;
+                } else {
+                    $principal[] = sprintf('%s (%s)', $scope, $carrier);
+                }
+            }
+            if ($anonymous !== []) {
+                return ['FAIL', sprintf(
+                    'scope(s) %s name a step-up carrier but the step-up plane is disabled (risk.step_up.enabled): the step-up demand has no completable factor',
+                    implode(', ', $anonymous),
+                )];
+            }
+            if ($principal !== []) {
+                return [self::LEVEL_WARN, sprintf(
+                    'scope(s) %s name a principal step-up carrier while the step-up plane is disabled (risk.step_up.enabled): no step-up demand can be raised until it is on',
+                    implode(', ', $principal),
+                )];
+            }
+
+            return ['PASS', 'no scope names a step-up carrier'];
         }
         $factors = [
             'step_up_email' => (bool) ($stepUp['email_ownership']['enabled'] ?? false),
@@ -943,13 +1161,81 @@ final class KiwiCaptchaDoctorCommand extends Command
             }
             if (!$factors[$carrier]) {
                 $dead[] = sprintf('%s names "%s" but that factor is not enabled', $scope, $carrier);
+
+                continue;
+            }
+            // An enabled factor is not enough: the demand the carrier
+            // raises must be answerable end to end. A code factor that
+            // delivers through the logging dev sender, or a principal
+            // factor with no lockout guard and no principal resolver,
+            // leaves the 403 advertising a dead end.
+            $gap = $this->carrierGap($carrier);
+            if ($gap !== '') {
+                $dead[] = sprintf('%s names "%s" but %s', $scope, $carrier, $gap);
             }
         }
         if ($dead !== []) {
-            return ['FAIL', sprintf('%d carrier scope(s) name a factor that is not enabled (%s): enable the factor under risk.step_up or drop the carrier', \count($dead), implode('; ', $dead))];
+            return ['FAIL', sprintf('%d carrier scope(s) name an unanswerable factor (%s): fix the delivery seam or the completion path under risk.step_up, or drop the carrier', \count($dead), implode('; ', $dead))];
         }
 
-        return ['PASS', sprintf('every named carrier names an enabled factor (%d scope(s))', \count($carriers))];
+        return ['PASS', sprintf('every named carrier names an enabled factor with a real delivery seam and a completion path (%d scope(s))', \count($carriers))];
+    }
+
+    /**
+     * The step-up routes the 403 body advertises: when the anonymous
+     * email factor is wired, the challenge controller advertises its
+     * begin path on every carrier-scope step-up refusal, so the visitor
+     * the body addresses can always reach the factor. A missing route
+     * makes that advertisement a dead link: the demand stands and no
+     * browser can answer it. The failure is hard, for exactly that
+     * reason.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkStepUpRoutes(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        $factorOn = ($risk['enabled'] ?? false)
+            && ($risk['step_up']['enabled'] ?? false)
+            && ($risk['step_up']['email_ownership']['enabled'] ?? false);
+        if (!$factorOn) {
+            return ['PASS', 'the anonymous email factor is off: no step-up begin path is advertised'];
+        }
+        $router = $this->router;
+        if ($router === null) {
+            return [self::LEVEL_WARN, 'the email-ownership factor is on but the container carries no router: the advertised begin path cannot be verified here'];
+        }
+        $beginPath = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::BEGIN_PATH;
+        $completePath = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::COMPLETE_PATH;
+        $found = ['begin' => false, 'complete' => false];
+        foreach ($router->getRouteCollection() as $route) {
+            $methods = $route->getMethods();
+            if ($methods !== [] && !\in_array('POST', $methods, true)) {
+                continue;
+            }
+            if ($route->getPath() === $beginPath) {
+                $found['begin'] = true;
+            }
+            if ($route->getPath() === $completePath) {
+                $found['complete'] = true;
+            }
+        }
+        if (!$found['begin'] || !$found['complete']) {
+            $missing = [];
+            if (!$found['begin']) {
+                $missing[] = $beginPath;
+            }
+            if (!$found['complete']) {
+                $missing[] = $completePath;
+            }
+
+            return ['FAIL', sprintf(
+                'the email-ownership factor is on and the step-up 403 advertises %s, but the router registers no POST route for it: import the bundle\'s step-up routing resource (@KiwiCaptchaBundle/Resources/config/routes/step_up.php) or register the advertised path yourself',
+                implode(' and ', $missing),
+            )];
+        }
+
+        return ['PASS', sprintf('the advertised step-up email routes are registered (%s, %s)', $beginPath, $completePath)];
     }
 
     private function checkProtocolFloor(): array

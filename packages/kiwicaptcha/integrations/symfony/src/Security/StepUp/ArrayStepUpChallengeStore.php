@@ -93,6 +93,53 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return $this->beginWindows[$principalPseudonym];
     }
 
+    /** @var array<string, array{record: StepUpDemand, expiresAt: int}> */
+    private array $demands = [];
+
+    public function createDemand(StepUpDemand $demand, int $ttlSecs): string
+    {
+        if (isset($this->demands[$demand->id])) {
+            throw new \RuntimeException('The step-up demand record could not be persisted (id collision)');
+        }
+        $this->demands[$demand->id] = [
+            'record' => StepUpDemand::fromJson((string) json_encode($demand->toArray(), JSON_UNESCAPED_SLASHES))
+                ?? throw new \RuntimeException('The step-up demand record could not be persisted (undecodable shape)'),
+            'expiresAt' => ($this->now()) + max(1, $ttlSecs),
+        ];
+
+        return $demand->id;
+    }
+
+    public function readDemand(string $demandId): ?StepUpDemand
+    {
+        return $this->liveDemand($demandId);
+    }
+
+    public function consumeDemand(string $demandId): ?StepUpDemand
+    {
+        $demand = $this->liveDemand($demandId);
+        if ($demand !== null) {
+            unset($this->demands[$demandId]);
+        }
+
+        return $demand;
+    }
+
+    private function liveDemand(string $demandId): ?StepUpDemand
+    {
+        $entry = $this->demands[$demandId] ?? null;
+        if ($entry === null) {
+            return null;
+        }
+        if ($this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$demandId]);
+
+            return null;
+        }
+
+        return $entry['record'];
+    }
+
     public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void
     {
         $this->totpSecrets[$principalPseudonym] = $secretRaw;

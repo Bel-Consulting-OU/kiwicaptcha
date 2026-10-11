@@ -8,18 +8,21 @@ declare(strict_types=1);
  * abuse_first protection profile, a form_login firewall over the
  * deployment's own user source, the step-up plane (email OTP bootstraps
  * the first factor, TOTP is the enrolled authenticator) and a protected
- * /account route. Nothing about the risk engine is constructed here:
- * the kernel's own extension builds every service, and the campaigns
+ * /account route. Nothing here knows how the risk engine works: the
+ * kernel's own extension builds every service, and the campaigns
  * drive the result through $kernel->handle(Request::create(...)) —
  * the same HTTP surface a real deployment serves.
  *
  * The container carries ZERO overrides: no definition is replaced,
- * removed or aliased. The campaign measurement contract is "the
- * product as shipped"; a missing seam is a boot failure, never a
- * silently absent dependency. The one compiler pass only widens
- * service visibility so the driver can read measurement state back
- * (the same pass every Symfony kernel test ships); visibility is not
- * wiring.
+ * removed or aliased, and the claim is computed, not asserted. The
+ * reference kernel below compiles the identical bundle configuration
+ * with no campaign passes at all; the campaign kernel captures the
+ * same bundle surface (every kiwi_captcha.* and BelConsulting\*
+ * definition's class and arguments) at the same late compiler stage,
+ * and the diff of the two captures is the override count the drivers
+ * report. Visibility widening is outside the surface (a public flag is
+ * not wiring). A missing seam is a boot failure, never a silently
+ * absent dependency.
  *
  * The application side of the deployment (the parts a real
  * integration supplies and the bundle deliberately does not):
@@ -44,6 +47,7 @@ use Symfony\Bundle\SecurityBundle\SecurityBundle;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Loader\LoaderInterface;
 use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
+use Symfony\Component\DependencyInjection\Compiler\PassConfig;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Kernel;
@@ -56,6 +60,14 @@ require_once __DIR__ . '/rt-risk-prelude.php';
 
 /** The shared kernel class name the campaigns report as the driver. */
 const RT_KERNEL_CLASS = 'KiwiRt\\RtCampaignKernel';
+
+/**
+ * The wiring fingerprint of the kernel configuration: folded into the
+ * cache directory, so a configuration change (a removed key, a new
+ * default) never serves a stale compiled container. Bump on any edit
+ * to the kernel wiring below.
+ */
+const RT_KERNEL_WIRING_VERSION = 'v2-store-trust-gate-default-audit';
 
 /**
  * The campaign ASN fixture: the local IP-to-ASN dataset the deployment
@@ -282,58 +294,142 @@ final class RtArrayLogger extends \Psr\Log\AbstractLogger
 }
 
 /**
- * The application's CheckPassport observer: feeds the outcome bridge
- * the claimed identifier of the login attempt (the request attribute
- * its LoginFailure lane reads). The deployment owns the login flow,
- * so the deployment supplies the flow's context; on this Symfony line
- * the CheckPassportEvent carries no request, so the main request comes
- * off the kernel's request stack.
+ * The computed container-override audit. The campaign kernel and the
+ * reference kernel each capture the same surface (every kiwi_captcha.*
+ * and BelConsulting\* definition's class and arguments) at the same
+ * late compiler stage, after class resolution and child-definition
+ * merging; the override count is the diff of the two captures. The
+ * reported count is computed, never a literal: any pass that replaces,
+ * re-argues or removes a bundle definition shows up in it. Visibility
+ * widening is not part of the surface (a public flag is not wiring).
  */
-final class RtOutcomeTargetListener
+final class RtContainerAuditPass implements CompilerPassInterface
 {
-    private const TARGET_ATTRIBUTE = '_kiwi_outcome_target';
-    private const USER_BADGE_CLASS = 'Symfony\Component\Security\Http\Authenticator\Passport\Badge\UserBadge';
+    public const CAMPAIGN = 'campaign';
+    public const REFERENCE = 'reference';
 
-    public function __construct(private readonly \Symfony\Component\HttpFoundation\RequestStack $requestStack)
-    {
+    /** @var array<string, array<string, string>> captured surfaces by variant */
+    public static array $surfaces = [];
+
+    /** @var array<string, int> persisted counts by cache directory */
+    public static array $persisted = [];
+
+    public function __construct(
+        private readonly string $variant,
+        private readonly ?string $persistTo = null,
+    ) {
     }
 
-    public function onCheckPassport(object $event): void
+    public function process(ContainerBuilder $container): void
     {
-        try {
-            $request = $this->requestStack->getMainRequest();
-            if ($request === null || !method_exists($event, 'getPassport')) {
-                return;
+        $surface = [];
+        foreach ($container->getDefinitions() as $id => $definition) {
+            if (!str_starts_with($id, 'kiwi_captcha.') && !str_starts_with($id, 'BelConsulting\\')) {
+                continue;
             }
-            $passport = $event->getPassport();
-            $badge = \is_object($passport) && method_exists($passport, 'getBadge')
-                ? $passport->getBadge(self::USER_BADGE_CLASS)
-                : null;
-            if (!\is_object($badge) || !method_exists($badge, 'getUserIdentifier')) {
-                return;
-            }
-            $id = $badge->getUserIdentifier();
-            if (\is_string($id) && $id !== '') {
-                $request->attributes->set(self::TARGET_ATTRIBUTE, $id);
-            }
-        } catch (\Throwable) {
-            // never break the authentication flow
+            $surface[$id] = $definition->getClass() . '|' . serialize($definition->getArguments());
         }
+        self::$surfaces[$this->variant] = $surface;
+        // The campaign capture persists the computed count beside the
+        // compiled container, so a later process that reuses the cache
+        // (no compiler passes run) still reports the audit of exactly
+        // this compiled wiring. Only a complete pair (both captures in
+        // this process) persists; a -1 never lands on disk.
+        if ($this->persistTo !== null) {
+            $count = self::overrideCount();
+            if ($count >= 0) {
+                self::$persisted[$this->persistTo] = $count;
+                @file_put_contents($this->persistTo, (string) $count);
+            }
+        }
+    }
+
+    /**
+     * The override count between the last reference capture and the
+     * last campaign capture: a changed class, changed arguments or a
+     * definition present on one side only is one override each.
+     */
+    public static function overrideCount(): int
+    {
+        $reference = self::$surfaces[self::REFERENCE] ?? [];
+        $campaign = self::$surfaces[self::CAMPAIGN] ?? [];
+        if ($reference === [] || $campaign === []) {
+            return -1;
+        }
+        $count = 0;
+        foreach ($reference as $id => $shape) {
+            if (!isset($campaign[$id]) || $campaign[$id] !== $shape) {
+                $count++;
+            }
+        }
+        foreach ($campaign as $id => $shape) {
+            if (!isset($reference[$id])) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * The persisted count of a cache directory's compiled container
+     * (the audit that ran when this container class was compiled), or
+     * -1 when the directory carries none.
+     */
+    public static function persistedCount(string $cacheDir): int
+    {
+        if (isset(self::$persisted[$cacheDir])) {
+            return self::$persisted[$cacheDir];
+        }
+        $raw = @file_get_contents($cacheDir . '/rt-override-count');
+        if ($raw === false || !preg_match('/^\d+$/', trim($raw))) {
+            return -1;
+        }
+
+        return (int) trim($raw);
+    }
+}
+
+/**
+ * The shared campaign kernel base: the namespace selector and the
+ * container-class derivation every boot phase needs. The risk Redis
+ * namespace of the next boot (null = the shipped default) rides the
+ * compiled container class name, so every namespace compiles its own
+ * container and no phase can silently reuse another phase's wiring.
+ */
+abstract class RtKernelBase extends Kernel
+{
+    public static ?string $riskNamespace = null;
+
+    public function __construct()
+    {
+        parent::__construct('test', false);
+    }
+
+    public function getContainerClass(): string
+    {
+        $class = parent::getContainerClass();
+        if (self::$riskNamespace !== null) {
+            $class .= '_' . ucfirst(md5(self::$riskNamespace));
+        }
+
+        return $class;
+    }
+
+    public function getLogDir(): string
+    {
+        return sys_get_temp_dir() . '/kiwi-rt-kernel-logs';
     }
 }
 
 /**
  * The kernel. abuse_first, form_login over the leaked list, TOTP and
  * email OTP enabled, /account behind IS_AUTHENTICATED_FULLY, the risk
- * engine on the real Redis. Zero container overrides.
+ * engine on the real Redis. Zero container overrides: the override
+ * count is the computed audit, never a literal.
  */
-final class RtCampaignKernel extends Kernel
+class RtCampaignKernel extends RtKernelBase
 {
-    public function __construct()
-    {
-        parent::__construct('test', false);
-    }
-
     public function registerBundles(): iterable
     {
         return [
@@ -346,7 +442,7 @@ final class RtCampaignKernel extends Kernel
     protected function build(ContainerBuilder $container): void
     {
         // Visibility only: no definition is replaced, removed or
-        // aliased (container_overrides stays 0). The driver reads
+        // aliased (the audit's override count stays 0). The driver reads
         // measurement state (store level, target state, policy) and
         // the application seams it itself registered.
         $container->addCompilerPass(new class implements CompilerPassInterface {
@@ -369,6 +465,16 @@ final class RtCampaignKernel extends Kernel
                 }
             }
         });
+        // The computed override surface: captured at the end of the
+        // optimize stage, after class resolution and child-definition
+        // merging, and diffed against the reference build by the driver.
+        // The count is persisted beside the compiled container so a
+        // cached-container boot still reports its own audit.
+        $container->addCompilerPass(
+            new RtContainerAuditPass(RtContainerAuditPass::CAMPAIGN, $this->getCacheDir() . '/rt-override-count'),
+            PassConfig::TYPE_OPTIMIZE,
+            -10000,
+        );
     }
 
     public function registerContainerConfiguration(LoaderInterface $loader): void
@@ -387,17 +493,6 @@ final class RtCampaignKernel extends Kernel
             $container->register(RtLoginPageController::class)->setPublic(true);
             $container->register(RtAccountPageController::class)->setPublic(true);
             $container->register(RtCodeCapture::class)->setPublic(true);
-            // The outcome bridge's request context: on this Symfony
-            // line CheckPassportEvent carries no request, so the
-            // deployment supplies the claimed identifier itself (the
-            // attribute the bridge's LoginFailure lane reads), the
-            // integration work the bundle documents as application
-            // side. Registered on the firewall's event dispatcher,
-            // where the security events are delivered.
-            $container->register('rt.outcome_target', RtOutcomeTargetListener::class)
-                ->setArguments([new \Symfony\Component\DependencyInjection\Reference('request_stack')])
-                ->setPublic(true)
-                ->addTag('kernel.event_listener', ['dispatcher' => 'security.event_dispatcher.main', 'event' => \Symfony\Component\Security\Http\Event\CheckPassportEvent::class, 'method' => 'onCheckPassport', 'priority' => 2048]);
             $container->register('logger', RtArrayLogger::class)->setPublic(true);
             $container->setAlias('Psr\\Log\\LoggerInterface', 'logger')->setPublic(true);
             // The step-up controller's principal resolver: the
@@ -454,6 +549,40 @@ final class RtCampaignKernel extends Kernel
                 ],
             ]);
 
+            // The deployment's own profile: the shipped abuse_first
+            // defaults, with the risk namespace the phase booted under
+            // (the default derivation when the phase set none). The
+            // success-trust gate is NOT configured: the shipped default
+            // (store) is the deployment posture under measurement.
+            $riskConfig = [
+                'enabled' => true,
+                'redis_service' => 'rt_redis',
+                'asn' => ['dataset_path' => rtAsnFixture()],
+                'scopes' => [
+                    'login' => ['id' => 1, 'target_field' => 'username'],
+                ],
+                'outcomes' => [
+                    'auto_bridge' => true,
+                    'scope' => 'login',
+                ],
+                'step_up' => [
+                    'enabled' => true,
+                    'scope' => 'login',
+                    // email OTP bootstraps the first enrollment,
+                    // TOTP is the enrolled authenticator after it.
+                    'default_handler' => 'email_otp',
+                    'hmac_secret' => 'rt-d35-stepup-hmac-secret-0123456789abcdef',
+                    'begin_path' => '/step-up/begin',
+                    'complete_path' => '/step-up/complete',
+                    'handlers' => [
+                        'email_otp' => ['enabled' => true, 'sender' => RtCodeCapture::class],
+                        'totp' => ['enabled' => true],
+                    ],
+                ],
+            ];
+            if (self::$riskNamespace !== null) {
+                $riskConfig['namespace'] = self::$riskNamespace;
+            }
             $container->loadFromExtension('kiwi_captcha', [
                 'secret_key' => 'rt-d35-secret-0123456789abcdefgh',
                 'difficulty_bits' => 8,
@@ -463,44 +592,41 @@ final class RtCampaignKernel extends Kernel
                 // enforcement, weights, scope minimums) comes from the
                 // bundle's own ProtectionProfileDefaults.
                 'protection_profile' => 'abuse_first',
-                'risk' => [
-                    'enabled' => true,
-                    'redis_service' => 'rt_redis',
-                    'asn' => ['dataset_path' => rtAsnFixture()],
-                    'scopes' => [
-                        'login' => ['id' => 1, 'target_field' => 'username'],
-                    ],
-                    'outcomes' => [
-                        'auto_bridge' => true,
-                        'scope' => 'login',
-                        'trust_gate' => 'fail_closed',
-                    ],
-                    'step_up' => [
-                        'enabled' => true,
-                        'scope' => 'login',
-                        // email OTP bootstraps the first enrollment,
-                        // TOTP is the enrolled authenticator after it.
-                        'default_handler' => 'email_otp',
-                        'hmac_secret' => 'rt-d35-stepup-hmac-secret-0123456789abcdef',
-                        'begin_path' => '/step-up/begin',
-                        'complete_path' => '/step-up/complete',
-                        'handlers' => [
-                            'email_otp' => ['enabled' => true, 'sender' => RtCodeCapture::class],
-                            'totp' => ['enabled' => true],
-                        ],
-                    ],
-                ],
+                'risk' => $riskConfig,
             ]);
         });
     }
 
     public function getCacheDir(): string
     {
-        return sys_get_temp_dir() . '/kiwi-rt-kernel-' . md5(RT_KERNEL_CLASS . (string) RtD35Accounts::rows()) . '/' . $this->environment;
+        // The wiring version and the risk namespace ride the cache
+        // directory (and through it the compiled container class): a
+        // configuration change or another phase's namespace compiles
+        // its own container instead of silently reusing stale wiring.
+        return sys_get_temp_dir() . '/kiwi-rt-kernel-' . md5(RT_KERNEL_CLASS . '|' . RT_KERNEL_WIRING_VERSION . '|' . (self::$riskNamespace ?? '')) . '/' . $this->environment;
+    }
+}
+
+/**
+ * The reference build of the audit: the identical bundle configuration
+ * compiled with NO campaign passes at all. Its captured bundle surface
+ * is the baseline the campaign kernel's capture is diffed against, so
+ * the override count is measured against what the bundle alone
+ * produces, never asserted.
+ */
+final class RtReferenceKernel extends RtCampaignKernel
+{
+    protected function build(ContainerBuilder $container): void
+    {
+        $container->addCompilerPass(
+            new RtContainerAuditPass(RtContainerAuditPass::REFERENCE),
+            PassConfig::TYPE_OPTIMIZE,
+            -10000,
+        );
     }
 
-    public function getLogDir(): string
+    public function getCacheDir(): string
     {
-        return sys_get_temp_dir() . '/kiwi-rt-kernel-logs';
+        return sys_get_temp_dir() . '/kiwi-rt-reference-' . md5('rt-reference|' . RT_KERNEL_WIRING_VERSION . '|' . (self::$riskNamespace ?? '')) . '/' . $this->environment;
     }
 }

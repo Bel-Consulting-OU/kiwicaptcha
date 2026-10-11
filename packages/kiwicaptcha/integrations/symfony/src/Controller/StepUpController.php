@@ -98,7 +98,7 @@ final class StepUpController
             $context = new StepUpContext(
                 $this->identityFactory->principalId($rawPrincipal),
                 $this->targetPseudonym($request),
-                $this->scope,
+                $this->scopeOf(),
                 \is_string($returnPath) && $returnPath !== '' ? $returnPath : null,
                 $reason,
                 $this->mode($request),
@@ -179,6 +179,24 @@ final class StepUpController
         }
 
         return $this->emailOwnership->complete($request);
+    }
+
+    /**
+     * The booking scope of a begin: the scope the first-attempt gate
+     * stamped onto the pending token when it raised the demand (the
+     * risk.login_scopes target of the login's firewall), or the
+     * configured fallback scope when no pending scope applies. The
+     * principal plane therefore books under the same per-event scope
+     * the guard assessed the login in.
+     */
+    private function scopeOf(): string
+    {
+        $token = $this->tokenStorage?->getToken();
+        if ($token instanceof StepUpPendingToken) {
+            return $token->scope() ?? $this->scope;
+        }
+
+        return $this->scope;
     }
 
     /**

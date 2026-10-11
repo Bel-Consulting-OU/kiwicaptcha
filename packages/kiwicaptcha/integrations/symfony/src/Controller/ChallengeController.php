@@ -347,31 +347,90 @@ final class ChallengeController
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\Agents\AgentsVerifier $agentsVerifier = null,
         /**
          * The begin path of the anonymous email-ownership carrier
-         * (risk.step_up.email_ownership). When set, every step-up 403
-         * carries the typed step_up object naming the carrier kind and
-         * that begin path, so the anonymous visitor the body addresses
-         * can complete the factor. Null keeps the plain body.
+         * (risk.step_up.email_ownership). When set, the step-up 403 of
+         * a carrier scope carries the typed step_up object naming the
+         * carrier kind, that begin path and the minted demand id, so
+         * the anonymous visitor the body addresses can complete the
+         * factor. Null keeps the plain body.
          */
         private readonly ?string $stepUpEmailBeginPath = null,
+        /**
+         * The anonymous email-ownership factor: mints the demand record
+         * the 403 body hands out and the begin endpoint requires. Null
+         * keeps the step-up 403 without the email carrier surface.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp $emailOwnership = null,
+        /**
+         * The scopes whose step-up demands the email factor carries
+         * (built from risk.scopes.*.carrier === 'step_up_email'). The
+         * step_up object and its demand are minted only for these
+         * scopes, so a scope that did not name the carrier is never
+         * advertised a dead-end begin path.
+         *
+         * @var array<string, true>
+         */
+        private readonly array $emailCarrierScopes = [],
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
     }
 
     /**
      * The step-up 403 body: the typed code, plus the step_up carrier
-     * object when the email-ownership factor is wired. The object is
-     * machine-readable: kind names the factor, begin its entry point.
+     * object when the scope names the email factor and the factor is
+     * wired. The object is machine-readable: kind names the factor,
+     * begin its entry point and demand the id of the minted demand
+     * record the begin endpoint requires.
      *
      * @return array<string, mixed>
      */
-    private function stepUpRequiredBody(): array
+    private function stepUpRequiredBody(?string $scope, Request $request, ?string $chainId = null, ?string $decisionId = null): array
     {
         $body = ['error' => ['code' => 'STEP_UP_REQUIRED', 'message' => 'Additional verification is required for this request.']];
-        if ($this->stepUpEmailBeginPath !== null) {
-            $body['error']['step_up'] = ['kind' => \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::KIND, 'begin' => $this->stepUpEmailBeginPath];
+        $carrier = $scope !== null
+            && $this->stepUpEmailBeginPath !== null
+            && $this->emailOwnership !== null
+            && isset($this->emailCarrierScopes[$scope]);
+        if (!$carrier) {
+            return $body;
         }
+        $demandId = null;
+        try {
+            $demandId = $this->emailOwnership?->mintDemand(
+                $scope,
+                $this->emailOwnership->presentedSessionHash($request),
+                $chainId,
+                $decisionId,
+            );
+        } catch (\Throwable) {
+            // A failed mint answers the bare 403: the factor refuses
+            // every begin without its demand, fail-closed.
+            $demandId = null;
+        }
+        if ($demandId === null) {
+            return $body;
+        }
+        $body['error']['step_up'] = [
+            'kind' => \BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::KIND,
+            'begin' => $this->stepUpEmailBeginPath,
+            'demand' => $demandId,
+        ];
 
         return $body;
+    }
+
+    /**
+     * The scope of the chain requirement, read for the demand minting
+     * of a stage-2 terminal step-up answer. Null when the chain is
+     * gone, unreadable, or chaining is disabled: the body then stays
+     * without the carrier surface, fail-closed.
+     */
+    private function chainScopeOf(string $chainId): ?string
+    {
+        try {
+            return $this->chainTickets?->requirementFor($chainId)?->scope;
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     /**
@@ -1632,7 +1691,7 @@ final class ChallengeController
                     $this->releaseChain($chainId, $chainOwner);
 
                     return $this->privateJson(
-                        $this->stepUpRequiredBody(),
+                        $this->stepUpRequiredBody($scope, $request, $chainId, $decision->decisionId),
                         Response::HTTP_FORBIDDEN,
                         $request,
                         $riskSession,
@@ -2903,7 +2962,7 @@ final class ChallengeController
                 // no challenge issuance can follow. A later request for the
                 // same transaction re-encounters this terminal state.
                 return $this->privateJson(
-                    $this->stepUpRequiredBody(),
+                    $this->stepUpRequiredBody($requirement?->scope, $request, $chainId),
                     Response::HTTP_FORBIDDEN,
                     $request,
                     $riskSession,
@@ -3733,7 +3792,7 @@ final class ChallengeController
                 }
 
                 return $this->privateJson(
-                    $this->stepUpRequiredBody(),
+                    $this->stepUpRequiredBody($this->chainScopeOf($chainId), $request, $chainId, $disposition->decisionId),
                     Response::HTTP_FORBIDDEN,
                     $request,
                     $riskSession,

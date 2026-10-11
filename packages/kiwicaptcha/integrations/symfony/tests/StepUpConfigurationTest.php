@@ -88,9 +88,13 @@ final class StepUpConfigurationTest extends TestCase
         ];
 
         return [
-            'no scope when enabled' => [
-                ['step_up' => ['enabled' => true]] + $base,
-                'risk.step_up.scope is required',
+            'login scope map value malformed' => [
+                ['login_scopes' => ['main' => 'bad scope!']] + $base,
+                'risk.login_scopes values must be scope names',
+            ],
+            'login scope map firewall malformed' => [
+                ['login_scopes' => ['bad firewall' => 'login']] + $base,
+                'risk.login_scopes keys must be firewall names',
             ],
             'default handler names nothing' => [
                 ['step_up' => ['enabled' => true, 'scope' => 'login', 'default_handler' => 'sms', 'handlers' => ['email_otp' => ['enabled' => true]]]] + $base,

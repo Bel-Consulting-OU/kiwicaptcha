@@ -59,6 +59,17 @@ final class StepUpChallenge
          * enrollment at the finish line.
          */
         public readonly bool $bootstrapAuthorized = false,
+        /**
+         * The principal pseudonym the record belongs to, null when the
+         * record's subject is not a principal. The email-ownership
+         * family addresses its records by the email address pseudonym
+         * in principalPseudonym (the consume key), so its subject is
+         * an email, never an account. Every principal-keyed lookup
+         * (an active-challenge search, a completion-credit scan) MUST
+         * go through {@see self::principalSubject()}; an email-subject
+         * record can then never answer for an account.
+         */
+        public readonly ?string $subjectPseudonym = null,
     ) {
     }
 
@@ -90,6 +101,7 @@ final class StepUpChallenge
         ?string $sessionId = null,
         bool $targetOwned = false,
         bool $bootstrapAuthorized = false,
+        ?string $subjectPseudonym = null,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up challenge TTL must be positive');
@@ -102,6 +114,18 @@ final class StepUpChallenge
         }
         if ($ceremony !== null && !\in_array($ceremony, ['creation', 'assertion'], true)) {
             throw new \InvalidArgumentException('A step-up challenge ceremony must be creation or assertion');
+        }
+        // The subject is a principal pseudonym only when the record's
+        // family is principal-keyed. The email-ownership family
+        // addresses its records by the email pseudonym, so its subject
+        // is never an account: the field stays null there, by
+        // construction and by validation.
+        if ($kind === StepUpChallengeKind::EmailOwnership) {
+            $subjectPseudonym = null;
+        } elseif ($subjectPseudonym !== null) {
+            $subjectPseudonym = self::pseudonym('subject', $subjectPseudonym);
+        } else {
+            $subjectPseudonym = self::pseudonym('principal', $principalPseudonym);
         }
 
         $clientSecret = null;
@@ -131,10 +155,24 @@ final class StepUpChallenge
             $clientSecretHash,
             $targetOwned && $targetPseudonym !== null,
             $bootstrapAuthorized,
+            $subjectPseudonym,
         );
         $challenge->issuedClientSecret = $clientSecret;
 
         return $challenge;
+    }
+
+    /**
+     * The pseudonym a principal-keyed lookup may match on: the subject
+     * principal of the record, or null when the record's subject is
+     * not a principal (the email-ownership family). A lookup MUST use
+     * this accessor and MUST treat null as no-match; the raw
+     * principalPseudonym field of an email-ownership record carries an
+     * email address pseudonym and can never answer for an account.
+     */
+    public function principalSubject(): ?string
+    {
+        return $this->subjectPseudonym;
     }
 
     /** Mint a plaintext secret for a stateless begin (returned once). */
@@ -206,6 +244,7 @@ final class StepUpChallenge
             $this->clientSecretHash,
             $this->targetOwned,
             $this->bootstrapAuthorized,
+            $this->subjectPseudonym,
         );
     }
 
@@ -241,6 +280,7 @@ final class StepUpChallenge
             'client_secret_hash' => $this->clientSecretHash,
             'bootstrap' => $this->bootstrapAuthorized ? 1 : 0,
             'target_owned' => $this->targetOwned,
+            'subject' => $this->subjectPseudonym,
         ];
     }
 
@@ -273,6 +313,21 @@ final class StepUpChallenge
         } catch (\ValueError) {
             throw $fail('kind must name a handler family');
         }
+        // The subject rides the record verbatim: absent on the
+        // pre-subject wire shape (the decode derives it), else a 32-hex
+        // pseudonym, and never present on an email-ownership record
+        // (its subject is an email, never an account).
+        $subjectRaw = $record['subject'] ?? null;
+        if ($subjectRaw !== null) {
+            if (!\is_string($subjectRaw) || preg_match('/^[0-9a-f]{32}$/D', $subjectRaw) !== 1) {
+                throw $fail('subject must be 32 lowercase hex chars');
+            }
+            if ($kind === StepUpChallengeKind::EmailOwnership) {
+                throw $fail('an email-ownership record carries no principal subject');
+            }
+        } elseif ($kind !== StepUpChallengeKind::EmailOwnership) {
+            $subjectRaw = \is_string($record['principal'] ?? null) ? $record['principal'] : null;
+        }
         try {
             $challenge = self::begin(
                 $record['id'],
@@ -290,6 +345,7 @@ final class StepUpChallenge
                 ($record['ceremony'] ?? null) === null ? null : (is_string($record['ceremony']) ? $record['ceremony'] : 'not-a-string'),
                 null,
                 ($record['target_owned'] ?? false) === true,
+                subjectPseudonym: $subjectRaw,
             );
         } catch (\InvalidArgumentException $e) {
             throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
@@ -346,6 +402,7 @@ final class StepUpChallenge
             $clientSecretHash,
             $challenge->targetOwned,
             $bootstrapAuthorized,
+            $challenge->subjectPseudonym,
         );
         $attempts = $record['attempts'] ?? null;
         if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {
