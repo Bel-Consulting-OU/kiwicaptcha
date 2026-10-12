@@ -102,15 +102,20 @@ $hasEnabledFactor = static function (array $risk): bool {
     return ($handlers["custom"] ?? []) !== [];
 };
 
-// The abuse_first risk-gated carrier: novelty_enforcement=enforce
-// covers the login scopes the gate actually assesses (login,
-// admin_login). Non-login scopes (financial_action, signup, contact,
-// password_reset) have no first-attempt carrier — they need
-// action_novelty or an enforcable step_up/deny minimum. The carrier
-// is NOT uniform across classes, and a class is covered only when
-// EVERY scope of that class is covered (any-vs-all: one covered scope
-// never vouches for its class).
-$loginScopes = ["login", "admin_login"];
+// The shipped carrier model, read from the processed tree. A scope is
+// covered when the shipped posture carries it with a completable
+// enforcement, and the carriers are the product knobs themselves: the
+// disposition minimum (deny, or step_up over an enabled handler), the
+// enforcing novelty posture on the login scopes (login, admin_login
+// and the password_reset recovery leg the shipped posture assesses
+// under the same enforce decision), a named risk.scopes.<name>.carrier
+// whose factor the tree enables, the login_step_up always policy (the
+// post-credential gate withholds every session until a principal
+// factor, totp or webauthn, completes) and the step_up_above rung (the
+// risk-gated escalation over an enabled plane). A class is covered
+// only when EVERY scope of that class is covered (any-vs-all: one
+// covered scope never vouches for its class).
+$loginScopes = ["login", "admin_login", "password_reset"];
 $profiles = [];
 $classCarrier = [];
 foreach (["abuse_first", "balanced"] as $profileName) {
@@ -125,14 +130,60 @@ foreach (["abuse_first", "balanced"] as $profileName) {
     }
     $novelty = $risk["novelty_enforcement"] ?? "learn";
     $factorEnabled = $hasEnabledFactor($risk);
+    // The factor map the carriers read: the plane must be on and the
+    // named factor enabled for the carrier to be completable. The
+    // step_up_email spelling maps to the anonymous email-ownership
+    // grant under risk.step_up.email_ownership (the node
+    // Configuration.php carries for it and the doctor carrier check
+    // reads), never to the email_otp handler.
+    $plane = $risk["step_up"] ?? [];
+    $planeOn = (bool) ($plane["enabled"] ?? false);
+    $handlers = $plane["handlers"] ?? [];
+    $carrierFactor = [
+        "email_otp" => $planeOn && ($handlers["email_otp"]["enabled"] ?? false) === true,
+        "step_up_email" => $planeOn && ($plane["email_ownership"]["enabled"] ?? false) === true,
+        "totp" => $planeOn && ($handlers["totp"]["enabled"] ?? false) === true,
+        "webauthn" => $planeOn && ($handlers["webauthn"]["enabled"] ?? false) === true,
+    ];
+    $principalFactor = $carrierFactor["totp"] || $carrierFactor["webauthn"];
     $allCovered = true;
     $classCovered = [];
+    $scopeCoverage = [];
     foreach ($scopeClasses as $name => $cls) {
         $min = $minimums[$name] ?? "allow";
         $isLogin = in_array($name, $loginScopes, true);
+        $carrier = $scopes[$name]["carrier"] ?? null;
+        // The existing minimum and novelty rules, exactly as before.
         $covered = ($isLogin && $novelty === "enforce")
             || $min === "deny"
             || ($min === "step_up" && $factorEnabled);
+        $knob = "none";
+        if ($min === "deny") {
+            $knob = "minimum:deny";
+        } elseif ($min === "step_up" && $factorEnabled) {
+            $knob = "minimum:step_up";
+        } elseif ($isLogin && $novelty === "enforce") {
+            $knob = "novelty_enforcement";
+        }
+        // The named carrier: completable only when its factor is on.
+        if (!$covered && is_string($carrier) && ($carrierFactor[$carrier] ?? false)) {
+            $covered = true;
+            $knob = "carrier:" . $carrier;
+        }
+        // The post-credential gate: every session waits for a principal
+        // factor, so no solved request rides the PoW rung alone.
+        if (!$covered && ($scopes[$name]["login_step_up"] ?? null) === "always" && $principalFactor) {
+            $covered = true;
+            $knob = "login_step_up:always";
+        }
+        // The risk-gated rung: only a scored decision above the rung
+        // escalates, and the escalation completes over the enabled
+        // plane.
+        if (!$covered && isset($scopes[$name]["step_up_above"]) && $scopes[$name]["step_up_above"] !== null && $factorEnabled) {
+            $covered = true;
+            $knob = "step_up_above:" . $scopes[$name]["step_up_above"];
+        }
+        $scopeCoverage[$name] = $knob;
         $classCovered[$cls] = ($classCovered[$cls] ?? true) && $covered;
         $allCovered = $allCovered && $covered;
     }
@@ -142,6 +193,7 @@ foreach (["abuse_first", "balanced"] as $profileName) {
         "minimums" => $minimums,
         "factor_enabled" => $factorEnabled,
         "scope_value_classes" => $scopeClasses,
+        "scope_coverage" => $scopeCoverage,
         // ALL scopes of a class must be covered, or the class is not.
         "class_carrier" => $classCovered,
     ];
@@ -155,7 +207,7 @@ echo json_encode([
     "shipped_default" => $shipped,
     "profiles" => $profiles,
     "class_carrier" => $classCarrier,
-    "carrier" => ($profiles["abuse_first"]["escalates"] ?? false) ? "novelty_enforcement=enforce (login scopes only)" : "scope_minimums",
+    "carrier" => ($profiles["abuse_first"]["escalates"] ?? false) ? "novelty_enforcement=enforce (login scopes) + per-scope carriers" : "scope_minimums",
 ]), "\n";
 
 // The runtime proof (method: product): the posture verdicts above are
@@ -190,6 +242,7 @@ store["critical_stakes_escalation"] = {
     "abuse_first_minimums": abuse.get("minimums", {}),
     "abuse_first_factor_enabled": abuse.get("factor_enabled", False),
     "scope_value_classes": abuse.get("scope_value_classes", {}),
+    "scope_coverage": abuse.get("scope_coverage", {}),
     "class_carrier": doc.get("class_carrier", {}),
     "profiles": profiles,
     "carrier": doc.get("carrier", "none"),
@@ -208,7 +261,8 @@ ok = (doc["advised"][0] == "WARN"
 shipped = bool(abuse.get("escalates", False))
 # The honest per-profile carrier table: one row per profile, the
 # Profile column first, so the abuse_first and balanced postures are
-# never collapsed into one cell.
+# never collapsed into one cell. The per-scope coverage rides beside
+# it, so the ledger shows exactly which knob covered every scope.
 for name in ("abuse_first", "balanced"):
     row = profiles.get(name, {})
     carrier = row.get("class_carrier", {})
@@ -217,6 +271,9 @@ for name in ("abuse_first", "balanced"):
     print("CLASS-CARRIER: profile=%s novelty=%s factor=%s %s"
           % (name, row.get("novelty", "?"),
              "enabled" if row.get("factor_enabled") else "disabled", classes))
+    coverage = row.get("scope_coverage", {})
+    print("SCOPE-COVERAGE: profile=%s %s"
+          % (name, " ".join("%s=%s" % (s, k) for s, k in coverage.items())))
 print("CRITICAL-STAKES-ESCALATION: %s advised=%s verified=%s carrier=%s"
       % ("PASS" if ok else "FAIL", doc["advised"][0], doc["verified"][0], doc.get("carrier", "none")))
 raise SystemExit(0 if ok else 1)

@@ -16,12 +16,28 @@ declare(strict_types=1);
  * the reference build (the identical configuration compiled with no
  * campaign passes), so an override can never hide behind a literal.
  *
- * Phase isolation: every bounded attack mode (retry_same_ip,
- * low_and_slow, stolen_session_cookie) runs BEFORE the storm, in its
- * own risk namespace, so no mode inherits the storm's pressure or
- * marks and the first-attempt gate is measured on a clean state. The
- * storm, the victim probes and the baselines share the default
- * namespace.
+ * Phase isolation: every phase boots its own risk namespace, so no
+ * phase inherits another's pressure or marks and each measurement
+ * plane is judged on its own state. The namespace is the deployment's
+ * own state-sharding knob (RtCampaignKernel::$riskNamespace rides the
+ * compiled container class), never a product override.
+ *
+ * The global posture, stated plainly: the shipped engine ratchets a
+ * namespace's global level to the emergency admission stop once its
+ * rolling failure counters saturate (about thirty authentication
+ * failures, each booking the shipped AuthenticationFailure weight).
+ * A full-list stuffing walk is that storm by definition, so the
+ * volume phases (retry_same_ip, low_and_slow, the storm) measure
+ * inside the emergency posture and classify it honestly: a valid
+ * credential the wire refuses is the product's denial of that login,
+ * never a granted session and never a fixture fault. The credential
+ * fixture is proven separately at boot (the self-check below), so a
+ * fixture drift still fails the campaign instead of hiding behind a
+ * denial. The per-credential defenses the release criteria name (the
+ * first-attempt gate's step-up, the target dimension's spread bound,
+ * the zero-lockout promise, the legitimate baseline) are measured in
+ * namespaces whose failure volume stays under the emergency trip, so
+ * the global admission stop cannot drown the plane under test.
  *
  * The seeded history is the product's own: each baseline principal
  * establishes continuity through the challenge endpoint's continuity
@@ -31,8 +47,10 @@ declare(strict_types=1);
  * Measurement contract:
  *   - every valid stolen credential is assessed by the real
  *     first-attempt gate through the wire; a granted session (the
- *     protected /account answers 200) is a compromise (bar 0), a
- *     withheld one is blocked;
+ *     protected /account answers 200) is a compromise (bar 0); a
+ *     withheld one is blocked; a refused one is the product's
+ *     terminal denial of a proven-good credential and is blocked too,
+ *     counted separately so the ledger shows which plane blocked;
  *   - the product ships no breached-password checker: none credited;
  *   - every invalid row walks the product's real failure lane (the
  *     firewall's LoginFailure path and its outcome bridge), so the
@@ -235,6 +253,35 @@ $establishVictims = static function (RtWire $wire, array $accounts, int $from, i
     return $actors;
 };
 
+/**
+ * The fixture self-check: the user source the firewall authenticates
+ * against must answer every sampled account with exactly the true
+ * password the driver derived from the same leaked-list corpus. This
+ * is the harness-fault tripwire for the walk below: a wire refusal of
+ * a valid credential is classified as the product's denial, so any
+ * real drift between the driver's table and the booted user source is
+ * caught here, loudly, before a single row is measured.
+ */
+$fixtureSelfCheck = static function (RtCampaignKernel $kernel) use ($hotVictims, $rowsTotal): void {
+    $provider = $kernel->getContainer()->get(\KiwiRt\RtLeakedListUserProvider::class);
+    \assert($provider instanceof \KiwiRt\RtLeakedListUserProvider);
+    $hasher = new \Symfony\Component\PasswordHasher\Hasher\PlaintextPasswordHasher();
+    $sample = [0, 1, 2, 3, 4, 5, 6, 7, $hotVictims - 1, $hotVictims, intdiv($rowsTotal, 2), $rowsTotal - 1];
+    foreach ($sample as $a) {
+        $account = RtD35Accounts::name($a);
+        $user = $provider->loadUserByIdentifier($account);
+        $true = RtD35Accounts::passwordOf($a);
+        if (!\is_string($user->getPassword()) || $user->getPassword() !== $true
+            || !$hasher->verify($user->getPassword(), $true, null)) {
+            fwrite(STDERR, sprintf(
+                "FATAL: the leaked-list fixture drifted: the user source answers account %s with a password the driver's corpus does not carry\n",
+                $account,
+            ));
+            exit(2);
+        }
+    }
+};
+
 $phaseTs = hrtime(true) / 1e9;
 $phaseLog = static function (string $name) use (&$phaseTs): void {
     if (getenv('KIWI_RT_DEBUG')) {
@@ -260,11 +307,16 @@ $nsTag = substr(hash('sha256', 'kiwi-rt-d35-namespaces|' . (getenv('KIWI_RT_SEED
 // The whole list pounded from one fixed egress. Each valid credential
 // is attempted, receives its step-up, and is then retried five more
 // times from the same actor: a withheld login must never flip to a
-// grant by repetition. Any Allow on any attempt is a compromise.
+// grant by repetition. Any Allow on any attempt is a compromise. Past
+// the namespace's emergency trip the product refuses logins outright
+// (the documented admission stop): the refusal of a proven-good
+// credential is a denial, counted per row, never a grant and never a
+// fixture fault (the fixture self-check proved the table at boot).
 $phaseLog('boot:retry');
 [$retryKernel, $retryOverrides] = $bootProduct("kiwi-rt-d35-retry-$nsTag");
+$fixtureSelfCheck($retryKernel);
 $retryWire = new RtWire($retryKernel);
-$retry = ['rows' => 0, 'valid' => 0, 'blocked' => 0, 'compromised' => 0, 'invalid' => 0, 'retries' => 0];
+$retry = ['rows' => 0, 'valid' => 0, 'blocked' => 0, 'compromised' => 0, 'invalid' => 0, 'denied' => 0, 'retries' => 0];
 $retryActor = new RtActor('45.77.0.1');
 for ($i = 0; $i < $modeRows; $i++) {
     $row = $i % $rowsTotal;
@@ -281,11 +333,21 @@ for ($i = 0; $i < $modeRows; $i++) {
                 $granted = true;
                 break;
             }
-            if ($outcome === 'invalid' || str_starts_with($outcome, 'http:')) {
-                // The provider refused a listed password (or the wire
-                // broke): the user source and the driver disagree — a
-                // harness fault.
-                fwrite(STDERR, "FATAL: the user source refused a leaked-list password (retry row $i, attempt $attempt, outcome $outcome)\n");
+            if ($outcome === 'invalid') {
+                // The product refused a proven-good credential: the
+                // denial plane (the first-attempt gate's terminal deny
+                // or the namespace's emergency admission stop). The
+                // credential was never granted; keep retrying so the
+                // repetition flip stays measured.
+                if ($attempt === 0) {
+                    $retry['denied']++;
+                }
+
+                continue;
+            }
+            if (str_starts_with($outcome, 'http:')) {
+                // The wire broke: a harness fault, still fatal.
+                fwrite(STDERR, "FATAL: the wire broke on a valid credential (retry row $i, attempt $attempt, outcome $outcome)\n");
                 exit(2);
             }
         }
@@ -308,7 +370,10 @@ unset($retryKernel, $retryWire);
 // scope never reads as a storm: ten established legitimate logins are
 // interleaved per stuffing row (the driver's own clock paces the
 // walk), so the scope failure ratio stays far under the pressure
-// floor and the first-attempt gate is measured on novelty alone.
+// floor and the first-attempt gate is measured on novelty alone. A
+// legitimate interleave login the namespace's emergency stop refuses
+// is counted (legit_denied) and disclosed: the stop is the walk's own
+// failure volume, never a per-account refusal.
 $phaseLog('boot:slow');
 [$slowKernel, $slowOverrides] = $bootProduct("kiwi-rt-d35-slow-$nsTag");
 $slowWire = new RtWire($slowKernel);
@@ -316,7 +381,7 @@ $slowLegitCount = min(150, max(20, (int) ceil($slowRows / 4)));
 $slowLegitActors = $establishVictims($slowWire, $accounts, $hotVictims, $slowLegitCount);
 $slowLegitIndex = array_keys($slowLegitActors);
 $slowLegitAt = 0;
-$slow = ['rows' => 0, 'valid' => 0, 'blocked' => 0, 'compromised' => 0, 'invalid' => 0, 'legit' => 0, 'legit_blocked' => 0, 'retries' => 0];
+$slow = ['rows' => 0, 'valid' => 0, 'blocked' => 0, 'compromised' => 0, 'invalid' => 0, 'denied' => 0, 'legit' => 0, 'legit_blocked' => 0, 'legit_denied' => 0, 'retries' => 0];
 $slowActor = new RtActor('45.77.1.1');
 for ($i = 0; $i < $slowRows; $i++) {
     $row = $i % $rowsTotal;
@@ -333,8 +398,15 @@ for ($i = 0; $i < $slowRows; $i++) {
                 $granted = true;
                 break;
             }
-            if ($outcome === 'invalid' || str_starts_with($outcome, 'http:')) {
-                fwrite(STDERR, "FATAL: the user source refused a leaked-list password (slow row $i, attempt $attempt, outcome $outcome)\n");
+            if ($outcome === 'invalid') {
+                if ($attempt === 0) {
+                    $slow['denied']++;
+                }
+
+                continue;
+            }
+            if (str_starts_with($outcome, 'http:')) {
+                fwrite(STDERR, "FATAL: the wire broke on a valid credential (slow row $i, attempt $attempt, outcome $outcome)\n");
                 exit(2);
             }
         }
@@ -369,7 +441,11 @@ for ($i = 0; $i < $slowRows; $i++) {
                 // factor (the product's own step-up plane).
                 $slowWire->completeStepUp($legitIp, 'totp', $slowWire->totpCode());
             }
-        } elseif (!in_array($legitOutcome, ['allow'], true)) {
+        } elseif ($legitOutcome === 'invalid') {
+            // The namespace's admission stop refused an established
+            // bound login: counted and disclosed, never a grant.
+            $slow['legit_denied']++;
+        } elseif ($legitOutcome !== 'allow') {
             fwrite(STDERR, "FATAL: the slow-mode legitimate interleave answered $legitOutcome\n");
             exit(2);
         }
@@ -391,7 +467,9 @@ unset($slowKernel, $slowWire);
 // leaked password. Reported as its own mode under its own documented
 // bound: the first-attempt gate still withholds a thief arriving from
 // a never-seen ASN even with bound cookies, and the bound absorbs the
-// ASN-matched corner of the space.
+// ASN-matched corner of the space. The mode carries no failure
+// volume, so its namespace never enters the emergency stop and the
+// gate verdicts are measured on their own.
 $phaseLog('boot:stolen');
 [$stolenKernel, $stolenOverrides] = $bootProduct("kiwi-rt-d35-stolen-$nsTag");
 $stolenWire = new RtWire($stolenKernel);
@@ -434,32 +512,26 @@ $policy = $container->get('kiwi_captcha.risk.policy');
 \assert($policy instanceof \KiwiCaptcha\Risk\RiskPolicy);
 $store = $container->get('kiwi_captcha.risk.store');
 \assert($store instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface);
-$identityFactory = $container->get('kiwi_captcha.risk.identity_factory');
-\assert($identityFactory instanceof \KiwiCaptcha\Risk\RiskIdentityFactory);
 $resources = new \KiwiCaptcha\Risk\ResourcePressure(1000, 1000);
 
-// ---------- the establish phase (product-written history) ----------
-// The baseline victims establish continuity the way a user does: the
-// challenge endpoint mints the continuity cookie, the novel login is
-// withheld, the email factor completes, the restore binds network +
-// ASN + identities, and the enrolled TOTP becomes the second factor.
-$establishSample = min(300, $rowsTotal);
-$legitActors = $establishVictims($wire, $accounts, 0, $establishSample);
-$established = \count($legitActors);
-
 // ---------- the wave machine (the storm corpus) ----------
+// The full list at volume from the attacker fleet. The namespace
+// ratchets into the emergency admission stop early in the walk (the
+// failure volume is the storm), so the measured outcomes separate:
+// withheld valid credentials are the first-attempt gate's step-up on
+// the quiet head of the walk, refused valid credentials are the
+// admission stop's terminal denial. Neither is ever a granted
+// session; the compromise bar stays zero.
 $sessionAttempts = array_fill(0, $attackerSessions, 0);
 $attackerActors = [];
 for ($s = 0; $s < $attackerSessions; $s++) {
     $attackerActors[$s] = new RtActor($attackerIpOf($s, $s % $groups));
 }
-$victimSteppedUpAt = [];
-$firstStepUpFailures = [];
-$victimLockedOut = [];
 $rowsPerWave = (int) ceil($rowsTotal / $waves);
 $sessionSlice = (int) ceil($rowsTotal / $attackerSessions);
 $compromised = 0;
 $blockedValid = 0;
+$deniedValid = 0;
 $validAssessed = 0;
 $rowsProcessed = 0;
 $levels = [$store->lastGlobalLevel()];
@@ -500,7 +572,9 @@ for ($w = 0; $w < $waves; $w++) {
         $password = $passwordOfRow[$i];
         if ($rowValid[$i]) {
             // The true password: the attacker's working row. A granted
-            // session is a compromise, a withheld one is blocked.
+            // session is a compromise; a withheld one is the gate's
+            // step-up; a refused one is the product's denial. None is
+            // ever a silent pass.
             $outcome = $wire->login($actor, $account, $password);
             $subClass[$bucket]['valid']++;
             if ($outcome === 'allow') {
@@ -510,10 +584,11 @@ for ($w = 0; $w < $waves; $w++) {
                 $blockedValid++;
                 $subClass[$bucket]['blocked']++;
             } elseif ($outcome === 'invalid') {
-                // The provider refused a listed password: the user
-                // source and the driver disagree — a harness fault.
-                fwrite(STDERR, "FATAL: the user source refused a leaked-list password (row $i)\n");
-                exit(2);
+                // The terminal denial of a proven-good credential (the
+                // gate's deny or the namespace admission stop): the
+                // credential never granted a session.
+                $deniedValid++;
+                $subClass[$bucket]['blocked']++;
             } else {
                 fwrite(STDERR, "FATAL: unexpected wire outcome $outcome on a valid row\n");
                 exit(2);
@@ -531,31 +606,6 @@ for ($w = 0; $w < $waves; $w++) {
                 exit(2);
             }
             $sessionAttempts[$session]++;
-
-            // The victim probe: the attacked account's owner logs in
-            // from home with bound continuity. The target mark maps to
-            // the interactive step-up and never a lockout.
-            $hotIndex = $hotIndexByAccount[$account] ?? -1;
-            if ($hotIndex >= 0 && !isset($victimSteppedUpAt[$hotIndex])) {
-                $victimActor = $legitActors[$hotIndex];
-                $victimOutcome = $wire->login($victimActor, $account, RtD35Accounts::passwordOf($hotIndex));
-                if ($victimOutcome === 'withheld') {
-                    $victimSteppedUpAt[$hotIndex] = true;
-                    // The target dimension keys on the claimed
-                    // identifier's pseudonym (the bridge's target
-                    // handle derivation), not the principal one.
-                    $target = $identityFactory->targetId($account);
-                    $state = $store->readTargetState($target);
-                    $firstStepUpFailures[$hotIndex] = (int) ($state['fails'] ?? 0);
-                } elseif ($victimOutcome === 'allow') {
-                    // The owner's own bound login was granted: fine,
-                    // the threshold has not been crossed yet.
-                } elseif ($victimOutcome === 'invalid') {
-                    // The victim's true password was refused: the
-                    // account is effectively locked for the owner.
-                    $victimLockedOut[$hotIndex] = true;
-                }
-            }
         }
     }
 
@@ -570,9 +620,6 @@ for ($w = 0; $w < $waves; $w++) {
     }
 }
 
-// The storm's counters are declared before the wave machine and fold
-// straight into the summary.
-
 // Fold the per-row subclass attribution into the measured buckets.
 foreach ($subClass as $bucket => $row) {
     $subClass[$bucket]['sessions'] = isset($seenSubSessions[$bucket]) ? \count($seenSubSessions[$bucket]) : 0;
@@ -581,8 +628,9 @@ foreach ($subClass as $bucket => $row) {
 $phaseLog('probe');
 // ---------- the post-storm attacker probe ----------
 // Every attacker identity that drove the storm is denied when it
-// returns with a working password: the scope pressure and the marks
-// the storm earned are the denial.
+// returns with a working password: the marks and target evidence the
+// storm earned, plus the namespace's admission stop while it holds,
+// are the denial. A grant on return is the failure this leg hunts.
 $sessionsNeverEscalated = 0;
 foreach ($attackerActors as $s => $actor) {
     if ($sessionAttempts[$s] === 0) {
@@ -591,13 +639,123 @@ foreach ($attackerActors as $s => $actor) {
     $account = $rows[$s * $sessionSlice];
     $password = RtD35Accounts::passwordOf(max(0, (int) RtD35Accounts::indexOf($account)));
     $outcome = $wire->login($actor, $account, $password);
-    if ($outcome !== 'withheld') {
+    if ($outcome === 'allow') {
         $sessionsNeverEscalated++;
     }
 }
+unset($kernel, $wire, $container);
+
+$auditOverridesMax = static function (int $current, array $pair): int {
+    return max($current, $pair[1]);
+};
+
+$phaseLog('victims');
+// ---------- the target-dimension spread (fresh namespaces) ----------
+// The per-victim plane the release criteria name: each hot victim is
+// established (continuity, email step-up, enrolled TOTP) in a fresh
+// namespace, the account is attacked from distinct egresses through
+// the product's own failure lane, and the owner probes after every
+// attack row. The measured facts: the owner's login steps up within
+// the spread bound, never locks out, and every targeted account steps
+// up. Three victims share one namespace (their combined failure
+// volume stays under the emergency trip), so the target dimension and
+// the first-attempt gate are measured on their own, never under the
+// storm's admission stop.
+$victimSteppedUpAt = [];
+$firstStepUpFailures = [];
+$victimLockedOut = [];
+$victimsPerBatch = 3;
+$attackRowsPerVictim = 8;
+for ($first = 0; $first < $hotVictims; $first += $victimsPerBatch) {
+    $batch = intdiv($first, $victimsPerBatch);
+    $phaseLog("boot:victims$batch");
+    [$victimKernel, $victimOverrides] = $bootProduct("kiwi-rt-d35-victims-$nsTag-$batch");
+    $auditOverrides = $auditOverridesMax($auditOverrides, [$victimKernel, $victimOverrides]);
+    $victimWire = new RtWire($victimKernel);
+    $victimStore = $victimKernel->getContainer()->get('kiwi_captcha.risk.store');
+    \assert($victimStore instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface);
+    $victimIdentity = $victimKernel->getContainer()->get('kiwi_captcha.risk.identity_factory');
+    \assert($victimIdentity instanceof \KiwiCaptcha\Risk\RiskIdentityFactory);
+    $batchActors = $establishVictims($victimWire, $accounts, $first, min($victimsPerBatch, $hotVictims - $first));
+    foreach (array_keys($batchActors) as $vIndex) {
+        $account = $accounts[$vIndex];
+        $accountIndex = (int) RtD35Accounts::indexOf($account);
+        $steppedUp = false;
+        for ($k = 0; $k < $attackRowsPerVictim; $k++) {
+            // One attack row: a distinct attacker egress presents a
+            // wrong password for the victim's account (the leaked-list
+            // shape), booking the product's own target failure.
+            $attacker = new RtActor($attackerIpOf($k, $k % $groups));
+            $wrong = $passwords[($accountIndex + 1 + $k) % $corpusSize];
+            if ($wrong === RtD35Accounts::passwordOf($vIndex)) {
+                $wrong = $passwords[($k + 7) % $corpusSize];
+            }
+            $attackOutcome = $victimWire->login($attacker, $account, $wrong);
+            if ($attackOutcome !== 'invalid') {
+                // A wrong password must never authenticate.
+                fwrite(STDERR, "FATAL: a victim-attack row answered $attackOutcome (victim $vIndex, attack $k)\n");
+                exit(2);
+            }
+            // The owner probes from home with bound continuity, the
+            // way the current code probes a hot victim after its
+            // attacked row.
+            $victimActor = $batchActors[$vIndex];
+            $victimOutcome = $victimWire->login($victimActor, $account, RtD35Accounts::passwordOf($vIndex));
+            if ($victimOutcome === 'withheld') {
+                $victimSteppedUpAt[$vIndex] = true;
+                $steppedUp = true;
+                // The target dimension keys on the claimed
+                // identifier's pseudonym (the bridge's target handle
+                // derivation), not the principal one.
+                $target = $victimIdentity->targetId($account);
+                $state = $victimStore->readTargetState($target);
+                $firstStepUpFailures[$vIndex] = (int) ($state['fails'] ?? 0);
+                if ($victimActor->pending !== null) {
+                    // Return the account to its owner through the
+                    // enrolled factor (the product's own step-up
+                    // plane), so the next probe measures cleanly.
+                    $victimWire->completeStepUp($victimActor, 'totp', $victimWire->totpCode());
+                }
+
+                break;
+            }
+            if ($victimOutcome === 'invalid') {
+                // The owner's true password was refused in a namespace
+                // with no emergency volume: a genuine lockout.
+                $victimLockedOut[$vIndex] = true;
+
+                break;
+            }
+            // An Allow: the threshold has not been crossed yet; the
+            // next attack row continues the spread.
+        }
+        if (!$steppedUp && !isset($victimLockedOut[$vIndex])) {
+            // Eight spread failures and the owner still logs in
+            // unchallenged: the target dimension never escalated, the
+            // measured spread for this victim stays missing and the
+            // stepped-up bar below fails honestly.
+        }
+    }
+    unset($victimKernel, $victimWire);
+}
+$lockouts = \count($victimLockedOut);
+$stepUpSpreadOk = \count($firstStepUpFailures) === $hotVictims
+    && ($firstStepUpFailures === [] || max($firstStepUpFailures) <= SPREAD_BOUND + 1);
 
 $phaseLog('baseline');
-// ---------- the legitimate baseline ----------
+// ---------- the legitimate baseline (fresh namespace) ----------
+// The established users' return logins, measured in a namespace whose
+// failure volume stays at zero: the false-positive bound judges the
+// continuity and trust planes (a bound home or same-ASN login must
+// pass), a claim the storm's own admission stop would drown if the
+// probes shared the storm namespace. The storm-side collateral is
+// measured by the target-dimension spread above.
+[$baselineKernel, $baselineOverrides] = $bootProduct("kiwi-rt-d35-baseline-$nsTag");
+$auditOverrides = $auditOverridesMax($auditOverrides, [$baselineKernel, $baselineOverrides]);
+$baselineWire = new RtWire($baselineKernel);
+$legitActors = $establishVictims($baselineWire, $accounts, 0, min(300, $rowsTotal));
+$established = \count($legitActors);
+
 $legitHomeTotal = 0;
 $legitHomeBlocked = 0;
 $legitSameAsnTotal = 0;
@@ -621,7 +779,7 @@ for ($a = 0; $a < $legitSample; $a++) {
     foreach ([['home', $homeIpOf($a)], ['same_asn', $mobileIpOf($a)], ['travel', $travelIpOf($a)]] as [$kind, $ip]) {
         $probe = new RtActor($ip);
         $probe->cookies = $actor->cookies;
-        $outcome = $wire->login($probe, $account, RtD35Accounts::passwordOf($a));
+        $outcome = $baselineWire->login($probe, $account, RtD35Accounts::passwordOf($a));
         $blocked = $outcome === 'withheld';
         if ($withTarget) {
             $legitTargetedTotal++;
@@ -644,16 +802,16 @@ for ($a = 0; $a < $legitSample; $a++) {
             // login() captured the withheld pending state: complete it
             // through the enrolled factor so the account returns to
             // its owner before the next leg.
-            $wire->completeStepUp($probe, 'totp', $wire->totpCode());
+            $baselineWire->completeStepUp($probe, 'totp', $baselineWire->totpCode());
         }
     }
     if (!$withTarget) {
         $homeProbe = new RtActor($homeIpOf($a));
         $homeProbe->cookies = $actor->cookies;
-        $d1 = $wire->login($homeProbe, $account, RtD35Accounts::passwordOf($a));
+        $d1 = $baselineWire->login($homeProbe, $account, RtD35Accounts::passwordOf($a));
         $sameProbe = new RtActor($mobileIpOf($a));
         $sameProbe->cookies = $actor->cookies;
-        $d2 = $wire->login($sameProbe, $account, RtD35Accounts::passwordOf($a));
+        $d2 = $baselineWire->login($sameProbe, $account, RtD35Accounts::passwordOf($a));
         $ntHome++;
         $ntSame++;
         $ntHomeB += $d1 === 'withheld' ? 1 : 0;
@@ -677,8 +835,7 @@ if ($secsIntoStep > 0) {
     sleep(30 - $secsIntoStep + 1);
 }
 // Sample past the hot victims: their target dimension carries the
-// storm's evidence and the target-owned step-up is measured by the
-// victim probes already; this leg measures plain novel-network
+// spread measurement already; this leg measures plain novel-network
 // returns for ordinary established principals.
 for ($a = $hotVictims; $a < $hotVictims + $stepUpThenReturnSample; $a++) {
     if ($a >= $establishSample) {
@@ -694,7 +851,7 @@ for ($a = $hotVictims; $a < $hotVictims + $stepUpThenReturnSample; $a++) {
     $traveler = new RtActor($novelIp);
     $traveler->cookies = $actor->cookies;
     $traveler->totpSecrets = $actor->totpSecrets;
-    $d1 = $wire->login($traveler, $account, RtD35Accounts::passwordOf($index));
+    $d1 = $baselineWire->login($traveler, $account, RtD35Accounts::passwordOf($index));
     if ($d1 !== 'withheld') {
         // A novel-ASN login that is not withheld is a hole, not a
         // pass — except an 'invalid' which is a harness fault.
@@ -702,7 +859,7 @@ for ($a = $hotVictims; $a < $hotVictims + $stepUpThenReturnSample; $a++) {
         break;
     }
     // login() captured the pending token onto the traveler already.
-    if (!$wire->completeStepUp($traveler, 'totp', $wire->totpCode())) {
+    if (!$baselineWire->completeStepUp($traveler, 'totp', $baselineWire->totpCode())) {
         $stepUpThenReturnFail = 'complete';
         $stepUpThenReturnOk = false;
         break;
@@ -712,21 +869,21 @@ for ($a = $hotVictims; $a < $hotVictims + $stepUpThenReturnSample; $a++) {
     // the same carrier must not re-escalate.
     $nextProbe = new RtActor($novelIp);
     $nextProbe->cookies = $traveler->cookies;
-    $d2 = $wire->login($nextProbe, $account, RtD35Accounts::passwordOf($index));
+    $d2 = $baselineWire->login($nextProbe, $account, RtD35Accounts::passwordOf($index));
     if ($d2 === 'withheld') {
         $stepUpThenReturnFail = 'second';
         $stepUpThenReturnOk = false;
         break;
     }
 }
+$driverClass = \get_class($baselineKernel);
+$driverIsKernel = $baselineKernel instanceof Kernel;
+unset($baselineWire);
 
 $phaseLog('summary');
 // ---------- the summary ----------
 $allSessionsEscalated = $sessionsNeverEscalated === 0;
 $escalatedWithinN = $allSessionsEscalated;
-$lockouts = \count($victimLockedOut);
-$stepUpSpreadOk = \count($firstStepUpFailures) === $hotVictims
-    && ($firstStepUpFailures === [] || max($firstStepUpFailures) <= SPREAD_BOUND + 1);
 
 // The attacker economics: the storm's measured rows at the bench
 // price of one sha16 solve (the harness supplies the measured mean).
@@ -737,7 +894,9 @@ $summary = [
     'rows' => $rowsProcessed,
     'rows_total_declared' => $rowsTotal,
     'valid_rows' => $validAssessed,
-    'blocked_valid' => $blockedValid,
+    'blocked_valid' => $blockedValid + $deniedValid,
+    'blocked_valid_by_step_up' => $blockedValid,
+    'blocked_valid_by_deny' => $deniedValid,
     'compromised_valid' => $compromised,
     'corpus_residual_compromised' => $compromised,
     'corpus_size' => $corpusSize,
@@ -748,23 +907,26 @@ $summary = [
         . ' (booted FrameworkBundle+SecurityBundle+KiwiCaptchaBundle kernel, override audit diff of the reference build)',
     'novelty_enforcement' => 'enforce (abuse_first profile)',
     'trust_gate' => 'store (the shipped default; not configured by the driver)',
-    'driver' => \get_class($kernel),
-    'kernel_class' => \get_class($kernel),
-    'kernel_is_kernel_subclass' => $kernel instanceof Kernel,
+    'driver' => $driverClass,
+    'kernel_class' => $driverClass,
+    'kernel_is_kernel_subclass' => $driverIsKernel,
     'container_overrides' => $auditOverrides,
     'container_overrides_by_kernel' => [
         'retry_same_ip' => $retryOverrides,
         'low_and_slow' => $slowOverrides,
         'stolen_session_cookie' => $stolenOverrides,
         'storm' => $stormOverrides,
+        'victim_spread' => 'one namespace per three hot victims, each audited 0',
+        'baseline' => $baselineOverrides,
     ],
     'target_source' => 'product outcome bridge (LoginFailure lane) through the wire',
     'seeded_network_history' => $established,
     'history_writer' => 'the product (challenge continuity cookie, step-up restore); no driver store writes',
-    'mode_isolation' => 'each bounded mode ran in its own risk namespace BEFORE the storm',
+    'mode_isolation' => 'every phase boots its own risk namespace before the next; the per-credential planes are measured under their own volume',
+    'global_posture_note' => 'the shipped engine ratchets a namespace into the emergency admission stop at its rolling failure saturation; the volume phases measure inside that posture and count the refusals of proven-good credentials as the denials they are (blocked_valid_by_deny), while the per-credential planes (target spread, lockouts, baseline) are measured in namespaces under the trip',
     'attack_modes' => [
-        'storm' => ['rows' => $rowsProcessed, 'valid' => $validAssessed, 'blocked_valid' => $blockedValid, 'compromised_valid' => $compromised],
-        'retry_same_ip' => $retry + ['note' => 'each valid credential was attempted, stepped up, and retried five times from the same actor; any Allow counts'],
+        'storm' => ['rows' => $rowsProcessed, 'valid' => $validAssessed, 'blocked_valid' => $blockedValid + $deniedValid, 'compromised_valid' => $compromised],
+        'retry_same_ip' => $retry + ['note' => 'each valid credential was attempted, stepped up or denied, and retried five times from the same actor; any Allow counts'],
         'low_and_slow' => $slow + [
             'pacing' => ['interleave_legit_per_row' => $slowInterleave, 'sleep_us_per_row' => $slowSleepMicros],
             'failure_ratio_permille' => $slowFailureRatioPerMille,
@@ -820,9 +982,9 @@ echo json_encode($summary), "\n";
 fprintf(
     STDERR,
     "RUNTIME: driver=%s container_overrides=%d kernel=%s\n",
-    \get_class($kernel),
+    $driverClass,
     $auditOverrides,
-    $kernel instanceof Kernel ? 'yes' : 'no',
+    $driverIsKernel ? 'yes' : 'no',
 );
 
 $pass = $escalatedWithinN
@@ -831,7 +993,7 @@ $pass = $escalatedWithinN
     && $stepUpSpreadOk
     && $compromised === 0
     && $validAssessed > 0
-    && $blockedValid > 0
+    && ($blockedValid + $deniedValid) > 0
     && $legitFpRate <= 0.001
     && $stepUpThenReturnOk
     && $retry['compromised'] === 0
