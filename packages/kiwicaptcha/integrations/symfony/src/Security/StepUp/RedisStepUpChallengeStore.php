@@ -380,6 +380,12 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         local okc, child = pcall(cjson.decode, ARGV[1])
         if not okc or type(child) ~= 'table' then return nil end
         if child['expires_at'] ~= parent['expires_at'] then return nil end
+        -- The child names the parent it replaces: the lineage is exact
+        -- in both directions (parent.superseded_by = child.id and
+        -- child.parent_demand_id = parent.id), the same rule the
+        -- reference store enforces, so a forged link can never sit in
+        -- the family index.
+        if type(child['parent_demand_id']) ~= 'string' or child['parent_demand_id'] ~= parent['id'] then return nil end
         local pttl = redis.call('PTTL', KEYS[1])
         if pttl <= 0 then return nil end
         child['created_at'] = nowS
@@ -552,11 +558,14 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      * the ledger: an abandoned budget key expires with its lockout.
      */
     private const LOCK_ARM_SCRIPT = <<<'LUA'
-        -- Step-up lockout: arm-or-extend the deadline.
+        -- Step-up lockout: arm-or-extend the deadline. The stored
+        -- value is epoch SECONDS, the unit the store contract names
+        -- (the consumer subtracts the current second); the key carries
+        -- the millisecond PX budget.
         local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-        local until_ms = tonumber(ARGV[1])
-        if until_ms > current then
-          redis.call('SET', KEYS[1], tostring(until_ms), 'PX', tonumber(ARGV[2]))
+        local until_s = tonumber(ARGV[1])
+        if until_s > current then
+          redis.call('SET', KEYS[1], tostring(until_s), 'PX', tonumber(ARGV[2]))
         end
         return 1
         LUA;
@@ -1106,7 +1115,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             self::LOCK_ARM_SCRIPT,
             1,
             $this->lockoutKey('lock', $dimension, $pseudonym),
-            (string) (($now + $ttlSecs) * 1000),
+            (string) ($now + $ttlSecs),
             (string) ($ttlSecs * 1000 + 60_000),
         );
     }

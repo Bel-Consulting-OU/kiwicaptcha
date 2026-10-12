@@ -148,7 +148,7 @@ DECOY_FILLED=$(python3 -c 'import json,sys; print(sum(1 for s in json.load(open(
 # ---------- the risk plane leg ----------
 RISK_OUT=$(KIWI_RT_RISK_AUTOLOAD="$REPO_ROOT/packages/kiwicaptcha-risk-php/vendor/autoload.php" \
 KIWI_RT_RISK_REDIS_URL="$REDIS_URL" KIWI_RT_SEED="$KIWI_RT_SEED" \
-    php "$RT_DIR/campaigns/lib/d32.driver.php" "$BROWSER_JSON" 2>"$RT_DIR/runs/env/d32-risk.err")
+    php -d memory_limit=512M "$RT_DIR/campaigns/lib/d32.driver.php" "$BROWSER_JSON" 2>"$RT_DIR/runs/env/d32-risk.err")
 RISK_RC=$?
 echo "$RISK_OUT"
 if [ "$RISK_RC" != 0 ]; then

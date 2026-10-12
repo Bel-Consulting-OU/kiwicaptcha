@@ -895,6 +895,15 @@ final class FakePredisClient extends \Predis\Client
                 }
                 $rec['state'] = $terminal;
                 $rec['state_at'] = (int) $rest[2];
+                if ($terminal === 'authorized') {
+                    // The authorized terminal books its settlement
+                    // timestamp and its completed factor, exactly like
+                    // the settle op of the demand transition script.
+                    $rec['authorized_at'] = (int) $rest[2];
+                    if ((string) $rest[3] !== '') {
+                        $rec['factor'] = (string) $rest[3];
+                    }
+                }
 
                 return $rearm($rec) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
             }
@@ -981,6 +990,11 @@ final class FakePredisClient extends \Predis\Client
             }
             $child = json_decode((string) $rest[0], true);
             if (!\is_array($child) || ($child['expires_at'] ?? null) !== $parent['expires_at']) {
+                return null;
+            }
+            // The lineage is exact in both directions, the same rule
+            // the production script enforces.
+            if (($child['parent_demand_id'] ?? null) !== ($parent['id'] ?? null)) {
                 return null;
             }
             $ttlMs = $this->expirations[$parentKey] ?? null;
@@ -1077,13 +1091,13 @@ final class FakePredisClient extends \Predis\Client
                 return false;
             }
             $stamp = \is_int($rec['lease_until'] ?? null) ? $rec['lease_until'] : 0;
-            if ($stamp !== (int) $rest[1]) {
+            if ($stamp !== (int) $rest[0]) {
                 return false;
             }
             $rec['lease_until'] = null;
-            if ((string) $rest[2] === '0') {
-                $rec['sends'] = (int) $rest[3];
-                $rec['last_sent_at'] = (string) $rest[4] === '-1' ? null : (int) $rest[4];
+            if ((string) $rest[1] === '0') {
+                $rec['sends'] = (int) $rest[2];
+                $rec['last_sent_at'] = (string) $rest[3] === '-1' ? null : (int) $rest[3];
             }
             $ttlMs = $this->expirations[$key] ?? null;
             if ($ttlMs === null || $ttlMs <= 0) {

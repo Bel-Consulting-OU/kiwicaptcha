@@ -67,7 +67,7 @@ const RT_KERNEL_CLASS = 'KiwiRt\\RtCampaignKernel';
  * default) never serves a stale compiled container. Bump on any edit
  * to the kernel wiring below.
  */
-const RT_KERNEL_WIRING_VERSION = 'v2-store-trust-gate-default-audit';
+const RT_KERNEL_WIRING_VERSION = 'v3-campaign-scope-config';
 
 /**
  * The campaign ASN fixture: the local IP-to-ASN dataset the deployment
@@ -401,6 +401,25 @@ abstract class RtKernelBase extends Kernel
 {
     public static ?string $riskNamespace = null;
 
+    /**
+     * Per-campaign risk scope row overrides, merged over the kernel's
+     * login scope row before the extension loads. The value is shipped
+     * kiwi_captcha.risk.scopes.login configuration (the bundle's own
+     * keys), so a campaign whose measurement contract pins a policy
+     * shape configures the real extension and the engine it wires —
+     * never a hand-built policy object. Empty keeps the kernel's own
+     * row (the d3.5 posture).
+     */
+    public static array $loginScopeOverrides = [];
+
+    /** The cache-key part of the scope overrides (empty when none). */
+    public static function scopeConfigKey(): string
+    {
+        return self::$loginScopeOverrides === []
+            ? ''
+            : (string) md5((string) json_encode(self::$loginScopeOverrides));
+    }
+
     public function __construct()
     {
         parent::__construct('test', false);
@@ -583,6 +602,17 @@ class RtCampaignKernel extends RtKernelBase
             if (self::$riskNamespace !== null) {
                 $riskConfig['namespace'] = self::$riskNamespace;
             }
+            // The campaign's scope row: shipped bundle configuration
+            // keys merged over the login row, so a campaign that pins
+            // its policy shape (d32/d38) configures the extension the
+            // deployment configures, and the measured behavior is the
+            // shipped engine's on that configuration.
+            if (self::$loginScopeOverrides !== []) {
+                $riskConfig['scopes']['login'] = array_merge(
+                    $riskConfig['scopes']['login'],
+                    self::$loginScopeOverrides,
+                );
+            }
             $container->loadFromExtension('kiwi_captcha', [
                 'secret_key' => 'rt-d35-secret-0123456789abcdefgh',
                 'difficulty_bits' => 8,
@@ -599,11 +629,12 @@ class RtCampaignKernel extends RtKernelBase
 
     public function getCacheDir(): string
     {
-        // The wiring version and the risk namespace ride the cache
-        // directory (and through it the compiled container class): a
-        // configuration change or another phase's namespace compiles
-        // its own container instead of silently reusing stale wiring.
-        return sys_get_temp_dir() . '/kiwi-rt-kernel-' . md5(RT_KERNEL_CLASS . '|' . RT_KERNEL_WIRING_VERSION . '|' . (self::$riskNamespace ?? '')) . '/' . $this->environment;
+        // The wiring version, the campaign scope row and the risk
+        // namespace ride the cache directory (and through it the
+        // compiled container class): a configuration change or another
+        // phase's namespace compiles its own container instead of
+        // silently reusing stale wiring.
+        return sys_get_temp_dir() . '/kiwi-rt-kernel-' . md5(RT_KERNEL_CLASS . '|' . RT_KERNEL_WIRING_VERSION . '|' . self::scopeConfigKey() . '|' . (self::$riskNamespace ?? '')) . '/' . $this->environment;
     }
 }
 
@@ -627,6 +658,6 @@ final class RtReferenceKernel extends RtCampaignKernel
 
     public function getCacheDir(): string
     {
-        return sys_get_temp_dir() . '/kiwi-rt-reference-' . md5('rt-reference|' . RT_KERNEL_WIRING_VERSION . '|' . (self::$riskNamespace ?? '')) . '/' . $this->environment;
+        return sys_get_temp_dir() . '/kiwi-rt-reference-' . md5('rt-reference|' . RT_KERNEL_WIRING_VERSION . '|' . self::scopeConfigKey() . '|' . (self::$riskNamespace ?? '')) . '/' . $this->environment;
     }
 }

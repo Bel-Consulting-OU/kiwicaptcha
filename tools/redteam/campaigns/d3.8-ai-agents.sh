@@ -116,7 +116,7 @@ PYB
 
 RISK_OUT=$(KIWI_RT_RISK_AUTOLOAD="$REPO_ROOT/packages/kiwicaptcha-risk-php/vendor/autoload.php" \
 KIWI_RT_RISK_REDIS_URL="$REDIS_URL" KIWI_RT_SEED="$KIWI_RT_SEED" \
-    php "$RT_DIR/campaigns/lib/d38.risk.php" "$BROWSER_JSON" 2>"$RT_DIR/runs/env/d38-risk.err")
+    php -d memory_limit=512M "$RT_DIR/campaigns/lib/d38.risk.php" "$BROWSER_JSON" 2>"$RT_DIR/runs/env/d38-risk.err")
 RISK_RC=$?
 echo "$RISK_OUT"
 [ "$RISK_RC" -eq 0 ] || {

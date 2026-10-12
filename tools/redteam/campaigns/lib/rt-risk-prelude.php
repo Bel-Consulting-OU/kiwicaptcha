@@ -24,8 +24,9 @@ const RT_BUNDLE_TESTS = __DIR__ . '/../../../../packages/kiwicaptcha/integration
 const RT_BUNDLE_VENDOR = __DIR__ . '/bundle-vendor/vendor';
 const RT_RISK_VENDOR = __DIR__ . '/../../../../packages/kiwicaptcha-risk-php/vendor/autoload.php';
 
-// The risk plane's own autoload: the prelude's runner class implements
-// one of its interfaces, so this lands before anything else registers.
+// The risk plane's own autoload: every driver's store, policy and
+// gateway classes live there, so this lands before anything else
+// registers.
 if (is_file(RT_RISK_VENDOR)) {
     require_once RT_RISK_VENDOR;
 }
@@ -70,35 +71,6 @@ function rtRedis(string $url): \Predis\Client
     $client->ping();
 
     return $client;
-}
-
-/**
- * The production script runner shape the evidence stores take: the
- * canonical Lua runs on the real Redis through the real client, so a
- * decoy escalation write or read is the deployment's own atomic
- * transition, never a fixture.
- */
-final class RtScriptRunner implements \KiwiCaptcha\Risk\Evidence\RedisScriptRunnerInterface
-{
-    public function __construct(private readonly \Predis\Client $client)
-    {
-    }
-
-    public function evalScript(string $script, array $keys, array $args): int|string|null
-    {
-        $sha = sha1($script);
-        $callArgs = array_merge($keys, $args);
-
-        try {
-            return $this->client->evalsha($sha, count($keys), ...$callArgs);
-        } catch (\Predis\Response\ServerException $e) {
-            if (!str_contains($e->getMessage(), 'NOSCRIPT')) {
-                throw $e;
-            }
-
-            return $this->client->eval($script, count($keys), ...$callArgs);
-        }
-    }
 }
 
 /**
