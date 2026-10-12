@@ -35,7 +35,6 @@ declare(strict_types=1);
  */
 
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
-use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
@@ -44,7 +43,6 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpCode;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnCredentialRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler;
-use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
 use Symfony\Component\HttpFoundation\Request;
 
 require getenv('KIWI_RT_RISK_AUTOLOAD') ?: throw new RuntimeException('autoload missing');
@@ -52,7 +50,6 @@ require __DIR__ . '/rt-risk-prelude.php';
 // The software-authenticator builder and the fake redis live beside
 // the bundle's own handler test; both are repo-internal fixtures.
 require_once getenv('KIWI_RT_BUNDLE_TESTS') . '/WebAuthnStepUpHandlerTest.php';
-require_once getenv('KIWI_RT_BUNDLE_TESTS') . '/Fixtures/SpyOutcomeReporter.php';
 
 const MASTER = 'd37mast3rd37mast3rd37mast3rd37mast3r';
 /** The fixed software-authenticator P-256 key (the bundle test's own vectors). */
@@ -138,16 +135,17 @@ $store = new RedisStepUpChallengeStore($redis, '{kiwi:rt37}:stepup:');
 foreach ((array) $redisRaw->keys('{kiwi:rt37}:*') as $staleKey) {
     $redisRaw->del([$staleKey]);
 }
-$reporter = new SpyOutcomeReporter();
 $ticket = new StepUpTicket(MASTER);
-$credit = new StepUpCompletionCredit($reporter, MASTER);
 $now = 1_700_000_000;
 $clock = static fn (): int => $now;
 
 $totp = new TotpStepUpHandler(
     $store,
     $ticket,
-    $credit,
+    // The sanctioned wiring shape (the extension's own argument list,
+    // KiwiCaptchaExtension totp handler block): the completion credit
+    // left the handler in the demand architecture, argument 3 is the
+    // RFC 6238 algorithm now.
     'sha1',
     6,
     1,          // the acceptance window: plus or minus one step
@@ -272,7 +270,6 @@ $registry = new WebAuthnCredentialRegistry($fakeRedis, 'tests:rt37:webauthn:');
 $webauthn = new WebAuthnStepUpHandler(
     $waStore,
     $ticket,
-    $credit,
     $registry,
     MASTER,
     300,

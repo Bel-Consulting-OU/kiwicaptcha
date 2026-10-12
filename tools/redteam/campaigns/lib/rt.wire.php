@@ -320,6 +320,13 @@ if ($code === null || $code === '') {
      * Enroll the TOTP factor for the actor's pending principal through
      * the product's own provisioning surface (the first enrollment is
      * authorized by the email-otp step-up this session just completed).
+     * The enrollment precondition reads the session-scoped success
+     * marker the deployment's own enrollment surface seeds after a
+     * verified completion (the bundle's own journey test seeds the same
+     * marker before the handler call): this session's email-otp
+     * completion is exactly that verified fact, so the marker is seeded
+     * here for the session the completion ran under, then the handler
+     * enrolls.
      */
     public function enrollTotp(RtActor $actor): ?string
     {
@@ -332,6 +339,8 @@ if ($code === null || $code === '') {
         $principal = $factory->principalId($raw);
         $handler = $this->kernel->getContainer()->get(TotpStepUpHandler::class);
         \assert($handler instanceof TotpStepUpHandler);
+        $store = $this->kernel->getContainer()->get('kiwi_captcha.step_up.store');
+        \assert($store instanceof \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore);
         // The completion credit records the session id of the session
         // it credited; the restore migrates that session on success, so
         // try the bound id and the migrated one (the two spellings the
@@ -340,6 +349,10 @@ if ($code === null || $code === '') {
             if ($session === null || $session === '') {
                 continue;
             }
+            // The provisioning marker: this session completed the
+            // email-otp step-up for this principal (the completed
+            // step-up above), the fact the enrollment surface records.
+            $store->markSessionStepUpSuccess($session, $principal, 'email_otp', 900, time());
             try {
                 $secret = $handler->enroll($principal, $session);
             } catch (\Throwable $e) {

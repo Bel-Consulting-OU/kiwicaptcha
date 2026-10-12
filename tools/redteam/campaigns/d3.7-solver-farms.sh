@@ -99,6 +99,10 @@ rt_assert_eq "$(jwa honest_registration_completed)" "true" "webauthn: the honest
 rt_assert_eq "$(jwa honest_assertion_completed)" "true" "webauthn: the honest origin asserts"
 rt_assert_eq "$(jwa assertion_replay_refused)" "true" "webauthn: the replayed assertion is refused"
 
+if [ "$RT_FAILURES" -eq 0 ]; then
+    rt_report_pass "relay residual measured: totp relayed code completed once, replay guard refused the second, consumed record refused, attempt cap burned, begin bound $RATE_LIMITED of 10; webauthn phishing origin refused, honest origin registered and asserted, replay refused"
+fi
+
 printf 'ECONOMIC: %s %s relayed_code_resale_value=single_use webauthn_phish_yield=0 cost_per_accepted_relayed_abuse_beyond_first=unbounded\n' \
     "$RT_CAMPAIGN" "$RT_PROFILE"
 
