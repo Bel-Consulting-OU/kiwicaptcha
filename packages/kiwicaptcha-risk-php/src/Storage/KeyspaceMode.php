@@ -277,6 +277,9 @@ enum KeyspaceMode: string
      */
     public static function sessionTagKey(string $encodedNamespace, string $kind, string $sessionHex): string
     {
+        if (preg_match('/^[0-9a-f]{32}$/', $sessionHex) !== 1) {
+            throw new \InvalidArgumentException('A session tag key names the 32-hex session pseudonym');
+        }
         return sprintf(
             '{kiwi:%s:session:%s}:risk:%s:%s',
             $encodedNamespace,
