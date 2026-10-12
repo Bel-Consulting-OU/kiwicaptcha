@@ -9,15 +9,15 @@
   },
   "budgets": {
     "widget_driver": {
-      "raw_bytes": 123224,
-      "brotli_bytes": 29976,
+      "raw_bytes": 123588,
+      "brotli_bytes": 30023,
       "raw_cap_bytes": 160000,
       "gzip_cap_bytes": 40000,
       "brotli_cap_bytes": 34000,
       "copies_identical": true,
-      "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative.",
-      "gzip_bytes_zlib12": 35728,
-      "gzip_bytes_zlib13": 35728,
+      "note": "The eager driver core (widget-driver.js), three byte-identical copies, the always-loaded asset; the lazy widget modules (widget-risk.js / widget-telemetry.js / widget-locales.js / widget-compat.js) and the execution interpreter carry their own budget rows. The raw cap is carried onto the always-loaded core; the compressed caps are the ordinary-bootstrap target. Compressed sizes use gzip -n -9 and brotli -q 11. perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative. The Escape-dismissal capture listener (the cross-engine keyboard fix) added the current delta.",
+      "gzip_bytes_zlib12": 35785,
+      "gzip_bytes_zlib13": 35785,
       "headroom_review": {
         "gzip": "reviewed 2026-10-12: 35552/40000 bytes (88.9%). The step-up surface of the eager core (the step-up dialog machinery, the email-ownership factor UI and the rendered-demand attribute fallback) grew the always-loaded driver on purpose; the gzip cap is re-baselined to 40,000 for that surface. The eager driver core still carries the always-loaded bootstrap (solvers, lifecycle, a11y, provider surface). The reviewed follow-up stands: move the pure-JS SHA-256 fallback (the largest non-bootstrap block, only reached when neither wasm nor the worker is available) into a lazy module before the next behavior wave. Any further growth must either recover bytes or re-review this note."
       },
