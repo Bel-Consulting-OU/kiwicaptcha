@@ -48,9 +48,9 @@
       "gzip_bytes_zlib13": 45213
     },
     "widget_css": {
-      "raw_bytes": 11155,
+      "raw_bytes": 11145,
       "copies_identical": true,
-      "note": "The widget stylesheet (widget.css), three byte-identical copies; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative. The narrow-container wrapping fix (status text wraps instead of ellipsizing) intentionally grew the sheet; the row carries no cap by design.",
+      "note": "The widget stylesheet (widget.css), three byte-identical copies; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes. Structured fields are authoritative. The narrow-container wrapping fix (status text wraps instead of ellipsizing) intentionally grew the sheet; the row carries no cap by design. The KiwiCaptcha identity palette (Teal Deep/Teal accent, Ink/Paper/Sage surfaces) and the host-system font stack keep the sheet under the caps.",
       "brotli_bytes": 2231,
       "raw_cap_bytes": 12155,
       "gzip_cap_bytes": 3218,

@@ -84,10 +84,24 @@ generated.set(twig, template.replace(svgPattern, () => compact));
 
 const preview = 'packages/kiwicaptcha/design/brand-preview.html';
 if (existsSync(join(root, preview))) {
-  generated.set(preview, read(preview).replace(
-    /<!-- kiwi-mark:start -->[\s\S]*?<!-- kiwi-mark:end -->/,
-    () => `<!-- kiwi-mark:start -->\n${mark}\n  <!-- kiwi-mark:end -->`,
-  ));
+  let content = read(preview);
+  const compactify = (svg) => svg.replace(/>\s+</g, '><').trim();
+  // The labelled span carries the accessible name; the artwork stays
+  // out of the accessibility tree.
+  const inlineSvg = (svg) => svg.replace('<svg ', '<svg aria-hidden="true" focusable="false" ');
+  const syncBlock = (name, markup) => {
+    const pattern = new RegExp(`<!-- ${name}:start -->[\\s\\S]*?<!-- ${name}:end -->`);
+    if (!pattern.test(content)) throw new Error(`Missing ${name} block in the brand preview`);
+    content = content.replace(pattern, () => `<!-- ${name}:start -->${markup}<!-- ${name}:end -->`);
+  };
+  const markBlock = new RegExp(`<!-- kiwi-mark:start -->[\\s\\S]*?<!-- kiwi-mark:end -->`);
+  if (!markBlock.test(content)) throw new Error('Missing kiwi-mark block in the brand preview');
+  content = content.replace(markBlock, () => `<!-- kiwi-mark:start -->\n${mark}\n  <!-- kiwi-mark:end -->`);
+  syncBlock('kiwi-lockup', `<span class="lockup" role="img" aria-label="kiwi captcha">${inlineSvg(compactify(lockupSvg))}</span>`);
+  syncBlock('kiwi-lockup-large', `<span class="lockup" aria-hidden="true">${inlineSvg(compactify(lockupSvg))}</span>`);
+  syncBlock('kiwi-stacked', `<span class="stacked" role="img" aria-label="kiwi captcha">${inlineSvg(compactify(stackedSvg))}</span>`);
+  syncBlock('kiwi-wordmark', `<span class="wordmark" role="img" aria-label="kiwi captcha">${inlineSvg(compactify(wordmark))}</span>`);
+  generated.set(preview, content);
 }
 
 // Asset copies ship inside the Rust crate and the Symfony bundle. Keep
