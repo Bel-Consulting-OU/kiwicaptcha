@@ -1,0 +1,16 @@
+name: zlib-probe
+on: workflow_dispatch
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: measure the driver gzip bytes with the gate's exact function
+        run: |
+          python3 - <<'PY'
+          import zlib
+          d = open('.zlib-probe/widget-driver.js', 'rb').read()
+          print('ZLIB_VERSION', zlib.ZLIB_VERSION)
+          c = zlib.compressobj(9, zlib.DEFLATED, 31)
+          print('GZIP_BYTES', len(c.compress(d) + c.flush()))
+          PY
