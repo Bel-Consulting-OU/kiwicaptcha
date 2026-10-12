@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Kernel;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Tests\Support\RswFixture;
 use Symfony\Component\Config\Loader\LoaderInterface;
+use Symfony\Component\Routing\Loader\Configurator\RoutingConfigurator;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
@@ -84,7 +85,10 @@ final class NewIntegratorSmokeKernel extends TestKernel
                 $config['risk']['step_up']['handlers']['email_otp']['sender'] = 'kiwi_step_up_test_sender';
                 $config['risk']['step_up']['default_handler'] = 'totp';
                 $config['risk']['step_up']['email_ownership']['sender'] = 'kiwi_step_up_test_ownership_sender';
-                $config['risk']['decoy_v3_enabled'] = false;
+                $config['risk']['decoy_v3_enabled'] = true;
+                foreach (['financial_action', 'admin_login'] as $s) {
+                    $config['risk']['scopes'][$s]['operation_identity_source'] = 'request_attribute';
+                }
             }
             if ($this->storageServiceId !== null) {
                 // The advanced escape hatch: an explicit storage service
@@ -97,10 +101,13 @@ final class NewIntegratorSmokeKernel extends TestKernel
             $container->register('kiwi_step_up_test_ownership_sender', \BelConsulting\KiwiCaptchaBundle\Tests\Kernel\Fixtures\DoctorCarrierOwnershipSender::class)
                 ->setPublic(true);
             $container->loadFromExtension('kiwi_captcha', $config);
-            $container->loadFromExtension('framework', [
-                'router' => ['resource' => __DIR__.'/Fixtures/smoke_step_up_routes.php', 'type' => 'php'],
-            ]);
         });
+    }
+
+    public function configureRoutes(RoutingConfigurator $routes): void
+    {
+        parent::configureRoutes($routes);
+        $routes->import(__DIR__.'/Fixtures/smoke_step_up_routes.php')->prefix('/kiwi');
     }
 
     private function isAbuseFirstProfile(): bool
