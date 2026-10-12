@@ -104,6 +104,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         end
         local op = ARGV[1]
         if op == 'complete' then
+          if type(rec['superseded_by']) == 'string' and rec['superseded_by'] ~= '' then return nil end
           if rec['state'] ~= 'open' then return nil end
           rec['state'] = 'completed'
           rec['state_at'] = tonumber(ARGV[2])
@@ -111,6 +112,12 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           return cjson.encode(rec)
         end
         if op == 'claim' then
+          -- A superseded demand finalizes nothing: escalation replaced
+          -- it, so no retake may drive it to a terminal. The marker is
+          -- checked inside the same script as the state CAS, so a
+          -- supersede that interleaves a stale claimant's read still
+          -- refuses it.
+          if type(rec['superseded_by']) == 'string' and rec['superseded_by'] ~= '' then return nil end
           -- The finalization claim runs on the store-owned clock: the
           -- stale-claim retake decision reads the Redis server time,
           -- never a PHP worker's clock, so two workers cannot disagree
@@ -139,6 +146,13 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           if rec['state'] ~= 'finalizing' then return nil end
           local terminal = ARGV[2]
           if terminal ~= 'authorized' and terminal ~= 'denied' and terminal ~= 'superseded' then return nil end
+          -- A superseded demand authorizes nothing ever again: only
+          -- the superseded settlement itself (the escalator's follow-up)
+          -- and the fail-closed denied terminal may still land. The
+          -- denied terminal is allowed because losing the supersede
+          -- race settles the loser denied, and denial carries no
+          -- authorization power.
+          if terminal == 'authorized' and type(rec['superseded_by']) == 'string' and rec['superseded_by'] ~= '' then return nil end
           rec['state'] = terminal
           rec['state_at'] = tonumber(ARGV[3])
           if terminal == 'authorized' then
@@ -233,6 +247,12 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           or type(de['id']) ~= 'string' or de['id'] ~= ARGV[1] then
           return {'crossed'}
         end
+        -- A superseded demand completes nothing, whatever its state
+        -- field still says: escalation replaced it with a stronger
+        -- child, and the weak proof must not land behind the family's
+        -- back. The marker rides the record, so the check is one
+        -- atomic read here.
+        if type(de['superseded_by']) == 'string' and de['superseded_by'] ~= '' then return {'spent'} end
         if de['state'] ~= 'open' then return {'spent'} end
         local now = tonumber(ARGV[2])
         if type(ch['expires_at']) ~= 'number' or ch['expires_at'] <= now then return {'expired'} end
@@ -345,7 +365,14 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         if not ok or type(parent) ~= 'table' or type(parent['expires_at']) ~= 'number' then
           return nil
         end
-        if parent['superseded_by'] then return nil end
+        if type(parent['superseded_by']) == 'string' and parent['superseded_by'] ~= '' then return nil end
+        -- A terminal demand is history, not a family head: only an
+        -- open demand (the mint lane) or a claimed finalizing one (the
+        -- escalator holding its own claim) may be superseded. An
+        -- authorized or denied record already settled, and completed
+        -- is mid-finalization; superseding any of them would hand the
+        -- operation a fresh live sibling it never earned.
+        if parent['state'] ~= 'open' and parent['state'] ~= 'finalizing' then return nil end
         local t = redis.call('TIME')
         local nowS = tonumber(t[1])
         if nowS >= parent['expires_at'] then return nil end
@@ -383,7 +410,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           redis.call('DEL', KEYS[1])
           return nil
         end
-        if rec['superseded_by'] then return nil end
+        if type(rec['superseded_by']) == 'string' and rec['superseded_by'] ~= '' then return nil end
         if rec['state'] ~= 'open' then return nil end
         local t = redis.call('TIME')
         local nowS = tonumber(t[1])

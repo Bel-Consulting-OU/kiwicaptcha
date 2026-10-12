@@ -169,6 +169,51 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->store->create($this->challenge($id), 300);
     }
 
+    public function testASupersededDemandCompletesNoChallengeOnTheRealClient(): void
+    {
+        // The finding this pins, on the real server: the escalation
+        // supersede wrote the parent's child link but left its state
+        // open, so the completion script's open-state gate passed and
+        // the weak proof landed behind the family's back. The
+        // supersession marker is now judged inside the completion
+        // script itself. The clock is the wall clock: the supersede
+        // script takes its liveness decision on the Redis server time,
+        // so frozen fixture timestamps would read as expired.
+        $now = time();
+        $demandId = 'realsupersededdemand000001';
+        $this->store->createDemand(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand::mint($demandId, 'login', null, null, null, $now, 300),
+            300,
+        );
+        $challenge = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
+            'realsupersededchallenge00001',
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            $now,
+            300,
+            5,
+            str_repeat('a', 64),
+            null,
+            null,
+            false,
+            false,
+            null,
+            $demandId,
+        );
+        $this->store->create($challenge, 300);
+        $child = $this->store->readDemand($demandId)->spawnChild('realsupersededchild0000001', $now, 'decision-2');
+        self::assertNotNull($this->store->supersedeDemandWithChild($demandId, $child), 'the escalation replaces the open parent');
+        self::assertNull(
+            $this->store->completeFactor('realsupersededchallenge00001', $demandId, (string) $challenge->clientSecretHash, $now + 1, null),
+            'the superseded parent completes no challenge on the real server',
+        );
+        self::assertNull($this->store->claimDemandFinalization($demandId, $now + 2, 30), 'the superseded parent is never claimed for finalization');
+    }
+
     public function testAReleasedReservationRefundsItsBudgetsOnTheRealClient(): void
     {
         // The finding this pins: the settle script reads the budget

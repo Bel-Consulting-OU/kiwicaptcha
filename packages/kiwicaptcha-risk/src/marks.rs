@@ -280,8 +280,10 @@ pub struct FirstAttemptEvidence {
     /// The unmasked novelty verdict, recorded before the enforcement
     /// mode is applied. The post-Allow trust minting reads it: an Allow
     /// that enforce mode would have stepped up records its session and
-    /// device bindings without trust, so learn mode's leniency can
-    /// never leave a trusted device under the victim.
+    /// device bindings without trust, so a novel (deferred) login
+    /// mints no trust even in learn mode; the repeat visit from
+    /// granted history is the trust-earning event, and a credential
+    /// change revokes the trust mirrors so the gate re-arms.
     pub would_step_up_under_enforce: bool,
 }
 

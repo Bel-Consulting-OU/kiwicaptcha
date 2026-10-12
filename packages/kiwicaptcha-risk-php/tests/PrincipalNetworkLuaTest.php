@@ -19,6 +19,8 @@ final class PrincipalNetworkLuaTest extends TestCase
 {
     private const PRINCIPAL = '9f1c4a7e2b8d63f05a1e9c4d7b2e6f18';
 
+    private const HOME_ASN_TAG = 'asn:64512';
+
     /** @var \Predis\Client */
     private $client;
 
@@ -149,8 +151,30 @@ final class PrincipalNetworkLuaTest extends TestCase
         $store->forgetDevices(self::PRINCIPAL);
         self::assertFalse($store->principalNetworkSeen(self::PRINCIPAL, 'session:aaaa0000000000000000000000000004'));
         self::assertFalse($store->principalNetworkSeen(self::PRINCIPAL, 'device:bbbb0000000000000000000000000005'));
-        // Network tags survive revocation.
+        // Network seen-ness survives revocation.
         self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010203'));
+    }
+
+    public function testForgetDevicesRevokesTheTrustMirrorsSoTheGateRearms(): void
+    {
+        // The revocation lane's documented intent: after a credential
+        // change, the next login from any network is judged by the
+        // first-attempt gate on its own evidence. A network whose only
+        // vouches came from the compromised credentials must not keep
+        // minting the account-level trusted-network answer, so the
+        // trust mirrors go with the credentials while the bare
+        // seen-ness (the long-memory evidence) survives.
+        $store = $this->store();
+        $store->recordPrincipalNetworkTag(self::PRINCIPAL, 'net:040a010204', trusted: true);
+        $store->recordPrincipalNetworkTag(self::PRINCIPAL, self::HOME_ASN_TAG, trusted: true);
+        $store->recordPrincipalNetworkTag(self::PRINCIPAL, 'session:aaaa0000000000000000000000000006', trusted: true);
+        $store->recordPrincipalNetworkTag(self::PRINCIPAL, 'device:bbbb0000000000000000000000000007', trusted: true);
+        self::assertTrue($store->principalHasTrustedNetwork(self::PRINCIPAL), 'the pre-revocation account reads network-trusted');
+        $store->forgetDevices(self::PRINCIPAL);
+        self::assertFalse($store->principalHasTrustedNetwork(self::PRINCIPAL), 'the revocation re-arms the trusted-network answer');
+        self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, 'net:040a010204'), 'the bare network evidence survives');
+        self::assertTrue($store->principalNetworkSeen(self::PRINCIPAL, self::HOME_ASN_TAG), 'the bare ASN evidence survives');
+        self::assertFalse($store->tagIsTrusted(self::PRINCIPAL, 'device:bbbb0000000000000000000000000007'), 'no trust survives on the continuity plane either');
     }
 
     /**

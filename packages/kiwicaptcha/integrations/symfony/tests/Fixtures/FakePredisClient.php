@@ -852,6 +852,9 @@ final class FakePredisClient extends \Predis\Client
             };
             $stateAt = \is_int($rec['state_at'] ?? null) ? $rec['state_at'] : 0;
             if ($op === 'complete') {
+                if (!empty($rec['superseded_by'])) {
+                    return null;
+                }
                 if ($rec['state'] !== 'open') {
                     return null;
                 }
@@ -861,6 +864,9 @@ final class FakePredisClient extends \Predis\Client
                 return $rearm($rec, (int) $rest[2]) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
             }
             if ($op === 'claim') {
+                if (!empty($rec['superseded_by'])) {
+                    return null;
+                }
                 $now = (int) $rest[1];
                 if ($rec['state'] === 'completed') {
                     $rec['state'] = 'finalizing';
@@ -882,6 +888,9 @@ final class FakePredisClient extends \Predis\Client
                 }
                 $terminal = (string) $rest[1];
                 if ($terminal !== 'authorized' && $terminal !== 'denied' && $terminal !== 'superseded') {
+                    return null;
+                }
+                if ($terminal === 'authorized' && !empty($rec['superseded_by'])) {
                     return null;
                 }
                 $rec['state'] = $terminal;
@@ -958,6 +967,9 @@ final class FakePredisClient extends \Predis\Client
                 return null;
             }
             if (!empty($parent['superseded_by'])) {
+                return null;
+            }
+            if (($parent['state'] ?? null) !== 'open' && ($parent['state'] ?? null) !== 'finalizing') {
                 return null;
             }
             $nowS = (int) floor($this->timeMs() / 1000);
@@ -1192,6 +1204,9 @@ final class FakePredisClient extends \Predis\Client
             }
             if (($ch['demand_id'] ?? null) !== $demandId || ($de['id'] ?? null) !== $demandId) {
                 return ['crossed'];
+            }
+            if (!empty($de['superseded_by'])) {
+                return ['spent'];
             }
             if (($de['state'] ?? null) !== 'open') {
                 return ['spent'];

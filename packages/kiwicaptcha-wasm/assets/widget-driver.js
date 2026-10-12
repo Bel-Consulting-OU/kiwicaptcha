@@ -526,7 +526,7 @@
       badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
       badgeVersionError: "Version Error", badgeUnavailable: "Unavailable", badgeExpired: "Expired",
       statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
-      statusVerified: "Verification complete", statusFailed: "Verification failed",
+      statusVerified: "Check complete", statusFailed: "Verification failed",
       statusExpired: "Verification expired", statusWorkerUnavailable: "Check could not start",
       statusExecutionUnavailable: "Check incomplete",
       statusSolverMismatch: "Solver version mismatch",
