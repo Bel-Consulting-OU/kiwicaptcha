@@ -31,8 +31,8 @@ namespace KiwiCaptcha\Risk\Marks;
  *   reads it to decide whether the login may mint session and device
  *   trust. An Allow that enforce mode would have stepped up records
  *   its bindings without trust, so a novel (deferred) login mints no
- *   trust even in learn mode; the repeat visit from granted history
- *   is the trust-earning event, and a credential change revokes the
+ *   trust even in learn mode. The repeat visit from granted history
+ *   is the trust-earning event; a credential change revokes the
  *   trust mirrors so the gate re-arms.
  *
  * Rust mirror: marks::FirstAttemptEvidence.
