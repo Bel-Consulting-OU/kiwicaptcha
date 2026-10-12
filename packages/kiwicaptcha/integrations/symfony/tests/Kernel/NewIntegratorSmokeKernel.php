@@ -104,12 +104,6 @@ final class NewIntegratorSmokeKernel extends TestKernel
         });
     }
 
-    public function configureRoutes(RoutingConfigurator $routes): void
-    {
-        parent::configureRoutes($routes);
-        $routes->import(__DIR__.'/Fixtures/smoke_step_up_routes.php')->prefix('/kiwi');
-    }
-
     private function isAbuseFirstProfile(): bool
     {
         return $this->profile === 'high_abuse' || $this->profile === 'abuse_first';
