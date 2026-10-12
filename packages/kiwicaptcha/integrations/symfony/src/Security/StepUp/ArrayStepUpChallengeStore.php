@@ -145,11 +145,8 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return $completed;
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, string $completedFactor, ?string $sessionHash = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion
     {
-        if (!FactorRequirement::isFamily($completedFactor)) {
-            throw new \InvalidArgumentException('The completed factor of an atomic completion must be a family of the assurance ladder');
-        }
         // The same gate order the Redis script runs: presence, decode
         // (the records round-trip through the strict wire decode at
         // write time here), identity, state, liveness, binding, factor
@@ -178,52 +175,48 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
         // The factor requirement gate, the script's own rule: the
         // demand's stored requirement is judged against the factor
-        // identity the stored challenge record carries (its kind), never
-        // a caller argument. A completion below the required assurance
-        // rank refuses, and so does a factor other than the exact id
-        // the requirement names at or below that rank; a strictly
-        // stronger completion satisfies a weaker floor, the ladder is a
-        // floor. Nothing moves on a refusal.
+        // identity the stored challenge record carries (its server-held
+        // snapshot, resolved at begin), never a caller argument. A
+        // completion below the required assurance rank refuses, and so
+        // does a factor neither the snapshot's family nor its exact id
+        // answers at or below that rank. A strictly stronger completion
+        // satisfies a weaker floor, the ladder is a floor. Nothing
+        // moves on a refusal.
         $required = $demand->requiredFactor;
+        $snapshot = $challenge->factor;
         if ($required !== null) {
-            $family = self::challengeFactorIdentity($challenge->kind);
-            $rank = FactorRequirement::rankOf($family);
-            if ($rank < $required->assuranceRank
-                || ($family !== $required->factorId && $rank <= $required->assuranceRank)) {
+            if ($snapshot === null || $snapshot->assuranceRank < $required->assuranceRank) {
+                return null;
+            }
+            if ($snapshot->family !== $required->factorId
+                && $snapshot->factorId !== $required->factorId
+                && $snapshot->assuranceRank <= $required->assuranceRank) {
                 return null;
             }
         }
         // The transition: consume the challenge, complete the demand,
-        // record the escalation marker, all or nothing.
+        // record the escalation marker, all or nothing. The marker
+        // stores the factor identity the record itself carries, never a
+        // caller argument: a completion cannot poison the future
+        // assurance escalation by claiming a stronger factor than its
+        // challenge proves.
         unset($this->challenges[$challengeId]);
         $completed = $demand->withState(StepUpDemandState::Completed, $now);
         $this->demands[$demandId] = ['record' => $completed, 'expiresAt' => $demand->expiresAt];
-        if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash) {
+        $family = $snapshot?->family;
+        if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash
+            && \is_string($family) && $family !== '') {
             $this->completedIndex[$sessionHash] = [
-                'value' => $challenge->scope.'|'.$completedFactor.'|'.$demand->expiresAt,
+                'value' => $challenge->scope.'|'.$family.'|'.$demand->expiresAt,
                 'expiresAt' => $demand->expiresAt,
             ];
         }
 
-        return StepUpFactorCompletion::fromRecords($challenge, $completed, $completedFactor);
+        return StepUpFactorCompletion::fromRecords($challenge, $completed);
     }
 
     /** @var array<string, array{value: string, expiresAt: int}> session hash -> escalation marker */
     private array $completedIndex = [];
-
-    /**
-     * The assurance family a stored challenge kind proves: the identity
-     * the requirement gate judges, the email-ownership grant answering
-     * as the email_otp rung of the ladder.
-     */
-    private static function challengeFactorIdentity(StepUpChallengeKind $kind): string
-    {
-        return match ($kind) {
-            StepUpChallengeKind::Totp => FactorRequirement::TOTP,
-            StepUpChallengeKind::WebAuthn => FactorRequirement::WEBAUTHN,
-            StepUpChallengeKind::EmailOtp, StepUpChallengeKind::EmailOwnership => FactorRequirement::EMAIL_OTP,
-        };
-    }
 
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
     {

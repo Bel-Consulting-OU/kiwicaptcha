@@ -14,121 +14,20 @@
 //!
 //! The harness is self-contained: it spawns its own redis-server
 //! processes on free ports and shuts every one down with a nosave final
-//! write, so the regular suite needs no infrastructure.
+//! write. The RISK_REDIS_URLS override (comma separated, at least two
+//! endpoints) hands over external stand-ins instead, which the harness
+//! never shuts down. Without either source the suite skips, so the
+//! regular run needs no infrastructure.
 
 mod common;
 
-use std::collections::BTreeSet;
-use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kiwicaptcha_risk::event::RiskEventKind;
 use kiwicaptcha_risk::sharded::{ShardedOptions, ShardedRedisRiskStateStore};
 use kiwicaptcha_risk::store::RiskStateStore;
 
 const MEASURED_ASSESSMENTS: u64 = 40;
-
-fn free_ports(count: usize) -> Vec<u16> {
-    let mut ports = BTreeSet::new();
-    while ports.len() < count {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        ports.insert(listener.local_addr().expect("addr").port());
-    }
-    ports.into_iter().collect()
-}
-
-struct RedisServer {
-    port: u16,
-    child: Child,
-}
-
-impl RedisServer {
-    fn spawn(port: u16) -> RedisServer {
-        let child = Command::new("redis-server")
-            .arg("--port")
-            .arg(port.to_string())
-            .arg("--save")
-            .arg("")
-            .arg("--appendonly")
-            .arg("no")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("redis-server spawned (is it on PATH?)");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}/")) {
-                if let Ok(mut conn) = client.get_connection() {
-                    let pong: Result<String, _> = redis::cmd("PING").query(&mut conn);
-                    if pong.is_ok() {
-                        break;
-                    }
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "redis-server on {port} never came up"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        RedisServer { port, child }
-    }
-
-    /// The `cmdstat_evalsha:calls=` counter of this server.
-    fn evalsha_calls(&self) -> u64 {
-        let mut conn = redis::Client::open(format!("redis://127.0.0.1:{}/", self.port))
-            .expect("url parses")
-            .get_connection()
-            .expect("connects");
-        let info: String = redis::cmd("INFO")
-            .arg("commandstats")
-            .query(&mut conn)
-            .expect("info");
-        for line in info.lines() {
-            if let Some(rest) = line.strip_prefix("cmdstat_evalsha:") {
-                for field in rest.split(',') {
-                    if let Some(calls) = field.strip_prefix("calls=") {
-                        return calls.trim().parse().expect("calls is an integer");
-                    }
-                }
-            }
-        }
-        0
-    }
-
-    fn reset_stats(&self) {
-        let mut conn = redis::Client::open(format!("redis://127.0.0.1:{}/", self.port))
-            .expect("url parses")
-            .get_connection()
-            .expect("connects");
-        let _: Result<String, _> = redis::cmd("CONFIG").arg("RESETSTAT").query(&mut conn);
-    }
-
-    fn exists(&self, key: &str) -> bool {
-        let mut conn = redis::Client::open(format!("redis://127.0.0.1:{}/", self.port))
-            .expect("url parses")
-            .get_connection()
-            .expect("connects");
-        let exists: i64 = redis::cmd("EXISTS")
-            .arg(key)
-            .query(&mut conn)
-            .expect("exists");
-        exists == 1
-    }
-}
-
-impl Drop for RedisServer {
-    fn drop(&mut self) {
-        if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{}/", self.port)) {
-            if let Ok(mut conn) = client.get_connection() {
-                let _: Result<String, _> = redis::cmd("SHUTDOWN").arg("NOSAVE").query(&mut conn);
-            }
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
 
 fn observation(i: u64) -> kiwicaptcha_risk::event::RiskObservation {
     let mut o = common::observation(
@@ -151,11 +50,13 @@ fn observation(i: u64) -> kiwicaptcha_risk::event::RiskObservation {
 /// the once-per-window transition budget.
 #[test]
 fn level_transition_lands_on_a_different_slot_than_the_session_keys() {
-    let servers: Vec<RedisServer> = free_ports(2).into_iter().map(RedisServer::spawn).collect();
-    let urls: Vec<String> = servers
-        .iter()
-        .map(|s| format!("redis://127.0.0.1:{}/", s.port))
-        .collect();
+    let Some(servers) = common::shard_standins(2) else {
+        eprintln!(
+            "skipping the slot-separation suite: set RISK_REDIS_URLS to at least two comma-separated endpoints or install redis-server"
+        );
+        return;
+    };
+    let urls: Vec<String> = servers.iter().map(|s| s.url().to_string()).collect();
     let options = ShardedOptions {
         connection_timeout_ms: 2_000,
         command_timeout_ms: 2_000,
@@ -323,13 +224,16 @@ fn level_transition_lands_on_a_different_slot_than_the_session_keys() {
             + refresh_scope_units_on(endpoint)
             + u64::from(endpoint == hyst_endpoint)
     };
-    let actual: Vec<u64> = servers.iter().map(RedisServer::evalsha_calls).collect();
+    let actual: Vec<u64> = servers
+        .iter()
+        .map(common::RedisStandin::evalsha_calls)
+        .collect();
     for (endpoint, server) in servers.iter().enumerate() {
         assert_eq!(
             actual[endpoint],
             expected(endpoint),
             "server {endpoint} ({}): the EVALSHA budget must match the routed expectation exactly (a per-assessment level transition would add one call per assessment)",
-            server.port,
+            server.url(),
         );
     }
 }

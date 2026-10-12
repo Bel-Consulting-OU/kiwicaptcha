@@ -1261,6 +1261,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', 'risk disabled: the operation identity binding is inactive'];
         }
         $missing = [];
+        $noRecipe = [];
         foreach (($risk['scopes'] ?? []) as $name => $scope) {
             if (!\is_array($scope)) {
                 continue;
@@ -1274,6 +1275,15 @@ final class KiwiCaptchaDoctorCommand extends Command
             $source = $scope['operation_identity_source'] ?? null;
             if ($source !== 'request_attribute') {
                 $missing[] = (string) $name;
+                continue;
+            }
+            // A bound scope whose content recipe is empty feeds the
+            // content digest over nothing: the fields supplied to the
+            // digest stay empty while the actual business operation
+            // changes, so the binding cannot refuse the swap.
+            $fields = $scope['operation_content_fields'] ?? [];
+            if (!\is_array($fields) || $fields === []) {
+                $noRecipe[] = (string) $name;
             }
         }
         if ($missing !== []) {
@@ -1283,8 +1293,15 @@ final class KiwiCaptchaDoctorCommand extends Command
                 implode(', ', $missing),
             )];
         }
+        if ($noRecipe !== []) {
+            return ['FAIL', sprintf(
+                '%d high-value operation-bound scope(s) carry no protected-content recipe (%s): set risk.scopes.<name>.operation_content_fields to the request fields whose submitted values the operation content digest binds (amount_minor, currency, beneficiary_id, ...) — without them the digest runs over nothing and a changed amount, currency or beneficiary rides the settled authorization',
+                \count($noRecipe),
+                implode(', ', $noRecipe),
+            )];
+        }
 
-        return ['PASS', 'every high-value scope names a server-authoritative operation identity source'];
+        return ['PASS', 'every high-value scope names a server-authoritative operation identity source and a protected-content recipe'];
     }
 
     /**

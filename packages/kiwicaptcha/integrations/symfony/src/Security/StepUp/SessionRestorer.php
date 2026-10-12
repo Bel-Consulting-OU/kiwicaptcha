@@ -26,6 +26,19 @@ final class SessionRestorer
     /** The restore-failure counter the metrics exporter carries. */
     public const RESTORE_FAILURES_METRIC = 'kiwi_step_up_restore_failures_total';
 
+    /**
+     * The session attribute carrying the durable restore claim: the
+     * demand id of the restore this session performed. The claim and
+     * the unwrapped token are one session state, so they persist in
+     * the same session write. A crash between the landed restore and
+     * its journal entry leaves the pair behind. The pair is the
+     * recovery authority: the session proves it performed this very
+     * restore, so the demand-bound retry answers for it after the
+     * pending token is gone. See
+     * {@see StepUpDemandFinalizer::retryAuthorizedEffects()}.
+     */
+    public const RESTORE_CLAIM_ATTRIBUTE = '_kiwi_step_up_restore_claim';
+
     public function __construct(
         private readonly RiskIdentityFactory $identityFactory,
         private readonly ?TokenStorageInterface $tokenStorage = null,
@@ -55,6 +68,15 @@ final class SessionRestorer
      * the trust bindings and the device mint); a refused restore
      * writes nothing and changes nothing.
      *
+     * The unwrap is a durable session mutation and the journal entry
+     * that records it lands after it, so a crash in between would
+     * leave a restored session the journal calls unrestored. The
+     * restore claim closes that window: the demand id is written into
+     * the session before the unwrap, and session state persists
+     * atomically, so the claim can never survive without the mutation
+     * nor the mutation without the claim. The demand-bound retry reads
+     * the claim as its authority once the pending token is gone.
+     *
      * The typed answer lets the caller distinguish a landed restore
      * from a refused one: a refusal is journalable nowhere and must
      * never surface as user-visible success downstream.
@@ -62,6 +84,7 @@ final class SessionRestorer
     public function restore(string $principalPseudonym, ?Request $request = null, ?string $demandId = null): StepUpSessionRestore
     {
         try {
+            $request ??= $this->requestStack?->getCurrentRequest();
             $unwrapped = false;
             $token = $this->tokenStorage?->getToken();
             if ($token instanceof StepUpPendingToken) {
@@ -102,10 +125,22 @@ final class SessionRestorer
 
                     return StepUpSessionRestore::refusedDemandMismatch();
                 }
+                // The durable restore claim, written before the mutation
+                // it names: the demand id rides the session that is about
+                // to carry the restored token, so the session write
+                // persists claim and unwrap together. A started session
+                // is the only surface a browser retry can come back on;
+                // a sessionless restore leaves no claim and no retry
+                // authority behind.
+                if ($request !== null && $request->hasSession()) {
+                    $claimSession = $request->getSession();
+                    if ($claimSession->isStarted()) {
+                        $claimSession->set(self::RESTORE_CLAIM_ATTRIBUTE, $demandId);
+                    }
+                }
                 $this->tokenStorage?->setToken($token->getWrapped());
                 $unwrapped = true;
             }
-            $request ??= $this->requestStack?->getCurrentRequest();
             // Rotate the session id on the privilege upgrade so a
             // fixation captured before the step-up cannot ride the new
             // session. Runs after the request-stack fallback so a caller
@@ -234,5 +269,41 @@ final class SessionRestorer
         } catch (\Throwable) {
             return '';
         }
+    }
+
+    /**
+     * The restore claim of the request's session: the demand id of the
+     * restore this session performed, or null when the session carries
+     * none. The demand-bound recovery reads it as its authority once
+     * the pending token is gone: a session that holds a claim has
+     * proven it performed that demand's restore, so completing the
+     * demand's journal needs no second factor. A malformed value reads
+     * as no claim, fail closed.
+     */
+    public static function restoreClaimOf(?Request $request): ?string
+    {
+        if ($request === null || !$request->hasSession() || !$request->getSession()->isStarted()) {
+            return null;
+        }
+        $claim = $request->getSession()->get(self::RESTORE_CLAIM_ATTRIBUTE);
+        if (!\is_string($claim) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $claim) !== 1) {
+            return null;
+        }
+
+        return $claim;
+    }
+
+    /**
+     * Retire the restore claim of the request's session: the journal
+     * of the claimed restore is complete, so the session holds no
+     * recovery authority anymore. A sessionless request clears
+     * nothing.
+     */
+    public static function clearRestoreClaim(?Request $request): void
+    {
+        if ($request === null || !$request->hasSession() || !$request->getSession()->isStarted()) {
+            return;
+        }
+        $request->getSession()->remove(self::RESTORE_CLAIM_ATTRIBUTE);
     }
 }

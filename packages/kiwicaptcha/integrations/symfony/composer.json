@@ -52,7 +52,7 @@
     "web-auth/webauthn-lib": "^5.3.5",
     "symfony/security-core": "^6.0|^7.0|^8.0",
     "symfony/security-http": "^6.0|^7.0|^8.0",
-    "symfony/mailer": "^8.1"
+    "symfony/mailer": "^6.4|^7.1|^8.1"
   },
   "repositories": [
     {

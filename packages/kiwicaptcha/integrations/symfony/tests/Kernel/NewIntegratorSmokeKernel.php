@@ -89,6 +89,10 @@ final class NewIntegratorSmokeKernel extends TestKernel
                 foreach (['financial_action', 'admin_login'] as $s) {
                     $config['risk']['scopes'][$s]['operation_identity_source'] = 'request_attribute';
                 }
+                // The admin login binds the presented identifier as its
+                // protected content; the transfer-shaped recipe of
+                // financial_action rides the shipped scope default.
+                $config['risk']['scopes']['admin_login']['operation_content_fields'] = ['username'];
             }
             if ($this->storageServiceId !== null) {
                 // The advanced escape hatch: an explicit storage service

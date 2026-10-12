@@ -166,6 +166,63 @@ final class StepUpOperationBindingTest extends TestCase
     }
 
     /**
+     * The replay gate of the settled family (operationAuthorized) is
+     * bound to both digests, the same invariant the finalization
+     * binding check enforces. The exact regression matrix: the same
+     * operation with the same contents is the authorized replay; the
+     * same operation with a changed amount, recipient or currency is
+     * refused; a different operation with identical contents is
+     * refused. An authorized family tip alone answers nothing.
+     */
+    public function testOperationAuthorizedRequiresBothTheIdentityAndTheContentDigest(): void
+    {
+        $finalizer = $this->finalizer();
+        $content = ['amount' => '100.00', 'currency' => 'USD', 'recipient' => 'alice'];
+        $demandId = $finalizer->mintFinancialDemand(self::SCOPE, 'tx-001', $content, ttlSecs: 600);
+        self::assertNotNull($demandId);
+        $this->completeFactor($demandId);
+        $settled = $finalizer->finalizeGrant(
+            $demandId,
+            new StepUpOperationMaterial(formFields: $content),
+            null,
+            'email_otp',
+            'tx-001',
+            StepUpOperationDigest::canonicalOperationContent($content),
+        );
+        self::assertTrue($settled->authorized, 'the preconditions: tx-001 sits authorized');
+
+        // Same operation, same contents: the authorized replay.
+        self::assertTrue(
+            $finalizer->operationAuthorized(self::SCOPE, 'tx-001', $content),
+            'the same logical operation with the same contents is the authorized replay',
+        );
+
+        // Same operation, changed amount: refused.
+        self::assertFalse(
+            $finalizer->operationAuthorized(self::SCOPE, 'tx-001', ['amount' => '50000.00', 'currency' => 'USD', 'recipient' => 'alice']),
+            'a changed amount must not ride the settled authorization',
+        );
+
+        // Same operation, changed recipient: refused.
+        self::assertFalse(
+            $finalizer->operationAuthorized(self::SCOPE, 'tx-001', ['amount' => '100.00', 'currency' => 'USD', 'recipient' => 'bob']),
+            'a changed recipient must not ride the settled authorization',
+        );
+
+        // Same operation, changed currency: refused.
+        self::assertFalse(
+            $finalizer->operationAuthorized(self::SCOPE, 'tx-001', ['amount' => '100.00', 'currency' => 'EUR', 'recipient' => 'alice']),
+            'a changed currency must not ride the settled authorization',
+        );
+
+        // Different operation, identical contents: refused.
+        self::assertFalse(
+            $finalizer->operationAuthorized(self::SCOPE, 'tx-002', $content),
+            'a different logical operation with identical contents must not ride the settled authorization',
+        );
+    }
+
+    /**
      * The durable authorized terminal retains the operation digests,
      * the decision, the quarantine flag, the factor and the timestamp.
      */

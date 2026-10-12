@@ -136,6 +136,20 @@ final class StepUpPendingToken implements TokenInterface
         $this->inner->setUser($user);
     }
 
+    /**
+     * The wrapper holds no credentials of its own, so erasure forwards
+     * to the wrapped token (the only place sensitive data can live).
+     * Symfony 8 removed eraseCredentials() from TokenInterface, so the
+     * forward is guarded: an inner token of a line without the method
+     * carries nothing to erase through it.
+     */
+    public function eraseCredentials(): void
+    {
+        if (method_exists($this->inner, 'eraseCredentials')) {
+            $this->inner->eraseCredentials();
+        }
+    }
+
     /** @return array<string, mixed> */
     public function getAttributes(): array
     {

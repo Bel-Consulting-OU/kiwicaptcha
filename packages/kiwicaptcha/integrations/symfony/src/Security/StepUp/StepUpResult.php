@@ -59,6 +59,17 @@ final class StepUpResult
         public readonly ?string $targetPseudonym = null,
         /** Whether the proof asserts the principal owns the target. */
         public readonly bool $targetOwned = false,
+        /**
+         * The structured escalation payload of a step_up_required
+         * completion answer (the child demand id, the factor it
+         * requires, its assurance rank, the begin path), null on every
+         * other verdict. The json wire shape reports it verbatim: the
+         * escalation survives the wire boundary instead of collapsing
+         * into an opaque failure.
+         *
+         * @var array<string, mixed>|null
+         */
+        public readonly ?array $escalation = null,
     ) {
     }
 
@@ -105,15 +116,51 @@ final class StepUpResult
     }
 
     /**
+     * The typed escalation answer of a completed proof: the fresh
+     * reassessment re-raised the step-up, a strictly stronger child
+     * demand took the family over, and the answer carries the child on
+     * the wire. The demand id, the required factor, its assurance rank
+     * and the begin path are exactly what a client needs to begin the
+     * child; nothing else rides.
+     */
+    public static function escalated(
+        ?string $challengeId,
+        string $childDemandId,
+        ?string $requiredFactor,
+        ?int $requiredRank,
+        string $beginPath,
+    ): self {
+        $payload = [
+            'status' => 'step_up_required',
+            'reason' => 'escalated',
+            'demand' => $childDemandId,
+        ];
+        if ($requiredFactor !== null) {
+            $payload['required_factor'] = $requiredFactor;
+        }
+        if ($requiredRank !== null) {
+            $payload['required_rank'] = $requiredRank;
+        }
+        $payload['begin_path'] = $beginPath;
+
+        return new self(StepUpResultStatus::Failed, $challengeId, self::FAIL_DEMAND_ESCALATED, false, false, escalation: $payload);
+    }
+
+    /**
      * The completion credit of a succeeded verdict, as the json wire
      * shape of a completion answer reports it. The pseudonym identities
      * and the assurance ride no wire: they are the finalizer's input,
-     * never a client payload.
+     * never a client payload. An escalated answer reports its
+     * structured payload verbatim (status step_up_required, the child
+     * demand, the required factor and rank, the begin path).
      *
      * @return array<string, mixed>
      */
     public function toArray(): array
     {
+        if ($this->escalation !== null) {
+            return $this->escalation;
+        }
         $payload = ['status' => $this->status->value];
         if ($this->challengeId !== null) {
             $payload['challenge_id'] = $this->challengeId;

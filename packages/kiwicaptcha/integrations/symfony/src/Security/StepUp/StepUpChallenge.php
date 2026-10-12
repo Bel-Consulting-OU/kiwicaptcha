@@ -94,6 +94,20 @@ final class StepUpChallenge
          * pre-demand wire shape (the decode derives null).
          */
         public readonly ?string $demandId = null,
+        /**
+         * The server-held factor snapshot: the factor identity the
+         * record's completion proves, resolved once at begin and stored
+         * on the record. The completion plane judges a demand's stored
+         * requirement against this snapshot, never a caller argument,
+         * so a buggy or hostile completion lane cannot claim a stronger
+         * factor than the record was begun under. The family and the
+         * rank are the kind's own ladder rung (a record never claims
+         * another family than its proof material verifies). The factor
+         * id is the handler identity that begun it, which a custom
+         * handler names as its own. Null only on the pre-snapshot wire
+         * shape (the decode derives the kind's rung).
+         */
+        public readonly ?FactorRequirement $factor = null,
     ) {
     }
 
@@ -109,7 +123,11 @@ final class StepUpChallenge
      * caller's assertion that the principal owns the named target; only
      * then may completion clear the target's failure/lockout state.
      * `$demandId` is the demand the challenge answers; the proof of the
-     * consumed challenge finalizes exactly that demand.
+     * consumed challenge finalizes exactly that demand. `$factor` is
+     * the factor snapshot the record carries: null derives it from the
+     * kind, and an explicit snapshot must serve the kind's own family.
+     * A custom handler names its identity inside its kind's rung, it
+     * never claims another family's.
      */
     public static function begin(
         string $id,
@@ -129,6 +147,7 @@ final class StepUpChallenge
         bool $bootstrapAuthorized = false,
         ?string $subjectPseudonym = null,
         ?string $demandId = null,
+        ?FactorRequirement $factor = null,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up challenge TTL must be positive');
@@ -147,6 +166,17 @@ final class StepUpChallenge
         }
         if ($demandId !== null && $ceremony === 'creation') {
             throw new \InvalidArgumentException('An enrollment creation ceremony is explicitly non-authorizing and never binds a demand id');
+        }
+        // The factor snapshot: the server-held factor identity the
+        // record's completion proves. Null derives the kind's own rung.
+        // An explicit snapshot must serve that rung's family, so a
+        // handler can name its custom identity inside its kind's family
+        // but never claim a stronger family than its proof material
+        // verifies.
+        $rung = self::factorOfKind($kind);
+        $snapshot = $factor ?? $rung;
+        if ($snapshot->family !== $rung->family) {
+            throw new \InvalidArgumentException('A step-up challenge factor snapshot must serve the family its kind proves');
         }
         // The subject is a principal pseudonym only when the record's
         // family is principal-keyed. The email-ownership family
@@ -190,10 +220,31 @@ final class StepUpChallenge
             $bootstrapAuthorized,
             $subjectPseudonym,
             $demandId,
+            $snapshot,
         );
         $challenge->issuedClientSecret = $clientSecret;
 
         return $challenge;
+    }
+
+    /**
+     * The assurance rung a stored challenge kind proves: the ladder
+     * family and rank the kind's proof material verifies, with the
+     * handler identity the kind's own lane spells. The anonymous
+     * email-ownership grant proves the email_otp rung spelled as the
+     * grant lane's own factor identity. This derivation is the
+     * authority the begin snapshot and the decode fallback share, and
+     * the identity the completion stores judge the demand requirement
+     * against.
+     */
+    public static function factorOfKind(StepUpChallengeKind $kind): FactorRequirement
+    {
+        return match ($kind) {
+            StepUpChallengeKind::EmailOtp => new FactorRequirement(FactorRequirement::EMAIL_OTP, FactorRequirement::EMAIL_OTP, 1),
+            StepUpChallengeKind::EmailOwnership => new FactorRequirement(FactorRequirement::EMAIL_OTP, StepUpFactorAssurance::EMAIL_OWNERSHIP, 1),
+            StepUpChallengeKind::Totp => new FactorRequirement(FactorRequirement::TOTP, FactorRequirement::TOTP, 2),
+            StepUpChallengeKind::WebAuthn => new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3),
+        };
     }
 
     /**
@@ -280,6 +331,7 @@ final class StepUpChallenge
             $this->bootstrapAuthorized,
             $this->subjectPseudonym,
             $this->demandId,
+            $this->factor,
         );
     }
 
@@ -317,6 +369,9 @@ final class StepUpChallenge
             'target_owned' => $this->targetOwned,
             'subject' => $this->subjectPseudonym,
             'demand_id' => $this->demandId,
+            'factor_family' => $this->factor?->family,
+            'factor_id' => $this->factor?->factorId,
+            'factor_rank' => $this->factor?->assuranceRank,
         ];
     }
 
@@ -348,6 +403,28 @@ final class StepUpChallenge
             $kind = StepUpChallengeKind::from((string) $record['kind']);
         } catch (\ValueError) {
             throw $fail('kind must name a handler family');
+        }
+        // The factor snapshot is a coherent triple when it rides at all:
+        // a half snapshot is not a decodable record, and a snapshot that
+        // claims another family than its kind proves is incoherent. A
+        // record without the triple (the pre-snapshot wire shape) decodes
+        // and derives the kind's own rung.
+        $factor = null;
+        $factorFamily = $record['factor_family'] ?? null;
+        $factorId = $record['factor_id'] ?? null;
+        $factorRank = $record['factor_rank'] ?? null;
+        if ($factorFamily !== null || $factorId !== null || $factorRank !== null) {
+            if (!\is_string($factorFamily) || !\is_string($factorId) || !\is_int($factorRank)) {
+                throw $fail('the factor snapshot must be a coherent family, id and rank triple');
+            }
+            try {
+                $factor = new FactorRequirement($factorFamily, $factorId, $factorRank);
+            } catch (\InvalidArgumentException) {
+                throw $fail('the factor snapshot must be a ladder family, its rank and a well-shaped factor id');
+            }
+            if ($factor->family !== self::factorOfKind($kind)->family) {
+                throw $fail('the factor snapshot must serve the family its kind proves');
+            }
         }
         // The subject rides the record verbatim: absent on the
         // pre-subject wire shape (the decode derives it), else a 32-hex
@@ -383,6 +460,7 @@ final class StepUpChallenge
                 ($record['target_owned'] ?? false) === true,
                 subjectPseudonym: $subjectRaw,
                 demandId: \is_string($record['demand_id'] ?? null) && $record['demand_id'] !== '' ? $record['demand_id'] : null,
+                factor: $factor,
             );
         } catch (\InvalidArgumentException $e) {
             throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
@@ -441,6 +519,7 @@ final class StepUpChallenge
             $bootstrapAuthorized,
             $challenge->subjectPseudonym,
             $challenge->demandId,
+            $challenge->factor,
         );
         $attempts = $record['attempts'] ?? null;
         if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {

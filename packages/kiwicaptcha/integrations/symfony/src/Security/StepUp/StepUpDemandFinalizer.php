@@ -59,8 +59,10 @@ use Symfony\Component\HttpFoundation\RequestStack;
  *     generic enrollment bootstrap marker. Every effect journals on
  *     the demand record ({@see StepUpEffectsJournal}) as it lands: a
  *     crash between the terminal and an effect is recovered by the
- *     demand-bound effects retry, {@see self::retryAuthorizedEffects()},
- *     which runs on the session's pending token, never a second factor.
+ *     demand-bound effects retry, {@see self::retryAuthorizedEffects()}.
+ *     The retry runs on the session's own state, its pending token
+ *     or, after a landed restore, the session's restore claim, never
+ *     a second factor.
  *     An authorized replay re-runs exactly the unjournaled effects.
  *
  * The finalizer is also the mint of the login plane's demand: a pending
@@ -126,6 +128,16 @@ final class StepUpDemandFinalizer
         if ($demandId !== null && preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
             return null;
         }
+        try {
+            $required = $this->requiredFactorOf($scope, $sessionHash);
+        } catch (StepUpAssuranceUnavailable $e) {
+            // An unavailable assurance state is no basis for a demand:
+            // the mint refuses (no demand id, nothing stored) instead of
+            // minting a no-snapshot record, fail closed.
+            $this->logger?->warning('kiwi step-up demand mint refused: {message}', ['message' => $e->getMessage()]);
+
+            return null;
+        }
         $demand = StepUpDemand::mint(
             $demandId ?? StepUpChallenge::mintId(),
             $scope,
@@ -140,7 +152,7 @@ final class StepUpDemandFinalizer
             null,
             false,
             null,
-            $this->requiredFactorOf($scope, $sessionHash),
+            $required,
         );
         try {
             $this->store->createDemand($demand, $ttlSecs);
@@ -172,7 +184,15 @@ final class StepUpDemandFinalizer
      * factor the family's live completion marker records. A demand
      * minted after a completed weaker factor can therefore never be
      * answered with that same weaker factor again. Null when no
-     * resolver is wired (the demand then carries no snapshot).
+     * resolver is wired (the demand then carries no snapshot), and null
+     * when the resolver genuinely answers an empty history (no prior
+     * factor stands). An unavailable completion history or a failing
+     * resolver is the third state, and it is never folded into the
+     * empty one: it answers
+     * {@see StepUpAssuranceUnavailable}. The mint then refuses instead
+     * of silently minting a demand with no assurance snapshot.
+     *
+     * @throws StepUpAssuranceUnavailable when the store or the resolver fails
      */
     private function requiredFactorOf(string $scope, ?string $sessionHash): ?FactorRequirement
     {
@@ -183,15 +203,65 @@ final class StepUpDemandFinalizer
         if ($sessionHash !== null && $sessionHash !== '') {
             try {
                 $completed = $this->store->completedFactorOf($sessionHash, $scope, $this->now());
-            } catch (\Throwable) {
-                $completed = null;
+            } catch (\Throwable $e) {
+                // An unavailable completion history is not a session
+                // without a prior factor: the mint cannot know what to
+                // demand, so it refuses rather than degrade the failure
+                // into "no requirement".
+                throw new StepUpAssuranceUnavailable('the step-up completion history is unavailable', 0, $e);
             }
         }
         try {
             return $this->factorResolver->requiredFactor($scope, null, new StepUpFactorContext($completed));
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            throw new StepUpAssuranceUnavailable('the step-up factor resolver failed', 0, $e);
+        }
+    }
+
+    /**
+     * The demand id a begin of the login plane binds its factor to: the
+     * named pending demand while it stands. Once an escalation
+     * superseded it, the answer is the live open tip of its family: the
+     * strictly stronger child the reassessment created, followed
+     * through the supersede links, bounded by the family depth. This is
+     * how the escalation child becomes beginnable: the pending token
+     * still carries the superseded parent's id, and the begin follows
+     * the family to the child instead of refusing. Everything is judged
+     * against server-owned state, fail closed: the tip must be open,
+     * carry the login binding kind and reproduce the resolved
+     * principal's login recipe. Null when the named id carries no
+     * demand (a fresh begin mints one), when the family died, or when
+     * the tip refuses any of the checks.
+     */
+    public function loginDemandIdForBegin(string $scope, string $principalPseudonym, ?string $sessionHash, ?string $demandId): ?string
+    {
+        if ($demandId === null) {
             return null;
         }
+        $computed = StepUpOperationDigest::login($scope, $principalPseudonym);
+        $id = $demandId;
+        for ($hop = 0; $hop <= StepUpDemand::MAX_GENERATION; $hop++) {
+            $demand = $this->liveDemand($id);
+            if ($demand === null) {
+                return null;
+            }
+            if (!$demand->superseded()) {
+                if ($demand->state !== StepUpDemandState::Open
+                    || $demand->operationBindingKind !== StepUpOperationBindingKind::Login
+                    || !hash_equals($demand->operationDigest, $computed)) {
+                    return null;
+                }
+
+                return $demand->id;
+            }
+            $next = $demand->supersededByDemandId;
+            if ($next === null || $next === $id) {
+                return null;
+            }
+            $id = $next;
+        }
+
+        return null;
     }
 
     /**
@@ -221,12 +291,54 @@ final class StepUpDemandFinalizer
         int $ttlSecs = 600,
         bool $quarantine = false,
     ): ?string {
+        return $this->mintBoundDemand(
+            $scope,
+            $serverOwnedOperationId,
+            StepUpOperationDigest::canonicalOperationContent($canonicalContentFields),
+            $sessionHash,
+            $chainId,
+            $decisionId,
+            $ttlSecs,
+            $quarantine,
+        );
+    }
+
+    /**
+     * The canonical-contents spelling of {@see self::mintFinancialDemand()}:
+     * the operation resolver's protected contents, already canonicalized
+     * by the one shared canonicalization, feed the content digest
+     * directly. The actual business operation (the amount, the currency,
+     * the beneficiary) rides the digest, not a shapeless stand-in.
+     *
+     * @param string $canonicalContent the canonical protected contents
+     *                                 of the operation
+     */
+    public function mintBoundDemand(
+        string $scope,
+        string $serverOwnedOperationId,
+        string $canonicalContent,
+        ?string $sessionHash = null,
+        ?string $chainId = null,
+        ?string $decisionId = null,
+        int $ttlSecs = 600,
+        bool $quarantine = false,
+    ): ?string {
         $binding = StepUpOperationDigest::financialBinding(
             $this->operationBindingMaster,
             $scope,
             $serverOwnedOperationId,
-            StepUpOperationDigest::canonicalOperationContent($canonicalContentFields),
+            $canonicalContent,
         );
+        try {
+            $required = $this->requiredFactorOf($scope, $sessionHash);
+        } catch (StepUpAssuranceUnavailable $e) {
+            // An unavailable assurance state is no basis for a demand:
+            // the mint refuses (no demand id, nothing stored) instead of
+            // minting a no-snapshot record, fail closed.
+            $this->logger?->warning('kiwi step-up demand mint refused: {message}', ['message' => $e->getMessage()]);
+
+            return null;
+        }
         $demand = StepUpDemand::mint(
             StepUpChallenge::mintId(),
             $scope,
@@ -241,7 +353,7 @@ final class StepUpDemandFinalizer
             $binding['content'],
             $quarantine,
             null,
-            $this->requiredFactorOf($scope, $sessionHash),
+            $required,
         );
         try {
             return $this->store->createRootDemand($demand, $ttlSecs);
@@ -254,12 +366,19 @@ final class StepUpDemandFinalizer
      * Whether the logical operation already carries a durable authorized
      * step-up settlement: the operation identity digest is reproduced
      * exactly as the mint built it (the same master, the same
-     * canonicalization) and the operation family tip is consulted. A
-     * retry of the same operation then answers its settled demand; a
-     * different operation, even with identical contents, derives a
-     * different identity digest and answers false. False for an absent
-     * family, a non-authorized tip, an empty master, or a store
-     * failure: fail-closed toward re-demand, never a silent pass.
+     * canonicalization) and the operation family tip is consulted. The
+     * same invariant as the finalization binding check holds in full:
+     * the tip is the answer only when it sits in the authorized terminal
+     * and both digests reproduce. The identity digest runs over the
+     * logical operation id, the content digest over the canonical
+     * contents. A retry of the same operation with the same contents
+     * then answers its settled demand. A different operation (even with
+     * identical contents) derives a different identity digest and
+     * answers false. The same operation with changed contents derives a
+     * different content digest and answers false too. False for an
+     * absent family, a non-authorized tip, a digest that does not
+     * reproduce, an empty master, or a store failure: fail-closed
+     * toward re-demand, never a silent pass.
      *
      * @param array<string, string> $canonicalContentFields the named
      *                                                      contents the
@@ -271,6 +390,27 @@ final class StepUpDemandFinalizer
         string $serverOwnedOperationId,
         array $canonicalContentFields,
     ): bool {
+        return $this->operationAuthorizedContents(
+            $scope,
+            $serverOwnedOperationId,
+            StepUpOperationDigest::canonicalOperationContent($canonicalContentFields),
+        );
+    }
+
+    /**
+     * The canonical-contents spelling of {@see self::operationAuthorized()}:
+     * the protected contents already canonicalized by one shared
+     * canonicalization, so the mint and this replay gate hash the same
+     * bytes.
+     *
+     * @param string $canonicalContent the canonical operation contents
+     *                                 the mint hashed
+     */
+    public function operationAuthorizedContents(
+        string $scope,
+        string $serverOwnedOperationId,
+        string $canonicalContent,
+    ): bool {
         if ($this->operationBindingMaster === '') {
             return false;
         }
@@ -279,7 +419,7 @@ final class StepUpDemandFinalizer
                 $this->operationBindingMaster,
                 $scope,
                 $serverOwnedOperationId,
-                StepUpOperationDigest::canonicalOperationContent($canonicalContentFields),
+                $canonicalContent,
             );
             $tipId = $this->store->demandIdForOperation($binding['identity']);
             if (!\is_string($tipId) || $tipId === '') {
@@ -290,7 +430,13 @@ final class StepUpDemandFinalizer
             return false;
         }
 
-        return $demand !== null && $demand->state === StepUpDemandState::Authorized;
+        // The family tip alone is not the answer: the settled
+        // authorization is bound to both digests, so the presented
+        // operation reproduces it only when the identity AND the content
+        // digest both match the stored terminal.
+        return $demand !== null
+            && $demand->state === StepUpDemandState::Authorized
+            && $demand->matchesOperation($binding['identity'], $binding['content']);
     }
 
     /**
@@ -299,9 +445,17 @@ final class StepUpDemandFinalizer
      * factor+demand transition), reassessed, settled terminally and,
      * only when authorized, credited and restored.
      *
+     * When the demand carries the split financial/action binding, the
+     * caller supplies the operation the completion presents, resolved
+     * through the wired resolver. The finalization reruns both digests
+     * over it: a different logical operation, or the same operation
+     * with changed contents, refuses the completion, so the principal
+     * plane can never authorize a proof against operation material the
+     * demand was never minted for.
+     *
      * @param StepUpResult $proof the handler's verified factor proof
      */
-    public function finalizeLogin(StepUpResult $proof, string $scope, ?Request $request = null): StepUpFinalization
+    public function finalizeLogin(StepUpResult $proof, string $scope, ?Request $request = null, ?StepUpOperation $operation = null): StepUpFinalization
     {
         if ($proof->demandId === null || $proof->principalPseudonym === null) {
             return StepUpFinalization::refusedUnbound();
@@ -309,6 +463,15 @@ final class StepUpDemandFinalizer
         $demand = $this->liveDemand($proof->demandId);
         if ($demand === null) {
             return StepUpFinalization::refusedAbsent();
+        }
+        if ($demand->operationIdentityDigest !== null) {
+            if (!$this->operationBindingMatches($demand, $operation?->logicalOperationId, $operation?->canonicalProtectedContents)) {
+                $this->logger?->info('kiwi step-up demand finalization refused: the presented operation does not reproduce the bound authorization', [
+                    'demand' => $demand->id,
+                ]);
+
+                return StepUpFinalization::refusedDigest();
+            }
         }
         $material = StepUpOperationMaterial::login($proof->principalPseudonym);
         $reassessed = $this->finalize($demand, $material, $proof->factor ?? 'unknown', $request);
@@ -579,12 +742,20 @@ final class StepUpDemandFinalizer
      * outcome credit, the session restore, the trust marker) never
      * landed. The ordinary completion can never re-run them, because
      * its proof is gone. The retry derives both identities from
-     * server-owned state (the session's pending token and the resolver),
-     * re-verifies the demand's stored login recipe against the resolved
-     * principal, and runs the journal: landed effects skip, missing
-     * effects run once and journal on success. Null when the demand is
-     * absent, expired, not authorized, not a login demand or not this
-     * principal's: the caller keeps its original failure, fail closed.
+     * server-owned state, the demand id and the principal, in one of
+     * two shapes. Before a landed restore: the session's pending
+     * token, with the resolver resolving behind it. After a landed
+     * restore: the session's restore claim
+     * ({@see SessionRestorer::RESTORE_CLAIM_ATTRIBUTE}), the demand id
+     * the session itself wrote when it performed the restore, with the
+     * resolver resolving against the restored token. The caller owns
+     * which shape applies; this method judges the demand either way.
+     * It re-verifies the demand's stored login recipe against the
+     * resolved principal, and runs the journal: landed effects skip,
+     * missing effects run once and journal on success. Null when the
+     * demand is absent, expired, not authorized, not a login demand or
+     * not this principal's: the caller keeps its original failure,
+     * fail closed.
      */
     public function retryAuthorizedEffects(string $demandId, string $principalPseudonym, ?Request $request = null): ?StepUpFinalization
     {
@@ -673,11 +844,13 @@ final class StepUpDemandFinalizer
      * crash between the two retries exactly the missing one. The order
      * is load-bearing: the credit runs before the restore. A crash
      * after the restore can then never leave an effect that only the
-     * spent challenge's completion could have booked, because the
-     * demand-bound retry runs on the session's pending token, which the
-     * restore unwraps. A credit failure and a refused restore leave the
-     * journal incomplete on purpose: the answer is the retryable
-     * failure, the retry re-runs exactly what is missing.
+     * spent challenge's completion could have booked. The demand-bound
+     * retry derives its authority from the session's own state: its
+     * pending token before the restore, its restore claim once the
+     * restore unwrapped the token. A credit failure and a
+     * refused restore leave the journal incomplete on purpose: the
+     * answer is the retryable failure, the retry re-runs exactly what
+     * is missing.
      */
     private function runEffects(
         string $demandId,
@@ -723,6 +896,14 @@ final class StepUpDemandFinalizer
                 $journal = $this->journalEffect($demandId, StepUpEffectsJournal::SESSION_RESTORED, $journal);
             } elseif ($restore->landed()) {
                 $journal = $this->journalEffect($demandId, StepUpEffectsJournal::SESSION_RESTORED, $journal);
+                // The restore claim's work is done once its journal
+                // entry stands: the normal request retires it in the
+                // same session write, so only the crash window (the
+                // mutation durable, the journal write lost) leaves a
+                // claim behind for the recovery to answer.
+                if ($restore->status === StepUpSessionRestore::RESTORED && $journal->sessionRestored()) {
+                    SessionRestorer::clearRestoreClaim($request);
+                }
             } else {
                 // A refused restore journals nothing and stops the run:
                 // the caller answers the retryable failure, never a

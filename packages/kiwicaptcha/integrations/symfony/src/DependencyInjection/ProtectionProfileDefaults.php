@@ -217,7 +217,7 @@ final class ProtectionProfileDefaults
                 // attribute plus the canonical protected contents, so a
                 // step-up for one transfer can never authorize another.
                 'scopes' => [
-                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute'],
+                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
                     'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],
@@ -308,7 +308,7 @@ final class ProtectionProfileDefaults
                 // attribute plus the canonical protected contents, so a
                 // step-up for one transfer can never authorize another.
                 'scopes' => [
-                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute'],
+                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
                     'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],

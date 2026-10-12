@@ -14,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipCodeSenderInte
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipDeliveryMetadata;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
@@ -154,6 +155,74 @@ final class StepUpEmailOwnershipTest extends TestCase
         $replay = $this->validate($store, $sender, $cookie, $sessionValue, $grant, 'signup', 'visitor@example.com');
         self::assertCount(1, $replay, 'a spent grant answers the standing step-up demand');
         self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $replay[0]->getCode());
+    }
+
+    public function testAPrincipalFactorRefusalCarriesTheRequiredFactorKind(): void
+    {
+        // The financial_action shape at issuance: the scope minimum
+        // demands step-up and the answering factor is principal-bound
+        // (email_otp), so the anonymous email carrier serves nothing
+        // here. The 403 still names the factor kind, so the demand
+        // reaches the browser and the application knows where to
+        // route it (its own step-up page, the widget never carries a
+        // principal factor).
+        $controller = new ChallengeController(
+            $this->issuer(),
+            null,
+            false,
+            $this->buildGateway('financial_action', ['base_risk' => 100, 'minimum' => 'step_up', 'degraded' => 'allow']),
+            stepUpFactorResolver: new StepUpFactorResolver('email_otp'),
+        );
+        $refused = $controller->challenge($this->challengeRequest('financial_action'));
+        self::assertSame(403, $refused->getStatusCode(), (string) $refused->getContent());
+        $refusal = json_decode((string) $refused->getContent(), true);
+        self::assertSame('STEP_UP_REQUIRED', $refusal['error']['code'] ?? null);
+        self::assertSame('email_otp', $refusal['error']['step_up']['kind'] ?? null);
+        self::assertArrayNotHasKey('begin', $refusal['error']['step_up'] ?? [], 'a principal factor names no widget begin path');
+        self::assertArrayNotHasKey('demand', $refusal['error']['step_up'] ?? [], 'a principal factor mints no anonymous demand');
+    }
+
+    public function testTheCarrierKindWinsAndABareRefusalStaysBare(): void
+    {
+        $cookie = new ContinuityCookie();
+        $sessionValue = (string) $cookie->mint();
+        $factor = $this->factor(new ArrayStepUpChallengeStore(), new CapturingEmailOwnershipSender(), $cookie);
+
+        // The carrier scope answers with the carrier kind even when a
+        // resolver stands: the carrier serves this scope, and the
+        // resolver would name a principal factor the anonymous visitor
+        // the body addresses cannot reach.
+        $carrierController = new ChallengeController(
+            $this->issuer(),
+            null,
+            false,
+            $this->buildGateway('signup', ['base_risk' => 100, 'minimum' => 'step_up', 'degraded' => 'allow']),
+            $cookie,
+            stepUpFactorResolver: new StepUpFactorResolver('email_otp'),
+            stepUpEmailBeginPath: EmailOwnershipStepUp::BEGIN_PATH,
+            emailOwnership: $factor,
+            emailCarrierScopes: self::CARRIERS,
+        );
+        $request = $this->challengeRequest('signup');
+        $request->cookies->set($this->cookieName($cookie), $sessionValue);
+        $refused = $carrierController->challenge($request);
+        self::assertSame(403, $refused->getStatusCode(), (string) $refused->getContent());
+        $refusal = json_decode((string) $refused->getContent(), true);
+        self::assertSame('email_ownership', $refusal['error']['step_up']['kind'] ?? null);
+        self::assertSame('/kiwi/step-up/email/begin', $refusal['error']['step_up']['begin'] ?? null);
+
+        // No resolver wired: a non-carrier refusal stays the bare
+        // typed code, never an invented factor kind.
+        $bareController = new ChallengeController(
+            $this->issuer(),
+            null,
+            false,
+            $this->buildGateway('financial_action', ['base_risk' => 100, 'minimum' => 'step_up', 'degraded' => 'allow']),
+        );
+        $bare = $bareController->challenge($this->challengeRequest('financial_action'));
+        self::assertSame(403, $bare->getStatusCode(), (string) $bare->getContent());
+        self::assertSame('STEP_UP_REQUIRED', json_decode((string) $bare->getContent(), true)['error']['code'] ?? null);
+        self::assertArrayNotHasKey('step_up', json_decode((string) $bare->getContent(), true)['error'] ?? [], 'no resolver, no factor metadata');
     }
 
     public function testAGrantForAnotherScopeOrABrokenGrantNeverRedeems(): void

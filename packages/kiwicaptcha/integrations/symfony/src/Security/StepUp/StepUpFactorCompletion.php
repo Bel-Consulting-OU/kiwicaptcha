@@ -32,15 +32,23 @@ final class StepUpFactorCompletion
      * The completion of the two consumed records. The subject derives
      * from the challenge alone: the email-ownership family stores the
      * address pseudonym as its principal, every other family stores the
-     * subject pseudonym the record was begun under.
+     * subject pseudonym the record was begun under. The completed
+     * factor derives from the record too: the challenge's server-held
+     * factor snapshot, the ladder family its kind proves, never a
+     * caller argument. A completion can therefore never claim a factor
+     * its consumed record was not begun under.
      */
-    public static function fromRecords(StepUpChallenge $challenge, StepUpDemand $demand, string $completedFactor): self
+    public static function fromRecords(StepUpChallenge $challenge, StepUpDemand $demand): self
     {
         $subject = $challenge->kind === StepUpChallengeKind::EmailOwnership
             ? $challenge->principalPseudonym
             : (string) $challenge->principalSubject();
         if ($subject === '') {
             throw new \InvalidArgumentException('The consumed challenge names no verifiable subject');
+        }
+        $completedFactor = $challenge->factor?->family;
+        if (!\is_string($completedFactor) || $completedFactor === '') {
+            throw new \InvalidArgumentException('The consumed challenge carries no factor identity');
         }
 
         return new self(
