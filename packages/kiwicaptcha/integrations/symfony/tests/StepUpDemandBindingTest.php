@@ -16,6 +16,9 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
 use BelConsulting\KiwiCaptchaBundle\Tests\CapturingEmailOwnershipSender;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Mailer\MailerInterface;
+use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\RawMessage;
 
 /**
  * The demand binding of the challenge wire shape and the delivery
@@ -221,8 +224,9 @@ final class StepUpDemandBindingTest extends TestCase
         self::assertCount(1, $messages);
         $email = $messages[0][0];
         self::assertInstanceOf(Email::class, $email);
-        $messageId = $email->getHeaders()->get('Message-ID')->getBody();
-        self::assertSame('<kiwi.demandid0000000000000000001.2@example.com>', $messageId, 'the Message-ID names the demand and its generation');
+        $messageIdBody = $email->getHeaders()->get('Message-ID')->getBody();
+        $messageId = is_array($messageIdBody) ? ($messageIdBody[0] ?? '') : (string) $messageIdBody;
+        self::assertSame('kiwi.demandid0000000000000000001.2@example.com', $messageId, 'the Message-ID names the demand and its generation');
         self::assertDoesNotMatchRegularExpression('/[<>\s@]*@.*:/i', (string) $messageId);
     }
 
