@@ -1,0 +1,45 @@
+# Woodpecker CI: the aggregate promotion gate. One workflow that runs
+# AFTER the push-triggered functional matrix and reports a single
+# pass/fail — the one status a forge ruleset should make required for
+# main and for release promotion, instead of dozens of individual jobs
+# (individual lanes flake; the aggregate is the stable required check
+# the audit's governance bar asks for). The lane itself runs no tests:
+# every entry in depends_on must finish green first, because Woodpecker
+# refuses to start a dependent workflow when a dependency failed.
+# Fails closed: a lane missing from the list below is a lane the gate
+# no longer witnesses — review this list whenever a lane is added.
+# Deliberately NOT listed: perf-latency (manual-only hard-ratchet, the
+# timing signal is loud but never a merge gate by design), assets and
+# the public-install lanes (manual-only), latency-regression
+# (non-gating by design).
+#
+# Forge-side setup (one time, needs repository admin): add a ruleset
+# for main requiring the check `promotion-gate` (and keep the v* tag
+# ruleset the release lane preflights). The gate is deliberately a
+# single workflow so the required-check list stays one line.
+labels:
+  capability: docker
+when:
+  - event: [push, pull_request, tag, manual]
+
+depends_on:
+  - lint
+  - php-core
+  - symfony
+  - risk
+  - rust
+  - browser
+  - redis-lanes
+  - redis8
+  - interop
+  - compat-build
+  - release-tools
+
+steps:
+  - name: promotion-gate
+    image: alpine:3.20
+    commands:
+      - |
+        set -eu
+        echo "promotion-gate: every dependency workflow in depends_on finished green for ${CI_COMMIT_SHA}"
+        echo "required-check name for the forge ruleset: promotion-gate"

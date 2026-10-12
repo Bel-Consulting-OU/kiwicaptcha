@@ -175,6 +175,16 @@ These three milestones sit outside the package publication sequence
 but are tracked here so the checklist is the complete record of the
 open work. Each lists its pass criteria and its current status.
 
+The aggregate required check for protected `main` now exists as the
+Woodpecker workflow `.woodpecker/promotion-gate.yml`: one
+`promotion-gate` status that witnesses the whole push-triggered
+functional matrix (lint, php-core, symfony, risk, rust, browser,
+redis-lanes, redis8, interop, compat-build, release-tools) and is red
+whenever any of them is. Enrolling that single check name in the main
+ruleset's required contexts is the governance step; individual lanes
+never need to become required checks, and the list of witnessed lanes
+is reviewed whenever a lane is added.
+
 ### Milestone A. Dedicated latency runner
 
 Provision the dedicated, isolated latency runner (fixed CPU class,

@@ -352,11 +352,14 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     await page.goto('/');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 30_000 });
     const box = await page.locator('[data-kiwi-retry]').boundingBox();
-    // The shipped CSS is a 44x44 minimum (an accessibility/security
+    // The shipped CSS is a hard 44x44 minimum (an accessibility/security
     // control has no reason to be cramped); the suite asserts the real
-    // target, not a weaker floor.
-    expect(box.width).toBeGreaterThanOrEqual(44);
-    expect(box.height).toBeGreaterThanOrEqual(44);
+    // target, not a weaker floor. The comparison carries a 0.01 px
+    // engine tolerance: Gecko reports the device-pixel back-converted
+    // rect (43.99999237 at the common device ratios), a measurement
+    // rounding of under a hundredth of a pixel, never a smaller target.
+    expect(box.width).toBeGreaterThanOrEqual(43.99);
+    expect(box.height).toBeGreaterThanOrEqual(43.99);
   });
 
   test('non-text contrast (WCAG 1.4.11): COMPUTED Retry control boundary and focus indicator >= 3:1, light AND dark', async ({ page }) => {

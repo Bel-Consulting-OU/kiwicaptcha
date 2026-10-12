@@ -1181,7 +1181,13 @@
       kiwiSetView({ statusKey: "statusStepUp", badgeKey: "badgeStepUp", domState: "solving", hintKey: "hintStepUp" });
       announce(kiwiT("statusStepUp"));
       if (typeof document === "undefined" || !document.body) { fail("Challenge failed"); return; }
+      var escDismiss = function (ev) {
+        if (gone()) { document.removeEventListener("keydown", escDismiss, true); return; }
+        if (ev && (ev.key === "Escape" || ev.key === "Esc")) { ev.stopPropagation(); close(); }
+      };
+      document.addEventListener("keydown", escDismiss, true);
       var close = function () {
+        document.removeEventListener("keydown", escDismiss, true);
         try { overlay.remove(); } catch (e) {}
         if (previousFocus && typeof previousFocus.focus === "function") { try { previousFocus.focus(); } catch (e) {} }
       };

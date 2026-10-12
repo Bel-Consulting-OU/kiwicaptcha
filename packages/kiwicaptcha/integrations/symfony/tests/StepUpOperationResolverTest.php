@@ -441,6 +441,94 @@ final class StepUpOperationResolverTest extends TestCase
         self::assertTrue($this->alreadyAuthorized($validator, $constraint, $request), 'the replay stays idempotent');
     }
 
+    /**
+     * The object-version binding: an application that names a revision
+     * (or any other domain version field) in its executable-field
+     * recipe invalidates the settled authorization the moment the
+     * object moves, even when every user-visible field is unchanged. A
+     * beneficiary re-verification, a sanctions-status change, an
+     * approval-chain edit or a fee change can all ride a
+     * revision-only bump. Applications that deliberately want
+     * semantic-content equality simply leave the version field out of
+     * the recipe; both shapes ride the same canonical bytes.
+     */
+    public function testARevisionOnlyBumpInvalidatesTheSettledAuthorization(): void
+    {
+        $store = new ArrayStepUpChallengeStore(fn (): int => $this->now);
+        $stack = new RequestStack();
+        $request = Request::create('/', 'POST', ['amount' => '100'], [], [], [self::remoteKey => '198.51.100.7']);
+        $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-123');
+        $stack->push($request);
+
+        $ledger = new class implements StepUpOperationResolverInterface {
+            /** @var array<string, array<string, string>> */
+            public array $objects = [];
+
+            public function resolve(Request $request, string $scope): StepUpOperation
+            {
+                $id = (string) $request->attributes->get(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE);
+                $object = $this->objects[$id] ?? null;
+                if ($object === null) {
+                    throw new \InvalidArgumentException('the business object of the operation id is absent');
+                }
+
+                return new StepUpOperation($id, StepUpOperationDigest::canonicalOperationContent($object), 'user-42');
+            }
+        };
+        // revision_8 rides the recipe next to the executable fields.
+        $ledger->objects['tx-123'] = ['amount' => '100', 'currency' => 'EUR', 'beneficiary' => 'Alice', 'revision' => '8'];
+
+        $validator = new KiwiCaptchaValidator(
+            new Verifier(new ArrayStorage()),
+            $stack,
+            self::SECRET,
+            enforceTelemetry: false,
+            risk: $this->gateway(),
+            dispositionStore: new ArrayPostSolveDispositionStore(fn (): int => $this->now, 0),
+            stepUpFinalizer: $this->finalizer($store),
+            operationBoundScopes: [self::SCOPE => true],
+            principalResolver: new FakePrincipalResolver('user-42'),
+            operationResolver: $ledger,
+        );
+        $constraint = new KiwiCaptcha(['scope' => self::SCOPE]);
+        $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, 'decision-1');
+        $mint = new \ReflectionMethod(KiwiCaptchaValidator::class, 'mintOperationBoundDemand');
+        $demandId = $mint->invoke($validator, $disposition, $constraint, $request, null);
+        self::assertNotNull($demandId, 'the revision-bound mint recorded the demand');
+        $canonicalRevision8 = StepUpOperationDigest::canonicalOperationContent($ledger->objects['tx-123']);
+        self::assertNotNull($store->completeDemand((string) $demandId, $this->now, 600));
+        $settled = $this->finalizer($store)->finalizeGrant(
+            (string) $demandId,
+            new StepUpOperationMaterial(principalPseudonym: 'user-42'),
+            null,
+            'email_otp',
+            'tx-123',
+            $canonicalRevision8,
+        );
+        self::assertTrue($settled->authorized, 'the precondition: revision 8 settled authorized');
+        self::assertTrue($this->alreadyAuthorized($validator, $constraint, $request), 'revision 8 replays idempotently');
+
+        // The object moves to revision 9 with every visible field
+        // unchanged: the settled authorization is invalidated by the
+        // version bump alone, because the canonical bytes changed.
+        $ledger->objects['tx-123'] = ['amount' => '100', 'currency' => 'EUR', 'beneficiary' => 'Alice', 'revision' => '9'];
+        self::assertFalse(
+            $this->alreadyAuthorized($validator, $constraint, $request),
+            'a revision-only bump invalidates the settled authorization',
+        );
+        $cross = $this->finalizer($store)->finalizeGrant(
+            (string) $demandId,
+            new StepUpOperationMaterial(principalPseudonym: 'user-42'),
+            null,
+            'email_otp',
+            'tx-123',
+            StepUpOperationDigest::canonicalOperationContent($ledger->objects['tx-123']),
+        );
+        self::assertFalse($cross->authorized, 'a finalization over revision 9 against the revision-8 demand is refused');
+        self::assertSame(StepUpFinalization::REFUSED_DIGEST, $cross->reason);
+        self::assertSame(StepUpDemandState::Authorized, $store->readDemand((string) $demandId)?->state, 'the refused rerun never touches the settled terminal');
+    }
+
     // ── the build gate ───────────────────────────────────────────────
 
     public function testAHighValueOperationBoundScopeWithoutARecipeRefusesTheBuild(): void
