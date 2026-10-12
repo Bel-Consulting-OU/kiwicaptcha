@@ -223,7 +223,9 @@ final class ProductionWiringGateTest extends TestCase
      * scope, no explicit login_scopes) must still arm the guard, and
      * the profile-derived map must resolve the conventional main
      * firewall to the login scope. The gate follows risk.login_scopes,
-     * never the outcomes bridge.
+     * never the outcomes bridge. The reporting lane rides the same
+     * inference: exactly one mapped login scope infers the outcome
+     * scope, so the bridge arms too (the H1 outcome-bridge half).
      */
     public function testMinimalAbuseFirstInstallArmsTheGuard(): void
     {
@@ -233,6 +235,11 @@ final class ProductionWiringGateTest extends TestCase
         $guard = $container->get(FirstAttemptLoginGuard::class);
         $loginScopes = (new \ReflectionProperty(FirstAttemptLoginGuard::class, 'loginScopes'))->getValue($guard);
         self::assertSame(['main' => 'login'], $loginScopes, 'the profile defaults the main firewall to the login scope');
+
+        self::assertTrue($container->has(KiwiOutcomeBridgeSubscriber::class), 'the single mapped login scope infers the outcome scope, so the outcome bridge arms without risk.outcomes.scope');
+        $bridge = $container->get(KiwiOutcomeBridgeSubscriber::class);
+        $scopeId = (new \ReflectionProperty(KiwiOutcomeBridgeSubscriber::class, 'scopeId'))->getValue($bridge);
+        self::assertSame(crc32('login') & 0x7fffffff, $scopeId, 'the bridge books under the inferred login scope id (the profile row derives its id from the name)');
 
         // The per-event resolution is live: an event whose firewall has
         // no entry is outside the gate's mandate, so the token stays
@@ -262,6 +269,50 @@ final class ProductionWiringGateTest extends TestCase
         $guard->onTokenCreated($event);
         self::assertNotInstanceOf(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken::class, $event->getAuthenticatedToken(), 'an unmapped firewall is skipped, not withheld');
         self::assertSame(1, $counters->all()['kiwi_login_guard_unmapped_total'] ?? 0, 'the unmapped skip is counted');
+    }
+
+    /**
+     * The inference at the extension level: exactly one distinct mapped
+     * login scope names the outcome scope, so the bridge arms without
+     * risk.outcomes.scope; several differing scopes leave no single
+     * target and the bridge stays unregistered until the knob is
+     * explicit.
+     */
+    public function testTheOutcomeScopeIsInferredFromASingleLoginScope(): void
+    {
+        $container = $this->load(['risk' => [
+            'enabled' => true,
+            'redis_service' => 'fake_redis',
+            'namespace' => 'bridge-infer',
+            'scopes' => ['login' => ['id' => 10]],
+            'login_scopes' => ['main' => 'login', 'second' => 'login'],
+            'outcomes' => ['auto_bridge' => true],
+        ]]);
+        self::assertTrue($container->hasDefinition(KiwiOutcomeBridgeSubscriber::class), 'two firewalls on one login scope still resolve one outcome scope');
+        $bridge = $container->getDefinition(KiwiOutcomeBridgeSubscriber::class);
+        self::assertSame(10, $bridge->getArgument(2), 'the inferred scope is the login scope id the auth events book under');
+
+        $container = $this->load(['risk' => [
+            'enabled' => true,
+            'redis_service' => 'fake_redis',
+            'namespace' => 'bridge-multi',
+            'scopes' => ['login' => ['id' => 10], 'admin_login' => ['id' => 30]],
+            'login_scopes' => ['main' => 'login', 'admin' => 'admin_login'],
+            'outcomes' => ['auto_bridge' => true],
+        ]]);
+        self::assertFalse($container->hasDefinition(KiwiOutcomeBridgeSubscriber::class), 'several differing login scopes leave no inferable outcome scope; the bridge needs the explicit risk.outcomes.scope');
+
+        $container = $this->load(['risk' => [
+            'enabled' => true,
+            'redis_service' => 'fake_redis',
+            'namespace' => 'bridge-explicit',
+            'scopes' => ['login' => ['id' => 10], 'admin_login' => ['id' => 30]],
+            'login_scopes' => ['main' => 'login', 'admin' => 'admin_login'],
+            'outcomes' => ['scope' => 'login'],
+        ]]);
+        self::assertTrue($container->hasDefinition(KiwiOutcomeBridgeSubscriber::class), 'an explicit risk.outcomes.scope wins over the multi-scope absence');
+        $bridge = $container->getDefinition(KiwiOutcomeBridgeSubscriber::class);
+        self::assertSame(10, $bridge->getArgument(2), 'the explicit scope decides the booking scope');
     }
 
     /**

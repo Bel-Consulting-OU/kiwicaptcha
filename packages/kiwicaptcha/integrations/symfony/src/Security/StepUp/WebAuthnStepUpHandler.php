@@ -6,23 +6,24 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\Serializer\SerializerInterface;
 use Webauthn\AuthenticatorAssertionResponse;
 use Webauthn\AuthenticatorAssertionResponseValidator;
 use Webauthn\AuthenticatorAttestationResponse;
 use Webauthn\AuthenticatorSelectionCriteria;
 use Webauthn\AuthenticatorAttestationResponseValidator;
 use Webauthn\CeremonyStep\CeremonyStepManagerFactory;
-use Webauthn\AttestationStatement\AttestationObjectLoader;
+use Webauthn\CredentialRecord;
 use Webauthn\AttestationStatement\AttestationStatementSupportManager;
 use Webauthn\AttestationStatement\NoneAttestationStatementSupport;
+use Webauthn\Denormalizer\WebauthnSerializerFactory;
 use Webauthn\Exception\CounterException;
+use Webauthn\PublicKeyCredential;
 use Webauthn\PublicKeyCredentialCreationOptions;
 use Webauthn\PublicKeyCredentialDescriptor;
-use Webauthn\PublicKeyCredentialLoader;
 use Webauthn\PublicKeyCredentialParameters;
 use Webauthn\PublicKeyCredentialRequestOptions;
 use Webauthn\PublicKeyCredentialRpEntity;
-use Webauthn\PublicKeyCredentialSource;
 use Webauthn\PublicKeyCredentialUserEntity;
 
 /**
@@ -259,7 +260,12 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
     private readonly string $challengeKey;
 
-    private readonly PublicKeyCredentialLoader $loader;
+    /**
+     * The library serializer: the credential presentation loader and
+     * the options document encoder of the v5 API (the historical
+     * PublicKeyCredentialLoader is gone there).
+     */
+    private readonly SerializerInterface $loader;
 
     private readonly AuthenticatorAttestationResponseValidator $creationValidator;
 
@@ -313,7 +319,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             }
         }
         $this->challengeKey = hash_hkdf('sha256', $master, 32, self::CHALLENGE_HKDF_INFO, self::CHALLENGE_HKDF_SALT);
-        $present = $libPresent ?? \class_exists(PublicKeyCredentialLoader::class);
+        $present = $libPresent ?? \class_exists(PublicKeyCredential::class);
         if (!$present) {
             throw new \LogicException(self::NOT_IMPLEMENTED_MESSAGE);
         }
@@ -321,10 +327,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             throw new \LogicException('WebAuthn step-up needs its credential registry wired; the bundle extension wires it whenever the handler is enabled');
         }
         $factory = new CeremonyStepManagerFactory();
-        $this->creationValidator = new AuthenticatorAttestationResponseValidator(null, null, null, null, null, $factory->creationCeremony());
-        $this->assertionValidator = new AuthenticatorAssertionResponseValidator($this->registry, null, null, null, null, $factory->requestCeremony());
+        $this->creationValidator = new AuthenticatorAttestationResponseValidator($factory->creationCeremony());
+        $this->assertionValidator = new AuthenticatorAssertionResponseValidator($factory->requestCeremony());
         $manager = AttestationStatementSupportManager::create([new NoneAttestationStatementSupport()]);
-        $this->loader = PublicKeyCredentialLoader::create(AttestationObjectLoader::create($manager));
+        $this->loader = (new WebauthnSerializerFactory($manager))->create();
     }
 
     public function assurance(): StepUpFactorAssurance
@@ -449,7 +455,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         }
         try {
             $decoded = json_decode($payload, true, 64, JSON_THROW_ON_ERROR);
-            $credential = $this->loader->loadArray(\is_array($decoded) ? $decoded : []);
+            $document = (string) json_encode(\is_array($decoded) ? $decoded : [], JSON_THROW_ON_ERROR);
+            $credential = $this->loader->deserialize($document, PublicKeyCredential::class, 'json');
         } catch (\Throwable $e) {
             return $this->failedAttempt($challenge, $boundContextKey);
         }
@@ -502,7 +509,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                         $host,
                         $challenge->principalPseudonym,
                     );
-                    // The validator updates the returned source only:
+                    // The validator updates the returned record only:
                     // persist the advanced sign count in the registry.
                     $this->registry->saveCredentialSource($updated);
                 } catch (CounterException) {
@@ -576,7 +583,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         );
     }
 
-    private function assertionOptions(StepUpChallenge $challenge, string $challengeBytes, string $host, PublicKeyCredentialSource $source): PublicKeyCredentialRequestOptions
+    private function assertionOptions(StepUpChallenge $challenge, string $challengeBytes, string $host, CredentialRecord $source): PublicKeyCredentialRequestOptions
     {
         return new PublicKeyCredentialRequestOptions(
             $challengeBytes,
@@ -701,7 +708,8 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         }
         try {
             $decoded = json_decode($payload, true, 64, JSON_THROW_ON_ERROR);
-            $credential = $this->loader->loadArray(\is_array($decoded) ? $decoded : []);
+            $document = (string) json_encode(\is_array($decoded) ? $decoded : [], JSON_THROW_ON_ERROR);
+            $credential = $this->loader->deserialize($document, PublicKeyCredential::class, 'json');
         } catch (\Throwable) {
             return $this->failedAttempt($challenge, $boundContextKey);
         }
@@ -757,6 +765,18 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $host = parse_url($this->allowedOrigins[0], \PHP_URL_HOST);
 
         return \is_string($host) ? $host : '';
+    }
+
+    /**
+     * The wire document of an options object: the library serializer's
+     * canonical spelling (the base64url challenge, the descriptor ids,
+     * the pubKeyCredParams), the exact JSON the browser's
+     * navigator.credentials call consumes.
+     */
+    private function optionsDocument(
+        \Webauthn\PublicKeyCredentialCreationOptions|\Webauthn\PublicKeyCredentialRequestOptions $options,
+    ): string {
+        return (string) $this->loader->serialize($options, 'json');
     }
 
     /**
@@ -865,12 +885,12 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      * the browser navigator.credentials call consumes) for the json
      * mode, and the same document embedded in a page for the html mode.
      *
-     * @param list<PublicKeyCredentialSource> $enrolled
-     * @param string|null                     $nonce the CSP nonce for
-     *                                                the inline script
-     *                                                (configured
-     *                                                default or a
-     *                                                per-request one)
+     * @param list<CredentialRecord> $enrolled
+     * @param string|null            $nonce the CSP nonce for
+     *                                      the inline script
+     *                                      (configured
+     *                                      default or a
+     *                                      per-request one)
      */
     private function presentation(StepUpContext $context, StepUpChallenge $challenge, string $challengeBytes, array $enrolled, string $ceremony, string $host, ?string $nonce = null): Response
     {
@@ -881,7 +901,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                 $challengeBytes,
                 $this->rpId,
                 array_map(
-                    static fn (PublicKeyCredentialSource $source): PublicKeyCredentialDescriptor => PublicKeyCredentialDescriptor::create('public-key', $source->publicKeyCredentialId),
+                    static fn (CredentialRecord $source): PublicKeyCredentialDescriptor => PublicKeyCredentialDescriptor::create('public-key', $source->publicKeyCredentialId),
                     $enrolled,
                 ),
                 AuthenticatorSelectionCriteria::USER_VERIFICATION_REQUIREMENT_REQUIRED,
@@ -892,7 +912,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             'handler' => 'webauthn',
             'ceremony' => $ceremony,
             'challenge' => $ticket,
-            'public_key' => json_decode((string) json_encode($options, JSON_UNESCAPED_SLASHES), true),
+            'public_key' => json_decode($this->optionsDocument($options), true),
             'expires_in' => $expiresIn,
             'complete_path' => $this->completePath,
         ];

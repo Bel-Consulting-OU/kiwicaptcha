@@ -11,6 +11,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\FactorRequirement;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Tests\CapturingEmailOwnershipSender;
 use PHPUnit\Framework\TestCase;
@@ -122,6 +123,104 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         self::assertTrue($completed->state === StepUpDemandState::Completed, 'the demand reached the completed state in the same script');
         self::assertSame(0, $this->liveChallengeCount(), 'the challenge record was consumed by the same transition');
         self::assertNull($this->store->read($this->challengeIds[0] ?? ''), 'the consumed challenge is gone');
+    }
+
+    public function testAWebAuthnRequiredDemandRefusesTheWeakerEmailGrant(): void
+    {
+        // The bypass test: a demand whose stored requirement names
+        // webauthn (rank 3) attempted with the email grant (the stored
+        // challenge's kind proves the email_otp rung, rank 1). The
+        // atomic completion judges the requirement against the factor
+        // identity the challenge record carries, never a caller
+        // argument, and refuses with both records untouched.
+        $demand = StepUpDemand::mint(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
+            'signup',
+            hash('sha256', $this->sessionValue),
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+            '',
+            null,
+            null,
+            false,
+            null,
+            new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3),
+        );
+        $challenge = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind::EmailOwnership,
+            '00112233445566778899aabbccddeeff',
+            null,
+            'signup',
+            null,
+            'email_ownership',
+            $this->now,
+            600,
+            5,
+            str_repeat('a', 64),
+            null,
+            $this->sessionValue,
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        $this->store->create($challenge, 600);
+        $this->store->createDemand($demand, 600);
+
+        $binding = hash('sha256', $this->sessionValue);
+        self::assertNull($this->store->completeFactor($challenge->id, $demand->id, $binding, $this->now, FactorRequirement::EMAIL_OTP, $challenge->sessionHash), 'the weaker factor completes nothing');
+        self::assertNotNull($this->store->read($challenge->id), 'the weaker-factor refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($demand->id)?->state->isOpen(), 'the weaker-factor refusal completed no demand');
+    }
+
+    /**
+     * The end-to-end shape of the same refusal: the factor's completion
+     * lane answers the typed failure, never a grant, when the demand
+     * requires a strictly stronger factor than the grant proves.
+     */
+    public function testTheGrantCompletionRefusesAWebAuthnRequiredDemand(): void
+    {
+        $factor = $this->factor(new StepUpFactorResolver('email_otp'));
+        $sessionHash = hash('sha256', $this->sessionValue);
+        $demand = StepUpDemand::mint(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
+            'signup',
+            $sessionHash,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+            '',
+            null,
+            null,
+            false,
+            null,
+            new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3),
+        );
+        $this->store->createDemand($demand, 600);
+
+        $begin = $factor->begin($this->emailRequest($demand->id));
+        self::assertSame(200, $begin->getStatusCode(), (string) $begin->getContent());
+        $body = json_decode((string) $begin->getContent(), true);
+        $code = (string) $this->sender->lastCode();
+        $delivered = \count($this->sender->codes);
+        $request = Request::create('https://example.com/kiwi/step-up/email/complete', 'POST', [
+            EmailOwnershipStepUp::EMAIL_FIELD => 'visitor@example.com',
+            EmailOwnershipStepUp::DEMAND_FIELD => $demand->id,
+            'kiwi_step_up_ticket' => (string) $body['challenge'],
+            'kiwi_step_up_code' => $code,
+        ]);
+        $request->cookies->set($this->cookie->cookie($request, 'seed')->getName(), $this->sessionValue);
+        $response = $factor->complete($request);
+
+        self::assertSame(422, $response->getStatusCode(), (string) $response->getContent(), 'the weaker grant completes nothing');
+        self::assertSame('unknown_challenge', json_decode((string) $response->getContent(), true)['failure_code'] ?? null);
+        self::assertSame($delivered, \count($this->sender->codes), 'no second code is delivered for a refused completion');
     }
 
     public function testTheStoreCompletesACrossedPairForNoOne(): void

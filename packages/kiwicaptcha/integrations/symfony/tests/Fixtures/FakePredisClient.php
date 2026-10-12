@@ -499,6 +499,33 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
+     * The assurance family a stored challenge kind proves, the same
+     * ladder the factor completion script carries: the anonymous
+     * email-ownership grant answers as the email_otp rung, the weakest
+     * of the ladder. Null for a kind outside the ladder.
+     */
+    private static function challengeKindFamily(string $kind): ?string
+    {
+        return match ($kind) {
+            'totp' => 'totp',
+            'webauthn' => 'webauthn',
+            'email_otp', 'email_ownership' => 'email_otp',
+            default => null,
+        };
+    }
+
+    /** The assurance rank of a stored challenge kind, null outside the ladder. */
+    private static function challengeKindRank(string $kind): ?int
+    {
+        return match ($kind) {
+            'totp' => 2,
+            'webauthn' => 3,
+            'email_otp', 'email_ownership' => 1,
+            default => null,
+        };
+    }
+
+    /**
      * TTL emulation for a plain string key: the armed lifetime in
      * whole seconds (the fake stores the pexpire/ex delta), or null
      * when the key carries no TTL.
@@ -836,6 +863,25 @@ final class FakePredisClient extends \Predis\Client
 
                 return $rearm($rec) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
             }
+            if ($op === 'fx') {
+                // The effects journal write: one known effect moves to
+                // its landed stamp, and only the authorized terminal
+                // journals anything. The record keeps its remaining
+                // lifetime exactly.
+                if ($rec['state'] !== 'authorized') {
+                    return null;
+                }
+                $effect = (string) $rest[1];
+                if ($effect !== 'authorization_settled' && $effect !== 'outcome_credited'
+                    && $effect !== 'session_restored' && $effect !== 'trust_written') {
+                    return null;
+                }
+                $fx = \is_array($rec['fx'] ?? null) ? $rec['fx'] : [];
+                $fx[$effect] = (int) $rest[2];
+                $rec['fx'] = $fx;
+
+                return $rearm($rec) === '' ? null : (string) json_encode($rec, JSON_UNESCAPED_SLASHES);
+            }
 
             return null;
         }
@@ -1127,6 +1173,26 @@ final class FakePredisClient extends \Predis\Client
             $bound = (($ch['session_hash'] ?? null) === $binding) || (($ch['client_secret_hash'] ?? null) === $binding);
             if (!$bound) {
                 return ['binding'];
+            }
+            // The factor requirement gate, the script's own rule: the
+            // demand's stored requirement is judged against the factor
+            // identity the stored challenge record carries (its kind),
+            // never a caller argument. A rank below the required one
+            // refuses, and so does a factor other than the exact id the
+            // requirement names at or below that rank; a strictly
+            // stronger completion satisfies a weaker floor. Nothing
+            // moves on a refusal.
+            $family = self::challengeKindFamily((string) ($ch['kind'] ?? ''));
+            $rank = self::challengeKindRank((string) ($ch['kind'] ?? ''));
+            $requiredRank = \is_int($de['required_rank'] ?? null) ? $de['required_rank'] : null;
+            if ($requiredRank !== null && $requiredRank >= 1 && ($rank === null || $rank < $requiredRank)) {
+                return ['weaker_factor'];
+            }
+            $requiredId = $de['required_factor_id'] ?? null;
+            if (\is_string($requiredId) && $requiredId !== ''
+                && $family !== $requiredId
+                && ($requiredRank === null || $rank === null || $rank <= $requiredRank)) {
+                return ['foreign_factor'];
             }
             unset($this->strings[$challengeKey], $this->expirations[$challengeKey]);
             $de['state'] = 'completed';

@@ -102,6 +102,11 @@ final class RecordingStepUpChallengeStore implements StepUpChallengeStore
         return $this->inner->settleDemandFinalization($demandId, $state, $now, $factor);
     }
 
+    public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand
+    {
+        return $this->inner->recordDemandEffect($demandId, $effect, $now);
+    }
+
     public function demandIdForOperation(string $operationDigest): ?string
     {
         return $this->inner->demandIdForOperation($operationDigest);

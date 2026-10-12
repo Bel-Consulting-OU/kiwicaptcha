@@ -118,6 +118,15 @@ final class StepUpDemand
          * answers the original demand, not the reassessment.
          */
         public readonly ?string $raisedByDecisionId = null,
+        /**
+         * The effects journal of the durable authorized terminal
+         * ({@see StepUpEffectsJournal}), null while no journal exists.
+         * The journal rides the demand record itself, so the
+         * authorization carries its own completion-effects state and a
+         * crash between the terminal settlement and an effect retries
+         * exactly the missing one.
+         */
+        public readonly ?StepUpEffectsJournal $effects = null,
     ) {
     }
 
@@ -229,6 +238,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -262,6 +272,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -299,6 +310,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -338,6 +350,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -371,6 +384,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -404,6 +418,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -469,6 +484,9 @@ final class StepUpDemand
             $requiredFactor ?? $this->requiredFactor,
             $this->generation + 1,
             $raisedByDecisionId === null || $raisedByDecisionId === '' ? null : self::decisionId($raisedByDecisionId),
+            // The escalation child is a fresh open record: it inherits
+            // no effects journal (its own terminal journals its own).
+            null,
         );
     }
 
@@ -519,6 +537,7 @@ final class StepUpDemand
             $this->requiredFactor,
             $this->generation,
             $this->raisedByDecisionId,
+            $this->effects,
         );
     }
 
@@ -601,6 +620,7 @@ final class StepUpDemand
             'required_rank' => $this->requiredFactor?->assuranceRank,
             'generation' => $this->generation,
             'raised_by_decision_id' => $this->raisedByDecisionId,
+            'fx' => $this->effects?->toArray(),
         ];
 
         return $record;
@@ -747,6 +767,15 @@ final class StepUpDemand
         if ($raisedBy !== null && (!\is_string($raisedBy) || preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $raisedBy) !== 1)) {
             return null;
         }
+        // The effects journal: absent on records predating it, present
+        // (and strictly shaped) on any record that carries one. A wrong
+        // shape refuses the whole record, fail closed: a corrupt
+        // journal can never impersonate completed effects.
+        $rawFx = \array_key_exists('fx', $record) ? $record['fx'] : null;
+        $effects = StepUpEffectsJournal::fromArray($rawFx);
+        if ($rawFx !== null && $effects === null) {
+            return null;
+        }
 
         return new self(
             $record['id'],
@@ -775,6 +804,41 @@ final class StepUpDemand
             $requiredFactor,
             $generation,
             $raisedBy,
+            $effects,
+        );
+    }
+
+    /** The demand after one effect of its journal landed. */
+    public function withEffects(StepUpEffectsJournal $effects): self
+    {
+        return new self(
+            $this->id,
+            $this->scope,
+            $this->sessionHash,
+            $this->chainId,
+            $this->decisionId,
+            $this->createdAt,
+            $this->expiresAt,
+            $this->sends,
+            $this->lastSentAt,
+            $this->state,
+            $this->stateAt,
+            $this->operationBindingKind,
+            $this->operationDigest,
+            $this->operationIdentityDigest,
+            $this->operationContentDigest,
+            $this->quarantine,
+            $this->factor,
+            $this->authorizedAt,
+            $this->parentDemandId,
+            $this->supersededByDemandId,
+            $this->leaseUntilMs,
+            $this->activeChallengeId,
+            $this->activeChallengeExpiresAt,
+            $this->requiredFactor,
+            $this->generation,
+            $this->raisedByDecisionId,
+            $effects,
         );
     }
 

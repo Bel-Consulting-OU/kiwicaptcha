@@ -91,6 +91,7 @@
     "data-kiwi-telemetry",
     "data-kiwi-telemetry-src",
     "data-kiwi-telemetry-integrity",
+    "data-kiwi-step-up-demand",
     "data-kiwi-lang",
   ];
   // W wins over container; unknown names are refused (one gate).
@@ -1158,7 +1159,15 @@
       overlay.appendChild(dialog);
       return { overlay: overlay, dialog: dialog, msg: msg, emailForm: emailForm, emailInput: emailInput, emailSend: emailSend, codeForm: codeForm, codeInput: codeInput, codeVerify: codeVerify };
     }
-    async function kiwiEmailStepUp(stepUp) {
+    async function kiwiEmailStepUp(stepUp, demandFallback) {
+      // The demand id travels two ways: the 403 body names the demand its
+      // issuer minted, and the widget container carries the demand the
+      // server rendered for this field (data-kiwi-step-up-demand). The
+      // body wins; the rendered attribute is the fallback, so a refused
+      // form still completes even when the 403 mint answered bare.
+      var demandId = (stepUp && typeof stepUp.demand === "string" && stepUp.demand !== "")
+        ? stepUp.demand
+        : String(demandFallback || "");
       var gen = kiwiWidgets[widgetId] ? kiwiWidgets[widgetId].gen : 0;
       function gone() { return !kiwiGenerationCurrent(widgetId, gen); }
       clearInterval(countdownTimer);
@@ -1208,7 +1217,7 @@
           var beginRes = null;
           try {
             beginRes = await kiwiStepUpPost(stepUp.begin, {
-              email: address, scope: scope, demand: stepUp.demand || "",
+              email: address, scope: scope, demand: demandId || "",
             });
           } catch (e) {
             beginRes = null;
@@ -1246,7 +1255,7 @@
                 completeRes = await kiwiStepUpPost(completePath, {
                   kiwi_step_up_ticket: beginDoc.challenge,
                   kiwi_step_up_code: code,
-                  demand: stepUp.demand || "",
+                  demand: demandId || "",
                 });
               } catch (e) {
                 completeRes = null;
@@ -1600,7 +1609,11 @@
               if (!kiwiGenerationCurrent(widgetId, gen)) return;
               var stepUp = refused.error.step_up || null;
               if (stepUp && stepUp.kind === "email_ownership" && typeof stepUp.begin === "string" && stepUp.begin !== "") {
-                await kiwiEmailStepUp(stepUp);
+                // The rendered demand rides the widget container: the
+                // form field whose validation minted the demand carries
+                // it as data-kiwi-step-up-demand (W wins over container).
+                var renderedDemand = kiwiConfigValue(W, container, "data-kiwi-step-up-demand") || "";
+                await kiwiEmailStepUp(stepUp, renderedDemand);
                 return;
               }
               clearInterval(countdownTimer);

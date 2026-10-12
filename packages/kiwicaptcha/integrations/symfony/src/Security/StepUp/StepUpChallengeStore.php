@@ -118,13 +118,19 @@ interface StepUpChallengeStore
      * challenge's demand id equals the demand's id), the state (the
      * demand is open and both records live) and the binding (the
      * presented hash equals the stored session binding or the stateless
-     * client secret). It then consumes the challenge and moves the
-     * demand to completed in the same atomic step. Exactly one caller
-     * of a concurrent pair receives the completion; every other caller,
-     * and every caller naming an absent, expired, crossed, spent or
-     * wrongly bound pair, receives null, with nothing left
-     * half-consumed. The verified subject is derived from the stored
-     * challenge, never from a caller argument.
+     * client secret). The factor requirement is asserted too: the
+     * demand's stored requirement is judged against the factor
+     * identity the stored challenge record carries. A completion below
+     * the required assurance rank refuses, and so does a completed
+     * factor other than the exact id the requirement names. It then
+     * consumes the
+     * challenge and moves the demand to completed in the same atomic
+     * step. Exactly one caller of a concurrent pair receives the
+     * completion; every other caller, and every caller naming an
+     * absent, expired, crossed, spent, wrongly bound or weaker-factor
+     * pair, receives null, with nothing left half-consumed. The
+     * verified subject is derived from the stored challenge, never from
+     * a caller argument.
      *
      * $sessionHash is the completion index hint: when it names the
      * stored session binding, the script also records the completed
@@ -161,6 +167,17 @@ interface StepUpChallengeStore
      * is absent, expired or not in the finalizing state.
      */
     public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand;
+
+    /**
+     * The effects journal write of a durable authorized settlement: one
+     * effect of the journal ({@see StepUpEffectsJournal}) moves to its
+     * landed stamp, atomically, on the authorized terminal only. The
+     * journal write follows its effect, so a crash between the effect
+     * and its journaling retries exactly the missing one. Answers the
+     * updated record, or null when the demand is absent, expired, not
+     * authorized, or the effect name is not a journalable one.
+     */
+    public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand;
 
     /**
      * The live demand id bound to an operation digest (the escalation

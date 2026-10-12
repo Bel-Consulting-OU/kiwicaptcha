@@ -155,6 +155,29 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', ttl)
           return cjson.encode(rec)
         end
+        if op == 'fx' then
+          -- The effects journal write of the durable authorized
+          -- terminal: one known effect moves to its landed stamp, and
+          -- only the authorized terminal journals anything. The write
+          -- keeps the remaining lifetime exactly.
+          if rec['state'] ~= 'authorized' then return nil end
+          local effect = ARGV[2]
+          if effect ~= 'authorization_settled' and effect ~= 'outcome_credited'
+            and effect ~= 'session_restored' and effect ~= 'trust_written' then
+            return nil
+          end
+          local fx = rec['fx']
+          if type(fx) ~= 'table' then fx = {} end
+          fx[effect] = tonumber(ARGV[3])
+          rec['fx'] = fx
+          local ttl = redis.call('TTL', KEYS[1])
+          if ttl <= 0 then
+            redis.call('DEL', KEYS[1])
+            return nil
+          end
+          redis.call('SET', KEYS[1], cjson.encode(rec), 'EX', ttl)
+          return cjson.encode(rec)
+        end
         return nil
         LUA;
 
@@ -171,11 +194,21 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      * lifecycle complete op. The escalation index write rides the same
      * script: the completed factor is recorded under the session hash
      * and scope, but only when the hint matches the stored session
-     * binding. Every refusal answers a typed reason table and leaves
-     * both records untouched; a corrupt record is removed, fail closed.
+     * binding. The factor requirement rides the same script: the
+     * demand's stored requirement is judged against the factor identity
+     * the stored challenge record carries (its kind). A completion
+     * below the required assurance rank, or of a factor other than the
+     * exact id the demand names, refuses before anything moves. Every
+     * refusal answers a typed reason table and leaves both records
+     * untouched; a corrupt record is removed, fail closed.
      */
     private const COMPLETE_FACTOR_SCRIPT = <<<'LUA'
         -- Step-up factor completion: one atomic challenge+demand transition.
+        -- The ladder of the challenge kinds: the assurance family and
+        -- rank each stored kind proves. The anonymous email-ownership
+        -- grant proves the email_otp rung, the weakest of the ladder.
+        local KIND_FAMILY = { email_otp = 'email_otp', email_ownership = 'email_otp', totp = 'totp', webauthn = 'webauthn' }
+        local KIND_RANK = { email_otp = 1, email_ownership = 1, totp = 2, webauthn = 3 }
         local craw = redis.call('GET', KEYS[1])
         if not craw then return {'missing_challenge'} end
         local cok, ch = pcall(cjson.decode, craw)
@@ -201,6 +234,24 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         local bound = (type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[3])
           or (type(ch['client_secret_hash']) == 'string' and ch['client_secret_hash'] == ARGV[3])
         if not bound then return {'binding'} end
+        -- The factor requirement gate: the demand's stored requirement is
+        -- judged against the factor identity the stored challenge record
+        -- carries, never a caller argument. A rank below the required
+        -- one refuses, and so does a factor other than the exact id the
+        -- requirement names at or below that rank; a strictly stronger
+        -- completion satisfies a weaker floor, the ladder is a floor.
+        local family = KIND_FAMILY[ch['kind']]
+        local rank = KIND_RANK[ch['kind']]
+        local requiredRank = nil
+        if type(de['required_rank']) == 'number' then requiredRank = de['required_rank'] end
+        if requiredRank ~= nil and requiredRank >= 1 then
+          if rank == nil or rank < requiredRank then return {'weaker_factor'} end
+        end
+        if type(de['required_factor_id']) == 'string' and de['required_factor_id'] ~= ''
+          and family ~= de['required_factor_id']
+          and (requiredRank == nil or rank == nil or rank <= requiredRank) then
+          return {'foreign_factor'}
+        end
         redis.call('DEL', KEYS[1])
         de['state'] = 'completed'
         de['state_at'] = now
@@ -623,6 +674,11 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
     public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand
     {
         return $this->demandTransition($demandId, 'settle', $state->value, (string) $now, $factor ?? '');
+    }
+
+    public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand
+    {
+        return $this->demandTransition($demandId, 'fx', $effect, (string) $now);
     }
 
     /**

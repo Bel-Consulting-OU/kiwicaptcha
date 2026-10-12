@@ -66,8 +66,9 @@ final class EvidenceStageWiringTest extends TestCase
 
     public function testTheWidgetTelemetryArmResolvesPerProfile(): void
     {
-        // Profile-less (the neutral balanced posture): minimal.
-        self::assertSame('minimal', $this->load($this->riskDefaults())
+        // Profile-less (the neutral balanced posture): off, the
+        // behavioral-telemetry-off-by-default claim.
+        self::assertSame('off', $this->load($this->riskDefaults())
             ->getDefinition(KiwiCaptchaRuntime::class)->getArgument(3));
 
         // The abuse postures arm the full telemetry.
@@ -78,8 +79,8 @@ final class EvidenceStageWiringTest extends TestCase
             ))->getDefinition(KiwiCaptchaRuntime::class)->getArgument(3), "$profile arms the full telemetry");
         }
 
-        // Compatibility stays minimal (the arm default everywhere).
-        self::assertSame('minimal', $this->load(array_merge(
+        // Compatibility keeps the arm off (the profileless default).
+        self::assertSame('off', $this->load(array_merge(
             $this->riskDefaults(),
             ['protection_profile' => 'compatibility'],
         ))->getDefinition(KiwiCaptchaRuntime::class)->getArgument(3));
@@ -113,11 +114,25 @@ final class EvidenceStageWiringTest extends TestCase
 
     public function testTheFormTypeCarriesTheSameTelemetryArm(): void
     {
-        self::assertSame('minimal', $this->load($this->riskDefaults())
+        self::assertSame('off', $this->load($this->riskDefaults())
             ->getDefinition(KiwiCaptchaType::class)->getArgument(2));
 
         $abuse = $this->load(array_merge($this->riskDefaults(), ['protection_profile' => 'abuse_first']));
         self::assertSame('full', $abuse->getDefinition(KiwiCaptchaType::class)->getArgument(2));
+
+        // The pinned floor: privacy_strict refuses the explicit
+        // evidence opt-in, the rendered arm stays off.
+        $pinned = $this->load(array_merge($this->riskDefaults(), [
+            'protection_profile' => 'privacy_strict',
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'namespace' => 'evidence-wiring',
+                'scopes' => ['login' => ['id' => 10]],
+                'evidence' => ['telemetry' => 'full'],
+            ],
+        ]));
+        self::assertSame('off', $pinned->getDefinition(KiwiCaptchaType::class)->getArgument(2), 'privacy_strict pins the arm off');
     }
 
     public function testAbuseFirstWiresTheDecoyEscalationPlane(): void

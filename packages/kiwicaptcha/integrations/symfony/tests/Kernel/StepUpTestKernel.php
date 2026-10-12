@@ -68,6 +68,12 @@ final class StepUpTestKernel extends TestKernel
         $loader->load(function (ContainerBuilder $container) use ($stepUpEnabled): void {
             $container->register('fake_redis', \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient::class)
                 ->setPublic(true);
+            // The security token storage the step-up controller and the
+            // session restorer resolve (the invalid-reference fallback
+            // in a kernel without a firewall): a real instance, so a
+            // kernel test can stage the pending session of a login.
+            $container->register('security.token_storage', \Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage::class)
+                ->setPublic(true);
             $container->register(PrincipalResolverInterface::class, FakePrincipalResolver::class)
                 ->setArgument('$principal', self::CANARY_PRINCIPAL);
             $container->loadFromExtension('framework', [

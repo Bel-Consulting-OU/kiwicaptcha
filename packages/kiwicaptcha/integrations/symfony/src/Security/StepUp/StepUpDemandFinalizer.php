@@ -44,9 +44,11 @@ use Symfony\Component\HttpFoundation\RequestStack;
  *     reassessment (a stale claim is retaken after its window).
  *  4. the reassessment: a fresh engine decision under the
  *     completed-step-up event, on the same inputs the demand was
- *     raised in. Only a Deny refuses the completion; an absent engine
- *     (manual construction) or an absent decision authorizes the
- *     demand on the factor proof alone.
+ *     raised in. A Deny refuses the completion. A StepUp escalates the
+ *     assurance: the demand is superseded by its strictly stronger
+ *     child in one atomic store transaction. An absent engine
+ *     (manual construction) or an absent or weaker decision authorizes
+ *     the demand on the factor proof alone.
  *  5. the terminal compare-and-set: the demand settles authorized or
  *     denied, atomically, once. The authorized terminal is durable and
  *     retains the operation digests, the decision, the quarantine
@@ -54,8 +56,12 @@ use Symfony\Component\HttpFoundation\RequestStack;
  *  6. the completion effects, authorized settlements only: the
  *     stepUpCompleted outcome credit ({@see StepUpCompletionCredit}),
  *     the pending-login restore ({@see SessionRestorer}) and the
- *     generic enrollment bootstrap marker. An authorized replay
- *     re-runs the effects idempotently.
+ *     generic enrollment bootstrap marker. Every effect journals on
+ *     the demand record ({@see StepUpEffectsJournal}) as it lands: a
+ *     crash between the terminal and an effect is recovered by the
+ *     demand-bound effects retry, {@see self::retryAuthorizedEffects()},
+ *     which runs on the session's pending token, never a second factor.
+ *     An authorized replay re-runs exactly the unjournaled effects.
  *
  * The finalizer is also the mint of the login plane's demand: a pending
  * token's begin() obtains its demand record here, under the login
@@ -193,8 +199,10 @@ final class StepUpDemandFinalizer
      * of the protected operation. The identity digest is the HMAC of
      * the server-owned unique logical operation id (never a raw client
      * value alone); the content digest is the HMAC of the canonical
-     * amount/currency/recipient contents. Null when the store refused
-     * the record.
+     * amount/currency/recipient contents. The demand snapshots the
+     * factor requirement the mint resolved for the session, so the
+     * stored record, never the request, decides which factor answers
+     * it. Null when the store refused the record.
      *
      * @param array<string, string> $canonicalContentFields the named
      *                                                      contents
@@ -232,12 +240,57 @@ final class StepUpDemandFinalizer
             $binding['identity'],
             $binding['content'],
             $quarantine,
+            null,
+            $this->requiredFactorOf($scope, $sessionHash),
         );
         try {
             return $this->store->createRootDemand($demand, $ttlSecs);
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * Whether the logical operation already carries a durable authorized
+     * step-up settlement: the operation identity digest is reproduced
+     * exactly as the mint built it (the same master, the same
+     * canonicalization) and the operation family tip is consulted. A
+     * retry of the same operation then answers its settled demand; a
+     * different operation, even with identical contents, derives a
+     * different identity digest and answers false. False for an absent
+     * family, a non-authorized tip, an empty master, or a store
+     * failure: fail-closed toward re-demand, never a silent pass.
+     *
+     * @param array<string, string> $canonicalContentFields the named
+     *                                                      contents the
+     *                                                      mint
+     *                                                      canonicalized
+     */
+    public function operationAuthorized(
+        string $scope,
+        string $serverOwnedOperationId,
+        array $canonicalContentFields,
+    ): bool {
+        if ($this->operationBindingMaster === '') {
+            return false;
+        }
+        try {
+            $binding = StepUpOperationDigest::financialBinding(
+                $this->operationBindingMaster,
+                $scope,
+                $serverOwnedOperationId,
+                StepUpOperationDigest::canonicalOperationContent($canonicalContentFields),
+            );
+            $tipId = $this->store->demandIdForOperation($binding['identity']);
+            if (!\is_string($tipId) || $tipId === '') {
+                return false;
+            }
+            $demand = $this->store->readDemand($tipId);
+        } catch (\Throwable) {
+            return false;
+        }
+
+        return $demand !== null && $demand->state === StepUpDemandState::Authorized;
     }
 
     /**
@@ -380,8 +433,13 @@ final class StepUpDemandFinalizer
         }
         // The reassessment: a fresh engine answer under the
         // completed-step-up event, on the context the demand carried.
-        // Only a Deny refuses; an unwired engine (manual construction)
-        // authorizes on the factor proof alone.
+        // Three answers: a Deny settles the demand denied, a StepUp
+        // escalates the assurance (the demand is superseded by its
+        // strictly stronger child, never authorized on the weaker
+        // proof), and every weaker rung (Allow and the proof-of-work
+        // actions, all below StepUp) settles the demand authorized. An
+        // unwired engine (manual construction) authorizes on the factor
+        // proof alone.
         $decision = $this->reassess($demand, $material, $request);
         if ($decision !== null && $decision->action === \KiwiCaptcha\Risk\RiskAction::Deny) {
             $this->settle($demand->id, StepUpDemandState::Denied);
@@ -389,17 +447,110 @@ final class StepUpDemandFinalizer
 
             return StepUpFinalization::refusedDenied();
         }
+        if ($decision !== null && $decision->action === \KiwiCaptcha\Risk\RiskAction::StepUp) {
+            return $this->escalate($demand, $factor, $decision->decisionId);
+        }
         $this->settleAuthorized($demand->id, $factor);
 
         return StepUpFinalization::authorized($demand);
     }
 
     /**
+     * The assurance escalation of one fresh StepUp reassessment: the
+     * completed factor satisfied the proof but not the engine, so the
+     * demand is superseded by a strictly stronger child in one atomic
+     * store transaction. The child is answered as the demand the
+     * caller still owes a proof for. The child inherits the parent's
+     * remaining authorization lifetime and its operation binding, and
+     * records the reassessment's decision id separately. The completed
+     * factor is never carried over: the child demands the next rung of
+     * the ladder. A family at its depth cap, or a completed factor no
+     * rung outranks, fails closed: the demand settles denied, never
+     * authorized on the weaker proof.
+     */
+    private function escalate(StepUpDemand $demand, string $completedFactor, ?string $raisedByDecisionId): StepUpFinalization
+    {
+        $requirement = $this->strongerRequirement($demand->scope, $completedFactor);
+        // The parent sits in its completed (here: claimed) state, past
+        // the factor proof: the family cap and the supersede link are
+        // the escalation's own bounds, never the open-state rule of a
+        // mint-time child.
+        $capped = $demand->superseded() || $demand->generation >= StepUpDemand::MAX_GENERATION;
+        if ($requirement === null || $capped) {
+            $this->settle($demand->id, StepUpDemandState::Denied);
+            $this->logger?->info('kiwi step-up demand finalization refused: the fresh assessment demands a stronger factor and the ladder offers none', [
+                'demand' => $demand->id,
+            ]);
+
+            return StepUpFinalization::refusedDenied();
+        }
+        $child = $demand->spawnChild(StepUpChallenge::mintId(), $this->now(), $raisedByDecisionId, $requirement);
+        $superseded = $this->store->supersedeDemandWithChild($demand->id, $child);
+        if ($superseded === null) {
+            // The family transaction refused (a concurrent escalation
+            // won, or the parent expired inside the claim): fail closed,
+            // the demand settles denied, never authorized.
+            $this->settle($demand->id, StepUpDemandState::Denied);
+            $this->logger?->info('kiwi step-up demand escalation refused; the demand settled denied', [
+                'demand' => $demand->id,
+            ]);
+
+            return StepUpFinalization::refusedDenied();
+        }
+        // The superseded terminal in both stores: the Redis script
+        // leaves the claimed parent in its finalizing state with the
+        // child link written, so the terminal compare-and-set lands the
+        // state; the array store already wrote it (the settle then
+        // answers null and is skipped).
+        try {
+            $this->store->settleDemandFinalization($demand->id, StepUpDemandState::Superseded, $this->now());
+        } catch (\Throwable) {
+        }
+        $this->logger?->info('kiwi step-up demand escalated to a strictly stronger factor', [
+            'demand' => $child->id,
+        ]);
+
+        return StepUpFinalization::escalated($child);
+    }
+
+    /**
+     * The requirement the escalation child demands: the resolver's
+     * answer for the scope, judged past the factor family the
+     * completion proved. Null when no strictly stronger rung exists
+     * (the top of the ladder is already completed) or the resolver is
+     * unwired: the escalation then has no factor to demand and fails
+     * closed. The anonymous address-ownership grant proves the
+     * email_otp rung of the ladder, spelled as the grant lane's own
+     * factor identity.
+     */
+    private function strongerRequirement(string $scope, string $completedFactor): ?FactorRequirement
+    {
+        if ($this->factorResolver === null) {
+            return null;
+        }
+        $family = FactorRequirement::isFamily($completedFactor)
+            ? $completedFactor
+            : ($completedFactor === StepUpFactorAssurance::EMAIL_OWNERSHIP ? FactorRequirement::EMAIL_OTP : $completedFactor);
+        $completedRank = FactorRequirement::rankOf($family);
+        try {
+            $requirement = $this->factorResolver->requiredFactor($scope, null, new StepUpFactorContext($family));
+        } catch (\Throwable) {
+            return null;
+        }
+        if ($requirement->assuranceRank <= $completedRank) {
+            return null;
+        }
+
+        return $requirement;
+    }
+
+    /**
      * The completion effects of an authorized settlement for the grant
      * lane: the outcome credit, the pending-login restore and the
-     * generic enrollment bootstrap marker. Invoked only after
-     * {@see self::finalize()} answered authorized, and re-invoked
-     * idempotently for an authorized replay.
+     * generic enrollment bootstrap marker, each journaled on the demand
+     * as it lands. Invoked only after {@see self::finalize()} answered
+     * authorized, and re-invoked idempotently for an authorized replay:
+     * journal effects skip, missing effects run once.
      */
     private function bookAuthorizedEffects(
         StepUpFinalization $finalization,
@@ -414,11 +565,48 @@ final class StepUpDemandFinalizer
         if ($principalPseudonym === null || $principalPseudonym === '') {
             return $finalization;
         }
-        $this->credit->report($demand->id, $principalPseudonym, null, false);
-        $this->sessionRestorer?->restore($principalPseudonym, $request ?? $this->requestStack?->getCurrentRequest(), $demand->id);
-        $this->writeEnrollmentMarker($principalPseudonym, $factor, $request);
 
-        return $finalization;
+        return $finalization->withEffects(
+            $this->runEffects($finalization->demand?->id ?? $demand->id, $demand->id, $principalPseudonym, null, false, $factor, $request),
+        );
+    }
+
+    /**
+     * The demand-bound effects retry of a durable authorized
+     * settlement: the same completion endpoint, the same session, no
+     * second factor. The crash boundary this closes: the challenge is
+     * spent and the demand is terminal authorized, yet an effect (the
+     * outcome credit, the session restore, the trust marker) never
+     * landed. The ordinary completion can never re-run them, because
+     * its proof is gone. The retry derives both identities from
+     * server-owned state (the session's pending token and the resolver),
+     * re-verifies the demand's stored login recipe against the resolved
+     * principal, and runs the journal: landed effects skip, missing
+     * effects run once and journal on success. Null when the demand is
+     * absent, expired, not authorized, not a login demand or not this
+     * principal's: the caller keeps its original failure, fail closed.
+     */
+    public function retryAuthorizedEffects(string $demandId, string $principalPseudonym, ?Request $request = null): ?StepUpFinalization
+    {
+        $demand = $this->liveDemand($demandId);
+        if ($demand === null || $demand->state !== StepUpDemandState::Authorized) {
+            return null;
+        }
+        if ($demand->operationBindingKind !== StepUpOperationBindingKind::Login) {
+            return null;
+        }
+        $computed = StepUpOperationDigest::login($demand->scope, $principalPseudonym);
+        if (!hash_equals($demand->operationDigest, $computed)) {
+            $this->logger?->info('kiwi step-up effects retry refused: the pending identity does not reproduce the demand', [
+                'demand' => $demand->id,
+            ]);
+
+            return null;
+        }
+
+        return (StepUpFinalization::authorizedReplay($demand))->withEffects(
+            $this->runEffects($demandId, $demandId, $principalPseudonym, null, false, $demand->factor ?? 'unknown', $request),
+        );
     }
 
     /**
@@ -450,36 +638,132 @@ final class StepUpDemandFinalizer
     /**
      * The completion effects of an authorized settlement: the outcome
      * credit, the pending-login restore and the generic enrollment
-     * bootstrap marker. Invoked by the lane only after
-     * {@see self::finalize()} answered authorized, and re-invoked
-     * idempotently for an authorized replay. The credit's idempotency
-     * keys make a re-run a no-op, the restore unwraps a pending token
-     * exactly once, and the marker rewrite is a timestamp refresh.
+     * bootstrap marker, each journaled on the demand as it lands.
+     * Invoked by the lane only after {@see self::finalize()} answered
+     * authorized, and re-invoked idempotently for an authorized
+     * replay: landed journal entries skip their effect, missing ones
+     * run exactly once and journal on success.
      */
     public function bookEffects(StepUpFinalization $finalization, StepUpResult $proof, ?Request $request = null): StepUpFinalization
     {
         if (!$finalization->authorized) {
             return $finalization;
         }
-        if ($proof->principalPseudonym !== null) {
-            $this->credit->report(
+        if ($proof->principalPseudonym === null || $proof->principalPseudonym === '') {
+            return $finalization;
+        }
+
+        return $finalization->withEffects(
+            $this->runEffects(
+                $proof->demandId ?? $finalization->demand?->id ?? '',
                 $proof->challengeId ?? '',
                 $proof->principalPseudonym,
                 $proof->targetPseudonym,
                 $proof->targetOwned,
-            );
-            $this->sessionRestorer?->restore($proof->principalPseudonym, $request ?? $this->requestStack?->getCurrentRequest(), $proof->demandId);
-            $this->writeEnrollmentMarker($proof->principalPseudonym, $proof->factor ?? 'unknown', $request);
+                $proof->factor ?? 'unknown',
+                $request,
+            ),
+        );
+    }
+
+    /**
+     * The journal-driven effects run of one authorized settlement, the
+     * one sequence every lane shares. The journal lives on the demand
+     * record itself; each landed effect journals after it ran, so a
+     * crash between the two retries exactly the missing one. The order
+     * is load-bearing: the credit runs before the restore. A crash
+     * after the restore can then never leave an effect that only the
+     * spent challenge's completion could have booked, because the
+     * demand-bound retry runs on the session's pending token, which the
+     * restore unwraps. A credit failure and a refused restore leave the
+     * journal incomplete on purpose: the answer is the retryable
+     * failure, the retry re-runs exactly what is missing.
+     */
+    private function runEffects(
+        string $demandId,
+        string $creditRef,
+        string $principalPseudonym,
+        ?string $targetPseudonym,
+        bool $targetOwned,
+        string $factor,
+        ?Request $request,
+    ): StepUpEffectsJournal {
+        if ($demandId === '') {
+            return StepUpEffectsJournal::none();
+        }
+        $demand = $this->liveDemand($demandId);
+        if ($demand === null || $demand->state !== StepUpDemandState::Authorized) {
+            // The terminal died (its TTL passed) with the effects
+            // incomplete: nothing journalable remains, the caller
+            // answers its authorized verdict without an effect claim.
+            return StepUpEffectsJournal::none();
+        }
+        $journal = $demand->effects ?? StepUpEffectsJournal::none();
+        $request ??= $this->requestStack?->getCurrentRequest();
+        if (!$journal->settled()) {
+            $journal = $this->journalEffect($demandId, StepUpEffectsJournal::SETTLED, $journal);
+        }
+        if (!$journal->outcomeCredited()) {
+            try {
+                $this->credit->report($creditRef, $principalPseudonym, $targetPseudonym, $targetOwned);
+            } catch (\Throwable $e) {
+                $this->logger?->warning('kiwi step-up completion credit failed: {message}', [
+                    'message' => $e->getMessage(),
+                ]);
+
+                return $journal;
+            }
+            $journal = $this->journalEffect($demandId, StepUpEffectsJournal::OUTCOME_CREDITED, $journal);
+        }
+        if (!$journal->sessionRestored()) {
+            $restore = $this->sessionRestorer?->restore($principalPseudonym, $request, $demandId);
+            if ($restore === null) {
+                // No restorer wired: there is no session surface to
+                // restore, the effect is trivially complete.
+                $journal = $this->journalEffect($demandId, StepUpEffectsJournal::SESSION_RESTORED, $journal);
+            } elseif ($restore->landed()) {
+                $journal = $this->journalEffect($demandId, StepUpEffectsJournal::SESSION_RESTORED, $journal);
+            } else {
+                // A refused restore journals nothing and stops the run:
+                // the caller answers the retryable failure, never a
+                // user-visible success for a session that stayed closed.
+                $this->logger?->warning('kiwi step-up session restore refused: {status}', [
+                    'status' => $restore->status,
+                ]);
+
+                return $journal;
+            }
+        }
+        if (!$journal->trustWritten() && $this->writeEnrollmentMarker($principalPseudonym, $factor, $request)) {
+            $journal = $this->journalEffect($demandId, StepUpEffectsJournal::TRUST_WRITTEN, $journal);
         }
 
-        return $finalization;
+        return $journal;
+    }
+
+    /**
+     * Journal one effect on the demand record. A journal write failure
+     * keeps the prior journal: the effect re-runs on the retry (each
+     * effect is idempotent by design, the double-run is the safe side).
+     */
+    private function journalEffect(string $demandId, string $effect, StepUpEffectsJournal $prior): StepUpEffectsJournal
+    {
+        try {
+            $record = $this->store->recordDemandEffect($demandId, $effect, $this->now());
+        } catch (\Throwable) {
+            return $prior;
+        }
+
+        return $record?->effects ?? $prior;
     }
 
     /**
      * The generic enrollment bootstrap marker: created only by the
-     * authorized terminal, never by a FactorVerified proof.
+     * authorized terminal, never by a FactorVerified proof. Answers
+     * whether both markers landed, so the journal records a trust
+     * write it can actually stand behind.
      */
-    private function writeEnrollmentMarker(string $principalPseudonym, string $factor, ?Request $request): void
+    private function writeEnrollmentMarker(string $principalPseudonym, string $factor, ?Request $request): bool
     {
         $now = $this->now();
         $effectiveRequest = $request ?? $this->requestStack?->getCurrentRequest();
@@ -496,7 +780,11 @@ final class StepUpDemandFinalizer
             $this->logger?->warning('kiwi step-up enrollment marker failed: {message}', [
                 'message' => $e->getMessage(),
             ]);
+
+            return false;
         }
+
+        return true;
     }
 
     /** The fresh engine decision of the completed factor, null when it cannot evaluate. */

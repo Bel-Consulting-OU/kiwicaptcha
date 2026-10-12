@@ -7,11 +7,12 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
-use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpCode;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
@@ -62,7 +63,6 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->handler = new TotpStepUpHandler(
             $this->store,
             new StepUpTicket(self::MASTER),
-            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
             'sha1', 6, 1, 300, 5, 100, 900, '/kiwi/step-up/complete',
             static fn (): int => self::NOW,
             self::MASTER,
@@ -102,9 +102,29 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $base32 = $this->enrollFirstTime();
         $secretRaw = (string) TotpCode::base32Decode($base32);
 
+        // The demand plane rides the walk: the begin binds its challenge
+        // to the demand the finalizer minted, and the completed proof
+        // settles authorized through it. The credit is the finalizer's
+        // booking, never the handler's.
+        $reporter = new SpyOutcomeReporter();
+        $finalizer = new StepUpDemandFinalizer(
+            $this->store,
+            new StepUpCompletionCredit($reporter, self::MASTER),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            static fn (): int => self::NOW,
+            self::MASTER,
+        );
+        $demandId = (string) $finalizer->mintLoginDemand('login', self::PRINCIPAL, null, 600);
+        self::assertNotSame('', $demandId, 'the login demand persists through the real client');
+
         $response = $this->handler->begin(
             Request::create('https://captcha.example.com/kiwi/step-up/begin'),
-            new StepUpContext(self::PRINCIPAL, null, 'login', null, 'post_solve_step_up_required', StepUpContext::MODE_JSON),
+            new StepUpContext(self::PRINCIPAL, null, 'login', null, 'post_solve_step_up_required', StepUpContext::MODE_JSON, false, $demandId),
         );
         self::assertSame(200, $response->getStatusCode(), 'begin() must persist its record through the real client');
 
@@ -119,8 +139,10 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
 
         $code = TotpCode::at($secretRaw, TotpCode::stepOf(self::NOW), 'sha1', 6);
         $result = $this->handler->complete($this->completeRequest($ticket, $code, $clientSecret));
-        self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted, consumed and credited end to end');
-        self::assertTrue($result->creditedPrincipal);
+        self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted and consumed end to end');
+        $finalization = $finalizer->finalizeLogin($result, 'login');
+        self::assertTrue($finalization->authorized, 'the completed proof settles authorized through its demand');
+        self::assertCount(1, $reporter->reports, 'the authorized settlement books the completion credit exactly once');
     }
 
     public function testTheConsumedRecordStaysSingleUseOnTheRealClient(): void

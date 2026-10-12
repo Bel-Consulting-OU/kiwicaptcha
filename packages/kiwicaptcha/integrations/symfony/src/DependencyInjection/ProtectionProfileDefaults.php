@@ -211,9 +211,13 @@ final class ProtectionProfileDefaults
                 // names the email_otp carrier with no step_up_above
                 // rung: issuance stays proof of work, and the carrier
                 // demand appears on the post-solve assessment, where
-                // the principal the action belongs to exists.
+                // the principal the action belongs to exists. The
+                // demand is the durable financial binding: the
+                // server-owned logical operation id of the operation id
+                // attribute plus the canonical protected contents, so a
+                // step-up for one transfer can never authorize another.
                 'scopes' => [
-                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high'],
+                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute'],
                     'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],
@@ -298,9 +302,13 @@ final class ProtectionProfileDefaults
                 // names the email_otp carrier with no step_up_above
                 // rung: issuance stays proof of work, and the carrier
                 // demand appears on the post-solve assessment, where
-                // the principal the action belongs to exists.
+                // the principal the action belongs to exists. The
+                // demand is the durable financial binding: the
+                // server-owned logical operation id of the operation id
+                // attribute plus the canonical protected contents, so a
+                // step-up for one transfer can never authorize another.
                 'scopes' => [
-                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high'],
+                    'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute'],
                     'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
                     'password_reset' => ['value_class' => 'standard'],

@@ -152,7 +152,8 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
         // The same gate order the Redis script runs: presence, decode
         // (the records round-trip through the strict wire decode at
-        // write time here), identity, state, liveness, binding.
+        // write time here), identity, state, liveness, binding, factor
+        // requirement.
         $challenge = $this->live($challengeId);
         if ($challenge === null) {
             return null;
@@ -175,6 +176,23 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if (!$bound) {
             return null;
         }
+        // The factor requirement gate, the script's own rule: the
+        // demand's stored requirement is judged against the factor
+        // identity the stored challenge record carries (its kind), never
+        // a caller argument. A completion below the required assurance
+        // rank refuses, and so does a factor other than the exact id
+        // the requirement names at or below that rank; a strictly
+        // stronger completion satisfies a weaker floor, the ladder is a
+        // floor. Nothing moves on a refusal.
+        $required = $demand->requiredFactor;
+        if ($required !== null) {
+            $family = self::challengeFactorIdentity($challenge->kind);
+            $rank = FactorRequirement::rankOf($family);
+            if ($rank < $required->assuranceRank
+                || ($family !== $required->factorId && $rank <= $required->assuranceRank)) {
+                return null;
+            }
+        }
         // The transition: consume the challenge, complete the demand,
         // record the escalation marker, all or nothing.
         unset($this->challenges[$challengeId]);
@@ -192,6 +210,20 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
 
     /** @var array<string, array{value: string, expiresAt: int}> session hash -> escalation marker */
     private array $completedIndex = [];
+
+    /**
+     * The assurance family a stored challenge kind proves: the identity
+     * the requirement gate judges, the email-ownership grant answering
+     * as the email_otp rung of the ladder.
+     */
+    private static function challengeFactorIdentity(StepUpChallengeKind $kind): string
+    {
+        return match ($kind) {
+            StepUpChallengeKind::Totp => FactorRequirement::TOTP,
+            StepUpChallengeKind::WebAuthn => FactorRequirement::WEBAUTHN,
+            StepUpChallengeKind::EmailOtp, StepUpChallengeKind::EmailOwnership => FactorRequirement::EMAIL_OTP,
+        };
+    }
 
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
     {
@@ -255,6 +287,29 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         $this->demands[$demandId] = ['record' => $settled, 'expiresAt' => $entry['expiresAt']];
 
         return $settled;
+    }
+
+    public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand
+    {
+        // The same gate order the Redis op runs: presence, liveness,
+        // terminal state, effect vocabulary.
+        $entry = $this->demands[$demandId] ?? null;
+        if ($entry === null || $this->now() >= $entry['expiresAt']) {
+            unset($this->demands[$demandId]);
+
+            return null;
+        }
+        if ($entry['record']->state !== StepUpDemandState::Authorized) {
+            return null;
+        }
+        if (!StepUpEffectsJournal::isEffect($effect)) {
+            return null;
+        }
+        $journal = ($entry['record']->effects ?? StepUpEffectsJournal::none())->withEffect($effect, $now);
+        $record = $entry['record']->withEffects($journal);
+        $this->demands[$demandId] = ['record' => $record, 'expiresAt' => $entry['expiresAt']];
+
+        return $record;
     }
 
     private function liveDemand(string $demandId): ?StepUpDemand
