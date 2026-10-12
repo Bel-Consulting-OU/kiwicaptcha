@@ -50,6 +50,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpKeyRing;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpLockoutGuard;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnCredentialRegistry;
@@ -2209,7 +2210,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // content digest, at the validator's mint and at the
                 // controller's finalization rerun. Absent when no scope
                 // names a recipe; the demand plane then binds the
-                // form-field recipe as before.
+                // form-field recipe as before. The shipped resolver is
+                // the default behind the interface alias: every
+                // consumer references
+                // StepUpOperationResolverInterface::class. A production
+                // financial deployment swaps in its own domain-backed
+                // resolver (server operation id, then the business
+                // object, then the canonical executable fields) by
+                // re-pointing that one alias.
                 $contentFieldsByScope = self::operationContentFieldMap($riskConfig);
                 if ($contentFieldsByScope !== []) {
                     $container->setDefinition(ConfiguredStepUpOperationResolver::class, (new Definition(ConfiguredStepUpOperationResolver::class, [
@@ -2217,7 +2225,9 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $container->has(PrincipalResolverInterface::class) ? new Reference(PrincipalResolverInterface::class) : null,
                         KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE,
                     ]))->setPublic(true));
-                    $operationResolverRef = new Reference(ConfiguredStepUpOperationResolver::class);
+                    $container->setAlias(StepUpOperationResolverInterface::class, ConfiguredStepUpOperationResolver::class)
+                        ->setPublic(true);
+                    $operationResolverRef = new Reference(StepUpOperationResolverInterface::class);
                 }
 
                 // The cross-challenge brute-force budget: escalating

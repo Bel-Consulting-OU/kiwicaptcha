@@ -17,11 +17,15 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFinalization;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperation;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationMaterial;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePrincipalResolver;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyStepUpOperationResolver;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
 use KiwiCaptcha\Config;
@@ -37,6 +41,7 @@ use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Loader\LoaderInterface;
+use Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
@@ -55,7 +60,11 @@ use Symfony\Component\Validator\Validation;
  * actual business operation (amount, currency, beneficiary) and a
  * changed amount no longer rides the settled authorization. A high
  * or critical value_class scope with an operation identity source but
- * no recipe refuses the container build, and the doctor fails it.
+ * no recipe refuses the container build, and the doctor fails it. The
+ * compiled container registers the shipped resolver behind the
+ * interface alias, the replacement test re-points that alias, and the
+ * server-authoritative walk refuses a business object the settled
+ * content digest no longer reproduces.
  */
 final class StepUpOperationResolverTest extends TestCase
 {
@@ -202,6 +211,236 @@ final class StepUpOperationResolverTest extends TestCase
         self::assertSame(StepUpDemandState::Authorized, $store->readDemand((string) $demandId)?->state);
     }
 
+    // ── the compiled seam ────────────────────────────────────────────
+
+    /**
+     * The compiled seam: the extension registers the shipped resolver
+     * behind the StepUpOperationResolverInterface alias and every
+     * consumer references the interface id. The kernel below re-points
+     * the alias at the spy implementation at compile time. The compiled
+     * container injects the replacement into the validator, the
+     * settlement minted through the container's own finalizer
+     * reproduces under the replacement's canonical bytes, and the
+     * validator's replay gate drives exactly the replacement.
+     */
+    public function testTheCompiledContainerInjectsTheReplacementBehindTheInterfaceAlias(): void
+    {
+        SpyStepUpOperationResolver::$resolved = [];
+        SpyStepUpOperationResolver::$operation = new StepUpOperation(
+            'tx-spy-001',
+            StepUpOperationDigest::canonicalOperationContent(['amount_minor' => '25000', 'currency' => 'EUR', 'beneficiary_id' => 'carol']),
+            'user-42',
+        );
+        $kernel = new class ('test', true) extends TestKernel {
+            protected function build(ContainerBuilder $container): void
+            {
+                parent::build($container);
+                $container->register('resolver.seam.fake.redis', FakePredisClient::class)
+                    ->setPublic(true);
+                $container->register('resolver.seam.domain', SpyStepUpOperationResolver::class)
+                    ->setPublic(true);
+                // The deployment's replacement pass: it re-points the
+                // interface alias at the domain implementation after
+                // the extension registered the shipped default behind
+                // it.
+                $container->addCompilerPass(new class implements CompilerPassInterface {
+                    public function process(ContainerBuilder $container): void
+                    {
+                        $container->setAlias(StepUpOperationResolverInterface::class, 'resolver.seam.domain')
+                            ->setPublic(true);
+                    }
+                });
+                $container->addCompilerPass(new class implements CompilerPassInterface {
+                    public function process(ContainerBuilder $container): void
+                    {
+                        $id = KiwiCaptchaValidator::class;
+                        if ($container->hasDefinition($id)) {
+                            $container->getDefinition($id)->setPublic(true);
+                        }
+                    }
+                });
+            }
+
+            public function registerContainerConfiguration(LoaderInterface $loader): void
+            {
+                $loader->load(function (ContainerBuilder $container): void {
+                    $container->loadFromExtension('framework', [
+                        'secret' => 'test-secret',
+                        'test' => true,
+                    ]);
+                    $container->loadFromExtension('kiwi_captcha', [
+                        'secret_key' => '0123456789abcdef0123456789abcdef',
+                        'redis_service' => 'resolver.seam.fake.redis',
+                        'risk' => [
+                            'enabled' => true,
+                            'redis_service' => 'resolver.seam.fake.redis',
+                            'scopes' => [
+                                'wire_transfer' => [
+                                    'value_class' => 'high',
+                                    'operation_identity_source' => 'request_attribute',
+                                    'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id'],
+                                ],
+                                'login' => ['id' => 20],
+                            ],
+                            'step_up' => [
+                                'enabled' => true,
+                                'handlers' => ['email_otp' => ['enabled' => true]],
+                            ],
+                        ],
+                    ]);
+                });
+            }
+        };
+        try {
+            $kernel->boot();
+            $container = $kernel->getContainer()->get('test.service_container');
+            $validator = $container->get(KiwiCaptchaValidator::class);
+            $injected = $this->injectedOperationResolver($validator);
+            self::assertInstanceOf(SpyStepUpOperationResolver::class, $injected, 'the validator received the alias replacement, never the shipped default');
+            self::assertSame($container->get('resolver.seam.domain'), $injected, 'the injected instance is the replacement service itself');
+
+            // The seam feeds the whole demand path: the demand minted
+            // through the container's own finalizer under the
+            // replacement's canonical bytes settles authorized, and
+            // the validator's replay gate answers it through the
+            // replacement.
+            $scope = 'wire_transfer';
+            $canonical = SpyStepUpOperationResolver::$operation->canonicalProtectedContents;
+            $finalizer = $container->get(StepUpDemandFinalizer::class);
+            $demandId = $finalizer->mintBoundDemand($scope, 'tx-spy-001', $canonical);
+            self::assertNotNull($demandId, 'the replacement-fed mint recorded the demand');
+            $store = $container->get('kiwi_captcha.step_up.store');
+            self::assertNotNull($store->completeDemand((string) $demandId, time(), 300), 'the factor completion landed on the container store');
+            $settled = $finalizer->finalizeGrant((string) $demandId, new StepUpOperationMaterial(), null, 'email_otp', 'tx-spy-001', $canonical);
+            self::assertTrue($settled->authorized, 'the replacement-bound demand settles authorized');
+
+            $request = Request::create('/', 'POST', ['amount_minor' => '1']);
+            $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-spy-001');
+            $gate = new \ReflectionMethod(KiwiCaptchaValidator::class, 'operationStepUpAlreadyAuthorized');
+            self::assertTrue($gate->invoke($validator, new KiwiCaptcha(['scope' => $scope]), $request, null), 'the replay gate authorizes through the replacement');
+            self::assertSame([['scope' => $scope, 'operationId' => 'tx-spy-001']], SpyStepUpOperationResolver::$resolved, 'the resolution ran on the replacement exactly once');
+        } finally {
+            SpyStepUpOperationResolver::$operation = null;
+            SpyStepUpOperationResolver::$resolved = [];
+            $kernel->shutdown();
+        }
+    }
+
+    // ── the server-authoritative walk ────────────────────────────────
+
+    /**
+     * The server-authoritative TOCTOU walk: the browser submits tx-123
+     * with 100 EUR to Alice, the demand is minted on the business
+     * object's executable fields, and the settlement authorizes. The
+     * application then changes the business object to 50000 EUR to
+     * Bob: the replay gate reads the executable fields through the
+     * domain resolver and refuses, the changed contents never
+     * re-authorize, and the settled terminal stands untouched. The
+     * unchanged object reproduces the authorization idempotently, over
+     * the same canonical bytes.
+     */
+    public function testAChangedBusinessObjectRefusesTheSettlementAndTheUnchangedObjectRetriesIdempotently(): void
+    {
+        $store = new ArrayStepUpChallengeStore(fn (): int => $this->now);
+        $stack = new RequestStack();
+        $request = Request::create('/', 'POST', ['amount' => '100'], [], [], [self::remoteKey => '198.51.100.7']);
+        $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-123');
+        $stack->push($request);
+
+        // The application's domain-backed resolver: the canonical bytes
+        // run over the business object's actual executable fields, read
+        // from the domain layer at every resolution.
+        $ledger = new class implements StepUpOperationResolverInterface {
+            /** @var array<string, array<string, string>> */
+            public array $objects = [];
+
+            public function resolve(Request $request, string $scope): StepUpOperation
+            {
+                $id = (string) $request->attributes->get(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE);
+                $object = $this->objects[$id] ?? null;
+                if ($object === null) {
+                    throw new \InvalidArgumentException('the business object of the operation id is absent');
+                }
+
+                return new StepUpOperation($id, StepUpOperationDigest::canonicalOperationContent($object), 'user-42');
+            }
+        };
+        $ledger->objects['tx-123'] = ['amount' => '100', 'currency' => 'EUR', 'beneficiary' => 'Alice'];
+
+        $validator = new KiwiCaptchaValidator(
+            new Verifier(new ArrayStorage()),
+            $stack,
+            self::SECRET,
+            enforceTelemetry: false,
+            risk: $this->gateway(),
+            dispositionStore: new ArrayPostSolveDispositionStore(fn (): int => $this->now, 0),
+            stepUpFinalizer: $this->finalizer($store),
+            operationBoundScopes: [self::SCOPE => true],
+            principalResolver: new FakePrincipalResolver('user-42'),
+            operationResolver: $ledger,
+        );
+        $constraint = new KiwiCaptcha(['scope' => self::SCOPE]);
+        $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, 'decision-1');
+        $mint = new \ReflectionMethod(KiwiCaptchaValidator::class, 'mintOperationBoundDemand');
+        $demandId = $mint->invoke($validator, $disposition, $constraint, $request, null);
+        self::assertNotNull($demandId, 'the domain-backed mint recorded the demand');
+        $canonicalSubmitted = StepUpOperationDigest::canonicalOperationContent(['amount' => '100', 'currency' => 'EUR', 'beneficiary' => 'Alice']);
+        $binding = StepUpOperationDigest::financialBinding(self::MASTER, self::SCOPE, 'tx-123', $canonicalSubmitted);
+        $demand = $store->readDemand((string) $demandId);
+        self::assertNotNull($demand);
+        self::assertSame($binding['identity'], $demand->operationIdentityDigest, 'the demand is bound to the server-owned operation');
+        self::assertSame($binding['content'], $demand->operationContentDigest, 'the content digest runs over the executable fields');
+
+        // The factor completes and the settlement authorizes on the
+        // executable representation.
+        self::assertNotNull($store->completeDemand((string) $demandId, $this->now, 600));
+        $settled = $this->finalizer($store)->finalizeGrant(
+            (string) $demandId,
+            new StepUpOperationMaterial(principalPseudonym: 'user-42'),
+            null,
+            'email_otp',
+            'tx-123',
+            $canonicalSubmitted,
+        );
+        self::assertTrue($settled->authorized, 'the precondition: tx-123 settled authorized on the executable fields');
+
+        // The business object changes under the settled authorization:
+        // tx-123 is now 50000 EUR to Bob. The replay gate resolves the
+        // actual executable fields and refuses: the stored content
+        // digest reproduces only the operation it was minted for.
+        $ledger->objects['tx-123'] = ['amount' => '50000', 'currency' => 'EUR', 'beneficiary' => 'Bob'];
+        self::assertFalse(
+            $this->alreadyAuthorized($validator, $constraint, $request),
+            'the changed business object must not replay the settled authorization',
+        );
+        $cross = $this->finalizer($store)->finalizeGrant(
+            (string) $demandId,
+            new StepUpOperationMaterial(principalPseudonym: 'user-42'),
+            null,
+            'email_otp',
+            'tx-123',
+            StepUpOperationDigest::canonicalOperationContent($ledger->objects['tx-123']),
+        );
+        self::assertFalse($cross->authorized, 'a finalization over the changed executable contents is refused');
+        self::assertSame(StepUpFinalization::REFUSED_DIGEST, $cross->reason);
+        self::assertSame(StepUpDemandState::Authorized, $store->readDemand((string) $demandId)?->state, 'the refused rerun never touches the settled terminal');
+
+        // The unchanged object: the retry reproduces the authorization
+        // idempotently, over the same canonical bytes both times.
+        $ledger->objects['tx-123'] = ['amount' => '100', 'currency' => 'EUR', 'beneficiary' => 'Alice'];
+        self::assertTrue($this->alreadyAuthorized($validator, $constraint, $request), 'the unchanged object replays the settled authorization');
+        $replay = $this->finalizer($store)->finalizeGrant(
+            (string) $demandId,
+            new StepUpOperationMaterial(principalPseudonym: 'user-42'),
+            null,
+            'email_otp',
+            'tx-123',
+            $canonicalSubmitted,
+        );
+        self::assertTrue($replay->authorized, 'the retry of the unchanged object is authorized');
+        self::assertTrue($this->alreadyAuthorized($validator, $constraint, $request), 'the replay stays idempotent');
+    }
+
     // ── the build gate ───────────────────────────────────────────────
 
     public function testAHighValueOperationBoundScopeWithoutARecipeRefusesTheBuild(): void
@@ -322,6 +561,8 @@ final class StepUpOperationResolverTest extends TestCase
         ]);
         self::assertSame('PASS', $pass, 'the recipe clears the doctor');
         self::assertStringContainsString('recipe', $passMessage);
+        self::assertStringContainsString('request representation', $passMessage, 'the doctor states what the shipped recipe binds');
+        self::assertStringContainsString('StepUpOperationResolverInterface', $passMessage, 'the doctor names the domain-backed resolver seam');
     }
 
     /**
@@ -352,6 +593,30 @@ final class StepUpOperationResolverTest extends TestCase
     }
 
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * The operation resolver instance the compiled container injected
+     * into the validator.
+     */
+    private function injectedOperationResolver(KiwiCaptchaValidator $validator): ?StepUpOperationResolverInterface
+    {
+        $property = new \ReflectionProperty(KiwiCaptchaValidator::class, 'operationResolver');
+        $resolver = $property->getValue($validator);
+        \assert($resolver instanceof StepUpOperationResolverInterface || $resolver === null);
+
+        return $resolver;
+    }
+
+    /**
+     * The validator's replay authorization gate: the settled demand of
+     * the resolved operation answers, anything else refuses.
+     */
+    private function alreadyAuthorized(KiwiCaptchaValidator $validator, KiwiCaptcha $constraint, Request $request): bool
+    {
+        $method = new \ReflectionMethod(KiwiCaptchaValidator::class, 'operationStepUpAlreadyAuthorized');
+
+        return (bool) $method->invoke($validator, $constraint, $request, null);
+    }
 
     private function finalizer(ArrayStepUpChallengeStore $store): StepUpDemandFinalizer
     {
