@@ -83,6 +83,24 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertArrayHasKey('{kiwi:test-ns}:stepup:begins:'.self::PRINCIPAL, $this->redis->counters);
     }
 
+    public function testAReleasedReservationRefundsItsBudgets(): void
+    {
+        // The pre-handoff release must roll the reservation's own
+        // increments back: the marker names the counters, the settle
+        // script refunds exactly those. A release that only dropped the
+        // marker would strand the spend and starve the budget window.
+        $dom = 'dom:'.str_repeat('a', 32);
+        self::assertTrue($this->store->reserveMailQuota('rel.0.1', [$dom, 'global:'], [1, 1000], 3600, 30));
+        self::assertFalse($this->store->reserveMailQuota('rel.0.2', [$dom, 'global:'], [1, 1000], 3600, 30), 'the second reservation passes the limit of one');
+        self::assertTrue($this->store->releaseMailQuota('rel.0.1'), 'the pre-handoff release refunds the counters');
+        self::assertTrue($this->store->reserveMailQuota('rel.0.3', [$dom, 'global:'], [1, 1000], 3600, 30), 'the freed capacity serves again');
+        // A committed reservation never releases: the spend stands.
+        $this->store->commitMailQuota('rel.0.3');
+        self::assertFalse($this->store->releaseMailQuota('rel.0.3'), 'a committed reservation never releases');
+        self::assertFalse($this->store->reserveMailQuota('rel.0.4', [$dom, 'global:'], [1, 1000], 3600, 30), 'the committed spend counts');
+        self::assertFalse($this->store->releaseMailQuota('rel.unknown.0.1'), 'an unknown reservation releases nothing');
+    }
+
     public function testTheTotpStateIsDurableAndReplayGuarded(): void
     {
         $this->store->saveTotpSecret(self::PRINCIPAL, 'secret-bytes');
