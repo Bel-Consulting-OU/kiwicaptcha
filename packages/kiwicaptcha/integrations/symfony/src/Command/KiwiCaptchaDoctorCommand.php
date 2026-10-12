@@ -1252,6 +1252,15 @@ final class KiwiCaptchaDoctorCommand extends Command
      * another. The failure is hard: a high-value config without that
      * server-authoritative identity source refuses to run.
      *
+     * The passing recipe carries one boundary the doctor states on
+     * every verdict: operation_content_fields binds the request
+     * representation (the submitted field values). A production
+     * financial deployment binds the executable operation itself: it
+     * re-points the StepUpOperationResolverInterface alias at a
+     * resolver over its own domain layer. There the server operation
+     * id loads the business object, and the canonical bytes run over
+     * the fields the deployment actually executes.
+     *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkOperationIdentity(): array
@@ -1301,7 +1310,11 @@ final class KiwiCaptchaDoctorCommand extends Command
             )];
         }
 
-        return ['PASS', 'every high-value scope names a server-authoritative operation identity source and a protected-content recipe'];
+        return ['PASS', 'every high-value scope names a server-authoritative operation identity source and a protected-content recipe'
+            .' (the recipe binds the request representation, the submitted field values; a production financial deployment'
+            .' binds the executable operation itself by re-pointing the StepUpOperationResolverInterface alias at a resolver'
+            .' over its domain layer, where the server operation id loads the business object and the digest runs over the'
+            .' executed fields)'];
     }
 
     /**

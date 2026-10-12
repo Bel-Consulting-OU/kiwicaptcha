@@ -50,9 +50,32 @@ final class ShardedSlotSeparationTest extends TestCase
         return $ports;
     }
 
+    /**
+     * The suite needs the local binaries. It spawns its own two
+     * stand-in servers: a single shared RISK_REDIS_URL cannot provide
+     * the two-endpoint slot separation this test proves, and a shared
+     * service container must never be shut down. A missing binary is
+     * an explicit skip with the remedy, never a red exit code 127.
+     */
+    private static function requireStandinBinaries(): void
+    {
+        foreach (['redis-server', 'redis-cli'] as $binary) {
+            if (trim((string) shell_exec('command -v ' . escapeshellarg($binary) . ' 2>/dev/null')) !== '') {
+                continue;
+            }
+            self::markTestSkipped(sprintf(
+                '%s is not on PATH; the sharded slot-separation suite spawns two throwaway local'
+                . ' stand-in servers, so install redis-server and redis-cli (or run the suite in a'
+                . ' lane image that ships them)',
+                $binary,
+            ));
+        }
+    }
+
     /** @return list<int> the stand-in ports */
     private static function startServers(int $count): array
     {
+        self::requireStandinBinaries();
         $ports = self::freePorts($count);
         foreach ($ports as $port) {
             exec(sprintf(

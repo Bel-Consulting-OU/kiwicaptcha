@@ -18,8 +18,9 @@ declare(strict_types=1);
  *      (libsodium, never gmp);
  *   5. an execution-armed challenge issues and verifies end to end at
  *      the live grammar maximum (ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
- *      with the test-only browser-equivalent trace fixture producing
- *      the evidence exactly like the oracle suites;
+ *      with the white-box envelope fixture producing the evidence: the
+ *      real-platform probe slots of the maximum rung need the
+ *      envelope-aware trace, the placeholder path is refused there;
  *   6. an RSW configuration refuses cleanly at construction with the
  *      documented missing-extension error - and only that error.
  *
@@ -98,7 +99,7 @@ function issueVerify(Config $config, ?string $executionVersion = null): void
         if ($program === null) {
             throw new \RuntimeException('the issued execution program must parse');
         }
-        $executionTrace = ExecutionTraceFixture::executedTraceForWithObservedHeight($program, 10);
+        $executionTrace = ExecutionTraceFixture::executedTraceForWhiteBox($program, ExecutionTraceFixture::OBSERVED_HEIGHT);
         $executionDigest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $executionTrace);
         if ($executionDigest === null) {
             throw new \RuntimeException('the digest over the executed trace must compute');

@@ -233,6 +233,7 @@ final class FakePredisClient extends \Predis\Client
             'GET' => $this->fakeGet($arguments),
             'GETDEL' => $this->fakeGetdel($arguments),
             'SET' => $this->fakeSet($arguments),
+            'EXISTS' => $this->fakeExists($arguments),
             'HINCRBYFLOAT' => $this->fakeHincrbyfloat($arguments),
             'HGETALL' => $this->fakeHgetall($arguments),
             'HSET' => $this->fakeHset($arguments),
@@ -329,6 +330,31 @@ final class FakePredisClient extends \Predis\Client
         $key = (string) $arguments[0];
 
         return $this->strings[$key] ?? (isset($this->counters[$key]) ? (string) $this->counters[$key] : null);
+    }
+
+    /**
+     * `EXISTS`: the per-key existence count across the fake's key spaces
+     * (strings, counters, hashes, sorted sets), exactly the answer a
+     * real server gives a live key. Expiry stays lazy here, like every
+     * other read command of this fake: an armed TTL alone never removes
+     * a key.
+     *
+     * @param list<mixed> $arguments
+     */
+    private function fakeExists(array $arguments): int
+    {
+        $found = 0;
+        foreach ($arguments as $key) {
+            $key = (string) $key;
+            if (isset($this->strings[$key])
+                || isset($this->counters[$key])
+                || isset($this->hashes[$key])
+                || isset($this->zsets[$key])) {
+                $found++;
+            }
+        }
+
+        return $found;
     }
 
     /**
