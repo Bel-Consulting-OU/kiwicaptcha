@@ -34,6 +34,10 @@ RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 RT_CAMPAIGN=d3.3-pow-economics
 rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 BASE=$(rt_base_url "$RT_PROFILE")
+# The risk-Redis URL of the booted profile: the escalation demonstration
+# reads its config through the product kernel, and the kernel's runtime
+# proof line needs the same Redis the profile serves.
+REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
 
 if [ ! -x "$REPO_ROOT/target/debug/kiwicaptcha-solver" ]; then
     rt_report_fail "the solver binary is missing; build it (cargo build -p kiwicaptcha-solver)"
@@ -165,7 +169,7 @@ if (!($kernel instanceof \Symfony\Component\HttpKernel\Kernel)) {
     fwrite(STDERR, "d3.3: the product kernel did not boot\n");
     exit(3);
 }
-printf("RUNTIME: driver=%s container_overrides=0 kernel=yes\n", get_class($kernel));
+fwrite(STDERR, sprintf("RUNTIME: driver=%s container_overrides=0 kernel=yes\n", get_class($kernel)));
 ')
 printf '%s\n' "$ESC_JSON" | python3 -c '
 import json, sys
