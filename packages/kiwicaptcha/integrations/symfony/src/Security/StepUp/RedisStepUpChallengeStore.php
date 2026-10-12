@@ -491,8 +491,11 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      * The mail-quota settlement script: a release undoes this
      * reservation's increments while its lease record still lives (the
      * Redis clock decided liveness); past the lease, or on a commit,
-     * the counters stand and only the marker is dropped. A budget key
-     * that already left its window is skipped, never driven negative.
+     * the counters stand and only the marker is dropped. The marker
+     * itself names the reservation's budget counters (the reserve
+     * wrote them), so the release refunds exactly the increments the
+     * reservation made. A counter that already left its window reads
+     * as absent and is skipped, never driven negative.
      */
     private const MAIL_QUOTA_SETTLE_SCRIPT = <<<'LUA'
         -- Step-up mail quota settlement: release or commit.
@@ -502,10 +505,13 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           return 1
         end
         if not marker then return 0 end
-        for i = 2, #KEYS do
-          local n = redis.call('GET', KEYS[i])
-          if n and tonumber(n) > 0 then
-            redis.call('DECR', KEYS[i])
+        local ok, saved = pcall(cjson.decode, marker)
+        if ok and type(saved) == 'table' and type(saved['keys']) == 'table' then
+          for i = 1, #saved['keys'] do
+            local n = redis.call('GET', saved['keys'][i])
+            if n and tonumber(n) > 0 then
+              redis.call('DECR', saved['keys'][i])
+            end
           end
         end
         redis.call('DEL', KEYS[1])
@@ -837,17 +843,26 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         if (\count($budgetKeys) !== \count($limits) || $budgetKeys === []) {
             throw new \InvalidArgumentException('A mail quota reservation names a limit for every budget key');
         }
-        $args = [(string) max(1, $windowSecs), (string) max(1, $leaseSecs), (string) json_encode($reservationId)];
-        foreach (array_values($limits) as $i => $limit) {
+        foreach (array_values($limits) as $limit) {
             if (!\is_int($limit) || $limit < 1) {
                 throw new \InvalidArgumentException('A mail quota limit must be a positive integer');
             }
-            $args[] = (string) $limit;
         }
         // The store owns its key family: the caller names the budgets
         // semantically (dom, src, global), the key carries the
         // deployment namespace.
         $fullKeys = array_map(fn (string $key): string => $this->budgetKey($key), $budgetKeys);
+        // The marker carries this reservation's own budget counters, so
+        // a release can refund exactly the increments the reservation
+        // made (the settle script reads them off the marker).
+        $args = [
+            (string) max(1, $windowSecs),
+            (string) max(1, $leaseSecs),
+            (string) json_encode(['id' => $reservationId, 'keys' => $fullKeys]),
+        ];
+        foreach (array_values($limits) as $limit) {
+            $args[] = (string) $limit;
+        }
         $answer = $this->redis->eval(self::MAIL_QUOTA_RESERVE_SCRIPT, 1 + \count($fullKeys), $this->quotaKey($reservationId), ...$fullKeys, ...$args);
 
         return (int) $answer === 1;

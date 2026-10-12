@@ -1124,27 +1124,30 @@ final class FakePredisClient extends \Predis\Client
         if (str_contains($script, 'Step-up mail quota settlement')) {
             // RedisStepUpChallengeStore::commitMailQuota and
             // releaseMailQuota: keys[1] the reservation marker,
-            // keys[2..] the budget counters, argv[1] commit (1) or
-            // release (0). A release rolls the reservation's increments
-            // back while the marker still lives (the lease is its own
-            // TTL); a commit drops the marker only.
+            // argv[1] commit (1) or release (0). The marker carries the
+            // reservation's own budget counters, so a release decrements
+            // exactly those, while the marker still lives (the lease is
+            // its own TTL); a commit drops the marker only.
             if ((string) $rest[0] === '1') {
                 unset($this->strings[(string) $keys[0]], $this->expirations[(string) $keys[0]]);
 
                 return true;
             }
-            if (!isset($this->strings[(string) $keys[0]])) {
+            $markerKey = (string) $keys[0];
+            if (!isset($this->strings[$markerKey])) {
                 return false;
             }
-            $count = count($keys);
-            for ($i = 1; $i < $count; $i++) {
-                $budgetKey = (string) $keys[$i];
-                $n = isset($this->counters[$budgetKey]) ? $this->counters[$budgetKey] : 0;
-                if ($n > 0) {
-                    $this->fakeDecr([$budgetKey]);
+            $saved = json_decode((string) $this->strings[$markerKey], true);
+            if (\is_array($saved) && isset($saved['keys']) && \is_array($saved['keys'])) {
+                foreach ($saved['keys'] as $budgetKey) {
+                    $budgetKey = (string) $budgetKey;
+                    $n = isset($this->counters[$budgetKey]) ? $this->counters[$budgetKey] : 0;
+                    if ($n > 0) {
+                        $this->fakeDecr([$budgetKey]);
+                    }
                 }
             }
-            unset($this->strings[(string) $keys[0]], $this->expirations[(string) $keys[0]]);
+            unset($this->strings[$markerKey], $this->expirations[$markerKey]);
 
             return true;
         }

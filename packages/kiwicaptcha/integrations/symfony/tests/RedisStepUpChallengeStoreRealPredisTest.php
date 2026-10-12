@@ -169,6 +169,24 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->store->create($this->challenge($id), 300);
     }
 
+    public function testAReleasedReservationRefundsItsBudgetsOnTheRealClient(): void
+    {
+        // The finding this pins: the settle script reads the budget
+        // counters off the reservation marker. A release that only
+        // dropped the marker answered true while the spend stood, and
+        // the freed capacity never served again.
+        $dom = 'dom:'.str_repeat('b', 32);
+        self::assertTrue($this->store->reserveMailQuota('real.0.1', [$dom, 'global:'], [1, 1000], 3600, 30));
+        self::assertFalse($this->store->reserveMailQuota('real.0.2', [$dom, 'global:'], [1, 1000], 3600, 30), 'the second reservation passes the limit of one');
+        self::assertTrue($this->store->releaseMailQuota('real.0.1'), 'the pre-handoff release refunds the counters');
+        self::assertSame('0', $this->client->get(self::PREFIX.'emb:'.$dom), 'the released reservation left no spend behind');
+        self::assertTrue($this->store->reserveMailQuota('real.0.3', [$dom, 'global:'], [1, 1000], 3600, 30), 'the freed capacity serves again on the real server');
+        // A committed reservation never releases: the spend stands.
+        $this->store->commitMailQuota('real.0.3');
+        self::assertFalse($this->store->releaseMailQuota('real.0.3'), 'a committed reservation never releases');
+        self::assertSame('1', $this->client->get(self::PREFIX.'emb:'.$dom), 'the committed spend stands');
+    }
+
     /**
      * First-time totp enrollment under the enrollment gate: the handler
      * refuses it without a session-scoped step-up completed in the
