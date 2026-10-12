@@ -44,7 +44,7 @@ final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderIn
     public function send(string $email, string $code, int $ttlSecs, EmailOwnershipDeliveryMetadata $delivery): void
     {
         // Derive the Message-ID (and refuse a From without a usable domain)
-        // BEFORE Symfony's Address parser can throw RfcComplianceException
+        // before Symfony's Address parser can throw RfcComplianceException
         // on a non-address From. Fail-closed with our own error, matching
         // the documented contract.
         $messageId = $this->messageId($delivery);
