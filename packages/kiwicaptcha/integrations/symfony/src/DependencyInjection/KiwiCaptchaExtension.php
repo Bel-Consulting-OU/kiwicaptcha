@@ -43,6 +43,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpBootstrapGate;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\ConfiguredStepUpOperationResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandViewRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
@@ -1223,6 +1224,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $selectedProfile,
             ));
         }
+        // The protected-content recipe gate: a high-value scope with a
+        // server-authoritative operation identity source but no named
+        // content fields would bind the content digest over nothing, so
+        // a changed amount, currency or beneficiary could ride an
+        // authorization minted for the original contents. The build
+        // refuses, fail closed.
+        self::assertHighValueScopesCarryAContentRecipe($riskConfig);
         $riskGatewayRef = null;
         $riskCookieRef = null;
         $issuanceCounterRef = null;
@@ -1234,6 +1242,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $emailOwnershipSenderDoctorRef = null;
         $emailOtpSenderDoctorRef = null;
         $stepUpFinalizerRef = null;
+        $operationResolverRef = null;
+        $stepUpFactorResolverRef = null;
         $bindingAuthorityRef = $riskConfig['request_binding_authority'] !== null
             ? new Reference($riskConfig['request_binding_authority'])
             : null;
@@ -2193,6 +2203,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setPublic(true));
                 $stepUpFinalizerRef = new Reference(StepUpDemandFinalizer::class);
 
+                // The protected-operation resolver: the scopes that name
+                // a content recipe feed the real business operation (the
+                // amount, the currency, the beneficiary) into the split
+                // content digest, at the validator's mint and at the
+                // controller's finalization rerun. Absent when no scope
+                // names a recipe; the demand plane then binds the
+                // form-field recipe as before.
+                $contentFieldsByScope = self::operationContentFieldMap($riskConfig);
+                if ($contentFieldsByScope !== []) {
+                    $container->setDefinition(ConfiguredStepUpOperationResolver::class, (new Definition(ConfiguredStepUpOperationResolver::class, [
+                        $contentFieldsByScope,
+                        $container->has(PrincipalResolverInterface::class) ? new Reference(PrincipalResolverInterface::class) : null,
+                        KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE,
+                    ]))->setPublic(true));
+                    $operationResolverRef = new Reference(ConfiguredStepUpOperationResolver::class);
+                }
+
                 // The cross-challenge brute-force budget: escalating
                 // lockouts per principal and target, with the owner
                 // notified through the logging hook (replace the
@@ -2419,6 +2446,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $container->setDefinition(StepUpFactorResolver::class, (new Definition(StepUpFactorResolver::class, [
                         $resolverDefault,
                     ]))->setPublic(true));
+                    $stepUpFactorResolverRef = new Reference(StepUpFactorResolver::class);
                     $container->getDefinition(StepUpDemandFinalizer::class)->setArgument('$factorResolver', new Reference(StepUpFactorResolver::class));
                     if ($emailOwnershipRef !== null) {
                         $container->getDefinition(EmailOwnershipStepUp::class)->setArgument('$factorResolver', new Reference(StepUpFactorResolver::class));
@@ -2436,6 +2464,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     // and the one authorization path of a completed
                     // factor proof.
                     ->setArgument('$demandFinalizer', new Reference(StepUpDemandFinalizer::class))
+                    // The begin path the escalation answer advertises:
+                    // the browser the completion tells to begin the child
+                    // lands on the same begin endpoint.
+                    ->setArgument('$beginPath', $riskConfig['step_up']['begin_path'])
+                    // The protected-operation resolver: the completion of
+                    // a financially bound demand reruns the split binding
+                    // over the operation the request presents.
+                    ->setArgument('$operationResolver', $operationResolverRef)
                     ->addTag('controller.service_arguments')
                     ->setPublic(true));
             }
@@ -2771,6 +2807,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // Signature-Input header then rides the ordinary widget
             // flow ignored).
             ->setArgument('$agentsVerifier', $agentsVerifierRef)
+            // The factor requirement source of the step-up plane: when
+            // wired, the step-up 403 of a non-carrier scope names the
+            // required factor kind, so the browser learns what the
+            // demand asks for and the application routes to its own
+            // step-up surface.
+            ->setArgument('$stepUpFactorResolver', $stepUpFactorResolverRef)
             // The anonymous email-ownership carrier's begin path: when
             // the factor is wired, the step-up 403 of a carrier scope
             // advertises it together with the minted demand id, so the
@@ -3262,6 +3304,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // the durable financial demand bound to the server-owned
             // logical operation id, never the anonymous carrier.
             ->setArgument('$operationBoundScopes', self::operationBoundScopeMap($riskConfig))
+            // The protected-operation resolver: the mint of an
+            // operation-bound demand feeds the real business contents
+            // (the configured recipe) into the split content digest,
+            // never a shapeless stand-in.
+            ->setArgument('$operationResolver', $operationResolverRef)
             // The authenticated principal resolver of the financial
             // demand path: the demand records the browser session of
             // exactly the principal the operation belongs to.
@@ -4849,6 +4896,73 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return $map;
+    }
+
+    /**
+     * The configured protected-content recipes, keyed by application
+     * scope name: the request fields whose submitted values feed the
+     * operation content digest of the scope's bound demand. Scopes
+     * without a recipe are absent, and the resolver service is then not
+     * registered at all.
+     *
+     * @param array<string, mixed> $riskConfig the processed risk config
+     *
+     * @return array<string, list<string>>
+     */
+    private static function operationContentFieldMap(array $riskConfig): array
+    {
+        $map = [];
+        foreach ($riskConfig['scopes'] as $name => $spec) {
+            $fields = \is_array($spec) ? ($spec['operation_content_fields'] ?? []) : [];
+            if (\is_array($fields) && $fields !== []) {
+                $map[(string) $name] = array_values($fields);
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * The build-time gate of the protected-content recipe: a scope
+     * declared value_class high or critical that names a
+     * server-authoritative operation identity source must also name the
+     * content fields its digest binds. An empty recipe would hash the
+     * content digest over nothing, so a transfer could change from one
+     * amount and beneficiary to another while the fields supplied to
+     * the digest stay empty, and the whole split binding would refuse
+     * nothing. The failure is hard: the container build refuses.
+     *
+     * @param array<string, mixed> $riskConfig the processed risk config
+     */
+    private static function assertHighValueScopesCarryAContentRecipe(array $riskConfig): void
+    {
+        if (!($riskConfig['enabled'] ?? false)) {
+            return;
+        }
+        $missing = [];
+        foreach (($riskConfig['scopes'] ?? []) as $name => $spec) {
+            if (!\is_array($spec)) {
+                continue;
+            }
+            $valueClass = (string) ($spec['value_class'] ?? 'standard');
+            if (!\in_array($valueClass, ['high', 'critical'], true)) {
+                continue;
+            }
+            if (($spec['operation_identity_source'] ?? null) !== 'request_attribute') {
+                continue;
+            }
+            $fields = $spec['operation_content_fields'] ?? [];
+            if (!\is_array($fields) || $fields === []) {
+                $missing[] = (string) $name;
+            }
+        }
+        if ($missing !== []) {
+            throw new \Symfony\Component\Config\Definition\Exception\InvalidConfigurationException(sprintf(
+                'kiwi_captcha.risk: %d high-value operation-bound scope(s) carry no protected-content recipe (%s): set risk.scopes.<name>.operation_content_fields to the request fields whose submitted values the operation content digest binds (amount_minor, currency, beneficiary_id, ...), so a step-up minted for one set of contents can never authorize changed contents',
+                \count($missing),
+                implode(', ', $missing),
+            ));
+        }
     }
 
     /**

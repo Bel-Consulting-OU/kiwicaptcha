@@ -1041,17 +1041,20 @@
     }
     // ── The typed step-up demand (STEP_UP_REQUIRED) ────────────────
     // A 403 whose body names STEP_UP_REQUIRED is not a challenge
-    // failure: it is the demand for a second factor. Two shapes exist.
-    // An anonymous email-ownership demand (kind "email_ownership" with
-    // its begin path and demand id) completes inside the widget: a
-    // labelled address input, then the 6-digit code field; begin
-    // consumes the demand id, complete answers the single-use grant,
-    // and the grant is written into the token field and handed to the
-    // success callback, so the form submission carries it in place of
-    // a solved token. A principal-carried demand (totp, email_otp,
-    // webauthn) belongs to the application's own auth flow: the driver
-    // dispatches kiwi:step-up-required with the 403 body so the page
-    // routes to its step-up page.
+    // failure: it is the demand for a second factor. The body carries
+    // the step_up object with the required factor kind, and the
+    // dispatch follows that metadata. The built-in carrier (kind
+    // "email_ownership" with its begin path and demand id) completes
+    // inside the widget: a labelled address input, then the 6-digit
+    // code field; begin consumes the demand id, complete answers the
+    // single-use grant, and the grant is written into the token field
+    // and handed to the success callback, so the form submission
+    // carries it in place of a solved token. Every other factor kind
+    // (email_otp, totp, webauthn, a custom factor) belongs to the
+    // application's own auth flow: the driver dispatches
+    // kiwi:step-up-required with the step_up metadata, so the page
+    // learns which factor the demand requires and routes to its own
+    // step-up page.
     function kiwiStepUpPost(url, body) {
       return fetch(url, {
         method: "POST", credentials: "same-origin", cache: "no-store",
@@ -1598,9 +1601,11 @@
         try {
           resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers: reqHeaders, body: JSON.stringify(reqBody), signal: abortController.signal });
           // The typed step-up refusal is a branch, never a failure: the
-          // 403 body names the factor that answers it (the dialog for
-          // the anonymous email grant, kiwi:step-up-required for the
-          // principal-carried kinds), so the flow never reports a
+          // 403 body names the factor that answers it, and the dispatch
+          // is generic on that metadata. The built-in carrier kind
+          // renders the dialog; every other kind (and a bare body with
+          // no metadata at all) reaches the application through
+          // kiwi:step-up-required, so the flow never reports a
           // challenge error for a demand it can carry.
           if (resp.status === 403) {
             var refused = null;
@@ -1623,6 +1628,11 @@
               kiwiRecordState("pending", "");
               kiwiSetView({ statusKey: "statusStepUp", badgeKey: "badgeStepUp", domState: "idle", hintKey: "hintStepUp" });
               announce(kiwiT("statusStepUp"));
+              // The generic dispatch: the whole step_up object rides the
+              // event, the factor kind inside it (required_factor kind
+              // metadata from the server), so the application can route
+              // by kind to its own step-up surface. A bare body
+              // dispatches with step_up null.
               dispatch("step-up-required", { step_up: stepUp });
               return;
             }

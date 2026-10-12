@@ -26,6 +26,14 @@ final class FailingCreateStepUpChallengeStore implements StepUpChallengeStore
 
     public bool $failCreate = false;
 
+    /**
+     * When armed, the completion-history read of the mint (the assurance
+     * source a demand's factor requirement resolves from) fails, so a
+     * test can prove the mint refuses rather than degrade into a demand
+     * with no assurance snapshot.
+     */
+    public bool $failAssuranceRead = false;
+
     public function __construct(
         private readonly ArrayStepUpChallengeStore $inner,
     ) {
@@ -81,13 +89,17 @@ final class FailingCreateStepUpChallengeStore implements StepUpChallengeStore
         return $this->inner->consumeDemand($demandId);
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, string $completedFactor, ?string $sessionHash = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion
     {
-        return $this->inner->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $completedFactor, $sessionHash);
+        return $this->inner->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash);
     }
 
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
     {
+        if ($this->failAssuranceRead) {
+            throw new \RuntimeException('the completion history is unavailable');
+        }
+
         return $this->inner->completedFactorOf($sessionHash, $scope, $now);
     }
 

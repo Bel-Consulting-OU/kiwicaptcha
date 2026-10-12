@@ -196,17 +196,23 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      * and scope, but only when the hint matches the stored session
      * binding. The factor requirement rides the same script: the
      * demand's stored requirement is judged against the factor identity
-     * the stored challenge record carries (its kind). A completion
-     * below the required assurance rank, or of a factor other than the
-     * exact id the demand names, refuses before anything moves. Every
-     * refusal answers a typed reason table and leaves both records
-     * untouched; a corrupt record is removed, fail closed.
+     * the stored challenge record carries, never a caller argument.
+     * That identity is the record's server-held snapshot resolved at
+     * begin; the kind tables are the drain-period fallback and the
+     * snapshot's coherence check. A
+     * completion below the required assurance rank, or of a factor
+     * neither the snapshot's family nor its exact id answers at or
+     * below that rank, refuses before anything moves. Every refusal
+     * answers a typed reason table and leaves both records untouched; a
+     * corrupt record is removed, fail closed.
      */
     private const COMPLETE_FACTOR_SCRIPT = <<<'LUA'
         -- Step-up factor completion: one atomic challenge+demand transition.
         -- The ladder of the challenge kinds: the assurance family and
         -- rank each stored kind proves. The anonymous email-ownership
         -- grant proves the email_otp rung, the weakest of the ladder.
+        -- The tables are also the coherence check of the record's own
+        -- factor snapshot and the fallback for the pre-snapshot shape.
         local KIND_FAMILY = { email_otp = 'email_otp', email_ownership = 'email_otp', totp = 'totp', webauthn = 'webauthn' }
         local KIND_RANK = { email_otp = 1, email_ownership = 1, totp = 2, webauthn = 3 }
         local craw = redis.call('GET', KEYS[1])
@@ -234,21 +240,45 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         local bound = (type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[3])
           or (type(ch['client_secret_hash']) == 'string' and ch['client_secret_hash'] == ARGV[3])
         if not bound then return {'binding'} end
-        -- The factor requirement gate: the demand's stored requirement is
-        -- judged against the factor identity the stored challenge record
-        -- carries, never a caller argument. A rank below the required
-        -- one refuses, and so does a factor other than the exact id the
-        -- requirement names at or below that rank; a strictly stronger
-        -- completion satisfies a weaker floor, the ladder is a floor.
-        local family = KIND_FAMILY[ch['kind']]
-        local rank = KIND_RANK[ch['kind']]
+        -- The factor identity gate. The judged identity is the stored
+        -- challenge's own server-held snapshot, the factor the record
+        -- was begun under, never a caller argument. The snapshot must
+        -- agree with its kind's family and rank: the kind decides what
+        -- proof material the completion verified, and the snapshot can
+        -- name the handler identity, never another family's rung. An
+        -- incoherent snapshot is a corrupt record, removed fail-closed.
+        -- A record without the snapshot (the pre-snapshot wire shape)
+        -- falls back to the kind tables. A rank below the required one
+        -- refuses, and so does a factor neither the family nor the
+        -- exact id the requirement names at or below that rank. A
+        -- strictly stronger completion satisfies a weaker floor, the
+        -- ladder is a floor.
+        local family = nil
+        local rank = nil
+        local fid = nil
+        if type(ch['factor_family']) == 'string' and ch['factor_family'] ~= ''
+          and type(ch['factor_id']) == 'string' and ch['factor_id'] ~= ''
+          and type(ch['factor_rank']) == 'number' then
+          if KIND_FAMILY[ch['kind']] ~= ch['factor_family']
+            or KIND_RANK[ch['kind']] ~= ch['factor_rank'] then
+            redis.call('DEL', KEYS[1])
+            return {'corrupt_challenge'}
+          end
+          family = ch['factor_family']
+          rank = ch['factor_rank']
+          fid = ch['factor_id']
+        else
+          family = KIND_FAMILY[ch['kind']]
+          rank = KIND_RANK[ch['kind']]
+          fid = family
+        end
         local requiredRank = nil
         if type(de['required_rank']) == 'number' then requiredRank = de['required_rank'] end
         if requiredRank ~= nil and requiredRank >= 1 then
           if rank == nil or rank < requiredRank then return {'weaker_factor'} end
         end
         if type(de['required_factor_id']) == 'string' and de['required_factor_id'] ~= ''
-          and family ~= de['required_factor_id']
+          and family ~= de['required_factor_id'] and fid ~= de['required_factor_id']
           and (requiredRank == nil or rank == nil or rank <= requiredRank) then
           return {'foreign_factor'}
         end
@@ -258,9 +288,14 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         local ttl = tonumber(de['expires_at']) - now
         if ttl < 1 then ttl = 1 end
         redis.call('SET', KEYS[2], cjson.encode(de), 'EX', ttl)
-        if ARGV[5] ~= '' and type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[5]
-          and type(ch['scope']) == 'string' and type(de['expires_at']) == 'number' then
-          redis.call('SET', KEYS[3], ch['scope']..'|'..ARGV[4]..'|'..tostring(math.floor(de['expires_at'])), 'EX', ttl)
+        -- The escalation index stores the factor identity the record
+        -- itself carries, never a caller argument: a completion cannot
+        -- poison the future assurance escalation by claiming a stronger
+        -- factor than its challenge proves.
+        if ARGV[4] ~= '' and type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[4]
+          and type(ch['scope']) == 'string' and type(de['expires_at']) == 'number'
+          and type(family) == 'string' and family ~= '' then
+          redis.call('SET', KEYS[3], ch['scope']..'|'..family..'|'..tostring(math.floor(de['expires_at'])), 'EX', ttl)
         end
         return {'ok', craw, cjson.encode(de)}
         LUA;
@@ -602,11 +637,8 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return $this->demandTransition($demandId, 'complete', (string) $now, (string) max(1, $ttlSecs));
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, string $completedFactor, ?string $sessionHash = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion
     {
-        if (!FactorRequirement::isFamily($completedFactor)) {
-            throw new \InvalidArgumentException('The completed factor of an atomic completion must be a family of the assurance ladder');
-        }
         // The index key rides as a declared key even when the hint is
         // absent: the script skips the write, and a declared-but-unused
         // key keeps the eval cluster-safe.
@@ -622,7 +654,6 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             $demandId,
             (string) $now,
             $presentedBindingHash,
-            $completedFactor,
             $sessionHash ?? '',
         );
         if (!\is_array($answer) || ($answer[0] ?? null) !== 'ok' || \count($answer) !== 3) {
@@ -640,7 +671,9 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             return null;
         }
 
-        return StepUpFactorCompletion::fromRecords($challenge, $demand, $completedFactor);
+        // The completed factor is the record's own: the consumed
+        // challenge's server-held snapshot, never a caller argument.
+        return StepUpFactorCompletion::fromRecords($challenge, $demand);
     }
 
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string

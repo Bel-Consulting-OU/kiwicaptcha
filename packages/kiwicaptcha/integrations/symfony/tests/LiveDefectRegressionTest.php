@@ -217,6 +217,10 @@ final class LiveDefectRegressionTest extends TestCase
                 {
                 }
 
+                public function eraseCredentials(): void
+                {
+                }
+
                 public function getAttributes(): array
                 {
                     return $this->attributes;
@@ -544,6 +548,10 @@ final class LiveDefectRegressionTest extends TestCase
             }
 
             public function setUser(UserInterface $user): void
+            {
+            }
+
+            public function eraseCredentials(): void
             {
             }
 

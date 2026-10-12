@@ -296,7 +296,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             return false;
         }
 
-        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $this->assurance()->identity, $challenge->sessionHash) !== null;
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash) !== null;
     }
 
     /**

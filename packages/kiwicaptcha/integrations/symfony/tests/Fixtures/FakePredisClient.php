@@ -1127,19 +1127,20 @@ final class FakePredisClient extends \Predis\Client
             // RedisStepUpChallengeStore completeFactor: keys[1] the
             // challenge record, keys[2] the demand record, keys[3] the
             // escalation index; argv[1] the demand id, argv[2] now,
-            // argv[3] the presented binding hash, argv[4] the completed
-            // factor family, argv[5] the session hash hint ('' skips the
-            // index write). One atomic challenge+demand transition: the
-            // checks run in the script's order, and the winner consumes
-            // the challenge and completes the demand in one step.
+            // argv[3] the presented binding hash, argv[4] the session
+            // hash hint ('' skips the index write). One atomic
+            // challenge+demand transition: the checks run in the
+            // script's order, and the winner consumes the challenge and
+            // completes the demand in one step. The judged factor
+            // identity is the stored challenge's own server-held
+            // snapshot, never a caller argument.
             $challengeKey = (string) $keys[0];
             $demandKey = (string) $keys[1];
             $indexKey = (string) $keys[2];
             $demandId = (string) $rest[0];
             $now = (int) $rest[1];
             $binding = (string) $rest[2];
-            $factor = (string) $rest[3];
-            $hint = (string) $rest[4];
+            $hint = (string) $rest[3];
             $craw = $this->strings[$challengeKey] ?? null;
             if ($craw === null) {
                 return ['missing_challenge'];
@@ -1174,23 +1175,45 @@ final class FakePredisClient extends \Predis\Client
             if (!$bound) {
                 return ['binding'];
             }
-            // The factor requirement gate, the script's own rule: the
+            // The factor identity gate, the script's own rule: the
             // demand's stored requirement is judged against the factor
-            // identity the stored challenge record carries (its kind),
-            // never a caller argument. A rank below the required one
-            // refuses, and so does a factor other than the exact id the
-            // requirement names at or below that rank; a strictly
-            // stronger completion satisfies a weaker floor. Nothing
-            // moves on a refusal.
-            $family = self::challengeKindFamily((string) ($ch['kind'] ?? ''));
-            $rank = self::challengeKindRank((string) ($ch['kind'] ?? ''));
+            // identity the stored challenge record carries (its
+            // server-held snapshot, resolved at begin), never a caller
+            // argument. The snapshot must agree with its kind's family
+            // and rank, and an incoherent one is a corrupt record,
+            // removed fail-closed; a record without the snapshot (the
+            // pre-snapshot wire shape) falls back to the kind tables. A
+            // rank below the required one refuses, and so does a factor
+            // neither the family nor the exact id the requirement names
+            // at or below that rank; a strictly stronger completion
+            // satisfies a weaker floor. Nothing moves on a refusal.
+            $family = null;
+            $rank = null;
+            $fid = null;
+            if (\is_string($ch['factor_family'] ?? null) && $ch['factor_family'] !== ''
+                && \is_string($ch['factor_id'] ?? null) && $ch['factor_id'] !== ''
+                && \is_int($ch['factor_rank'] ?? null)) {
+                if (self::challengeKindFamily((string) ($ch['kind'] ?? '')) !== $ch['factor_family']
+                    || self::challengeKindRank((string) ($ch['kind'] ?? '')) !== $ch['factor_rank']) {
+                    unset($this->strings[$challengeKey], $this->expirations[$challengeKey]);
+
+                    return ['corrupt_challenge'];
+                }
+                $family = (string) $ch['factor_family'];
+                $rank = (int) $ch['factor_rank'];
+                $fid = (string) $ch['factor_id'];
+            } else {
+                $family = self::challengeKindFamily((string) ($ch['kind'] ?? ''));
+                $rank = self::challengeKindRank((string) ($ch['kind'] ?? ''));
+                $fid = $family;
+            }
             $requiredRank = \is_int($de['required_rank'] ?? null) ? $de['required_rank'] : null;
             if ($requiredRank !== null && $requiredRank >= 1 && ($rank === null || $rank < $requiredRank)) {
                 return ['weaker_factor'];
             }
             $requiredId = $de['required_factor_id'] ?? null;
             if (\is_string($requiredId) && $requiredId !== ''
-                && $family !== $requiredId
+                && $family !== $requiredId && $fid !== $requiredId
                 && ($requiredRank === null || $rank === null || $rank <= $requiredRank)) {
                 return ['foreign_factor'];
             }
@@ -1201,8 +1224,13 @@ final class FakePredisClient extends \Predis\Client
             $encoded = (string) json_encode($de, JSON_UNESCAPED_SLASHES);
             $this->strings[$demandKey] = $encoded;
             $this->fakePexpire([$demandKey, $ttl * 1000]);
-            if ($hint !== '' && ($ch['session_hash'] ?? null) === $hint) {
-                $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$factor.'|'.$de['expires_at'];
+            // The escalation index stores the factor identity the record
+            // itself carries, never a caller argument: a completion
+            // cannot poison the future assurance escalation by claiming
+            // a stronger factor than its challenge proves.
+            if ($hint !== '' && ($ch['session_hash'] ?? null) === $hint
+                && \is_string($family) && $family !== '') {
+                $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$de['expires_at'];
                 $this->fakePexpire([$indexKey, $ttl * 1000]);
             }
 

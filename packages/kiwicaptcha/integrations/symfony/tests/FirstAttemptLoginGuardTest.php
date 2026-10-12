@@ -149,6 +149,10 @@ final class FirstAttemptLoginGuardTest extends TestCase
             {
             }
 
+            public function eraseCredentials(): void
+            {
+            }
+
             public function getAttributes(): array
             {
                 return $this->attributes;

@@ -219,7 +219,16 @@ final class EmailOwnershipStepUp
             return null;
         }
         $now = $this->now();
-        $requirement = $this->requiredFactorOf($scope, $sessionHash);
+        try {
+            $requirement = $this->requiredFactorOf($scope, $sessionHash);
+        } catch (StepUpAssuranceUnavailable $e) {
+            // An unavailable assurance state is no basis for a demand:
+            // the 403 then carries no demand, and begin() refuses every
+            // code request, fail closed.
+            $this->logger?->warning('kiwi step-up demand mint refused: {message}', ['message' => $e->getMessage()]);
+
+            return null;
+        }
         $demand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $sessionHash, $chainId, $decisionId, $now, $this->ttlSecs, $operationBindingKind, $operationDigest, null, null, false, null, $requirement);
         try {
             $tipId = $this->store->demandIdForOperation($demand->operationDigest);
@@ -259,7 +268,14 @@ final class EmailOwnershipStepUp
      * The factor requirement the mint snapshots onto its demand: the
      * resolver's answer for the scope, escalated strictly past the
      * factor the live completion marker records for this browser
-     * session and scope. Null when no resolver is wired.
+     * session and scope. Null when no resolver is wired, and null when
+     * the resolver genuinely answers an empty history (no prior factor
+     * stands). An unavailable completion history or a failing resolver
+     * is the third state, and it is never folded into the empty one: it
+     * answers {@see StepUpAssuranceUnavailable}. The mint then refuses
+     * instead of silently minting a demand with no assurance snapshot.
+     *
+     * @throws StepUpAssuranceUnavailable when the store or the resolver fails
      */
     private function requiredFactorOf(string $scope, ?string $sessionHash): ?FactorRequirement
     {
@@ -270,14 +286,18 @@ final class EmailOwnershipStepUp
         if ($sessionHash !== null && $sessionHash !== '') {
             try {
                 $completed = $this->store->completedFactorOf($sessionHash, $scope, $this->now());
-            } catch (\Throwable) {
-                $completed = null;
+            } catch (\Throwable $e) {
+                // An unavailable completion history is not a session
+                // without a prior factor: the mint cannot know what to
+                // demand, so it refuses rather than degrade the failure
+                // into "no requirement".
+                throw new StepUpAssuranceUnavailable('the step-up completion history is unavailable', 0, $e);
             }
         }
         try {
             return $this->factorResolver->requiredFactor($scope, null, new StepUpFactorContext($completed));
-        } catch (\Throwable) {
-            return null;
+        } catch (\Throwable $e) {
+            throw new StepUpAssuranceUnavailable('the step-up factor resolver failed', 0, $e);
         }
     }
 
@@ -548,7 +568,6 @@ final class EmailOwnershipStepUp
             $demand->id,
             $binding,
             $now,
-            FactorRequirement::EMAIL_OTP,
             $challenge->sessionHash,
         );
         if ($completion === null) {

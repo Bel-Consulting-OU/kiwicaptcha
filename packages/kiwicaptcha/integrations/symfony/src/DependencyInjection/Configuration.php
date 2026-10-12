@@ -735,6 +735,16 @@ final class Configuration implements ConfigurationInterface
                                         ->values(['request_attribute', null])
                                         ->defaultNull()
                                     ->end()
+                                    ->arrayNode('operation_content_fields')
+                                        ->info('THE PROTECTED-CONTENT RECIPE of this scope\'s operation binding: the named request fields whose submitted values feed the operationContentDigest (the business contents of the protected action, e.g. amount_minor, currency, beneficiary_id). The recipe rides the configured operation resolver, so the demand binds the actual transfer contents and a changed amount, currency or beneficiary can never ride an authorization minted for the original ones. A high or critical value_class scope with an operation identity source but NO recipe refuses the container build and FAILs the doctor: a content digest over nothing would authorize anything.')
+                                        ->defaultValue([])
+                                        ->scalarPrototype()
+                                            ->validate()
+                                                ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
+                                                ->thenInvalid('risk.scopes.*.operation_content_fields entries must be request field names of 1-128 characters of [A-Za-z0-9._:-]')
+                                            ->end()
+                                        ->end()
+                                    ->end()
                                 ->end()
                             ->end()
                             ->defaultValue([
@@ -743,7 +753,7 @@ final class Configuration implements ConfigurationInterface
                                 'login' => ['id' => null, 'base_risk' => 120, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
                                 'password_reset' => ['id' => null, 'base_risk' => 180, 'minimum' => 'sha18', 'degraded' => 'sha20', 'post_solve_check' => true, 'value_class' => 'standard'],
                                 'admin_login' => ['id' => null, 'base_risk' => 300, 'minimum' => 'sha20', 'degraded' => 'deny', 'post_solve_check' => true, 'value_class' => 'standard'],
-                                'financial_action' => ['value_class' => 'high', 'carrier' => 'totp', 'operation_identity_source' => 'request_attribute'],
+                                'financial_action' => ['value_class' => 'high', 'carrier' => 'totp', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
                             ])
                         ->end()
                         ->arrayNode('login_scopes')

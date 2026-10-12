@@ -1,0 +1,394 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BelConsulting\KiwiCaptchaBundle\Tests;
+
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
+use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
+use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\ConfiguredStepUpOperationResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationMaterial;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePrincipalResolver;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptcha;
+use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use KiwiCaptcha\Config;
+use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
+use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskScorer;
+use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\Verifier;
+use PHPUnit\Framework\TestCase;
+use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
+use Symfony\Component\Config\Loader\LoaderInterface;
+use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\RequestStack;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\TestKernel;
+use Symfony\Component\Validator\ConstraintValidatorFactory;
+use Symfony\Component\Validator\Validation;
+
+/**
+ * The protected-operation resolver of the operation-bound demand path.
+ * Covered: the shipped default resolver reads the server-owned logical
+ * operation id from its request attribute, the protected contents from
+ * the explicit per-scope recipe, and the principal from the wired
+ * resolver. A missing id, a scope without a recipe and a configured
+ * field with no submitted value throw. The mint feeds the resolved
+ * contents into the split content digest, so the demand is bound to the
+ * actual business operation (amount, currency, beneficiary) and a
+ * changed amount no longer rides the settled authorization. A high
+ * or critical value_class scope with an operation identity source but
+ * no recipe refuses the container build, and the doctor fails it.
+ */
+final class StepUpOperationResolverTest extends TestCase
+{
+    private const SECRET = '0123456789abcdef0123456789abcdef';
+
+    private const MASTER = 'kiwi-resolver-master-0123456789ab';
+
+    /** The server-parameter key for the peer address (glued so prose lint treats it as code). */
+    private const remoteKey = 'REMOTE_ADDR';
+
+    private const SCOPE = 'financial_action';
+
+    private int $now = 1700000000;
+
+    // ── the default resolver ─────────────────────────────────────────
+
+    public function testTheResolverBindsTheServerOwnedIdAndTheConfiguredContentFields(): void
+    {
+        $request = Request::create('/', 'POST', ['transfer' => ['amount_minor' => '10000', 'currency' => 'EUR', 'beneficiary_id' => 'alice']]);
+        $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-001');
+        $resolver = new ConfiguredStepUpOperationResolver(
+            [self::SCOPE => ['amount_minor', 'currency', 'beneficiary_id']],
+            new FakePrincipalResolver('user-42'),
+        );
+
+        $operation = $resolver->resolve($request, self::SCOPE);
+
+        self::assertSame('tx-001', $operation->logicalOperationId, 'the logical operation id is the server-owned attribute');
+        self::assertSame(
+            StepUpOperationDigest::canonicalOperationContent(['amount_minor' => '10000', 'currency' => 'EUR', 'beneficiary_id' => 'alice']),
+            $operation->canonicalProtectedContents,
+            'the protected contents are the canonical string over the configured recipe',
+        );
+        self::assertSame('user-42', $operation->principal, 'the principal rides the operation');
+        // Order independence: the canonicalization sorts the recipe.
+        $shuffled = new ConfiguredStepUpOperationResolver(
+            [self::SCOPE => ['beneficiary_id', 'currency', 'amount_minor']],
+            new FakePrincipalResolver('user-42'),
+        );
+        self::assertSame(
+            $operation->canonicalProtectedContents,
+            $shuffled->resolve($request, self::SCOPE)->canonicalProtectedContents,
+            'the recipe order never changes the canonical bytes',
+        );
+    }
+
+    public function testAResolutionWithoutIdOrRecipeOrFieldValueThrows(): void
+    {
+        $refusals = 0;
+        // No server-owned operation id under the attribute.
+        $request = Request::create('/', 'POST', ['amount_minor' => '10000']);
+        $resolver = new ConfiguredStepUpOperationResolver([self::SCOPE => ['amount_minor', 'currency']]);
+        try {
+            $resolver->resolve($request, self::SCOPE);
+        } catch (\InvalidArgumentException) {
+            $refusals++;
+        }
+
+        // A scope that names no recipe.
+        $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-001');
+        try {
+            $resolver->resolve($request, 'unconfigured_scope');
+        } catch (\InvalidArgumentException) {
+            $refusals++;
+        }
+
+        // A configured field with no submitted value.
+        try {
+            $resolver->resolve($request, self::SCOPE);
+        } catch (\InvalidArgumentException) {
+            $refusals++;
+        }
+
+        self::assertSame(3, $refusals, 'the missing id, the missing recipe and the empty field each refuse the resolution');
+    }
+
+    // ── the mint feeds the digest over the resolved operation ────────
+
+    public function testTheMintBindsTheDemandToTheResolvedBusinessContents(): void
+    {
+        $store = new ArrayStepUpChallengeStore(fn (): int => $this->now);
+        $stack = new RequestStack();
+        $request = Request::create('/', 'POST', [
+            'transfer' => ['amount_minor' => '10000', 'currency' => 'EUR', 'beneficiary_id' => 'alice'],
+        ], [], [], [self::remoteKey => '198.51.100.7']);
+        $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-001');
+        $stack->push($request);
+
+        $resolver = new ConfiguredStepUpOperationResolver(
+            [self::SCOPE => ['amount_minor', 'currency', 'beneficiary_id']],
+            new FakePrincipalResolver('user-42'),
+        );
+        $validator = new KiwiCaptchaValidator(
+            new Verifier(new ArrayStorage()),
+            $stack,
+            self::SECRET,
+            enforceTelemetry: false,
+            risk: $this->gateway(),
+            dispositionStore: new ArrayPostSolveDispositionStore(fn (): int => $this->now, 0),
+            stepUpFinalizer: $this->finalizer($store),
+            operationBoundScopes: [self::SCOPE => true],
+            principalResolver: new FakePrincipalResolver('user-42'),
+            operationResolver: $resolver,
+        );
+        $constraint = new KiwiCaptcha(['scope' => self::SCOPE]);
+        $disposition = new PostSolveDisposition(PostSolveDispositionKind::StepUp, 'decision-1');
+        $method = new \ReflectionMethod(KiwiCaptchaValidator::class, 'mintOperationBoundDemand');
+        $demandId = $method->invoke($validator, $disposition, $constraint, $request, null);
+
+        self::assertNotNull($demandId, 'the resolver-fed mint recorded the demand');
+        $demand = $store->readDemand((string) $demandId);
+        self::assertNotNull($demand);
+        $contents = ['amount_minor' => '10000', 'currency' => 'EUR', 'beneficiary_id' => 'alice'];
+        $binding = StepUpOperationDigest::financialBinding(self::MASTER, self::SCOPE, 'tx-001', StepUpOperationDigest::canonicalOperationContent($contents));
+        self::assertSame($binding['identity'], $demand->operationIdentityDigest, 'the demand is bound to the server-owned logical operation');
+        self::assertSame($binding['content'], $demand->operationContentDigest, 'the content digest runs over the actual business contents');
+
+        // The finalization rerun answers the same operation with the
+        // same contents, and refuses the same operation whose amount
+        // changed: the wire-level swap of one transfer for another is
+        // dead on arrival.
+        self::assertNotNull($store->completeDemand((string) $demandId, $this->now, 600));
+        $settled = $this->finalizer($store)->finalizeGrant(
+            (string) $demandId,
+            new StepUpOperationMaterial(principalPseudonym: 'user-42'),
+            null,
+            'email_otp',
+            'tx-001',
+            StepUpOperationDigest::canonicalOperationContent($contents),
+        );
+        self::assertTrue($settled->authorized, 'the same operation with the same contents settles authorized');
+        self::assertFalse(
+            $this->finalizer($store)->operationAuthorizedContents(self::SCOPE, 'tx-001', StepUpOperationDigest::canonicalOperationContent([
+                'amount_minor' => '50000000',
+                'currency' => 'EUR',
+                'beneficiary_id' => 'bob',
+            ])),
+            'the replay gate refuses the same operation with swapped contents',
+        );
+        self::assertTrue(
+            $this->finalizer($store)->operationAuthorizedContents(self::SCOPE, 'tx-001', StepUpOperationDigest::canonicalOperationContent($contents)),
+            'the replay gate answers the identical contents',
+        );
+        self::assertSame(StepUpDemandState::Authorized, $store->readDemand((string) $demandId)?->state);
+    }
+
+    // ── the build gate ───────────────────────────────────────────────
+
+    public function testAHighValueOperationBoundScopeWithoutARecipeRefusesTheBuild(): void
+    {
+        $kernel = new class ('test', true) extends TestKernel {
+            protected function build(ContainerBuilder $container): void
+            {
+                $container->register('resolver.gate.fake.redis', FakePredisClient::class)
+                    ->setPublic(true);
+            }
+
+            public function registerContainerConfiguration(LoaderInterface $loader): void
+            {
+                $loader->load(function (ContainerBuilder $container): void {
+                    $container->loadFromExtension('framework', [
+                        'secret' => 'test-secret',
+                        'test' => true,
+                    ]);
+                    $container->loadFromExtension('kiwi_captcha', [
+                        'secret_key' => '0123456789abcdef0123456789abcdef',
+                        'redis_service' => 'resolver.gate.fake.redis',
+                        'risk' => [
+                            'enabled' => true,
+                            'redis_service' => 'resolver.gate.fake.redis',
+                            'scopes' => [
+                                'wire_transfer' => [
+                                    'value_class' => 'high',
+                                    'operation_identity_source' => 'request_attribute',
+                                ],
+                            ],
+                        ],
+                    ]);
+                });
+            }
+        };
+        try {
+            $kernel->boot();
+            $kernel->shutdown();
+            self::fail('a high-value operation-bound scope without a content recipe must refuse the build');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('operation_content_fields', $e->getMessage(), 'the refusal names the knob: '.$e->getMessage());
+        }
+    }
+
+    public function testAHighValueOperationBoundScopeWithARecipeBuilds(): void
+    {
+        $kernel = new class ('test', true) extends TestKernel {
+            protected function build(ContainerBuilder $container): void
+            {
+                $container->register('resolver.gate.fake.redis', FakePredisClient::class)
+                    ->setPublic(true);
+            }
+
+            public function registerContainerConfiguration(LoaderInterface $loader): void
+            {
+                $loader->load(function (ContainerBuilder $container): void {
+                    $container->loadFromExtension('framework', [
+                        'secret' => 'test-secret',
+                        'test' => true,
+                    ]);
+                    $container->loadFromExtension('kiwi_captcha', [
+                        'secret_key' => '0123456789abcdef0123456789abcdef',
+                        'redis_service' => 'resolver.gate.fake.redis',
+                        'risk' => [
+                            'enabled' => true,
+                            'redis_service' => 'resolver.gate.fake.redis',
+                            'scopes' => [
+                                'wire_transfer' => [
+                                    'value_class' => 'high',
+                                    'operation_identity_source' => 'request_attribute',
+                                    'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id'],
+                                ],
+                                'login' => ['id' => 20],
+                            ],
+                            'step_up' => [
+                                'enabled' => true,
+                                'handlers' => ['email_otp' => ['enabled' => true]],
+                            ],
+                        ],
+                    ]);
+                });
+            }
+        };
+        try {
+            $kernel->boot();
+            $container = $kernel->getContainer()->get('test.service_container');
+            self::assertTrue($container->has(ConfiguredStepUpOperationResolver::class), 'the named recipe registers the resolver');
+        } finally {
+            $kernel->shutdown();
+        }
+    }
+
+    public function testTheShippedFinancialActionScopeCarriesItsRecipe(): void
+    {
+        $processed = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(new Configuration(), [
+            ['secret_key' => self::SECRET],
+        ]);
+        $recipe = $processed['risk']['scopes']['financial_action']['operation_content_fields'] ?? null;
+        self::assertSame(['amount_minor', 'currency', 'beneficiary_id'], $recipe, 'the shipped financial_action scope names the transfer contents');
+    }
+
+    // ── the doctor gate ──────────────────────────────────────────────
+
+    public function testTheDoctorFailsAHighValueScopeWithoutAContentRecipe(): void
+    {
+        [$fail, $failMessage] = $this->doctorVerdict([
+            'financial_action' => ['value_class' => 'high', 'operation_identity_source' => 'request_attribute'],
+        ]);
+        self::assertSame('FAIL', $fail, 'the doctor fails the empty recipe');
+        self::assertStringContainsString('operation_content_fields', $failMessage);
+
+        [$pass, $passMessage] = $this->doctorVerdict([
+            'financial_action' => [
+                'value_class' => 'high',
+                'operation_identity_source' => 'request_attribute',
+                'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id'],
+            ],
+        ]);
+        self::assertSame('PASS', $pass, 'the recipe clears the doctor');
+        self::assertStringContainsString('recipe', $passMessage);
+    }
+
+    /**
+     * The verdict of the doctor's operation-identity check over one
+     * scope map, exercised through the command instance.
+     *
+     * @param array<string, mixed> $scopes
+     * @return array{0: string, 1: string}
+     */
+    private function doctorVerdict(array $scopes): array
+    {
+        $command = new KiwiCaptchaDoctorCommand(
+            'test',
+            ['risk' => ['enabled' => true, 'scopes' => $scopes]],
+            new ArrayStorage(),
+            new Config(secretKey: self::SECRET),
+            new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(new Verifier(new ArrayStorage()), null, 'kiwi:test', 1),
+            null,
+            null,
+            null,
+            null,
+        );
+        $method = new \ReflectionMethod(KiwiCaptchaDoctorCommand::class, 'checkOperationIdentity');
+        $verdict = $method->invoke($command);
+        \assert(\is_array($verdict) && \is_string($verdict[0]) && \is_string($verdict[1]));
+
+        return $verdict;
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────
+
+    private function finalizer(ArrayStepUpChallengeStore $store): StepUpDemandFinalizer
+    {
+        return new StepUpDemandFinalizer(
+            $store,
+            new StepUpCompletionCredit(new SpyOutcomeReporter(), self::MASTER),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            fn (): int => $this->now,
+            self::MASTER,
+            new StepUpFactorResolver('email_otp'),
+        );
+    }
+
+    /**
+     * The risk gateway of the walk: the financial_action scope raises
+     * the step-up on the post-solve assessment, exactly the shipped
+     * profile's completable enforcement.
+     */
+    private function gateway(): RiskGateway
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'global_floors' => [0 => 'allow', 1 => 'sha16', 2 => 'sha18', 3 => 'sha20', 4 => 'sha20'],
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 400, 'minimum' => 'step_up', 'post_solve_check' => true, 'degraded' => 'allow'],
+            ],
+        ]);
+        $engine = new AdaptiveRiskEngine(new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+
+        return new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), [self::SCOPE => 1], null, null, [self::SCOPE => true], policy: $policy);
+    }
+}

@@ -77,9 +77,9 @@ final class RecordingStepUpChallengeStore implements StepUpChallengeStore
         return $this->inner->consumeDemand($demandId);
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, string $completedFactor, ?string $sessionHash = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion
     {
-        return $this->inner->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $completedFactor, $sessionHash);
+        return $this->inner->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash);
     }
 
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string

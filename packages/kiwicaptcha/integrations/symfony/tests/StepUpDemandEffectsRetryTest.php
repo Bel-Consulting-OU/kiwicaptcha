@@ -5,23 +5,35 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpEffectsJournal;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorAssurance;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpHandlerInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingToken;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionRestore;
+use BelConsulting\KiwiCaptchaBundle\Controller\StepUpController;
+use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FailingDemandEffectStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\TokenStoragePrincipalResolver;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\Session\Session;
+use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
 use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorage;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
 use Symfony\Component\Security\Core\Authentication\Token\UsernamePasswordToken;
 use Symfony\Component\Security\Core\User\InMemoryUser;
 
@@ -258,6 +270,94 @@ final class StepUpDemandEffectsRetryTest extends TestCase
     }
 
     /**
+     * The kill window the pending-token retry cannot see: the restore
+     * landed (the unwrap and the session rotation are the durable
+     * session mutation) and the journal write of session_restored is
+     * the statement that dies. The pending token is gone, so the
+     * pending lane is closed. The recovery authority is the session's
+     * restore claim, written before the unwrap and persisted with it:
+     * the resubmitted completion endpoint proves the claim, the same
+     * principal and the authorized demand, and completes the journal
+     * without a second factor.
+     */
+    public function testACrashAfterTheRestoreLandedRecoversOnTheClaimWithoutAnotherFactor(): void
+    {
+        $session = $this->pendingBrowserSession();
+        $fault = new FailingDemandEffectStepUpChallengeStore($this->store);
+        $finalizer = new StepUpDemandFinalizer(
+            $fault,
+            new StepUpCompletionCredit($this->reporter, self::MASTER),
+            $session->restorer,
+            null,
+            null,
+            null,
+            null,
+            null,
+            fn (): int => $this->now,
+            self::MASTER,
+        );
+        $principal = $this->principal();
+        $demandId = $finalizer->mintLoginDemand(self::SCOPE, $principal, null, 900);
+        self::assertNotNull($demandId);
+        $session->bindDemand($demandId);
+        $this->completeFactor($demandId);
+
+        // The kill: armed on the session_restored journal write, the
+        // statement right after the SessionRestorer landed.
+        $fault->failEffect = StepUpEffectsJournal::SESSION_RESTORED;
+        $crashed = $finalizer->finalizeLogin($this->proof($demandId, $principal), self::SCOPE, $session->request);
+        self::assertTrue($crashed->authorized, 'the factor proof still settles the authorization');
+        self::assertNotNull($crashed->effects);
+        self::assertTrue($crashed->effects->settled());
+        self::assertTrue($crashed->effects->outcomeCredited());
+        self::assertFalse($crashed->effects->sessionRestored(), 'the crash sits exactly between the landed restore and its journal entry');
+        self::assertNotInstanceOf(StepUpPendingToken::class, $session->tokenStorage->getToken(), 'the session mutation is durable: the session is restored');
+        self::assertSame($demandId, SessionRestorer::restoreClaimOf($session->request), 'the restore claim stands where the pending token stood');
+
+        // The browser resubmits the completion endpoint. The handler
+        // below never answers success (the challenge is spent), so a
+        // success here can only be the claim lane completing the
+        // journal: the same session, the same principal, no second
+        // factor.
+        $this->now += 5;
+        $controller = $this->completionController($finalizer, $session);
+        $replay = Request::create('/kiwi/step-up/complete', 'POST', [], [], [], ['HTTP_ACCEPT' => 'application/json']);
+        $replay->setSession($session->session);
+        $answer = $controller->complete($replay);
+        self::assertSame(Response::HTTP_OK, $answer->getStatusCode(), (string) $answer->getContent());
+        self::assertSame('succeeded', json_decode((string) $answer->getContent(), true)['status'] ?? null);
+        $stored = $this->store->readDemand($demandId);
+        self::assertNotNull($stored);
+        self::assertNotNull($stored->effects);
+        self::assertTrue($stored->effects->sessionRestored(), 'the journal entry landed on the recovery');
+        self::assertTrue($stored->effects->complete(), 'the recovery completes every effect');
+        self::assertCount(1, $this->reporter->reports, 'the credit booked exactly once across both attempts');
+        self::assertTrue($this->store->recentStepUpSuccess($principal, 900, $this->now), 'the trust marker landed');
+        self::assertNull(SessionRestorer::restoreClaimOf($session->request), 'the completed recovery retires the claim');
+
+        // A further failed completion answers its failure again: the
+        // claim is retired, the endpoint has no recovery surface left.
+        $later = Request::create('/kiwi/step-up/complete', 'POST', [], [], [], ['HTTP_ACCEPT' => 'application/json']);
+        $later->setSession($session->session);
+        $again = $controller->complete($later);
+        self::assertSame(Response::HTTP_UNPROCESSABLE_ENTITY, $again->getStatusCode(), (string) $again->getContent());
+        self::assertCount(1, $this->reporter->reports, 'the spent endpoint books nothing more');
+
+        // Another principal's session carrying the claim of a demand it
+        // never restored reproduces nothing: the demand's login recipe
+        // refuses the resolved principal, fail closed.
+        $stranger = $this->authenticatedBrowserSession('mallory@example.com', $demandId);
+        $strangerController = $this->completionController($finalizer, $stranger);
+        $intrusion = Request::create('/kiwi/step-up/complete', 'POST', [], [], [], ['HTTP_ACCEPT' => 'application/json']);
+        $intrusion->setSession($stranger->session);
+        $refused = $strangerController->complete($intrusion);
+        self::assertSame(Response::HTTP_UNPROCESSABLE_ENTITY, $refused->getStatusCode(), (string) $refused->getContent());
+        self::assertNotNull($this->store->readDemand($demandId));
+        self::assertNotNull($this->store->readDemand($demandId)->effects);
+        self::assertTrue($this->store->readDemand($demandId)->effects->complete(), 'the refused claim changes nothing');
+    }
+
+    /**
      * The typed restore answer: a landed restore and a refused one are
      * distinguishable, so the caller can journal the first and answer
      * no success for the second.
@@ -343,6 +443,113 @@ final class StepUpDemandEffectsRetryTest extends TestCase
             tokenStorage: $tokenStorage,
             identityFactory: $this->identity,
         );
+    }
+
+    /**
+     * A pending session with the browser surface the restore needs: a
+     * started session (the restore claim rides it) and a request, so
+     * the restore rotates the session id exactly like production.
+     */
+    private function pendingBrowserSession(): BrowserSession
+    {
+        $wrapped = new UsernamePasswordToken(new InMemoryUser(self::RAW_USER, null, ['ROLE_USER']), 'main');
+        $session = new Session(new MockArraySessionStorage());
+        $session->start();
+        $request = Request::create('/kiwi/step-up/complete', 'POST');
+        $request->setSession($session);
+        $tokenStorage = new TokenStorage();
+        $pending = new StepUpPendingToken($wrapped);
+        $tokenStorage->setToken($pending);
+        $restorer = new SessionRestorer(
+            tokenStorage: $tokenStorage,
+            identityFactory: $this->identity,
+        );
+
+        return new BrowserSession($restorer, $tokenStorage, $pending, $session, $request);
+    }
+
+    /**
+     * An already authenticated browser session: the real token stands,
+     * the restore claim is pre-set (the pair the crash window leaves
+     * behind). A second raw identity proves the claim lane is
+     * demand-bound and principal-bound.
+     */
+    private function authenticatedBrowserSession(string $rawUser, string $claimDemandId): BrowserSession
+    {
+        $session = new Session(new MockArraySessionStorage());
+        $session->start();
+        $session->set(SessionRestorer::RESTORE_CLAIM_ATTRIBUTE, $claimDemandId);
+        $request = Request::create('/kiwi/step-up/complete', 'POST');
+        $request->setSession($session);
+        $tokenStorage = new TokenStorage();
+        $tokenStorage->setToken(new UsernamePasswordToken(new InMemoryUser($rawUser, null, ['ROLE_USER']), 'main'));
+        $restorer = new SessionRestorer(
+            tokenStorage: $tokenStorage,
+            identityFactory: $this->identity,
+        );
+
+        return new BrowserSession($restorer, $tokenStorage, null, $session, $request);
+    }
+
+    /**
+     * The completion endpoint of the recovery journey. Its handler
+     * never answers success (the challenge of the crashed attempt is
+     * spent), so every success the endpoint answers comes from the
+     * demand-bound effects retry.
+     */
+    private function completionController(StepUpDemandFinalizer $finalizer, BrowserSession $session): StepUpController
+    {
+        $spent = new class implements StepUpHandlerInterface {
+            public function assurance(): StepUpFactorAssurance
+            {
+                return StepUpFactorAssurance::totp();
+            }
+
+            public function begin(Request $request, StepUpContext $context): Response
+            {
+                return new Response('begin', Response::HTTP_FORBIDDEN);
+            }
+
+            public function complete(Request $request): StepUpResult
+            {
+                return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE);
+            }
+        };
+        $registry = new KiwiStepUpHandlerRegistry(['totp' => $spent], 'totp');
+
+        return new StepUpController(
+            $registry,
+            $this->identity,
+            self::SCOPE,
+            new TokenStoragePrincipalResolver($session->tokenStorage),
+            $session->tokenStorage,
+            null,
+            $finalizer,
+        );
+    }
+}
+
+/**
+ * The browser session fixture of the crash-window tests: the restorer,
+ * the token storage it unwraps through, the pending token (null once
+ * the restore unwrapped it), the HTTP session and the request.
+ */
+final class BrowserSession
+{
+    public function __construct(
+        public readonly SessionRestorer $restorer,
+        public readonly TokenStorage $tokenStorage,
+        public readonly ?StepUpPendingToken $pending,
+        public readonly Session $session,
+        public readonly Request $request,
+    ) {
+    }
+
+    /** Bind the pending session to the demand the proof finalized. */
+    public function bindDemand(string $demandId): void
+    {
+        \assert($this->pending !== null);
+        $this->pending->setAttribute(StepUpPendingToken::DEMAND_ID_ATTRIBUTE, $demandId);
     }
 }
 

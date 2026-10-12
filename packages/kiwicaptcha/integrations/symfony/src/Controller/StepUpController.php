@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
 use BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\SessionRestorer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFinalization;
@@ -93,6 +94,8 @@ final class StepUpController
         private readonly ?\Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface $tokenStorage = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp $emailOwnership = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer $demandFinalizer = null,
+        private readonly string $beginPath = '/kiwi/step-up/begin',
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationResolverInterface $operationResolver = null,
     ) {
     }
 
@@ -136,13 +139,14 @@ final class StepUpController
         // can hold the session to it. A failed mint refuses the begin
         // outright: a challenge without its demand could only end in
         // the unbound refusal at the completion.
-        $demandId = $this->demandFinalizer?->mintLoginDemand(
-            $context->scope,
-            $principal,
-            StepUpChallenge::sessionHash(StepUpSessionBinding::sessionId($request)),
-            self::DEMAND_TTL_SECS,
-            $this->pendingDemandId(),
-        );
+        $sessionHash = StepUpChallenge::sessionHash(StepUpSessionBinding::sessionId($request));
+        // The escalation resume: when an earlier completion escalated,
+        // the pending token still names the superseded parent, and the
+        // begin follows the family to its live open child instead of
+        // refusing. The browser that begins the child binds its factor
+        // to exactly the demand the wire answer named.
+        $demandId = $this->demandFinalizer?->loginDemandIdForBegin($context->scope, $principal, $sessionHash, $this->pendingDemandId())
+            ?? $this->demandFinalizer?->mintLoginDemand($context->scope, $principal, $sessionHash, self::DEMAND_TTL_SECS, $this->pendingDemandId());
         if ($demandId === null) {
             return self::plain('The step-up demand could not be recorded; try again.', Response::HTTP_SERVICE_UNAVAILABLE);
         }
@@ -255,8 +259,12 @@ final class StepUpController
             // The booking scope is the same one the begin booked under:
             // the pending token's stamped scope with the configured
             // fallback, so the demand's operation identity is rerun in
-            // exactly the scope it was minted in.
-            $finalization = $finalizer->finalizeLogin($proof, $this->scopeOf(), $request);
+            // exactly the scope it was minted in. A demand carrying the
+            // split financial/action binding reruns both digests over
+            // the operation the completion presents, resolved through
+            // the wired resolver; an unwired resolver (or a thrown
+            // resolution) refuses that demand, fail closed.
+            $finalization = $finalizer->finalizeLogin($proof, $this->scopeOf(), $request, $this->presentedOperation($request));
         } catch (\Throwable) {
             return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $proof->challengeId);
         }
@@ -281,9 +289,23 @@ final class StepUpController
             // The fresh assessment re-raised the step-up: the completed
             // factor was verified, the engine demanded more, and a
             // strictly stronger child demand took the family over. The
-            // completion answers the typed escalation failure, so the
-            // application begins the child's factor instead of treating
-            // this proof as an authorization.
+            // answer is a structured step_up_required document naming
+            // the child demand, the factor it requires, its assurance
+            // rank and the begin path: the application can begin the
+            // child's factor instead of treating this proof as an
+            // authorization, and the child demand survives the wire
+            // boundary it used to be dropped at.
+            $child = $finalization->demand;
+            if ($child !== null) {
+                return StepUpResult::escalated(
+                    $proof->challengeId,
+                    $child->id,
+                    $child->requiredFactor?->family,
+                    $child->requiredFactor?->assuranceRank,
+                    $this->beginPath,
+                );
+            }
+
             return StepUpResult::failed(StepUpResult::FAIL_DEMAND_ESCALATED, $proof->challengeId);
         }
 
@@ -291,19 +313,50 @@ final class StepUpController
     }
 
     /**
+     * The protected operation the completion presents, resolved through
+     * the wired resolver. Null when no resolver is wired (no scope
+     * names a content recipe, the binding rerun is then the form-field
+     * lane's business) or the resolution threw (a bound demand then
+     * refuses the completion at the digest compare, fail closed).
+     */
+    private function presentedOperation(Request $request): ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperation
+    {
+        if ($this->operationResolver === null) {
+            return null;
+        }
+        try {
+            return $this->operationResolver->resolve($request, $this->scopeOf());
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
      * The demand-bound effects retry of the completion endpoint. Both
-     * identities arrive from server-owned state: the demand id from the
-     * session's own pending token, the principal from the wired
-     * resolver (temporarily unwrapping the pending token exactly like
-     * begin() and complete() do) — client input names neither. The
-     * finalizer re-verifies the demand's stored login recipe against
-     * the resolved principal, then runs the effects journal of the
-     * authorized terminal. Null when this session pends under no
-     * demand, when nothing is resolvable, or when the demand refuses
-     * the retry (absent, expired, another principal's): the caller
-     * keeps its original failure, fail closed. A retried settlement
-     * with an incomplete journal answers the retryable failure; a
-     * complete one answers success.
+     * identities arrive from server-owned state, never client input.
+     * Two authority shapes apply, in order.
+     *
+     * The pending-token lane: the demand id from the session's own
+     * pending token, the principal from the wired resolver (temporarily
+     * unwrapping the pending token exactly like begin() and complete()
+     * do). This is the crash before the restore: the session still
+     * pends, so the retry completes the missing effects and restores.
+     *
+     * The restore-claim lane: the demand id from the session's restore
+     * claim ({@see SessionRestorer::RESTORE_CLAIM_ATTRIBUTE}), the
+     * principal from the resolver against the restored token. This is
+     * the crash after the restore landed but before its journal entry:
+     * the pending token is gone, and the session holds the claim the
+     * restore itself wrote. The claim proves this session performed
+     * exactly that demand's restore, so completing its journal is no
+     * second factor. The claim is retired once the
+     * journal completes; a claim whose demand refuses (absent, expired,
+     * another principal's, an incomplete run) stays for the next
+     * attempt and the caller keeps its original failure, fail closed.
+     * Null when neither shape applies or the demand refuses: the caller
+     * keeps its original failure. A retried settlement with an
+     * incomplete journal answers the retryable failure; a complete one
+     * answers success.
      */
     private function retryAuthorizedEffects(Request $request): ?StepUpResult
     {
@@ -312,9 +365,31 @@ final class StepUpController
             return null;
         }
         $token = $this->tokenStorage?->getToken();
-        if (!$token instanceof StepUpPendingToken || $token->demandId() === null) {
+        if ($token instanceof StepUpPendingToken && $token->demandId() !== null) {
+            return $this->retryWithDemand($request, $token->demandId());
+        }
+        $claim = SessionRestorer::restoreClaimOf($request);
+        if ($claim === null) {
             return null;
         }
+        $answer = $this->retryWithDemand($request, $claim);
+        if ($answer !== null && $answer->status === StepUpResultStatus::Succeeded) {
+            // The journal of the claimed restore is complete: the
+            // session holds no recovery authority anymore.
+            SessionRestorer::clearRestoreClaim($request);
+        }
+
+        return $answer;
+    }
+
+    /**
+     * The retry of one named demand: the principal from the wired
+     * resolver, the demand's stored login recipe re-verified, the
+     * journal run. Null when nothing is resolvable or the demand
+     * refuses the retry.
+     */
+    private function retryWithDemand(Request $request, string $demandId): ?StepUpResult
+    {
         $rawPrincipal = $this->unwrapPendingToken($request);
         if ($rawPrincipal === null || $rawPrincipal === '') {
             return null;
@@ -328,7 +403,7 @@ final class StepUpController
             return null;
         }
         try {
-            $finalization = $finalizer->retryAuthorizedEffects($token->demandId(), $principal, $request);
+            $finalization = $this->demandFinalizer?->retryAuthorizedEffects($demandId, $principal, $request);
         } catch (\Throwable) {
             return null;
         }

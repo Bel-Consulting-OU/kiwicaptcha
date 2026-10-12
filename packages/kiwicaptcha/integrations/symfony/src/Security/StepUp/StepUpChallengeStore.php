@@ -119,8 +119,9 @@ interface StepUpChallengeStore
      * demand is open and both records live) and the binding (the
      * presented hash equals the stored session binding or the stateless
      * client secret). The factor requirement is asserted too: the
-     * demand's stored requirement is judged against the factor
-     * identity the stored challenge record carries. A completion below
+     * demand's stored requirement is judged against the factor identity
+     * the stored challenge record carries (its server-held snapshot,
+     * resolved at begin), never a caller argument. A completion below
      * the required assurance rank refuses, and so does a completed
      * factor other than the exact id the requirement names. It then
      * consumes the
@@ -129,15 +130,15 @@ interface StepUpChallengeStore
      * completion; every other caller, and every caller naming an
      * absent, expired, crossed, spent, wrongly bound or weaker-factor
      * pair, receives null, with nothing left half-consumed. The
-     * verified subject is derived from the stored challenge, never from
-     * a caller argument.
+     * verified subject and the completed factor are both derived from
+     * the stored challenge, never from a caller argument.
      *
      * $sessionHash is the completion index hint: when it names the
      * stored session binding, the script also records the completed
      * factor under that session hash and scope, the parent factor a
      * child demand escalates past. Null skips the index write.
      */
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, string $completedFactor, ?string $sessionHash = null): ?StepUpFactorCompletion;
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion;
 
     /**
      * The factor family the live completion marker records for a
