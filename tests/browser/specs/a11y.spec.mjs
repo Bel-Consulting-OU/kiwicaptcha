@@ -523,7 +523,7 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     expect(sem.statusRole).toBe('status');
     expect(sem.statusLive).toBe('polite');
     // The announcer reports only meaningful transitions (verified here).
-    await expect(page.locator('[data-kiwi-status]')).toHaveText('Verification complete', { timeout: 60_000 });
+    await expect(page.locator('[data-kiwi-status]')).toHaveText('Check complete', { timeout: 60_000 });
   });
 
   test('semantics: exactly ONE widget-local live region, in the static AND initialized markup', async ({ page }) => {

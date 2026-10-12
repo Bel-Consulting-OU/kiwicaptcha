@@ -171,6 +171,75 @@ final class StepUpDemandEscalationTest extends TestCase
         }
     }
 
+    // ── the supersession marker is enforced on every transition ─────
+
+    public function testASupersededParentCompletesNoFactorAndAuthorizesNothing(): void
+    {
+        // The finding this pins: the completion and the finalization
+        // gates judged only the state field, so a parent that escalation
+        // had replaced (superseded_by set, state still open) completed
+        // its old weak challenge behind the family's back and settled
+        // authorized on the rung the engine had escalated past.
+        $digest = StepUpOperationDigest::none('signup');
+        $parent = $this->mintRoot($digest, 'decision-1');
+        $this->escalate($parent, 'childid00000000000000001', 'decision-2');
+        $stored = $this->store->readDemand($parent);
+        self::assertTrue($stored->superseded(), 'the parent carries the marker');
+
+        self::assertNull($this->store->claimDemandFinalization($parent, $this->now, 30), 'a superseded demand is never claimed for finalization');
+        self::assertNull($this->store->completeDemand($parent, $this->now, 600), 'a superseded demand never completes');
+        self::assertNull($this->store->settleDemandFinalization($parent, StepUpDemandState::Authorized, $this->now), 'a superseded demand never settles authorized');
+    }
+
+    public function testASupersededFinalizingParentAuthorizesThroughNoStaleClaim(): void
+    {
+        // The finding this pins: a stale claimant retaking a
+        // finalizing demand that escalation had already superseded
+        // (the escalator's follow-up settlement lost) could drive the
+        // parent to authorized past the stronger child.
+        $digest = StepUpOperationDigest::none('signup');
+        $parent = $this->mintRoot($digest, 'decision-1');
+        self::assertNotNull($this->store->completeDemand($parent, $this->now, 600), 'the factor proof completes the demand');
+        self::assertNotNull($this->store->claimDemandFinalization($parent, $this->now, 30), 'the escalator holds its claim');
+        $this->escalate($parent, 'childid00000000000000001', 'decision-2');
+        self::assertTrue($this->store->readDemand($parent)->superseded());
+
+        self::assertNull($this->store->settleDemandFinalization($parent, StepUpDemandState::Authorized, $this->now), 'a superseded finalizing parent never settles authorized');
+        self::assertNull($this->store->claimDemandFinalization($parent, $this->now + 31, 30), 'a stale claimant never retakes a superseded demand');
+        self::assertNull($this->store->settleDemandFinalization($parent, StepUpDemandState::Superseded, $this->now), 'the terminal the supersede already wrote answers null to a second settle');
+    }
+
+    public function testATerminalParentIsNeverSupersededIntoAFreshSibling(): void
+    {
+        // The finding this pins: the supersede script accepted parents
+        // in any non-superseded state, so an authorized (or completed)
+        // demand could be handed a fresh live sibling for an operation
+        // that had already settled. Distinct scopes keep the three
+        // roots in distinct families (a None-bound demand's family key
+        // is its scope).
+        $mintInFamily = function (string $scope): string {
+            return $this->store->createRootDemand(
+                StepUpDemand::mint(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(), $scope, null, null, 'decision-terminal', $this->now, 600, StepUpOperationBindingKind::None, StepUpOperationDigest::none($scope)),
+                600,
+            );
+        };
+        $authorized = $mintInFamily('signup');
+        self::assertNotNull($this->store->completeDemand($authorized, $this->now, 600));
+        self::assertNotNull($this->store->claimDemandFinalization($authorized, $this->now, 30));
+        self::assertNotNull($this->store->settleDemandFinalization($authorized, StepUpDemandState::Authorized, $this->now));
+        self::assertNull($this->escalate($authorized, 'childid00000000000000001', 'decision-2'), 'an authorized demand is history, not a family head');
+
+        $completed = $mintInFamily('signup_confirm');
+        self::assertNotNull($this->store->completeDemand($completed, $this->now, 600));
+        self::assertNull($this->escalate($completed, 'childid00000000000000002', 'decision-4'), 'a completed demand mid-finalization is never superseded');
+
+        $denied = $mintInFamily('signup_email');
+        self::assertNotNull($this->store->completeDemand($denied, $this->now, 600));
+        self::assertNotNull($this->store->claimDemandFinalization($denied, $this->now, 30));
+        self::assertNotNull($this->store->settleDemandFinalization($denied, StepUpDemandState::Denied, $this->now));
+        self::assertNull($this->escalate($denied, 'childid00000000000000003', 'decision-6'), 'a denied demand never funds a fresh sibling');
+    }
+
     public function testMintDemandEscalatesInsteadOfRefreshingTheWindow(): void
     {
         $session = str_repeat('b', 64);

@@ -127,17 +127,21 @@ end
 
 if op == 'forget_devices' then
     -- Atomic revocation (F15): the session and device tags of the
-    -- principal and their trust mirrors go in one HDEL, so a record
+    -- principal and every trust mirror go in one HDEL, so a record
     -- racing the revocation cannot survive half-deleted. The op takes
     -- no tag and no TTL: it deletes whole classes and never reads a
-    -- lifetime. Bare-hex and net/asn tags are the deployment's
-    -- long-memory network evidence and survive the revocation.
+    -- lifetime. Bare-hex and net/asn seen-ness survives (the
+    -- deployment's long-memory network evidence), but the trust
+    -- mirrors go with the credentials: a network whose only vouches
+    -- came from the compromised credentials re-runs the first-attempt
+    -- gate on its own evidence at the next login, and the
+    -- trusted-network answer of a compromised account re-arms.
     local all = redis.call('HGETALL', KEYS[1])
     local doomed = {}
     for i = 1, #all, 2 do
         local f = all[i]
         if string.sub(f, 1, 8) == 'session:' or string.sub(f, 1, 7) == 'device:'
-            or string.sub(f, 1, 10) == 't:session:' or string.sub(f, 1, 9) == 't:device:' then
+            or string.sub(f, 1, 2) == 't:' then
             doomed[#doomed + 1] = f
         end
     end

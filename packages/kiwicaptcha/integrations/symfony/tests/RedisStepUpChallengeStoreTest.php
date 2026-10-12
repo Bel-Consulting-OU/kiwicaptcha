@@ -446,6 +446,71 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertNull($this->store->completeFactor('customfactoridchallenged01', $referenceDemandId, (string) $customChallenge->clientSecretHash, 1700000000, null), 'the custom factor never answers a demand bound to the reference id');
     }
 
+    public function testASupersededDemandCompletesNoChallenge(): void
+    {
+        // The finding this pins: the escalation supersede wrote the
+        // parent's child link but left its state open, so the completion
+        // script's open-state gate passed and the weak proof landed
+        // behind the family's back, past the rung the reassessment had
+        // escalated to.
+        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        $challenge = StepUpChallenge::begin(
+            'supersededcompletechallenge001',
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            str_repeat('a', 64),
+            null,
+            null,
+            false,
+            false,
+            null,
+            self::DEMAND_ID,
+        );
+        $this->store->create($challenge, 300);
+        $child = $this->store->readDemand(self::DEMAND_ID)->spawnChild('supersededcompletechild0000001', 1700000000, 'decision-2');
+        self::assertNotNull($this->store->supersedeDemandWithChild(self::DEMAND_ID, $child), 'the escalation replaces the open parent');
+        self::assertNull($this->store->completeFactor('supersededcompletechallenge001', self::DEMAND_ID, (string) $challenge->clientSecretHash, 1700000001, null), 'the superseded parent completes no challenge');
+        self::assertNotNull($this->store->read('supersededcompletechallenge001'), 'the refusal never consumes the challenge');
+        self::assertNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000002, 30), 'the superseded parent is never claimed for finalization');
+    }
+
+    public function testATerminalDemandIsNeverSupersededIntoAFreshSibling(): void
+    {
+        // The finding this pins: the supersede script accepted parents
+        // in any non-superseded state, handing an already-settled
+        // operation a fresh live sibling demand.
+        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        self::assertNotNull($this->store->completeDemand(self::DEMAND_ID, 1700000001, 300));
+        self::assertNotNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000002, 30));
+        self::assertNotNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Authorized, 1700000003));
+        $child = $this->store->readDemand(self::DEMAND_ID)->spawnChild('supersededterminalchild00001', 1700000003, 'decision-2');
+        self::assertNull($this->store->supersedeDemandWithChild(self::DEMAND_ID, $child), 'an authorized demand is history, not a family head');
+        self::assertNull($this->store->readDemand('supersededterminalchild00001'), 'the refused child was never written');
+    }
+
+    public function testASupersededFinalizingDemandAuthorizesThroughNothing(): void
+    {
+        // The finding this pins: a stale claimant retaking a finalizing
+        // demand that escalation had already superseded could drive it
+        // to the authorized terminal past the stronger child.
+        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        self::assertNotNull($this->store->completeDemand(self::DEMAND_ID, 1700000001, 300));
+        self::assertNotNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000002, 30));
+        $child = $this->store->readDemand(self::DEMAND_ID)->spawnChild('supersededfinalizingchild0001', 1700000002, 'decision-2');
+        self::assertNotNull($this->store->supersedeDemandWithChild(self::DEMAND_ID, $child), 'the escalator holding its claim supersedes');
+        self::assertNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Authorized, 1700000003), 'a superseded demand never settles authorized');
+        self::assertNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000040, 30), 'a stale claimant never retakes a superseded demand');
+        self::assertNotNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Superseded, 1700000004), 'the escalator follow-up settlement lands');
+        self::assertNull($this->store->completeDemand(self::DEMAND_ID, 1700000005, 300), 'a superseded demand never completes');
+    }
+
     private function demand(string $id, ?string $sessionHash): StepUpDemand
     {
         return StepUpDemand::mint($id, 'login', $sessionHash, null, null, 1700000000, 300);

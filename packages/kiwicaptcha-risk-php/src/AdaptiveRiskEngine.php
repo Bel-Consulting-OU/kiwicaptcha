@@ -676,11 +676,17 @@ final class AdaptiveRiskEngine
         // have stepped up (a genuinely novel network, or unreadable
         // history) records the session and the device without the
         // trust flag, even in learn mode: the step-up demand is only
-        // deferred there, so an attacker with stolen credentials can
-        // never leave a trusted device under the victim by riding the
-        // rollout window. The trusted device cookie outlives the
-        // session window, so the sliding refresh happens here on every
-        // minting Allow that carries the cookie.
+        // deferred there, and the deferred login mints no trust — a
+        // stolen-credential login from a novel network leaves nothing
+        // trusted behind. What earns the trust is the repeat visit: a
+        // login the gate judges non-novel (history the account was
+        // already granted from) is the trust-minting event, in learn
+        // and in enforce alike, and a credential change revokes every
+        // trust mirror (the forget-devices op), so the next login
+        // re-runs the first-attempt gate on its own evidence. The
+        // trusted device cookie outlives the session window, so the
+        // sliding refresh happens here on every minting Allow that
+        // carries the cookie.
         //
         // The same Allow also records the network bucket and the ASN
         // bucket with the trust flag minted (the learn history: the

@@ -461,9 +461,11 @@ final class FirstAttemptNoveltyTest extends TestCase
      * Learn mode's deferred step-up must not mint device trust. A
      * novel login is allowed (the rollout window's leniency), but its
      * session and device bindings are recorded without the trust
-     * flag, so an attacker with stolen credentials never leaves a
-     * trusted device under the victim. The second, non-novel Allow
-     * from the same network is what earns the trust.
+     * flag: a stolen-credential login from a novel network leaves
+     * nothing trusted behind. The second, non-novel Allow from the
+     * same network is what earns the trust (the repeat visit is the
+     * trust signal), and a credential change revokes the trust
+     * mirrors so the gate re-arms.
      */
     public function testLearnModeNovelAllowDoesNotMintDeviceTrust(): void
     {

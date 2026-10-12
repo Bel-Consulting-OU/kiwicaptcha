@@ -133,7 +133,7 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
 
             return null;
         }
-        if (!$entry['record']->state->isOpen()) {
+        if (!$entry['record']->state->isOpen() || $entry['record']->superseded()) {
             return null;
         }
         $completed = $entry['record']->withState(StepUpDemandState::Completed, $now);
@@ -162,7 +162,10 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if ($challenge->demandId !== $demandId || $demand->id !== $demandId) {
             return null;
         }
-        if (!$demand->state->isOpen()) {
+        // A superseded demand completes nothing, whatever its state
+        // field still says: escalation replaced it with a stronger
+        // child. Same gate the Redis script runs.
+        if (!$demand->state->isOpen() || $demand->superseded()) {
             return null;
         }
         if ($challenge->expired($now) || $demand->expired($now)) {
@@ -246,6 +249,11 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
             return null;
         }
         $state = $entry['record']->state;
+        // A superseded demand finalizes nothing: escalation replaced
+        // it, so no retake may drive it to a terminal.
+        if ($entry['record']->superseded()) {
+            return null;
+        }
         if ($state === StepUpDemandState::Finalizing) {
             // A claim inside its window is untouchable; a stale claim
             // (an owner that died inside the window) is retaken.
@@ -275,6 +283,12 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
         if (!$state->isTerminal()) {
             throw new \InvalidArgumentException('A step-up demand finalization settles to a terminal state only');
+        }
+        // A superseded demand authorizes nothing ever again: only the
+        // superseded settlement itself and the fail-closed denied
+        // terminal may still land.
+        if ($state === StepUpDemandState::Authorized && $entry['record']->superseded()) {
+            return null;
         }
         $settled = $entry['record']->withState($state, $now, $factor);
         $this->demands[$demandId] = ['record' => $settled, 'expiresAt' => $entry['expiresAt']];
@@ -364,6 +378,11 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
         $parent = $entry['record'];
         if ($parent->superseded()) {
+            return null;
+        }
+        // A terminal demand is history, not a family head: only an
+        // open demand or a claimed finalizing one may be superseded.
+        if (!$parent->state->isOpen() && $parent->state !== StepUpDemandState::Finalizing) {
             return null;
         }
         if (isset($this->demands[$child->id])) {

@@ -65,6 +65,15 @@ fn redis_principal_networks_full_surface_on_real_redis() {
     assert!(store
         .record_principal_network_tag(&principal, "device:abcd", true)
         .unwrap());
+    // a trusted network minted under the old credentials re-arms at
+    // the revocation: the trust mirrors go, the bare seen-ness stays
+    assert!(store
+        .record_principal_network_tag(&principal, "net:00ff", true)
+        .unwrap());
+    assert_eq!(
+        store.principal_has_trusted_network(&principal).unwrap(),
+        Some(true)
+    );
     store.forget_devices(&principal).unwrap();
     assert_eq!(
         store.principal_network_seen(&principal, fresh).unwrap(),
@@ -74,12 +83,21 @@ fn redis_principal_networks_full_surface_on_real_redis() {
         store.tag_is_trusted(&principal, "device:abcd").unwrap(),
         Some(false)
     );
-    // the net class survives the revocation
+    // the net class survives the revocation, untrusted: the next
+    // login re-runs the first-attempt gate on its own evidence
     assert_eq!(
         store
             .principal_network_seen(&principal, "net:00ff")
             .unwrap(),
         Some(true)
+    );
+    assert_eq!(
+        store.tag_is_trusted(&principal, "net:00ff").unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        store.principal_has_trusted_network(&principal).unwrap(),
+        Some(false)
     );
 
     // invalid tags are refused, never answered as "not seen"
