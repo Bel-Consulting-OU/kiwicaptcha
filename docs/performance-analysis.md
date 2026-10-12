@@ -64,6 +64,27 @@ kept; the environment block of the record names the machine, the PHP
 and Redis versions and the recording date, and is adjusted when the
 recording machine changes.
 
+### The concurrent risk ratchet is load-sensitive, and the gate knows it
+
+A shared-hosted runner reds the concurrent risk row on load alone.
+The 2026-10-12 qualification measured it both ways on the same machine
+and build: five consecutive quiet-host runs of
+`perf-bench-risk.php --redis` landed at p50 1.29 to 1.79 ms and p95
+1.84 to 2.82 ms (ratchet 4.09 ms: five greens, worst run at 69 percent
+of the ratchet), while runs taken alongside parallel test processes
+measured p50 2.5 to 5.0 ms and p95 8.4 to 23.2 ms, and a shared
+2 to 4 core runner reported p95 7.55 ms. The command profile did not
+explain a real cost: the request walks roughly 5.5 client round trips
+(1.1 risk evaluations, 2.2 point reads, 1.1 context-tag writes, the
+rest connection setup) and the assess script's per-shard hash reads
+run inside one evaluation, a shape unchanged since the baseline was
+recorded. The verdict: the recorded baseline stands, the ratchet is
+not under architectural pressure, and a hosted-runner red is runner
+load until proven otherwise by the controlled protocol the release
+checklist already prescribes (dedicated runner, warm state, paired
+ABBA repeats, paired-distribution comparison). This is why the hard
+ratchet stays manual-only and never a merge gate.
+
 ## Measurement tools
 
 - `packages/kiwicaptcha/tools/perf-bench.php` measures serial issuance
