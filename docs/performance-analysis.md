@@ -349,16 +349,16 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 102,356 bytes
-raw, 30,218 gzip and 25,583 brotli (the record's
+any memory-hard challenge — is the eager core alone: 123,231 bytes
+raw, 35,731 gzip and 29,986 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
-figure sits at 98.8% of its 30,720-byte cap after the timeout-ordering
-and correlation-hardening wave added core code; the cap is unchanged
-and still enforced, the asset carries a recorded `headroom_review`
-exemption under the 95% near-cap gate, and the raw 160,000 cap keeps
-large headroom. The reviewed follow-up is moving the pure-JS SHA-256
-fallback to a lazy module before the next behavior wave; the
-compressed caps remain the ordinary-bootstrap target.
+figure sits within the 37,000-byte cap after the step-up demand
+dialog and carrier-escalation wave added the interactive step-up
+client; the cap was raised accordingly and remains enforced. The raw
+160,000 cap keeps large headroom. The reviewed follow-up is moving
+the pure-JS SHA-256 fallback to a lazy module before the next
+behavior wave; the compressed caps remain the ordinary-bootstrap
+target.
 
 The driver surface is now five files with one eager core (the
 record's budget rows, equality-gated):
