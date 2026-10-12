@@ -43,9 +43,21 @@ final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderIn
 
     public function send(string $email, string $code, int $ttlSecs, EmailOwnershipDeliveryMetadata $delivery): void
     {
+        // Derive the Message-ID (and refuse a From without a usable domain)
+        // BEFORE Symfony's Address parser can throw RfcComplianceException
+        // on a non-address From. Fail-closed with our own error, matching
+        // the documented contract.
+        $messageId = $this->messageId($delivery);
         $minutes = max(1, (int) ceil($ttlSecs / 60));
-        $message = (new Email())
-            ->from($this->fromAddress)
+        $message = new Email();
+        try {
+            $message->from($this->fromAddress);
+        } catch (\Throwable $e) {
+            throw new \RuntimeException(sprintf(
+                'The mailer email-ownership sender cannot derive a Message-ID domain from the configured From identity; set a deliverable from address (got a From without a usable domain)',
+            ), 0, $e);
+        }
+        $message
             ->to($email)
             ->subject('Your verification code')
             ->text(sprintf(
@@ -53,7 +65,7 @@ final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderIn
                 $code,
                 $minutes,
             ));
-        $message->getHeaders()->addIdHeader('Message-ID', $this->messageId($delivery));
+        $message->getHeaders()->addIdHeader('Message-ID', trim($messageId, '<>'));
         $this->mailer->send($message);
         $this->logger?->info('kiwi email-ownership step-up code delivered', [
             'recipient' => LoggingEmailOwnershipCodeSender::hashForLog($email, $this->hashKey),
@@ -79,6 +91,6 @@ final class MailerEmailOwnershipCodeSender implements EmailOwnershipCodeSenderIn
             ));
         }
 
-        return '<'.$delivery->messageIdLocalPart().'@'.strtolower($domain).'>';
+        return $delivery->messageIdLocalPart().'@'.strtolower($domain);
     }
 }

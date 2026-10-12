@@ -329,9 +329,15 @@ mod tests {
         assert_eq!(RiskEventKind::from_u8(255), None);
         // 22 is StepUpCompleted (the step-up completion channel), never a
         // reserved hole and never an alias of the honeypot kinds at 18.
-        assert_eq!(RiskEventKind::from_u8(22), Some(RiskEventKind::StepUpCompleted));
+        assert_eq!(
+            RiskEventKind::from_u8(22),
+            Some(RiskEventKind::StepUpCompleted)
+        );
         assert_eq!(RiskEventKind::StepUpCompleted.as_u8(), 22);
-        assert_ne!(RiskEventKind::StepUpCompleted, RiskEventKind::HoneypotTriggered);
+        assert_ne!(
+            RiskEventKind::StepUpCompleted,
+            RiskEventKind::HoneypotTriggered
+        );
     }
 
     #[test]
@@ -368,8 +374,7 @@ mod tests {
             serde_json::to_value(RiskEventKind::StepUpCompleted).unwrap(),
             serde_json::json!("step_up_completed")
         );
-        let parsed: RiskEventKind =
-            serde_json::from_str("\"step_up_completed\"").expect("parses");
+        let parsed: RiskEventKind = serde_json::from_str("\"step_up_completed\"").expect("parses");
         assert_eq!(parsed, RiskEventKind::StepUpCompleted);
         // Mixed-version readiness: an unknown wire name refuses fail-closed
         // (no silent default to PreIssue), and the wire number 22 round-trips
