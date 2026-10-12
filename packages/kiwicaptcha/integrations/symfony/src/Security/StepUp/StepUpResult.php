@@ -38,6 +38,8 @@ final class StepUpResult
     public const FAIL_DEMAND_UNBOUND = 'demand_unbound';
     /** The demand finalization refused the completion (the reassessment denied it). */
     public const FAIL_DEMAND_REFUSED = 'demand_refused';
+    /** The reassessment re-raised the step-up: a strictly stronger child demand took over. */
+    public const FAIL_DEMAND_ESCALATED = 'escalated';
 
     private function __construct(
         public readonly StepUpResultStatus $status,

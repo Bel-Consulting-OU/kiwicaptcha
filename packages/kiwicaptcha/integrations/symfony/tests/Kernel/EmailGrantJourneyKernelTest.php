@@ -16,9 +16,11 @@ use Symfony\Component\HttpKernel\HttpKernelBrowser;
  * The anonymous email-grant journey over the real kernel. The signup
  * challenge answers the typed step-up 403 carrying the demand id, and
  * the visitor begins and completes the factor against that demand. The
- * submission with the grant and the proven address passes the real
- * container validator, and the same grant on the non-carrier login
- * scope is a violation.
+ * redemption runs the shared finalizer: the fresh completion
+ * assessment rides the signup scope's step-up minimum, so it re-raises
+ * over the completed grant and the assurance escalates to the strictly
+ * stronger child demand, which the refusal advertises. The same grant
+ * on the non-carrier login scope is a violation.
  */
 final class EmailGrantJourneyKernelTest extends TestCase
 {
@@ -80,14 +82,22 @@ final class EmailGrantJourneyKernelTest extends TestCase
         self::assertSame(200, $complete->getStatusCode(), (string) $complete->getContent());
         $grant = (string) json_decode((string) $complete->getContent(), true)['grant'];
 
-        // (4) The submission: the grant with the proven address passes
-        // the real container validator with no violation (the protected
-        // form processes, the application-level 200).
+        // (4) The submission: the grant redeems into the shared
+        // finalizer, and the fresh completion assessment runs under the
+        // signup scope's step-up minimum. The assessment re-raises over
+        // the completed grant, the assurance escalates to the strictly
+        // stronger child demand, and the completion is never authorized:
+        // the refusal advertises exactly that child demand.
         $violations = $this->submit($container, $grant, 'signup', self::EMAIL);
-        self::assertCount(0, $violations, 'the grant redeems on the carrier scope: '.var_export($violations, true));
+        self::assertCount(1, $violations, 'a step-up minimum re-raises over the completed grant: '.var_export($violations, true));
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode());
+        $child = (string) ($violations[0]->getParameters()['{{ step_up_demand }}'] ?? '');
+        self::assertMatchesRegularExpression('/^[A-Za-z0-9_-]{16,43}$/D', $child, 'the refusal advertises the escalation child demand');
+        self::assertNotSame($demand, $child, 'the child demand is its own record');
 
         // (5) The same grant on the non-carrier login scope: a
-        // violation, never a pass.
+        // violation, never a pass (the grant was spent by the redeemed
+        // leg above).
         $misused = $this->submit($container, $grant, 'login', self::EMAIL);
         self::assertCount(1, $misused, 'a grant is worthless on a scope that did not name the carrier');
     }

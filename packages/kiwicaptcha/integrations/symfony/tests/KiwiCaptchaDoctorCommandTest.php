@@ -1073,11 +1073,16 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
      * diagnostics are exercised with (the container path validates first,
      * which would refuse the very states under test for the wrong
      * reason). The security Redis is a FakePredisClient so tests seed
-     * central policy state directly.
+     * central policy state directly. The armed wiring (the post-
+     * credential gate and, by default, the registered outcome bridge)
+     * rides along explicitly, so each check under study stays the
+     * subject; the reporting-lane tests pass withBridge false to
+     * simulate the missing lane.
      *
      * @param callable(array<string, mixed>): array<string, mixed>|null $mutate
+     * @param object|null                                                    $outcomeBridge
      */
-    private function doctorWithConfig(?callable $mutate = null): CommandTester
+    private function doctorWithConfig(?callable $mutate = null, ?object $outcomeBridge = null, bool $withBridge = true): CommandTester
     {
         $config = (new \Symfony\Component\Config\Definition\Processor())->processConfiguration(
             new \BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration(),
@@ -1132,6 +1137,12 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
                 ),
                 ['main' => 'login'],
             ),
+            $outcomeBridge ?? ($withBridge ? new \BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber(
+                new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter(),
+                new \KiwiCaptcha\Risk\RiskIdentityFactory(\KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('c', 32))),
+                10,
+                str_repeat('d', 32),
+            ) : null),
         );
 
         return new CommandTester($command);
@@ -1205,6 +1216,60 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('payments', $display, 'every actions scope must be collected');
         self::assertStringNotContainsString('login,', $display, 'scopes listed in risk.scopes are not reported');
         self::assertDoesNotMatchRegularExpression('/\bArray\b/', $display, 'a non-string allowed_scopes entry must not become a phantom "Array" scope');
+    }
+
+    /**
+     * The reporting lane of the protected logins: with the login map
+     * active and the bridge absent the doctor fails the deployment
+     * (the successes and failures of the withheld sessions would never
+     * report), and a registered bridge passes the same posture.
+     */
+    public function testDoctorFailsMappedLoginsWithoutARegisteredOutcomeBridge(): void
+    {
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['login_scopes'] = ['main' => 'login'];
+
+            return $config;
+        }, null, withBridge: false);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString(''.self::failTag().' Outcome bridge', $display, 'protected logins without a reporting lane must fail the deploy gate');
+        self::assertStringContainsString('risk.outcomes.scope', $display);
+    }
+
+    public function testDoctorRequiresTheExplicitScopeForDifferingLoginScopes(): void
+    {
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['login_scopes'] = ['main' => 'login', 'admin' => 'admin_login'];
+
+            return $config;
+        }, null, withBridge: false);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString(''.self::failTag().' Outcome bridge', $display);
+        self::assertStringContainsString('several differing scopes leave no single outcome scope to infer', $display, 'the failure must demand the explicit risk.outcomes.scope mapping');
+    }
+
+    public function testDoctorPassesMappedLoginsWithARegisteredOutcomeBridge(): void
+    {
+        $bridge = new \BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber(
+            new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter(),
+            new \KiwiCaptcha\Risk\RiskIdentityFactory(\KiwiCaptcha\Risk\RiskKeys::fromMaster(str_repeat('c', 32))),
+            10,
+            str_repeat('d', 32),
+        );
+        $tester = $this->doctorWithConfig(static function (array $config): array {
+            $config['risk']['login_scopes'] = ['main' => 'login'];
+
+            return $config;
+        }, $bridge);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Outcome bridge', $display, 'a registered bridge reports the protected logins');
+        self::assertStringNotContainsString(''.self::failTag().' Outcome bridge', $display);
     }
 
     public function testDoctorWarnsWhenTheCentralEpochIsAheadOfTheConfiguredPolicyVersion(): void

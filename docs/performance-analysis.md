@@ -237,11 +237,13 @@ single-node fixture cannot produce.
 
 The deterministic budgets (from the `budgets` section, measured by
 perf-budget.sh): every eager-core driver copy is
-105,384 bytes raw, 31,343 bytes gzip and 26,494 bytes brotli, against
-caps of 160,000 / 32,000 / 28,000 bytes (the raw cap carried forward
+122,600 bytes raw, 35,552 bytes gzip and 29,826 bytes brotli, against
+caps of 160,000 / 40,000 / 34,000 bytes (the raw cap carried forward
 onto the always-loaded core, the compressed caps the ordinary-
-bootstrap target; the gzip cap is re-baselined for the Object.create(null)
-prototype-pollution hardening); every widget-risk.js copy (the lazy adaptive-risk
+bootstrap target; the compressed caps are re-baselined for the
+step-up surface of the eager core — the step-up dialog machinery,
+the email-ownership factor UI and the rendered-demand attribute
+fallback); every widget-risk.js copy (the lazy adaptive-risk
 module) is 42,552 bytes raw, 12,423 bytes gzip and 10,653 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 5,621 bytes raw, 2,104 bytes gzip and 1,780

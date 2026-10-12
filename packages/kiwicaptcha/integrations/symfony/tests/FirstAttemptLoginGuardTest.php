@@ -14,6 +14,7 @@ use KiwiCaptcha\Risk\RiskKeys;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+use Symfony\Component\Security\Core\Exception\AuthenticationException;
 use Symfony\Component\Security\Core\User\UserInterface;
 
 /**
@@ -78,6 +79,42 @@ final class FirstAttemptLoginGuardTest extends TestCase
             public function setAuthenticatedToken(object $token): void
             {
                 $this->token = $token;
+            }
+        };
+    }
+
+    /**
+     * An event whose setter refuses the pending replacement (the
+     * simulated wiring failure inside the guard's exception handler)
+     * but accepts the null clear: the shape the refused-login path must
+     * answer with a cleared token and an AuthenticationException.
+     */
+    private function refusingEvent(): object
+    {
+        return new class ($this->request(), $this->token()) {
+            private ?object $token;
+
+            public function __construct(private readonly Request $request, object $token)
+            {
+                $this->token = $token;
+            }
+
+            public function getRequest(): Request
+            {
+                return $this->request;
+            }
+
+            public function getAuthenticatedToken(): ?object
+            {
+                return $this->token;
+            }
+
+            public function setAuthenticatedToken(?object $token): void
+            {
+                if ($token !== null) {
+                    throw new \RuntimeException('the pending replacement is refused');
+                }
+                $this->token = null;
             }
         };
     }
@@ -219,6 +256,26 @@ final class FirstAttemptLoginGuardTest extends TestCase
             $event->getAuthenticatedToken(),
             'a gate error must fail closed to the pending token, never hand out a full session',
         );
+    }
+
+    /**
+     * The refused-login invariant: when the exception handler cannot
+     * install the pending state either, the authenticated token is
+     * cleared and the login is refused outright. An authentication that
+     * stays authenticated on an undetermined outcome would hand the
+     * full session the gate exists to withhold.
+     */
+    public function testAFailedPendingReplacementClearsTheTokenAndRefusesTheLogin(): void
+    {
+        $guard = new FirstAttemptLoginGuard($this->stubGateway(null, true), $this->identity(), ['main' => '1']);
+
+        $event = $this->refusingEvent();
+        try {
+            $guard->onTokenCreated($event);
+            self::fail('a replacement failure inside the exception handler must refuse the login');
+        } catch (AuthenticationException $e) {
+            self::assertNull($event->getAuthenticatedToken(), 'the authenticated token must be cleared when the pending state cannot be installed');
+        }
     }
 
     public function testConfiguredTargetFieldRidesTheLoginDecision(): void

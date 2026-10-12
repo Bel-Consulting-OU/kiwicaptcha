@@ -1243,7 +1243,7 @@ final class Configuration implements ConfigurationInterface
                                     ->defaultFalse()
                                 ->end()
                                 ->scalarNode('scope')
-                                    ->info('The risk scope name (a key of risk.scopes) whose policy the framework auth events book under, e.g. "login". Required for the auto-bridge to arm; null (default) leaves the bridge unregistered.')
+                                    ->info('The risk scope name (a key of risk.scopes) whose policy the framework auth events book under, e.g. "login". Null (default) infers the scope when the risk.login_scopes map resolves to exactly one scope; several differing login scopes have no single target, so the bridge then stays unregistered until this knob names the scope explicitly (the doctor fails such a deployment).')
                                     ->defaultNull()
                                     ->validate()
                                         ->ifTrue(static fn ($v): bool => \is_string($v) && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $v) !== 1)
@@ -1291,7 +1291,7 @@ final class Configuration implements ConfigurationInterface
                             ->end()
                         ->end()
                         ->arrayNode('evidence')
-                            ->info('THE PLANE-2 EVIDENCE STAGE of the adaptive engine (interaction_anomaly and solve_anomaly over the telemetry-v1 payload, plus the decoy escalation). The engine composes the stage automatically whenever an assessment carries evidence inputs (the token\'s telemetry payload, the measured solve facts); an absent or rejected payload is the neutral-unknown state and the stage may only raise the composed action. The telemetry knob is the BROWSER ARM SWITCH: it renders data-kiwi-telemetry on the widget container, and the driver\'s collector then attaches to the widget\'s host form and the solved token carries the coarse aggregate payload (event-class counts, one 4-bit entropy value, a focus-transition count, a paste ratio, the sample count; no raw coordinates, no key values, no timing series ever leave the page). Default: "minimal" under every protection profile, "full" under abuse_first and high_abuse. The payload is client-controlled and forgeable: probabilistic evidence for the engine, never the security boundary.')
+                            ->info('THE PLANE-2 EVIDENCE STAGE of the adaptive engine (interaction_anomaly and solve_anomaly over the telemetry-v1 payload, plus the decoy escalation). The engine composes the stage automatically whenever an assessment carries evidence inputs (the token\'s telemetry payload, the measured solve facts); an absent or rejected payload is the neutral-unknown state and the stage may only raise the composed action. The telemetry knob is the BROWSER ARM SWITCH: it renders data-kiwi-telemetry on the widget container, and the driver\'s collector then attaches to the widget\'s host form and the solved token carries the coarse aggregate payload (event-class counts, one 4-bit entropy value, a focus-transition count, a paste ratio, the sample count; no raw coordinates, no key values, no timing series ever leave the page). Default: "off" under every privacy-bearing profile and the profile-less default (behavioral telemetry off by default), "full" under abuse_first and high_abuse; under privacy_strict the arm is pinned off and no operator value re-arms it through the composition. The payload is client-controlled and forgeable: probabilistic evidence for the engine, never the security boundary.')
                             ->addDefaultsIfNotSet()
                             ->children()
                                 ->enumNode('telemetry')
@@ -1360,11 +1360,90 @@ final class Configuration implements ConfigurationInterface
                                     ->defaultFalse()
                                 ->end()
                                 ->scalarNode('hmac_secret')
-                                    ->info('HMAC master of the step-up plane: the ticket signing key, the stored-code hash key and the completion-credit idempotency key all derive from it through purpose-separated HKDF derivations. MUST be a high-entropy secret of at least 32 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter literal is refused at compile time and an env-resolved secret is floor-checked when the services are constructed. When null (default) it derives from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated secret is recommended so a compromise of one never leaks the other.')
+                                    ->info('HMAC master of the step-up plane: the ticket signing key, the stored-code hash key and the completion-credit idempotency key all derive from it through purpose-separated HKDF derivations. MUST be a high-entropy secret of at least 32 bytes (%env(KIWI_RISK_SECRET)% recommended); a shorter literal is refused at compile time and an env-resolved secret is floor-checked when the services are constructed. When null (default) it derives from the risk master_secret (which itself defaults to the captcha secret_key) — a dedicated secret is recommended so a compromise of one never leaks the other. Superseded by keyring when that is configured.')
                                     ->defaultNull()
                                     ->validate()
                                         ->ifTrue(static fn ($v): bool => self::isShortSecret($v))
                                         ->thenInvalid('risk.step_up.hmac_secret must be a string of at least 32 bytes when configured (the same floor as secret_key): a shorter step-up master weakens the ticket signatures, the code hashes and the credit idempotency at once. An %%env()%% placeholder is length-checked when the step-up services are constructed')
+                                    ->end()
+                                ->end()
+                                ->arrayNode('keyring')
+                                    ->info('THE ROTATION-CAPABLE MASTER SET of the step-up plane (default off: the plane derives its single master from hmac_secret, the risk master_secret or the captcha secret_key, the legacy fallback order). Configuring secrets_by_kid switches the plane onto the keyring: current_kid is the only kid the ticket signing mints with, secrets_by_kid carries the current plus the historical masters (each at least 32 bytes, the same floor as secret_key), and revoked_kids refuses compromised kids even while their secret is still configured. Rotation: keep the superseded kid and its secret in secrets_by_kid for at least the maximum demand lifetime (the challenge, code and demand TTLs of the plane), bump current_kid to the new kid, and drop a historical kid only after no demand of that lifetime can still be outstanding. A ticket whose kid is revoked, unknown or ahead of the newest configured kid fails verification fail-closed. The plane\'s other derivations (the stored-code hashes, the sender-log hash and the completion-credit idempotency) key on the current kid\'s secret. An %%env()%% placeholder is length-checked when the services are constructed.')
+                                    ->addDefaultsIfNotSet()
+                                    ->children()
+                                        ->integerNode('current_kid')
+                                            ->info('The signing kid every fresh ticket is minted with (1..4294967295). Required (and resolved) once secrets_by_kid is configured; it must name a key of secrets_by_kid and must never be revoked.')
+                                            ->defaultNull()
+                                            ->min(1)
+                                            ->max(4294967295)
+                                        ->end()
+                                        ->arrayNode('secrets_by_kid')
+                                            ->info('The step-up masters keyed by canonical kid (map of kid => secret, each >= 32 bytes, the same floor as secret_key). The current kid and every historical kid still inside the maximum demand lifetime live here. Configuring at least one entry switches the plane onto the keyring.')
+                                            ->scalarPrototype()->end()
+                                            ->useAttributeAsKey('kid')
+                                            ->normalizeKeys(false)
+                                            ->defaultValue([])
+                                            ->validate()
+                                                ->ifTrue(static function (array $secrets): bool {
+                                                    // Two distinct map keys that canonicalize
+                                                    // to the same integer would silently
+                                                    // overwrite one historical secret, so
+                                                    // the duplicate is refused before any
+                                                    // shape rule.
+                                                    $seen = [];
+                                                    foreach (\array_keys($secrets) as $kid) {
+                                                        $canonical = (int) $kid;
+                                                        if (isset($seen[$canonical])) {
+                                                            return true;
+                                                        }
+                                                        $seen[$canonical] = true;
+                                                    }
+
+                                                    return false;
+                                                })
+                                                ->thenInvalid('risk.step_up.keyring.secrets_by_kid keys must be distinct canonical kids: two entries that resolve to the same integer would silently overwrite one historical master')
+                                            ->end()
+                                            ->validate()
+                                                ->ifTrue(static function (array $secrets): bool {
+                                                    foreach (\array_keys($secrets) as $kid) {
+                                                        if (\is_int($kid)) {
+                                                            if ($kid < 1 || $kid > 4294967295) {
+                                                                return true;
+                                                            }
+
+                                                            continue;
+                                                        }
+                                                        if (preg_match('/^[1-9][0-9]*$/D', (string) $kid) !== 1) {
+                                                            return true;
+                                                        }
+                                                        $canonical = (int) $kid;
+                                                        if ($canonical < 1 || $canonical > 4294967295) {
+                                                            return true;
+                                                        }
+                                                    }
+
+                                                    return false;
+                                                })
+                                                ->thenInvalid('risk.step_up.keyring.secrets_by_kid keys must be canonical decimal integers in 1..4294967295: a historical kid is written without leading zeros and without text, so "02", "0" and "foo" are all refused')
+                                            ->end()
+                                            ->validate()
+                                                ->ifTrue(static function (array $secrets): bool {
+                                                    foreach ($secrets as $v) {
+                                                        if (!\is_string($v) || self::isShortSecret($v)) {
+                                                            return true;
+                                                        }
+                                                    }
+
+                                                    return false;
+                                                })
+                                                ->thenInvalid('risk.step_up.keyring.secrets_by_kid values must be strings of at least 32 bytes (the same floor as secret_key): a shorter historical master cannot verify and would only surface when a rotation makes it live. Rotate to a randomly generated 32-byte-or-longer secret. An %%env()%% placeholder is length-checked when the step-up services are constructed')
+                                            ->end()
+                                        ->end()
+                                        ->arrayNode('revoked_kids')
+                                            ->info('Compromised step-up kids: verification fails even when the secret is still configured. Revocation always wins over rotation.')
+                                            ->integerPrototype()->min(1)->max(4294967295)->end()
+                                            ->defaultValue([])
+                                        ->end()
                                     ->end()
                                 ->end()
                                 ->scalarNode('begin_path')

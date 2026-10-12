@@ -205,6 +205,16 @@ final class StepUpController
         if ($result->status === StepUpResultStatus::Succeeded) {
             $result = $this->authorize($result, $request);
         }
+        // The demand-bound effects retry: when the proof is spent (the
+        // challenge already consumed) but the demand this session pends
+        // under settled authorized with incomplete completion effects,
+        // the same endpoint completes them without a second factor.
+        if ($result->status !== StepUpResultStatus::Succeeded) {
+            $retried = $this->retryAuthorizedEffects($request);
+            if ($retried !== null) {
+                $result = $retried;
+            }
+        }
 
         if ($this->mode($request) === StepUpContext::MODE_JSON) {
             return new Response(
@@ -251,6 +261,14 @@ final class StepUpController
             return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $proof->challengeId);
         }
         if ($finalization->authorized) {
+            // An authorized settlement whose completion effects never
+            // landed answers the retryable failure, never success: the
+            // demand-bound retry below completes them on the same
+            // endpoint, without another factor.
+            if (!$finalization->effectsComplete()) {
+                return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, $proof->challengeId);
+            }
+
             return StepUpResult::succeeded(true, $proof->targetOwned && $proof->targetPseudonym !== null);
         }
         if ($finalization->reason === StepUpFinalization::REFUSED_UNBOUND) {
@@ -259,8 +277,69 @@ final class StepUpController
         if ($finalization->reason === StepUpFinalization::REFUSED_DENIED) {
             return StepUpResult::failed(StepUpResult::FAIL_DEMAND_REFUSED, $proof->challengeId);
         }
+        if ($finalization->reason === StepUpFinalization::ESCALATED) {
+            // The fresh assessment re-raised the step-up: the completed
+            // factor was verified, the engine demanded more, and a
+            // strictly stronger child demand took the family over. The
+            // completion answers the typed escalation failure, so the
+            // application begins the child's factor instead of treating
+            // this proof as an authorization.
+            return StepUpResult::failed(StepUpResult::FAIL_DEMAND_ESCALATED, $proof->challengeId);
+        }
 
         return StepUpResult::failed(StepUpResult::FAIL_UNKNOWN_CHALLENGE, $proof->challengeId);
+    }
+
+    /**
+     * The demand-bound effects retry of the completion endpoint. Both
+     * identities arrive from server-owned state: the demand id from the
+     * session's own pending token, the principal from the wired
+     * resolver (temporarily unwrapping the pending token exactly like
+     * begin() and complete() do) — client input names neither. The
+     * finalizer re-verifies the demand's stored login recipe against
+     * the resolved principal, then runs the effects journal of the
+     * authorized terminal. Null when this session pends under no
+     * demand, when nothing is resolvable, or when the demand refuses
+     * the retry (absent, expired, another principal's): the caller
+     * keeps its original failure, fail closed. A retried settlement
+     * with an incomplete journal answers the retryable failure; a
+     * complete one answers success.
+     */
+    private function retryAuthorizedEffects(Request $request): ?StepUpResult
+    {
+        $finalizer = $this->demandFinalizer;
+        if ($finalizer === null) {
+            return null;
+        }
+        $token = $this->tokenStorage?->getToken();
+        if (!$token instanceof StepUpPendingToken || $token->demandId() === null) {
+            return null;
+        }
+        $rawPrincipal = $this->unwrapPendingToken($request);
+        if ($rawPrincipal === null || $rawPrincipal === '') {
+            return null;
+        }
+        try {
+            $principal = $this->identityFactory->principalId($rawPrincipal);
+        } catch (\Throwable) {
+            return null;
+        }
+        if ($principal === '') {
+            return null;
+        }
+        try {
+            $finalization = $finalizer->retryAuthorizedEffects($token->demandId(), $principal, $request);
+        } catch (\Throwable) {
+            return null;
+        }
+        if ($finalization === null || !$finalization->authorized) {
+            return null;
+        }
+        if (!$finalization->effectsComplete()) {
+            return StepUpResult::failed(StepUpResult::FAIL_OUTCOME_UNAVAILABLE, null);
+        }
+
+        return StepUpResult::succeeded(true, false);
     }
 
     /**

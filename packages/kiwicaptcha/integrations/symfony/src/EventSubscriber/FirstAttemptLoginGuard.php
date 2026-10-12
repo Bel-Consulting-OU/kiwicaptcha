@@ -17,6 +17,7 @@ use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Security\Core\Authentication\Token\RememberMeToken;
+use Symfony\Component\Security\Core\Exception\AuthenticationException;
 use Symfony\Component\Security\Core\Exception\BadCredentialsException;
 
 /**
@@ -298,9 +299,18 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
                         ? $this->pendingToken($token, $resolvedScope)
                         : new StepUpPendingToken($token));
                 }
-            } catch (\Throwable) {
-                // Last resort: the original token stands, but the error
-                // is already alerted through the log.
+            } catch (\Throwable $replacementFailure) {
+                // The guard could not install the blocked state. The
+                // invariant: when the guard cannot determine the
+                // outcome, authentication cannot stay authenticated.
+                // The authenticated token is cleared where the event
+                // allows it and the login is refused outright, so the
+                // failure handler answers instead of a granted session.
+                $this->logger?->error('kiwi first-attempt gate could not install the pending state; the login is refused: {message}', [
+                    'message' => $replacementFailure->getMessage(),
+                ]);
+                $this->clearToken($event);
+                throw new AuthenticationException('The first-attempt gate could not determine the login outcome; the login is refused.', 0, $replacementFailure);
             }
         }
     }
@@ -447,6 +457,31 @@ final class FirstAttemptLoginGuard implements EventSubscriberInterface
         }
         if (method_exists($event, 'setToken')) {
             $event->setToken($token);
+        }
+    }
+
+    /**
+     * The best-effort token clear of the refused-login path: the event
+     * is asked to drop its token so no later reader can resurrect the
+     * authenticated state. A typed event whose setter refuses null
+     * stays untouched (the call is swallowed): the AuthenticationException
+     * the caller throws is the real refusal, and the framework answers
+     * it on the failure path, never with a stored token.
+     */
+    private function clearToken(object $event): void
+    {
+        foreach (['setAuthenticatedToken', 'setToken'] as $method) {
+            if (!method_exists($event, $method)) {
+                continue;
+            }
+            try {
+                $event->{$method}(null);
+            } catch (\Throwable) {
+                // The setter's own contract wins; the thrown
+                // AuthenticationException carries the refusal.
+            }
+
+            return;
         }
     }
 

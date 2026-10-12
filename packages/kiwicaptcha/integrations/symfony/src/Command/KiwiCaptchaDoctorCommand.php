@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\RiskStageComposition;
 use BelConsulting\KiwiCaptchaBundle\Economics\ValueClassCeiling;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
@@ -98,6 +99,10 @@ final class KiwiCaptchaDoctorCommand extends Command
      * @param FirstAttemptLoginGuard|null $firstAttemptGuard the wired
      *        post-credential gate. Null when the risk.login_scopes map
      *        armed nothing.
+     * @param KiwiOutcomeBridgeSubscriber|null $outcomeBridge the wired
+     *        security auto-bridge. Null when the bridge stays
+     *        unregistered (no inferable or configured outcome scope,
+     *        auto_bridge off, or the security surface absent).
      * @param StepUpCodeSenderInterface|null $emailOtpSender the resolved
      *        delivery seam of the enabled email one-time-passcode
      *        handler. Null when the factor is off.
@@ -127,6 +132,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         private readonly ?\KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface $principalNetworks = null,
         private readonly ?\Closure $apcEnableCliProbe = null,
         private readonly ?FirstAttemptLoginGuard $firstAttemptGuard = null,
+        private readonly ?KiwiOutcomeBridgeSubscriber $outcomeBridge = null,
         private readonly ?StepUpCodeSenderInterface $emailOtpSender = null,
         private readonly ?EmailOwnershipCodeSenderInterface $emailOwnershipSender = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface $principalResolver = null,
@@ -168,6 +174,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'ASN dataset' => $this->checkAsnDataset(),
             'Principal-network store' => $this->checkPrincipalNetworks(),
             'First-attempt gate' => $this->checkFirstAttemptGuard(),
+            'Outcome bridge' => $this->checkOutcomeBridge(),
             'Risk scope policy' => $this->checkScopePolicy(),
             'Value-class pricing' => $this->checkValueClassPricing(),
             'Carrier factors' => $this->checkCarrierFactors(),
@@ -859,6 +866,54 @@ final class KiwiCaptchaDoctorCommand extends Command
             $novelty,
             \count($alwaysScopes),
         )];
+    }
+
+    /**
+     * The reporting lane of the protected logins. The risk.login_scopes
+     * map arms the first-attempt gate, and the same mapping needs the
+     * outcome bridge: a gate that withholds sessions without ever
+     * booking its successes and failures leaves the trust gates blind
+     * to the history they read. The extension infers the bridge scope
+     * when the map resolves to exactly one scope; several differing
+     * scopes have no single target, so the explicit risk.outcomes.scope
+     * is required there (the same demand the advisory logs at container
+     * build).
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkOutcomeBridge(): array
+    {
+        $risk = $this->config['risk'] ?? [];
+        if (!($risk['enabled'] ?? false)) {
+            return ['PASS', 'risk engine disabled: the outcome bridge is inactive'];
+        }
+        $loginScopes = array_map('strval', (array) ($risk['login_scopes'] ?? []));
+        if ($loginScopes === []) {
+            return ['PASS', 'no firewall is mapped under risk.login_scopes, so there is no protected login surface to report'];
+        }
+        if ($this->outcomeBridge !== null) {
+            return ['PASS', sprintf(
+                'the outcome bridge books the auth events of %d firewall(s) (%s)',
+                \count($loginScopes),
+                implode(', ', array_keys($loginScopes)),
+            )];
+        }
+        if (!class_exists(KiwiOutcomeBridgeSubscriber::LOGIN_SUCCESS_EVENT)) {
+            return ['FAIL', 'login firewalls are mapped under risk.login_scopes but the security event classes are absent, so the outcome bridge cannot report the protected logins. Install symfony/security-http.'];
+        }
+        $distinct = array_values(array_unique($loginScopes));
+        if (\count($distinct) > 1) {
+            return ['FAIL', sprintf(
+                '%d login scopes are active (%s) and the outcome bridge is not registered, so the protected logins report nothing: several differing scopes leave no single outcome scope to infer, and the mapping must be explicit. Set risk.outcomes.scope to the scope the framework auth events book under.',
+                \count($distinct),
+                implode(', ', $distinct),
+            )];
+        }
+        if (!($risk['outcomes']['auto_bridge'] ?? true)) {
+            return ['FAIL', 'risk.outcomes.auto_bridge is false while login firewalls are mapped under risk.login_scopes: the first-attempt gate withholds sessions that no outcome ever reports. Re-enable the auto-bridge.'];
+        }
+
+        return ['FAIL', 'login firewalls are mapped under risk.login_scopes but the outcome bridge is not registered. Set risk.outcomes.scope (or map exactly one login scope, which the extension infers).'];
     }
 
     /**

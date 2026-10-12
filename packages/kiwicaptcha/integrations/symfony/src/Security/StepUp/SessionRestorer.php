@@ -41,8 +41,9 @@ final class SessionRestorer
     }
 
     /**
-     * Restore the wrapped token and record the network bucket. No-op
-     * when the current token is not pending (a plain step-up inside an
+     * Restore the wrapped token and record the network bucket. A no-op
+     * answer, {@see StepUpSessionRestore::nothingPending()}, when the
+     * current token is not pending (a plain step-up inside an
      * already-authenticated session) or when a seam is missing.
      *
      * $demandId is the exact demand the completed factor finalizes. A
@@ -53,10 +54,15 @@ final class SessionRestorer
      * every effect of the restore (the unwrap, the session rotation,
      * the trust bindings and the device mint); a refused restore
      * writes nothing and changes nothing.
+     *
+     * The typed answer lets the caller distinguish a landed restore
+     * from a refused one: a refusal is journalable nowhere and must
+     * never surface as user-visible success downstream.
      */
-    public function restore(string $principalPseudonym, ?Request $request = null, ?string $demandId = null): void
+    public function restore(string $principalPseudonym, ?Request $request = null, ?string $demandId = null): StepUpSessionRestore
     {
         try {
+            $unwrapped = false;
             $token = $this->tokenStorage?->getToken();
             if ($token instanceof StepUpPendingToken) {
                 // The pending token's principal must be the one that
@@ -76,13 +82,13 @@ final class SessionRestorer
                     $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
                     $this->logger?->warning('kiwi step-up session restore refused: empty pseudonym');
 
-                    return;
+                    return StepUpSessionRestore::refusedEmptyPseudonym();
                 }
                 if (!hash_equals($pendingPrincipal, $principalPseudonym)) {
                     $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
                     $this->logger?->warning('kiwi step-up session restore refused: principal mismatch');
 
-                    return;
+                    return StepUpSessionRestore::refusedPrincipalMismatch();
                 }
                 // The exact-demand gate: the completed challenge names
                 // the demand it finalizes and the pending token carries
@@ -94,9 +100,10 @@ final class SessionRestorer
                     $this->metrics?->increment(self::RESTORE_FAILURES_METRIC);
                     $this->logger?->warning('kiwi step-up session restore refused: demand mismatch');
 
-                    return;
+                    return StepUpSessionRestore::refusedDemandMismatch();
                 }
                 $this->tokenStorage?->setToken($token->getWrapped());
+                $unwrapped = true;
             }
             $request ??= $this->requestStack?->getCurrentRequest();
             // Rotate the session id on the privilege upgrade so a
@@ -110,13 +117,16 @@ final class SessionRestorer
                 }
             }
             if ($request === null || $this->principalNetworks === null || $principalPseudonym === '') {
-                return;
+                // The unwrap landed (or nothing pended); the network
+                // records are best-effort surface and their absence is
+                // still the terminal answer of this restore.
+                return $unwrapped ? StepUpSessionRestore::restored() : StepUpSessionRestore::nothingPending();
             }
             $ip = $this->clientIpResolver !== null
                 ? $this->clientIpResolver->resolve($request)
                 : (string) ($request->getClientIp() ?? '');
             if ($ip === '') {
-                return;
+                return $unwrapped ? StepUpSessionRestore::restored() : StepUpSessionRestore::nothingPending();
             }
             // Session and device bindings first, each in its own try:
             // the identity-bound tags are the stronger continuity
@@ -180,10 +190,14 @@ final class SessionRestorer
                     'message' => $e->getMessage(),
                 ]);
             }
+
+            return $unwrapped ? StepUpSessionRestore::restored() : StepUpSessionRestore::nothingPending();
         } catch (\Throwable $e) {
             $this->logger?->warning('kiwi step-up session restore failed: {message}', [
                 'message' => $e->getMessage(),
             ]);
+
+            return StepUpSessionRestore::failed();
         }
     }
 

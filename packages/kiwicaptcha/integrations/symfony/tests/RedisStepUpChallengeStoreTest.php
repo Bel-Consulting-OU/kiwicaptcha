@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\FactorRequirement;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
@@ -141,6 +142,121 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertNull($this->store->completeFactor($id, self::DEMAND_ID, str_repeat('b', 64), 1700000000, FactorRequirement::EMAIL_OTP, null), 'a wrong binding completes nothing');
         self::assertNotNull($this->store->read($id), 'the binding refusal consumed nothing');
         self::assertTrue($this->store->readDemand(self::DEMAND_ID)?->state->isOpen(), 'the binding refusal completed no demand');
+    }
+
+    public function testAWebAuthnRequiredDemandRefusesTheWeakerEmailOtpCompletion(): void
+    {
+        // The bypass test: a demand whose stored requirement names
+        // webauthn (rank 3) attempted with the email_otp factor (the
+        // challenge record's kind proves rank 1). The script reads the
+        // requirement off the demand and the factor identity off the
+        // stored challenge, never a caller argument, and refuses with
+        // both records untouched.
+        $id = 'fffffffffffffffffffffff';
+        $this->store->create($this->challenge($id), 300);
+        $required = new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3);
+        $demand = StepUpDemand::mint(self::DEMAND_ID, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $required);
+        $this->store->createDemand($demand, 300);
+        $challenge = $this->store->read($id);
+        self::assertNotNull($challenge);
+        $secretHash = (string) $challenge->clientSecretHash;
+
+        self::assertNull($this->store->completeFactor($id, self::DEMAND_ID, $secretHash, 1700000000, FactorRequirement::EMAIL_OTP, null), 'the weaker factor completes nothing');
+        self::assertNotNull($this->store->read($id), 'the weaker-factor refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand(self::DEMAND_ID)?->state->isOpen(), 'the weaker-factor refusal completed no demand');
+    }
+
+    public function testTheExactFactorIdRuleRefusesAnImposterAtTheRequiredRank(): void
+    {
+        // At the required rank a factor id other than the one the
+        // requirement names refuses: a deployment that binds its demand
+        // to a custom handler id is never answered by the reference
+        // factor of the same family.
+        $demandId = 'exactiddemandid00000000001';
+        $challengeId = 'exactidchallllllllllllll1';
+        $totpChallenge = StepUpChallenge::begin(
+            $challengeId,
+            StepUpChallengeKind::Totp,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            null,
+            null,
+            null,
+            false,
+            false,
+            null,
+            $demandId,
+        );
+        $this->store->create($totpChallenge, 300);
+        $customRequired = new FactorRequirement(FactorRequirement::TOTP, 'acme_otp', 2);
+        $demand = StepUpDemand::mint($demandId, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $customRequired);
+        $this->store->createDemand($demand, 300);
+        $secretHash = (string) $totpChallenge->clientSecretHash;
+
+        self::assertNull($this->store->completeFactor($challengeId, $demandId, $secretHash, 1700000000, FactorRequirement::TOTP, null), 'the reference factor never answers a custom factor id at its own rank');
+        self::assertNotNull($this->store->read($challengeId), 'the exact-id refusal consumed no challenge');
+
+        // A strictly stronger completion satisfies a weaker floor: the
+        // webauthn proof answers an email_otp demand, the ladder is a
+        // floor.
+        $strongerChallengeId = 'exactidchallllllllllllll3';
+        $webauthnChallenge = StepUpChallenge::begin(
+            $strongerChallengeId,
+            StepUpChallengeKind::WebAuthn,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            str_repeat('a', 64),
+            'assertion',
+            null,
+            false,
+            false,
+            null,
+            'exactiddemandid00000000003',
+        );
+        $this->store->create($webauthnChallenge, 300);
+        $emailRequired = new FactorRequirement(FactorRequirement::EMAIL_OTP, FactorRequirement::EMAIL_OTP, 1);
+        $weakerFloor = StepUpDemand::mint('exactiddemandid00000000003', 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $emailRequired);
+        $this->store->createDemand($weakerFloor, 300);
+        self::assertNotNull($this->store->completeFactor($strongerChallengeId, 'exactiddemandid00000000003', (string) $webauthnChallenge->clientSecretHash, 1700000000, FactorRequirement::WEBAUTHN, null), 'the strictly stronger completion satisfies the weaker floor');
+
+        // The matching requirement completes: the same kind satisfies
+        // the requirement the demand stored.
+        $totpRequired = new FactorRequirement(FactorRequirement::TOTP, FactorRequirement::TOTP, 2);
+        $totpDemand = StepUpDemand::mint('exactiddemandid00000000002', 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $totpRequired);
+        $totpChallenge = StepUpChallenge::begin(
+            'exactidchallllllllllllll2',
+            StepUpChallengeKind::Totp,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            null,
+            null,
+            null,
+            false,
+            false,
+            null,
+            'exactiddemandid00000000002',
+        );
+        $this->store->create($totpChallenge, 300);
+        $this->store->createDemand($totpDemand, 300);
+        self::assertNotNull($this->store->completeFactor('exactidchallllllllllllll2', 'exactiddemandid00000000002', (string) $totpChallenge->clientSecretHash, 1700000000, FactorRequirement::TOTP, null), 'the matching requirement completes');
     }
 
     public function testTheCompletionWritesTheEscalationMarkerForTheSession(): void
