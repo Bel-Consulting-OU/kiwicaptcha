@@ -22,31 +22,13 @@ use PHPUnit\Framework\TestCase;
  * code lives in the shared harness fixture, so the real-Predis lane
  * (StepUpStoreDifferentialRealPredisTest) runs the identical engine.
  *
- * The file also pins two of the documented divergences the sweep
- * normalizes away, loudly, so they can never silently widen:
- *
- *  - the forged escalation child. The array store refuses a child
- *    whose parent link names a different demand
- *    (ArrayStepUpChallengeStore.php line 393). The Redis escalation
- *    script checks the inherited expiry only
- *    (RedisStepUpChallengeStore.php line 382) and accepts such a
- *    child, repointing the family index at it. The behavior is per
- *    the script's documented contract: the expiry check is the
- *    documented inheritance gate. The path is unreachable through
- *    spawnChild, so the pin documents the gap instead of a src
- *    rewrite.
- *  - the superseded parent state field. The array store moves the
- *    parent state to superseded on supersede, the Redis script stamps
- *    superseded_by and keeps the pre-supersede state. Each store's
- *    own suite pins its shape as intended; the shared harness compares
- *    the superseded-ness both mean, and this file pins the observable
- *    difference itself.
- *
- * The third divergence is the lockout deadline unit: epoch seconds on
- * the array store, milliseconds on the Redis store, against a
- * documented epoch-second contract. It is pinned on the real-Predis
- * lane. The emulated client never interprets the lock-arm script, so
- * the unit difference is only observable against the live server.
+ * Three store divergences the sweep surfaced are eliminated in src
+ * with the parity demanded here. The supersede script requires the
+ * exact lineage in both directions; both stores write the superseded
+ * terminal inside the supersede transaction; both stores answer
+ * lockout deadlines in epoch seconds. This file keeps a raw-state
+ * parity pin for the supersede terminal, and the real-Predis lane
+ * pins the epoch-second lockout contract against the live server.
  */
 final class StepUpStoreDifferentialTest extends TestCase
 {

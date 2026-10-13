@@ -10,7 +10,7 @@ Security patches are released for the **latest minor of every supported major li
 | `kiwicaptcha-php` | latest `1.x`. |
 | `kiwicaptcha-risk` (Rust) | latest `0.1.x`, pre-1.0: patches land on `0.1`. |
 | `kiwicaptcha-risk-php` | latest `1.0.x`: patches land on `1.0`. |
-| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r2` solver protocol id; older protocol ids are not patched, so upgrade the asset set. |
+| `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-09-r1` solver protocol id; older protocol ids are not patched, so upgrade the asset set. |
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major. |
 
 Repository releases are **monorepo snapshots**: each artifact keeps its own independent version.

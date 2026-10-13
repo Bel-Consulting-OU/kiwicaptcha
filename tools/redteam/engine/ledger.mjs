@@ -19,6 +19,12 @@
  *   - campaign name exact (the document's campaign field, not the
  *     filename),
  *   - seed exact (the seed this ledger invocation runs under),
+ *   - profile exact and topology exact (the target profile and the
+ *     replication topology this ledger invocation grades evidence
+ *     under: KIWI_RT_PROFILE or "redis", and the topology that profile
+ *     boots, the same mapping exit-criteria.sh applies), so a pass
+ *     recorded under one deployment shape is never selectable as
+ *     evidence for another,
  *   - exit status present and 0,
  *   - verdict/result PASS,
  *   - the document parses and carries the required schema fields
@@ -30,11 +36,16 @@
  * is that slot's evidence. A document missing any of the three digests
  * (pre-upgrade evidence) never satisfies: the slot reads stale/RED with
  * the reason, and the ledger never falls back to an older passing run
- * of a different seed or shape. A malformed or unreadable document is
- * skipped with a stderr note naming the file, is reported against its
- * slot (filename convention, best effort), and never lets selection
- * fall through to an older successful run silently: when a newer
- * refused document sits above the selected run, the row names it.
+ * of a different seed or shape. The same holds for a document missing
+ * the profile or topology binding: it predates schema /2 and is
+ * refused as pre-upgrade evidence, and a document recorded under a
+ * different profile or topology is refused with both values named,
+ * the same field != expected vocabulary the digest refusals use. A
+ * malformed or unreadable document is skipped with a stderr note
+ * naming the file, is reported against its slot (filename convention,
+ * best effort), and never lets selection fall through to an older
+ * successful run silently: when a newer refused document sits above
+ * the selected run, the row names it.
  *
  * Both files are generated: the header marks them as engine output,
  * the engine version is the seed, and regeneration is idempotent.
@@ -52,6 +63,23 @@ const RUNS_DIR = join(ENGINE_DIR, "runs");
 const seedArg = process.argv.includes("--seed")
     ? process.argv[process.argv.indexOf("--seed") + 1]
     : (process.env.KIWI_RT_SEED ?? "0x6b776d74");
+
+// The target profile this ledger invocation grades evidence under,
+// learned exactly the way the battery learns it (exit-criteria.sh):
+// the KIWI_RT_PROFILE environment variable or the "redis" default.
+const profileField = process.env.KIWI_RT_PROFILE || "redis";
+
+// The replication topology a profile boots, the same mapping
+// exit-criteria.sh applies when it writes run documents: 'sentinel'
+// is the sentinel trio, 'cluster' is the multi-primary cluster, and
+// every other profile (redis and the storage profiles) is the
+// single-primary reference deployment.
+function topologyOf(profile) {
+    if (profile === "sentinel") return "sentinel";
+    if (profile === "cluster") return "cluster";
+    return "single-primary";
+}
+const topologyField = topologyOf(profileField);
 
 // ---------- the evidence digests, computed against the current tree ----------
 import { productFingerprint, harnessFingerprint, campaignFingerprint } from "./fingerprint.mjs";
@@ -186,11 +214,15 @@ function scaleNote(run) {
  * The schema fields a run document must carry before it can be
  * evidence at all. A document missing any of the three digests is
  * pre-upgrade evidence and never satisfies — it is never backfilled.
+ * A document missing profile or topology predates the deployment
+ * binding (schema /2) and is pre-upgrade evidence the same way.
  */
 const REQUIRED_FIELDS = [
     "schema",
     "campaign",
     "seed",
+    "profile",
+    "topology",
     "exit",
     "result",
     "product_fingerprint",
@@ -231,13 +263,24 @@ function digestRefusal(run, campaign) {
 
 /**
  * Why this document can never be selected for the slot regardless of
- * digests: wrong campaign name, wrong seed, missing or non-zero exit,
- * non-PASS verdict, or a missing schema field.
+ * digests: wrong campaign name, wrong seed, wrong profile or topology,
+ * missing or non-zero exit, non-PASS verdict, or a missing schema
+ * field. A present-but-different profile or topology is refused with
+ * both values named, the same field != expected shape the digest
+ * refusals use; a missing one is left to the REQUIRED_FIELDS check
+ * below, which names it as pre-upgrade evidence.
  */
 function shapeRefusal(run, campaign) {
     if (run.campaign !== campaign) return "campaign name mismatch";
     if (run.seed !== seedArg) {
         return `seed ${JSON.stringify(run.seed)} != the ledger seed ${JSON.stringify(seedArg)}`;
+    }
+    for (const [field, want] of [["profile", profileField], ["topology", topologyField]]) {
+        const got = run[field];
+        if (got === undefined || got === null || got === "") continue;
+        if (got !== want) {
+            return `${field} ${JSON.stringify(got)} != the ledger ${field} ${JSON.stringify(want)}`;
+        }
     }
     if (typeof run.exit !== "number" || !Number.isFinite(run.exit)) {
         return "no exit status recorded";
@@ -513,18 +556,21 @@ const threats = `# THREATS
 The living output of the automated red-team engine (change.md Part 10).
 Generated from the runs ledger by \`tools/redteam/engine/ledger.mjs\`;
 regenerate with the orchestrator. Status GREEN means a recorded run of
-the campaign's required result holds under the current seed and the
-current product, harness and campaign digests; the digests prove which
-tree a run measured, and the recorded result, metrics and economics
+the campaign's required result holds under the current seed, the
+current target profile and topology, and the current product, harness
+and campaign digests; the digests prove which tree a run measured and
+the profile and topology prove which deployment shape it measured,
+and the recorded result, metrics and economics
 are trusted as written (they are not re-measured or signed here) while binding the CURRENT
 product, harness and campaign digests (engine/fingerprint.mjs), RED
 means it did not, NOT RUN means this environment has no run document
 for the campaign (that is not a pass and is never omitted from this
 table).
 
-Seed: \`${seedArg}\` · Campaign slots: ${EXPECTED_CAMPAIGNS.length} ·
-Recorded runs: ${slotsWithDocs} · Satisfying the current seed and
-digest contract: ${slotsSelected}
+Seed: \`${seedArg}\` · Profile: \`${profileField}\` ·
+Topology: \`${topologyField}\` · Campaign slots: ${EXPECTED_CAMPAIGNS.length} ·
+Recorded runs: ${slotsWithDocs} · Satisfying the current seed, profile
+and digest contract: ${slotsSelected}
 
 ## Method note
 
@@ -551,6 +597,11 @@ ${threatRows.join("\n")}
   old PASS evidence exactly as a product edit does — and the ledger
   never falls back to an older passing run of a different seed or
   shape. A document that predates the digest binding never satisfies.
+- Evidence is bound to the deployment shape too: every run document
+  records the target profile and the replication topology it measured,
+  and the ledger selects only runs recorded under its own profile and
+  topology. A document missing those fields predates the binding and
+  never satisfies; a mismatch is refused with both values named.
 - Known tiny-scale facts from the recorded evidence, stated honestly
   (transcribed from the run documents and runs/env/gate logs, not
   invented): the D3.5 wire sample paid 13,215,184 proof-of-work hashes
@@ -657,5 +708,5 @@ ${reference.provenance?.honesty ?? ""}
 }
 
 console.log(`ledger: ${EXPECTED_CAMPAIGNS.length} campaign slots aggregated`
-    + ` (${slotsWithDocs} with recorded runs, ${slotsSelected} satisfying the current seed and digest contract);`
+    + ` (${slotsWithDocs} with recorded runs, ${slotsSelected} satisfying the current seed, profile and digest contract);`
     + " THREATS.md generated");

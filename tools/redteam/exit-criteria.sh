@@ -4,6 +4,11 @@
 # gate: it fails on ANY red, including the repository's own gates, and
 # it has no excuse rows. A criterion the toolchain cannot run prints
 # TOOLCHAIN-ABSENT with the exact blocker, and that is non-green too.
+# A criterion whose required manual qualification is still pending
+# prints PENDING with the pending rows named, and that is non-green
+# too: the d3.16 slot renders PENDING while an accessibility or
+# autofill manual qualification row has not passed, whatever the
+# automated lane shows.
 #
 # The rows (each mapped to its 9.5 clause):
 #   open-findings       zero open findings of medium severity or above
@@ -46,6 +51,11 @@
 #                       cluster (tools/redteam/cluster.sh suites)
 #   d3.14-privacy       the privacy campaign row
 #   d3.17-parity        the cross-SDK parity campaign row
+#   d3.16-qualification the accessibility slot's manual qualification
+#                       state: GREEN only when the campaign passed AND
+#                       every QUALIFICATION matrix reports qualified;
+#                       pending manual rows render PENDING (non-green)
+#                       with the matrices and manual row counts named
 #   differential-parity the rust/php fixture hash pair, the limits and
 #                       the protocol manifest contract gates
 #   docs-lint           the prose ratchet at its baseline (any failure
@@ -66,8 +76,10 @@
 # KIWI_EC_SKIP_* skips a row and the row prints SKIP; the exit is
 # red unless KIWI_EC_ALLOW_SKIP=1 accepts SKIP rows (and only SKIP
 # rows). A skipped row is never green — it prints as SKIP even when
-# the operator accepts it — and a RED or TOOLCHAIN-ABSENT row can
-# never be excused by any knob.
+# the operator accepts it — and a RED, TOOLCHAIN-ABSENT or PENDING
+# row can never be excused by any knob: a pending manual
+# qualification is release work that has not happened, and only a
+# completed qualification turns its row green.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -81,6 +93,22 @@ mkdir -p "$GATE_DIR"
 SEED_HEX=${KIWI_RT_SEED#0x}
 RESULT=0
 START_TS=$(date +%s)
+
+# The deployment topology the run documents record beside the profile.
+# target.sh names the profiles: 'redis' boots the single-primary
+# reference deployment, 'sentinel' boots the sentinel trio, and the
+# cluster row boots the multi-primary cluster; the storage profiles
+# (sqlite, files, sidecar) are single-primary by construction. The
+# string travels in every run document so a pass under one deployment
+# shape is never selectable as evidence for another.
+topology_of() {
+    case "$1" in
+        sentinel) echo "sentinel" ;;
+        cluster) echo "cluster" ;;
+        *) echo "single-primary" ;;
+    esac
+}
+TOPOLOGY=$(topology_of "$KIWI_RT_PROFILE")
 # The invocation start timestamp every artifact freshness check compares
 # against: an artifact written before GATE_T0 is a leftover from an
 # earlier invocation, never this run's evidence.
@@ -88,9 +116,11 @@ GATE_T0=$START_TS
 
 ROWS=()
 # record <name> <kind> <verdict> <measured-value>
-# Only an explicit GREEN is non-failing. RED, SKIP, TOOLCHAIN-ABSENT
-# and any unexpected verdict all close the gate: there is no verdict
-# string that downgrades a failure into a non-gating note.
+# Only an explicit GREEN is non-failing. RED, SKIP, TOOLCHAIN-ABSENT,
+# PENDING and any unexpected verdict all close the gate: there is no
+# verdict string that downgrades a failure or a pending qualification
+# into a non-gating note, and PENDING (unlike SKIP) is never tolerated
+# by any knob.
 record() {
     ROWS+=("$1|$2|$3|$4")
     if [ "$3" != "GREEN" ]; then
@@ -200,10 +230,11 @@ campaign_log_verdict() {
 # the fields the ledger requires. Prints nothing when the document
 # parses and is complete; prints the reason when it does not. Checked:
 # the schema marker; the non-empty strings (campaign, class, seed,
-# verdict, detail, source fingerprint, the three evidence digests, and
-# the started timestamp); a numeric non-negative duration; and the
-# metric and economic line fields, which must be non-empty strings so
-# a row never goes green without a recorded scale and economics.
+# verdict, detail, source fingerprint, the three evidence digests, the
+# started timestamp, and the target profile and topology the run was
+# measured under); a numeric non-negative duration; and the metric and
+# economic line fields, which must be non-empty strings so a row never
+# goes green without a recorded scale and economics.
 run_document_check() {
     [ -f "$1" ] || { echo "the document is missing at $1"; return 0; }
     python3 - "$1" <<'PYDOC'
@@ -218,13 +249,14 @@ except Exception as exc:
 
 if not isinstance(doc, dict):
     print("the document is not a json object")
-elif doc.get("schema") != "kiwicaptcha.redteam.run/1":
-    print("schema is %r, expected kiwicaptcha.redteam.run/1" % doc.get("schema"))
+elif doc.get("schema") != "kiwicaptcha.redteam.run/2":
+    print("schema is %r, expected kiwicaptcha.redteam.run/2" % doc.get("schema"))
 else:
     empty = [k for k in ("campaign", "attackClass", "seed", "result",
                          "detail", "source_fingerprint",
                          "product_fingerprint", "harness_fingerprint",
-                         "campaign_fingerprint", "started")
+                         "campaign_fingerprint", "started",
+                         "profile", "topology")
              if not (isinstance(doc.get(k), str) and doc[k].strip())]
     if empty:
         print("missing or empty field(s): %s" % ", ".join(empty))
@@ -318,11 +350,14 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     fi
     # A failed write, a missing or unparseable document, or a document
     # that fails the schema validation turns the row RED: the ledger
-    # entry is part of the measured result, never a side note.
+    # entry is part of the measured result, never a side note. The
+    # document binds the target profile and topology this invocation
+    # measured (schema /2), so a pass under one deployment shape can
+    # never be quoted as a pass under another.
     doc_ok=1
     doc_reason=""
     if ! node "$RT_DIR/engine/write-run.mjs" \
-        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$campaign_rc" "$doc_verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}" "$runtime_driver" "$runtime_overrides"; then
+        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$campaign_rc" "$doc_verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}" "$runtime_driver" "$runtime_overrides" "$KIWI_RT_PROFILE" "$TOPOLOGY"; then
         doc_ok=0
         doc_reason="the run document did not persist or validate (the writer failed; wanted $doc)"
         echo "exit-criteria: campaign $campaign failed to write its run document" >&2
@@ -334,12 +369,44 @@ for campaign in $CAMPAIGNS_EXPECTED; do
             echo "exit-criteria: campaign $campaign wrote an invalid run document: $doc_reason" >&2
         fi
     fi
-    if [ "$verdict" != "GREEN" ]; then
-        record "$campaign" campaign RED "$detail${doc_reason:+; $doc_reason}"
+    # The D3.16 evidence semantics: the automated compatibility lane is
+    # one necessary part of the slot row, never the whole of it. The
+    # campaign prints one QUALIFICATION record per matrix; the row is
+    # GREEN only when the campaign passed AND every matrix reports
+    # qualified. While a required manual qualification row is still
+    # pending, the row renders PENDING (non-green) with the pending
+    # matrices and manual row counts named, beside what the automated
+    # lane did prove. A log without any QUALIFICATION record cannot
+    # prove either state and is RED. PENDING keeps the gate closed and
+    # no knob excuses it.
+    row_verdict=$verdict
+    row_detail=$detail
+    if [ "$campaign" = "d3.16-accessibility" ] && [ "$verdict" = "GREEN" ] && [ "$doc_ok" = 1 ]; then
+        qual_pending=$(grep '^QUALIFICATION: pending' "$log" 2>/dev/null)
+        qual_pending_count=$(printf '%s\n' "$qual_pending" | grep -c '^QUALIFICATION: pending')
+        qual_total=$(grep -c '^QUALIFICATION:' "$log" 2>/dev/null)
+        qual_total=${qual_total:-0}
+        if [ "$qual_total" -eq 0 ]; then
+            row_verdict=RED
+            row_detail="the campaign log carries no QUALIFICATION record; the row is green only when every qualification matrix reports qualified"
+        elif [ "$qual_pending_count" -gt 0 ]; then
+            row_verdict=PENDING
+            pending_matrices=$(printf '%s\n' "$qual_pending" \
+                | awk '{ n = $3; sub(/^manual_rows=/, "", n); print $4 " (manual_rows=" n ")" }' \
+                | paste -sd, - | sed 's/,/, /g')
+            qual_qualified=$(grep -c '^QUALIFICATION: qualified' "$log" 2>/dev/null)
+            qual_qualified=${qual_qualified:-0}
+            row_detail="automated lane green ($detail); manual qualification PENDING in $qual_pending_count of $qual_total matrices ($pending_matrices); qualified matrices: $qual_qualified"
+        else
+            row_detail="$detail; every qualification matrix reports qualified (no manual row pending)"
+        fi
+    fi
+    if [ "$row_verdict" != "GREEN" ]; then
+        record "$campaign" campaign "$row_verdict" "$row_detail${doc_reason:+; $doc_reason}"
     elif [ "$doc_ok" != "1" ]; then
         record "$campaign" campaign RED "$doc_reason"
     else
-        record "$campaign" campaign GREEN "$detail"
+        record "$campaign" campaign GREEN "$row_detail"
     fi
 done
 
@@ -1081,31 +1148,40 @@ for row in "${ROWS[@]}"; do
     printf '  %-24s %-17s %s\n' "$name" "$verdict" "$value"
 done
 printf '  ==========================================================================================================================\n'
-red_count=0; absent_count=0; skip_count=0; green_count=0
+red_count=0; absent_count=0; skip_count=0; green_count=0; pending_count=0
 for row in "${ROWS[@]}"; do
     case "$(printf '%s' "$row" | cut -d'|' -f3)" in
         RED) red_count=$((red_count + 1)) ;;
         TOOLCHAIN-ABSENT) absent_count=$((absent_count + 1)) ;;
         SKIP) skip_count=$((skip_count + 1)) ;;
+        PENDING) pending_count=$((pending_count + 1)) ;;
         GREEN) green_count=$((green_count + 1)) ;;
         *) red_count=$((red_count + 1)) ;;
     esac
 done
-printf '  green=%d red=%d toolchain-absent=%d skip=%d (wall %ds)\n' "$green_count" "$red_count" "$absent_count" "$skip_count" "$ELAPSED"
+printf '  green=%d red=%d toolchain-absent=%d skip=%d pending=%d (wall %ds)\n' "$green_count" "$red_count" "$absent_count" "$skip_count" "$pending_count" "$ELAPSED"
 
 # The gate verdict is derived only from the row counts, never from a
-# separate flag: ANY red, absent, skip or unknown verdict is non-green,
-# and the string "ALL GREEN" is unobtainable while one exists. The exit
-# code follows the same rule: the gate exits non-zero whenever a red,
-# toolchain-absent or skip row exists, and KIWI_EC_ALLOW_SKIP=1 can
-# tolerate SKIP rows in the exit code only.
-if [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -eq 0 ] && [ "$RESULT" -eq 0 ]; then
+# separate flag: ANY red, absent, skip, pending or unknown verdict is
+# non-green, and the string "ALL GREEN" is unobtainable while one
+# exists. The exit code follows the same rule: the gate exits non-zero
+# whenever a red, toolchain-absent, skip or pending row exists, and
+# KIWI_EC_ALLOW_SKIP=1 can tolerate SKIP rows in the exit code only
+# (a PENDING row is a required manual qualification that has not
+# happened, and no knob tolerates it).
+if [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -eq 0 ] \
+    && [ "$pending_count" -eq 0 ] && [ "$RESULT" -eq 0 ]; then
     printf 'exit-criteria: ALL GREEN; the release gate is open\n'
     exit 0
 fi
 
-printf 'exit-criteria: non-green rows present (red=%d toolchain-absent=%d skip=%d); the release gate is closed\n' \
-    "$red_count" "$absent_count" "$skip_count"
+printf 'exit-criteria: non-green rows present (red=%d toolchain-absent=%d skip=%d pending=%d); the release gate is closed\n' \
+    "$red_count" "$absent_count" "$skip_count" "$pending_count"
+
+if [ "$pending_count" -gt 0 ]; then
+    printf 'exit-criteria: %d row(s) PENDING required manual qualification; a pending row is never green and no knob excuses it\n' \
+        "$pending_count"
+fi
 
 # A partial run is never a release verdict, whatever the knobs say: the
 # banner prints on every skip so the log cannot hide that rows went
@@ -1115,13 +1191,14 @@ if [ "$skip_count" -gt 0 ]; then
         "$skip_count"
 fi
 
-# KIWI_EC_ALLOW_SKIP=1 tolerates SKIP rows in the EXIT CODE only: a red
-# or toolchain-absent row is never excused, and the campaign lint (the
-# P3 gate) is never excusable at all — a skip of that row keeps the gate
-# closed. Skipped rows stay non-green in the table above even when the
-# operator accepts them.
+# KIWI_EC_ALLOW_SKIP=1 tolerates SKIP rows in the EXIT CODE only: a red,
+# toolchain-absent or pending row is never excused, and the campaign
+# lint (the P3 gate) is never excusable at all — a skip of that row
+# keeps the gate closed. Skipped and pending rows stay non-green in the
+# table above even when the operator accepts them.
 if [ "${KIWI_EC_ALLOW_SKIP:-0}" = 1 ] && [ "$CAMPAIGN_LINT_SKIPPED" != 1 ] \
-    && [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -gt 0 ]; then
+    && [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$pending_count" -eq 0 ] \
+    && [ "$skip_count" -gt 0 ]; then
     printf 'exit-criteria: GATE PARTIAL, exit 0 only because KIWI_EC_ALLOW_SKIP=1 tolerated %d skip row(s); the gate ran partially and this exit code is NOT a release verdict\n' \
         "$skip_count"
     exit 0

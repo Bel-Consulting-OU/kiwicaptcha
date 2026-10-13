@@ -61,8 +61,9 @@ function targetUp() {
 describe("exit-criteria source contract", () => {
     const src = readFileSync(GATE, "utf8");
 
-    test("SKIP rows remain non-green", () => {
-        assert.match(src, /those rows remain non-green/);
+    test("SKIP rows remain non-green and PENDING is never excusable", () => {
+        assert.match(src, /Skipped and pending rows stay non-green/);
+        assert.match(src, /a pending row is never green and no knob excuses it/);
     });
 
     test("record() treats every non-GREEN verdict as failing", () => {
@@ -121,15 +122,22 @@ describe("exit-criteria skip-mode run (needs the redis target)", () => {
         assert.match(stdout, /the release gate is closed/);
     });
 
-    test("KIWI_EC_ALLOW_SKIP=1 opens the gate but the message stays honest", (t) => {
+    test("KIWI_EC_ALLOW_SKIP=1 tolerates skips but never a pending qualification", (t) => {
         if (!targetUp()) {
             t.skip("redis target profile could not boot");
             return;
         }
         const { code, stdout } = runGate({ KIWI_EC_ALLOW_SKIP: "1" });
-        assert.equal(code, 0);
-        assert.match(stdout, /gate open ONLY because KIWI_EC_ALLOW_SKIP=1/);
-        assert.match(stdout, /remain non-green/);
+        // This harness also skips the P3 campaign-lint row, and that
+        // row is never excusable: ALLOW_SKIP tolerates ordinary SKIP
+        // rows only, so the gate stays closed, prints the partial-run
+        // banner, names the inexcusable lint skip, and never claims a
+        // partial pass. A pending qualification (d3.16 before its
+        // manual matrices complete) would likewise keep it closed.
+        assert.equal(code, 1, "the inexcusable P3 lint skip keeps the gate closed under ALLOW_SKIP");
+        assert.match(stdout, /THE GATE RAN PARTIALLY/);
+        assert.match(stdout, /the P3 gate is never excusable, the release gate stays RED/);
+        assert.ok(!/GATE PARTIAL, exit 0/.test(stdout), "ALLOW_SKIP must not print a partial pass over the lint skip");
         assert.ok(!/ALL GREEN/.test(stdout), "accepted skips must not print ALL GREEN");
     });
 

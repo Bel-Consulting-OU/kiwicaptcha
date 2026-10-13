@@ -66,6 +66,15 @@ steps:
           }
         done
         echo "workflow lint: every promotion-gate dependency names an existing lane"
+        # SECURITY.md's solver protocol id is machine-checked against
+        # the canonical constant, never hand-maintained.
+        CANONICAL_ID=$$(sed -n 's/.*"worker_protocol_id": *"\([^"]*\)".*/\1/p' protocol/limits.json)
+        [ -n "$$CANONICAL_ID" ] || { echo "workflow lint: no worker_protocol_id in protocol/limits.json" >&2; exit 1; }
+        grep -q "current \`$$CANONICAL_ID\` solver protocol id" SECURITY.md || {
+          echo "workflow lint: SECURITY.md names a stale solver protocol id (canonical: $$CANONICAL_ID)" >&2
+          exit 1
+        }
+        echo "workflow lint: SECURITY.md protocol id matches the canonical constant ($$CANONICAL_ID)"
       - sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
       - sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
       - bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt

@@ -10,7 +10,10 @@
  * The writer's contract (enforced here): the document path is the FIRST
  * argument and must live under engine/runs/. A path outside that
  * directory is refused — a shifted argv must never scatter campaign
- * files across the working directory.
+ * files across the working directory. The document also binds the
+ * deployment shape (schema /2): the target profile and topology travel
+ * in their own fields, and the ledger refuses a document whose profile
+ * or topology differs from its own.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -50,6 +53,46 @@ test("the run writer records the three digests and the ledger accepts them", () 
         assert.ok(run.method, "the writer records the method");
         assert.equal(run.campaign, "d3.1-commodity-nojs", "campaign lands in the campaign field");
         assert.equal(run.result, "PASS", "verdict lands in the result field");
+        // The deployment binding: schema /2 carries non-empty profile
+        // and topology strings (the fallbacks: KIWI_RT_PROFILE or
+        // "redis", and the single-primary topology).
+        assert.equal(run.schema, "kiwicaptcha.redteam.run/2", "the schema marker is /2");
+        assert.equal(typeof run.profile, "string");
+        assert.ok(run.profile.trim() !== "", "the profile field is a non-empty string");
+        assert.equal(typeof run.topology, "string");
+        assert.ok(run.topology.trim() !== "", "the topology field is a non-empty string");
+    } finally {
+        rmSync(doc, { force: true });
+    }
+});
+
+test("the writer records the caller's profile and topology verbatim", () => {
+    const doc = join(RUNS_DIR, `.fingerprint-profile-${Date.now()}.json`);
+    try {
+        // The battery's argv shape: empty driver and override slots,
+        // then the profile and the topology the gate derived.
+        writeRun(doc, ["", "", "sentinel", "sentinel"]);
+        const run = JSON.parse(readFileSync(doc, "utf8"));
+        assert.equal(run.schema, "kiwicaptcha.redteam.run/2", "the schema marker is /2");
+        assert.equal(run.profile, "sentinel", "the caller's profile lands verbatim");
+        assert.equal(run.topology, "sentinel", "the caller's topology lands verbatim");
+    } finally {
+        rmSync(doc, { force: true });
+    }
+});
+
+test("the writer resolves the profile from the environment and the topology default", () => {
+    const doc = join(RUNS_DIR, `.fingerprint-profile-default-${Date.now()}.json`);
+    try {
+        execFileSync("node", [
+            WRITER,
+            doc, "d3.1-commodity-nojs", "D3.1 commodity no-JS bots",
+            "0x6b776d74", new Date().toISOString(), "1", "0", "PASS", "ok",
+            "", "", "0", "offline-grammar",
+        ], { cwd: REPO_ROOT, stdio: "pipe", env: { ...process.env, KIWI_RT_PROFILE: "redis" } });
+        const run = JSON.parse(readFileSync(doc, "utf8"));
+        assert.equal(run.profile, "redis", "an unset profile argument falls back to KIWI_RT_PROFILE");
+        assert.equal(run.topology, "single-primary", "an unset topology argument falls back to single-primary");
     } finally {
         rmSync(doc, { force: true });
     }

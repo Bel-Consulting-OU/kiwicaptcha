@@ -36,10 +36,19 @@ steps:
       mkdir -p "$$CI_WORKSPACE/.ci-run-tmp/bin"
       tar -xzf /tmp/symfony-cli.tar.gz -C "$$CI_WORKSPACE/.ci-run-tmp/bin" symfony
       "$$CI_WORKSPACE/.ci-run-tmp/bin/symfony" --version
+      # php:8.3-cli ships no composer either; the app-scoped steps are
+      # fresh containers that reach this shared copy by absolute path.
+      curl -fsSL -o "$$CI_WORKSPACE/.ci-run-tmp/bin/composer" \
+        "https://github.com/composer/composer/releases/download/$${COMPOSER_VERSION}/composer.phar"
+      echo "$${COMPOSER_SHA256}  $$CI_WORKSPACE/.ci-run-tmp/bin/composer" | sha256sum -c -
+      chmod +x "$$CI_WORKSPACE/.ci-run-tmp/bin/composer"
+      "$$CI_WORKSPACE/.ci-run-tmp/bin/composer" --version
 
   environment:
     SYMFONY_CLI_VERSION: 5.20.0
     SYMFONY_CLI_SHA256: f50bfbbc1825a2f12a125ea4391f6f7c5b3d7e656901aeeeece0dd8bba135f36
+    COMPOSER_VERSION: 2.8.11
+    COMPOSER_SHA256: 257a969e9a9d27e0e45cfe954835c17a76033ba84a388e0f472db83eded65a8b
 - name: create-the-empty-lts-application-(--webapp)
   image: php:8.3-cli
   commands:
@@ -86,7 +95,7 @@ steps:
       {
         echo "KIWI_SECRET_KEY=$${KIWI_SECRET_KEY}"
         echo "KIWI_PUBLIC_URL=http://127.0.0.1:8000"
-        echo "KIWI_REDIS_DSN=redis://127.0.0.1:6379/0"
+        echo "KIWI_REDIS_DSN=redis://redis:6379/0"
       } >> .env.local
       cat .env.local
 
