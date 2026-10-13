@@ -3,8 +3,9 @@
  * ledger.mjs — the runs ledger aggregator and the output generator.
  *
  * Reads every run document the orchestrator wrote under
- * engine/runs/<ts>-<campaign>-seed<seed>.json, keeps the latest run
- * per campaign, and generates the two Part 10.4 outputs:
+ * engine/runs/<ts>-<campaign>-seed<seed>.json, selects ONE run per
+ * campaign slot under the strict evidence contract, and generates the
+ * two Part 10.4 outputs:
  *
  *   THREATS.md            the living table at the repo root: attack
  *                         class, current economic result, status,
@@ -12,13 +13,35 @@
  *                         the bench reference costs and the fresh
  *                         measurement the campaigns recorded.
  *
+ * The selection invariant per campaign slot: the newest run document
+ * satisfying ALL of —
+ *
+ *   - campaign name exact (the document's campaign field, not the
+ *     filename),
+ *   - seed exact (the seed this ledger invocation runs under),
+ *   - exit status present and 0,
+ *   - verdict/result PASS,
+ *   - the document parses and carries the required schema fields
+ *     (including all three evidence digests), and
+ *   - product_fingerprint, harness_fingerprint and
+ *     campaign_fingerprint each equal the CURRENT tree's digests
+ *     (engine/fingerprint.mjs, computed now),
+ *
+ * is that slot's evidence. A document missing any of the three digests
+ * (pre-upgrade evidence) never satisfies: the slot reads stale/RED with
+ * the reason, and the ledger never falls back to an older passing run
+ * of a different seed or shape. A malformed or unreadable document is
+ * skipped with a stderr note naming the file, is reported against its
+ * slot (filename convention, best effort), and never lets selection
+ * fall through to an older successful run silently: when a newer
+ * refused document sits above the selected run, the row names it.
+ *
  * Both files are generated: the header marks them as engine output,
  * the engine version is the seed, and regeneration is idempotent.
  */
 
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -30,16 +53,73 @@ const seedArg = process.argv.includes("--seed")
     ? process.argv[process.argv.indexOf("--seed") + 1]
     : (process.env.KIWI_RT_SEED ?? "0x6b776d74");
 
-// ---------- the runs ledger ----------
-const byCampaign = new Map();
-for (const name of readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json")).sort()) {
-    try {
-        const run = JSON.parse(readFileSync(join(RUNS_DIR, name), "utf8"));
-        if (!run.campaign) continue;
-        byCampaign.set(run.campaign, run);
-    } catch {
-        // an unreadable run document is skipped, never fatal
+// ---------- the evidence digests, computed against the current tree ----------
+import { productFingerprint, harnessFingerprint, campaignFingerprint } from "./fingerprint.mjs";
+
+let currentProduct = null;
+let currentHarness = null;
+let digestError = null;
+try {
+    currentProduct = productFingerprint();
+    currentHarness = harnessFingerprint();
+} catch (err) {
+    // Fail closed: without the current digests nothing can be fresh.
+    digestError = err.message;
+}
+const campaignDigestCache = new Map();
+function campaignDigest(campaign) {
+    if (!campaignDigestCache.has(campaign)) {
+        try {
+            campaignDigestCache.set(campaign, { digest: campaignFingerprint(campaign) });
+        } catch (err) {
+            campaignDigestCache.set(campaign, { error: err.message });
+        }
     }
+    return campaignDigestCache.get(campaign);
+}
+
+// ---------- the runs ledger ----------
+// The filename convention (write-run callers): <ts>-<campaign>-seed<seed>.json.
+const RUN_DOC_NAME_RE = /^\d{8}T\d{6}Z-(.+)-seed-.+\.json$/;
+// Engine bookkeeping that lives beside the run documents but is never
+// one: the escalation record, the LLM-consult evidence, the triage
+// reports. They are not run documents and are not named as malformed.
+const BOOKKEEPING_RE = /^(escalations\.json|agent-loop-evidence\.json|triage-.*\.json)$/;
+
+// Chronological (filename-sorted) event list per campaign slot. Parsed
+// documents are attributed by their campaign field; an unreadable file
+// cannot name a campaign, so its filename decides the slot it is
+// reported against (best effort — the stderr note names it regardless).
+const slotEvents = new Map();
+
+for (const name of readdirSync(RUNS_DIR).filter((f) => f.endsWith(".json")).sort()) {
+    if (BOOKKEEPING_RE.test(name)) continue;
+    let run = null;
+    try {
+        run = JSON.parse(readFileSync(join(RUNS_DIR, name), "utf8"));
+    } catch (err) {
+        console.error(`ledger: skipping unreadable run document ${name}: ${err.message}`);
+        const m = RUN_DOC_NAME_RE.exec(name);
+        if (m) {
+            const events = slotEvents.get(m[1]) ?? [];
+            events.push({ kind: "unreadable", file: name, reason: `parse error: ${err.message}` });
+            slotEvents.set(m[1], events);
+        }
+        continue;
+    }
+    if (!run || typeof run.campaign !== "string" || run.campaign === "") {
+        console.error(`ledger: skipping unreadable run document ${name}: no campaign field`);
+        const m = RUN_DOC_NAME_RE.exec(name);
+        if (m) {
+            const events = slotEvents.get(m[1]) ?? [];
+            events.push({ kind: "unreadable", file: name, reason: "no campaign field" });
+            slotEvents.set(m[1], events);
+        }
+        continue;
+    }
+    const events = slotEvents.get(run.campaign) ?? [];
+    events.push({ kind: "doc", file: name, run });
+    slotEvents.set(run.campaign, events);
 }
 
 // Every documented campaign slot (the 9.3 list). A slot without a
@@ -103,24 +183,148 @@ function scaleNote(run) {
 }
 
 /**
- * A run is stale when the source fingerprint it recorded no longer
- * matches the current tree. The fingerprint is a content hash of the
- * measured source tree, computed by the shared engine/fingerprint.mjs
- * (the orchestrator records it in every run document). Any error is
- * treated as STALE (fail closed).
+ * The schema fields a run document must carry before it can be
+ * evidence at all. A document missing any of the three digests is
+ * pre-upgrade evidence and never satisfies — it is never backfilled.
  */
-import { sourceFingerprint } from "./fingerprint.mjs";
+const REQUIRED_FIELDS = [
+    "schema",
+    "campaign",
+    "seed",
+    "exit",
+    "result",
+    "product_fingerprint",
+    "harness_fingerprint",
+    "campaign_fingerprint",
+];
 
-function isStaleRun(run) {
-    if (!run) return true;
-    try {
-        const current = sourceFingerprint();
-        const recorded = run.source_fingerprint || run.sourceFingerprint;
-        if (!recorded) return true;
-        return recorded !== current;
-    } catch {
-        return true;
+/**
+ * Why the digests of this run no longer match the current tree, or
+ * null when all three bind. The mismatch is named field by field so a
+ * stale row says exactly which surface moved.
+ */
+function digestRefusal(run, campaign) {
+    if (digestError !== null) {
+        return `the current digests could not be computed (${digestError})`;
     }
+    const missing = ["product_fingerprint", "harness_fingerprint", "campaign_fingerprint"]
+        .filter((f) => typeof run[f] !== "string" || run[f] === "");
+    if (missing.length > 0) {
+        return `the document carries no ${missing.join(", ")} — pre-upgrade evidence predating the digest binding`;
+    }
+    const cd = campaignDigest(campaign);
+    const mismatches = [];
+    if (run.product_fingerprint !== currentProduct) {
+        mismatches.push(`product_fingerprint ${run.product_fingerprint} != current ${currentProduct}`);
+    }
+    if (run.harness_fingerprint !== currentHarness) {
+        mismatches.push(`harness_fingerprint ${run.harness_fingerprint} != current ${currentHarness}`);
+    }
+    if (cd.error) {
+        mismatches.push(`campaign_fingerprint could not be computed: ${cd.error}`);
+    } else if (run.campaign_fingerprint !== cd.digest) {
+        mismatches.push(`campaign_fingerprint ${run.campaign_fingerprint} != current ${cd.digest}`);
+    }
+    if (mismatches.length > 0) return mismatches.join("; ");
+    return null;
+}
+
+/**
+ * Why this document can never be selected for the slot regardless of
+ * digests: wrong campaign name, wrong seed, missing or non-zero exit,
+ * non-PASS verdict, or a missing schema field.
+ */
+function shapeRefusal(run, campaign) {
+    if (run.campaign !== campaign) return "campaign name mismatch";
+    if (run.seed !== seedArg) {
+        return `seed ${JSON.stringify(run.seed)} != the ledger seed ${JSON.stringify(seedArg)}`;
+    }
+    if (typeof run.exit !== "number" || !Number.isFinite(run.exit)) {
+        return "no exit status recorded";
+    }
+    if (run.exit !== 0) return `exit status ${run.exit}`;
+    if (run.result !== "PASS") return `result ${JSON.stringify(run.result)}`;
+    const missing = REQUIRED_FIELDS.filter((f) => run[f] === undefined || run[f] === null || run[f] === "");
+    if (missing.length > 0) return `missing required field(s): ${missing.join(", ")}`;
+    return null;
+}
+
+function qualifies(run, campaign) {
+    // Digest first: stale evidence is refused with its mismatch even
+    // when the shape is also wrong.
+    return digestRefusal(run, campaign) === null && shapeRefusal(run, campaign) === null;
+}
+
+/**
+ * The row note when an event refuses to be evidence. Digest failures
+ * read STALE with the mismatch named; shape failures read REFUSED and
+ * say the ledger never falls back to an older passing run of a
+ * different seed or shape.
+ */
+function refusalNoteOf(ev, campaign) {
+    if (ev.kind === "unreadable") {
+        return {
+            status: "RED",
+            verdict: `unreadable run document (${ev.file})`,
+            evidence: `STALE: the newest run document for this slot is unreadable (${ev.file}: ${ev.reason}); it is never evidence. Re-run the campaign.`,
+        };
+    }
+    const digest = digestRefusal(ev.run, campaign);
+    if (digest !== null) {
+        return {
+            status: "RED",
+            verdict: `stale run: ${digest}`,
+            evidence: `STALE: ${digest}. Re-run the campaign against the current tree; a leftover run is never a pass.`,
+        };
+    }
+    const shape = shapeRefusal(ev.run, campaign);
+    if (shape !== null) {
+        return {
+            status: "RED",
+            verdict: `refused run document: ${shape}`,
+            evidence: `REFUSED: the newest run document does not satisfy the selection contract (${shape}); the ledger never falls back to an older passing run of a different seed or shape. Re-run the campaign.`,
+        };
+    }
+    return null;
+}
+
+/**
+ * Strict per-slot selection: the newest document satisfying the whole
+ * contract (campaign, seed, exit 0, PASS, schema, all three digests
+ * current). No qualifying document means the slot is not fresh; the
+ * note carries the newest document's refusal (or NOT RUN). When a
+ * newer refused document sits above the selected run, the refusal is
+ * carried so a fall-through to the older qualifying run is never
+ * silent.
+ */
+function selectRun(campaign) {
+    const events = slotEvents.get(campaign) ?? [];
+    let selected = null;
+    for (const ev of events) {
+        if (ev.kind === "doc" && qualifies(ev.run, campaign)) selected = ev;
+    }
+    const newest = events.length > 0 ? events[events.length - 1] : null;
+    if (selected !== null) {
+        return {
+            run: selected.run,
+            file: selected.file,
+            note: null,
+            newerRefusal: newest !== selected ? refusalNoteOf(newest, campaign) : null,
+        };
+    }
+    const note = newest !== null
+        ? refusalNoteOf(newest, campaign)
+        : {
+            status: "NOT RUN",
+            verdict: "no recorded run under tools/redteam/engine/runs/",
+            evidence: "NOT RUN: this environment has no run document for this campaign; it is not a pass",
+        };
+    return { run: null, file: null, note, newerRefusal: null };
+}
+
+const selections = new Map();
+for (const { campaign } of EXPECTED_CAMPAIGNS) {
+    selections.set(campaign, selectRun(campaign));
 }
 
 /**
@@ -157,13 +361,16 @@ function productMethodGap(run) {
     return null;
 }
 
-function statusOf(run) {
-    if (!run) return { status: "NOT RUN", verdict: "no recorded run under tools/redteam/engine/runs/", evidence: "NOT RUN: this environment has no run document for this campaign; it is not a pass" };
-    if (isStaleRun(run)) {
+function statusOf(run, campaign) {
+    // Defensive fail-closed re-check: a selected run already passed
+    // every check, but the tree is hashed again here so a digest that
+    // changed mid-generation can never ride through as GREEN.
+    const digest = digestRefusal(run, campaign);
+    if (digest !== null) {
         return {
             status: "RED",
-            verdict: "stale run: the recorded source fingerprint does not match the current tree",
-            evidence: "STALE: the run document's source fingerprint does not match the current tree. Re-run the campaign against the current tree; a leftover run is never a pass.",
+            verdict: `stale run: ${digest}`,
+            evidence: `STALE: ${digest}. Re-run the campaign against the current tree; a leftover run is never a pass.`,
         };
     }
     const gap = productMethodGap(run);
@@ -181,14 +388,24 @@ function statusOf(run) {
 }
 
 /**
+ * The honest footnote when the selected run is NOT the slot's newest
+ * document: a newer document was refused, and the fall-through to the
+ * older qualifying run is stated in the row instead of hiding.
+ */
+function evidenceSuffix(selection) {
+    if (!selection.newerRefusal) return "";
+    return ` (a newer run document was refused: ${selection.newerRefusal.verdict})`;
+}
+
+/**
  * D3.5 is one row: step-up prevention volume and compromise economics
  * are measurements of the same run, so they share one status. The row
  * is RED whenever the measured verdict is FAIL (real compromises never
  * ride into a green cell) or the run itself did not pass — a single run
  * is never reported as both GREEN and RED.
  */
-function d35Row(run) {
-    const evidence = scaleNote(run);
+function d35Row(run, suffix = "") {
+    const evidence = scaleNote(run) + suffix;
     if (!run) {
         return "| D3.5 credential stuffing | no measured economics | NOT RUN | NOT RUN: no run document; not a pass |";
     }
@@ -211,26 +428,33 @@ function d35Row(run) {
 }
 
 const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
-    const run = byCampaign.get(campaign);
-    if (campaign === "d3.5-credential-stuffing" && isStaleRun(run)) {
-        return `| D3.5 credential stuffing | stale run: the recorded evidence predates the source it measures | RED | STALE: the run document's source fingerprint does not match the current tree. Re-run the campaign. |`;
-    }
+    const sel = selections.get(campaign);
     if (campaign === "d3.5-credential-stuffing") {
-        return d35Row(run);
+        if (!sel.run) {
+            return `| D3.5 credential stuffing | ${sel.note.verdict} | ${sel.note.status} | ${sel.note.evidence} |`;
+        }
+        return d35Row(sel.run, evidenceSuffix(sel));
     }
-    const { status, verdict, evidence } = statusOf(run);
-    return `| ${attackClass} | ${verdict} | ${status} | ${evidence} |`;
+    if (!sel.run) {
+        return `| ${attackClass} | ${sel.note.verdict} | ${sel.note.status} | ${sel.note.evidence} |`;
+    }
+    const { status, verdict, evidence } = statusOf(sel.run, campaign);
+    return `| ${attackClass} | ${verdict} | ${status} | ${evidence}${evidenceSuffix(sel)} |`;
 }).flat();
 
 // The method note and the engine-loop facts (escalations and triage),
 // read from the engine's own ledger documents.
 // The method note is generated from the run documents themselves:
-    // each run records how the engine produced it (offline grammar or a
-    // consulted model). Nothing is hard-coded here.
-    const methodNotes = [...byCampaign.values()].map((r) => r && r.method).filter(Boolean);
-    let methodNote = methodNotes.length > 0
-        ? "the engine method is recorded per run: " + [...new Set(methodNotes)].join("; ")
-        : "the engine method is recorded per run (see the run documents)";
+// each run records how the engine produced it (offline grammar or a
+// consulted model). Nothing is hard-coded here. Only the SELECTED run
+// per slot speaks: a refused document's method is not the engine's
+// method.
+const methodNotes = EXPECTED_CAMPAIGNS
+    .map(({ campaign }) => selections.get(campaign)?.run?.method)
+    .filter(Boolean);
+let methodNote = methodNotes.length > 0
+    ? "the engine method is recorded per run: " + [...new Set(methodNotes)].join("; ")
+    : "the engine method is recorded per run (see the run documents)";
 let escalationNote = "no escalation record yet";
 let triageNote = "no triage report yet";
 try {
@@ -248,17 +472,24 @@ try {
     triageNote = `the synthesis corpus was consumed end to end: ${triage.candidates} candidates triaged, ${triage.refuted} refuted deterministically (two-run hash gate), ${triage.findingsFiled} findings filed, ${triage.unstable} unstable harnesses, ${inconclusive} inconclusive, ${harnessError} harness errors, ${triage.noHarness} classes without a harness`;
 } catch {}
 
+const slotsWithDocs = EXPECTED_CAMPAIGNS.filter(({ campaign }) =>
+    (slotEvents.get(campaign) ?? []).some((ev) => ev.kind === "doc")).length;
+const slotsSelected = EXPECTED_CAMPAIGNS.filter(({ campaign }) => selections.get(campaign)?.run).length;
+
 const threats = `# THREATS
 
 The living output of the automated red-team engine (change.md Part 10).
 Generated from the runs ledger by \`tools/redteam/engine/ledger.mjs\`;
 regenerate with the orchestrator. Status GREEN means a real recorded
-run of the campaign's required result held, RED means it did not,
-NOT RUN means this environment has no run document for the campaign
-(that is not a pass and is never omitted from this table).
+run of the campaign's required result held while binding the CURRENT
+product, harness and campaign digests (engine/fingerprint.mjs), RED
+means it did not, NOT RUN means this environment has no run document
+for the campaign (that is not a pass and is never omitted from this
+table).
 
 Seed: \`${seedArg}\` · Campaign slots: ${EXPECTED_CAMPAIGNS.length} ·
-Recorded runs: ${EXPECTED_CAMPAIGNS.filter((c) => byCampaign.has(c.campaign)).length}
+Recorded runs: ${slotsWithDocs} · Satisfying the current seed and
+digest contract: ${slotsSelected}
 
 ## Method note
 
@@ -279,6 +510,12 @@ ${threatRows.join("\n")}
   never restated as a solve count.
 - A campaign without a recorded run is listed NOT RUN with its reason.
   Green is never claimed without a run document.
+- Evidence is bound to three digests recorded at run time (product,
+  harness, campaign). A run whose digests do not match the current
+  tree is STALE, never a pass — a campaign or harness edit invalidates
+  old PASS evidence exactly as a product edit does — and the ledger
+  never falls back to an older passing run of a different seed or
+  shape. A document that predates the digest binding never satisfies.
 - Known tiny-scale facts from the recorded evidence, stated honestly
   (transcribed from the run documents and runs/env/gate logs, not
   invented): the D3.5 wire sample paid 13,215,184 proof-of-work hashes
@@ -321,7 +558,7 @@ if (costIsRich) {
         .map((rate) => `| ${rate.hardware_class} | ${rate.hashes_per_second.toExponential(1)} hashes/s | sha256 | ${rate.id} |`);
 
     const measured = EXPECTED_CAMPAIGNS
-        .map(({ campaign }) => byCampaign.get(campaign))
+        .map(({ campaign }) => selections.get(campaign)?.run)
         .filter(Boolean)
         .map((run) => run.metrics?.sha16_solve_us)
         .filter((v) => typeof v === "number" && v > 0);
@@ -385,5 +622,5 @@ ${reference.provenance?.honesty ?? ""}
 }
 
 console.log(`ledger: ${EXPECTED_CAMPAIGNS.length} campaign slots aggregated`
-    + ` (${EXPECTED_CAMPAIGNS.filter((c) => byCampaign.has(c.campaign)).length} with recorded runs);`
+    + ` (${slotsWithDocs} with recorded runs, ${slotsSelected} satisfying the current seed and digest contract);`
     + " THREATS.md generated");

@@ -1,9 +1,11 @@
 /**
  * fingerprint.test.mjs — the full evidence chain: the run writer
- * (write-run.mjs) records the shared source fingerprint in a run
- * document, and the ledger's isStaleRun() reports it as not stale when
- * the fingerprint matches the current tree. Probes are written relative
- * to the resolved repository root so the test is directory-independent.
+ * (write-run.mjs) records the THREE evidence digests (product,
+ * harness, campaign) in a run document — with source_fingerprint kept
+ * as the alias of the product digest — and the ledger's selection
+ * reports the document as satisfying the digest contract while the
+ * digests match the current tree. Probes are written relative to the
+ * resolved repository root so the test is directory-independent.
  *
  * The writer's contract (enforced here): the document path is the FIRST
  * argument and must live under engine/runs/. A path outside that
@@ -17,7 +19,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { sourceFingerprint } from "../fingerprint.mjs";
+import { sourceFingerprint, productFingerprint, harnessFingerprint, campaignFingerprint } from "../fingerprint.mjs";
 
 const ENGINE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const RUNS_DIR = join(ENGINE_DIR, "runs");
@@ -33,20 +35,21 @@ function writeRun(doc, extra = []) {
     ], { cwd: REPO_ROOT, stdio: "pipe" });
 }
 
-test("the run writer records a fingerprint and the ledger accepts it", () => {
+test("the run writer records the three digests and the ledger accepts them", () => {
     const doc = join(RUNS_DIR, `.fingerprint-test-${Date.now()}.json`);
     try {
         // The exact writer the orchestrator invokes: document path FIRST.
         writeRun(doc);
         assert.ok(existsSync(doc), "the writer must land the document under engine/runs/");
         const run = JSON.parse(readFileSync(doc, "utf8"));
-        assert.ok(run.source_fingerprint, "the writer records a fingerprint");
-        assert.equal(run.source_fingerprint, sourceFingerprint(), "the fingerprint matches the current tree");
+        assert.equal(run.product_fingerprint, productFingerprint(), "the product digest matches the current tree");
+        assert.equal(run.harness_fingerprint, harnessFingerprint(), "the harness digest matches the current tree");
+        assert.equal(run.campaign_fingerprint, campaignFingerprint("d3.1-commodity-nojs"), "the campaign digest matches the current tree");
+        // The transition alias: source_fingerprint is the product digest.
+        assert.equal(run.source_fingerprint, run.product_fingerprint, "source_fingerprint aliases the product digest");
         assert.ok(run.method, "the writer records the method");
         assert.equal(run.campaign, "d3.1-commodity-nojs", "campaign lands in the campaign field");
         assert.equal(run.result, "PASS", "verdict lands in the result field");
-        // The ledger's staleness rule: matching fingerprint is not stale.
-        assert.equal(run.source_fingerprint, sourceFingerprint());
     } finally {
         rmSync(doc, { force: true });
     }
@@ -111,14 +114,16 @@ test("orchestrator-shaped end to end: document lands in runs/ and the ledger doe
         writeRun(doc);
         const run = JSON.parse(readFileSync(doc, "utf8"));
         // Same shape the orchestrator now produces: doc path first, fields
-        // in the documented order. The ledger must see a current fingerprint.
-        assert.equal(run.source_fingerprint, sourceFingerprint());
+        // in the documented order. The ledger must see current digests.
+        assert.equal(run.product_fingerprint, productFingerprint());
         assert.notEqual(run.result, undefined, "result field present");
         assert.equal(typeof run.duration_s, "number", "duration_s is numeric");
         assert.equal(typeof run.exit, "number", "exit is numeric");
-        // A STALE status is a fingerprint mismatch. Matching fingerprint
-        // means the ledger will not mark it STALE.
-        const isStale = run.source_fingerprint !== sourceFingerprint();
+        // A STALE status is a digest mismatch. Matching digests
+        // mean the ledger will not mark it STALE.
+        const isStale = run.product_fingerprint !== productFingerprint()
+            || run.harness_fingerprint !== harnessFingerprint()
+            || run.campaign_fingerprint !== campaignFingerprint(run.campaign);
         assert.equal(isStale, false, "a same-tree run is never STALE");
     } finally {
         rmSync(doc, { force: true });
@@ -127,41 +132,69 @@ test("orchestrator-shaped end to end: document lands in runs/ and the ledger doe
 
 test("a run without a fingerprint is always stale", () => {
     const run = { campaign: "d3.1-commodity-nojs", result: "PASS" };
-    assert.ok(!run.source_fingerprint, "no fingerprint recorded");
+    assert.ok(!run.product_fingerprint, "no fingerprint recorded");
 });
 
 test("a run with a different fingerprint is stale", () => {
-    const run = { source_fingerprint: "0".repeat(32), result: "PASS" };
-    assert.notEqual(run.source_fingerprint, sourceFingerprint());
+    const run = { product_fingerprint: "0".repeat(32), result: "PASS" };
+    assert.notEqual(run.product_fingerprint, productFingerprint());
 });
 
-test("the fingerprint is deterministic across calls", () => {
+test("the fingerprints are deterministic across calls", () => {
     assert.equal(sourceFingerprint(), sourceFingerprint());
+    assert.equal(productFingerprint(), productFingerprint());
+    assert.equal(harnessFingerprint(), harnessFingerprint());
+    assert.equal(campaignFingerprint("d3.1-commodity-nojs"), campaignFingerprint("d3.1-commodity-nojs"));
 });
 
-test("the fingerprint is git-tracked-only: untracked build output never changes it", () => {
-    const before = sourceFingerprint();
+test("the product digest is git-tracked-only: untracked build output never changes it", () => {
+    const before = productFingerprint();
     // A probe in a build-output directory that git ignores.
     const probe = join(REPO_ROOT, "packages", "kiwicaptcha-wasm", ".fingerprint-probe-" + Date.now() + ".tmp");
     try {
         writeFileSync(probe, "x");
-        assert.equal(sourceFingerprint(), before, "an untracked build artifact never changes the fingerprint");
+        assert.equal(productFingerprint(), before, "an untracked build artifact never changes the digest");
     } finally {
         rmSync(probe, { force: true });
     }
 });
 
-test("the fingerprint changes when a TRACKED source file changes", () => {
-    const before = sourceFingerprint();
+test("an untracked file does not change the product digest", () => {
+    const before = productFingerprint();
     // A new file under packages/ that git would track.
     const probe = join(REPO_ROOT, "packages", ".fingerprint-probe-" + Date.now() + ".tmp");
     try {
         writeFileSync(probe, "x");
-        // git ls-files won't list it (untracked), so the fingerprint is
+        // git ls-files won't list it (untracked), so the digest is
         // unchanged until it is added — this is the correct behaviour:
         // untracked leftovers must never make a run stale.
-        assert.equal(sourceFingerprint(), before, "an untracked file does not change the fingerprint");
+        assert.equal(productFingerprint(), before, "an untracked file does not change the digest");
     } finally {
         rmSync(probe, { force: true });
     }
+});
+
+test("the product digest covers deploy/ and the shipped wasm assets: both are inside its pathspec set", () => {
+    // The digest machinery (index OIDs + uncommitted diff) is proven
+    // sensitive by the sourceFingerprint tests above; here we prove the
+    // NEW surfaces are inside the hashed pathspec set.
+    const listed = execFileSync("git", [
+        "ls-files", "-s", "--",
+        "packages", "protocol", "integrations-platforms", "deploy", "packages/kiwicaptcha-wasm/assets",
+    ], { cwd: REPO_ROOT, encoding: "utf8" });
+    assert.ok(listed.includes("deploy/"), "deploy/ is inside the product digest's pathspec set");
+    assert.ok(listed.includes("packages/kiwicaptcha-wasm/assets/"), "the shipped wasm bytes are inside the pathspec set");
+});
+
+test("the campaign digest covers the campaign script and the lib files it names", () => {
+    // d3.3 names lib/rt.kernel.php inside a heredoc require — the parse
+    // must see it (the transitive gap is documented, the direct mention
+    // is binding).
+    const d33 = campaignFingerprint("d3.3-pow-economics");
+    const d31 = campaignFingerprint("d3.1-commodity-nojs");
+    assert.notEqual(d33, d31, "different campaigns digest differently");
+    // A campaign without a script fails closed.
+    assert.throws(() => campaignFingerprint("no-such-campaign"), /no campaign script/);
+    // Traversal is refused.
+    assert.throws(() => campaignFingerprint("../deploy"), /invalid campaign name/);
 });
