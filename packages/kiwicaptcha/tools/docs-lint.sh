@@ -489,7 +489,7 @@ DUPAWK
 
 excluded() {
   "$AWK_BIN" '
-    /\/vendor\// || /\/node_modules\// || /\/target\// || /\/pkg\// || /\/assets\// || /\/resources\// || /\/Resources\/public\// || /\/\.venv\// || /\/\.pytest_cache\// || /\/\.git\// { next }
+    /\/vendor\// || /\/node_modules\// || /\/target\// || /\/pkg\// || /\/assets\// || /\/resources\// || /\/Resources\/public\// || /\/\.venv\// || /\/\.pytest_cache\// || /\/\.git\// || /\/test-results\// { next }
     { print }
   '
 }
