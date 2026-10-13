@@ -108,7 +108,15 @@ const overridesField = args[14] !== undefined && args[14] !== "" ? Number(args[1
 // KIWI_RT_PROFILE or "redis" (exit-criteria.sh's default), and the
 // single-primary reference topology.
 const profileField = args[15] && args[15] !== "" ? args[15] : (process.env.KIWI_RT_PROFILE || "redis");
-const topologyField = args[16] && args[16] !== "" ? args[16] : "single-primary";
+function topologyOf(profile) {
+    if (profile === "sentinel") return "sentinel";
+    if (profile === "cluster") return "cluster";
+    return "single-primary";
+}
+// The fallback mirrors the ledger's topologyOf so an orchestrator run
+// under KIWI_RT_PROFILE=sentinel|cluster records the shape it ran on,
+// not a constant that the ledger would then refuse.
+const topologyField = args[16] && args[16] !== "" ? args[16] : topologyOf(profileField);
 
 mkdirSync(RUNS_DIR, { recursive: true });
 writeFileSync(

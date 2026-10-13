@@ -1499,9 +1499,9 @@ jobs:
           # whole-word (an unanchored 'round[- ]?[0-9]+' also matches
           # CSS transitions), and the P-digit shape requires a following
           # word boundary that is not a clause hyphen, so the P0-1
-          # criterion ids stay legal while a bare P0 severity tag does
+          # criterion ids stay legal while a bare P-digit severity tag does
           # not.
-          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b(?![-_0-9])''|ApexMa''il'
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|(^|[^A-Za-z0-9_])(?-i:P[0-3])([^A-Za-z0-9_-]|$)''|ApexMa''il'
           if rg -n -i \
             --glob '!CHANGELOG*' \
             --glob '!**/CHANGELOG*' \
@@ -1517,7 +1517,7 @@ jobs:
       - name: excluded-category match count (changelogs/workflows, informational)
         run: |
           echo "excluded-category matches (changelogs/workflows):"
-          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|round[- ]?[0-9]''+''|\bP[0-3]\b(?![-_0-9])'
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|round[- ]?[0-9]''+''|(^|[^A-Za-z0-9_])(?-i:P[0-3])([^A-Za-z0-9_-]|$)'
           rg -n -i --glob '*CHANGELOG*' --glob '.github/**' "$PATTERN" . 2>/dev/null | wc -l
 
   package-cargo:
