@@ -20,6 +20,10 @@ RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 . "$RT_DIR/lib/common.sh"
 
 RT_CAMPAIGN=d3.16-accessibility
+# The profile the battery grades under: the authoritative RESULT record
+# must name the campaign and profile the gate invoked, so the profile
+# honors the environment exactly like the deployment campaigns do.
+RT_PROFILE="${KIWI_RT_PROFILE:-default}"
 
 # ---------- the qualification validators and their mutation corpora ----------
 for validator in test-validate-autofill-qualification.mjs test-validate-accessibility-qualification.mjs; do
