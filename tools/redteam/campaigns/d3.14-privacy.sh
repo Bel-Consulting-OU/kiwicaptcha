@@ -56,13 +56,33 @@ echo "$CANARY_OUT"
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
 SQLITE_PATH="$RT_DIR/runs/env/$RT_PROFILE/kiwi.db"
 if [ -n "$REDIS_URL" ]; then
-    redis-cli -u "$REDIS_URL" --scan | while IFS= read -r key; do
-        redis-cli -u "$REDIS_URL" get "$key" >"$DUMP_DIR/redis-value.bin"
-        printf '%s' "$key" >"$DUMP_DIR/redis-key.txt"
-        cat "$DUMP_DIR/redis-key.txt" "$DUMP_DIR/redis-value.bin" >>"$DUMP_DIR/redis-all.txt"
-        printf '\n' >>"$DUMP_DIR/redis-all.txt"
-    done
-    rm -f "$DUMP_DIR/redis-key.txt" "$DUMP_DIR/redis-value.bin"
+    # One scanner process over the whole keyspace: the per-key
+    # redis-cli spawn of the previous shape turned a 500k-key target
+    # into a multi-hour walk (one fork per key). The dumped bytes and
+    # the file shape are identical (key then value then newline).
+    REPO_ROOT="$REPO_ROOT" DUMP_DIR="$DUMP_DIR" RT_REDIS_URL="$REDIS_URL" php -r '
+    $autoload = getenv("REPO_ROOT")."/packages/kiwicaptcha/integrations/symfony/vendor/autoload.php";
+    if (is_file($autoload)) { require_once $autoload; }
+    $client = new \\Predis\\Client(getenv("RT_REDIS_URL"));
+    $all = fopen(getenv("DUMP_DIR")."/redis-all.txt", "w");
+    $cursor = "0";
+    do {
+        $reply = $client->executeCommand(new \\Predis\\Command\\RawCommand("SCAN", [$cursor, "COUNT", "5000"]));
+        $cursor = (string) $reply[0];
+        foreach ($reply[1] as $key) {
+            // Non-string keys dump the refusal marker the redis-cli
+            // shape carried, never a crash: the scan must cover every
+            // key, and hashes, sets and ZSETs are part of the space.
+            try {
+                $value = $client->get($key);
+            } catch (\\Predis\\Response\\ServerException $e) {
+                $value = "(error ".$e->getMessage().")";
+            }
+            fwrite($all, $key.(is_string($value) ? $value : "")."\n");
+        }
+    } while ($cursor !== "0");
+    fclose($all);
+    '
 fi
 [ -f "$SQLITE_PATH" ] && cp "$SQLITE_PATH" "$DUMP_DIR/sqlite-copy.db"
 [ -d "$RT_DIR/runs/env/$RT_PROFILE/records" ] && cp -R "$RT_DIR/runs/env/$RT_PROFILE/records" "$DUMP_DIR/files-store" 2>/dev/null
