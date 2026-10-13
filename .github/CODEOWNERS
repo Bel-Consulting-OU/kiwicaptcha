@@ -1,0 +1,14 @@
+# The review-surface map the branch ruleset's code-owner requirement
+# reads. The security, protocol, build and deployment surfaces require
+# the owner's review on every change; everything else defaults to the
+# same owner because the ruleset demands two reviews on main anyway.
+*                               @sbelakho2
+/SECURITY.md                    @sbelakho2
+/THREATS.md                     @sbelakho2
+/protocol/                      @sbelakho2
+/.github/workflows/             @sbelakho2
+/.woodpecker/                   @sbelakho2
+/deploy/                        @sbelakho2
+/tools/redteam/                 @sbelakho2
+/tools/ci/                      @sbelakho2
+/packages/kiwicaptcha-wasm/assets/ @sbelakho2

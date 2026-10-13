@@ -2243,3 +2243,52 @@ jobs:
         run: node tools/ci/test-validate-autofill-qualification.mjs
       - name: adversarial mutation corpus of the accessibility-qualification validator
         run: node tools/ci/test-validate-accessibility-qualification.mjs
+  promotion-gate:
+    # The single aggregate required check for protected main. needs()
+    # gives the exact gate semantics on GitHub: a failed dependency
+    # skips this job, and a skipped required check blocks the branch —
+    # a broken functional job can never produce a green gate. The two
+    # deliberate exclusions are the nightly non-gating matrix and the
+    # dispatch-only manual hard-ratchet benchmark.
+    name: promotion-gate
+    needs:
+      - rust
+      - quick-start
+      - workflow-lint
+      - php
+      - php-matrix
+      - php-no-gmp
+      - symfony
+      - symfony-matrix
+      - redis
+      - docker-reference-deployment
+      - php-core-real-redis
+      - phpredis-siteverify
+      - redis-compat
+      - risk-rust
+      - risk-php
+      - risk-parity
+      - browser
+      - browser-a11y
+      - n1-compat
+      - repo-sanity
+      - release-contract
+      - doc-hygiene
+      - package-cargo
+      - package-composer
+      - lua-parity
+      - rust-redis-verify
+      - build-repro-a
+      - build-repro-b
+      - build-repro-compare
+      - symfony-assets
+      - perf-budget
+      - cross-language
+      - release-validator-mutation-suite
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: witness
+        run: |
+          echo "promotion-gate: every functional job in needs() finished green for ${GITHUB_SHA}"
