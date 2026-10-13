@@ -214,16 +214,14 @@ final class StepUpStoreDifferentialRealPredisTest extends TestCase
     }
 
     /**
-     * Divergence pin: the lockout deadline unit. Arming agrees; the
-     * deadline readback differs by a factor of one thousand. The array
-     * store side is the documented contract (epoch seconds), the Redis
-     * store side answers milliseconds. The one consumer
-     * (StepUpLockoutGuard::retryAfterSecs) subtracts the clock second
-     * from the deadline directly, so the Redis lane over-reports the
-     * wait by three orders of magnitude. The pin lives here because
-     * the emulated client never interprets the lock-arm script.
+     * Parity pin: the lockout deadline unit. Both stores arm the
+     * deadline in epoch seconds, the unit the interface contract
+     * names, and both answer the same value past an arm. The one
+     * consumer (StepUpLockoutGuard::retryAfterSecs) subtracts the
+     * clock second from the deadline directly, so a millisecond value
+     * on either lane would overstate the wait a thousandfold.
      */
-    public function testKnownDivergenceTheLockoutDeadlineUnitDiffers(): void
+    public function testTheLockoutDeadlineAnswersEpochSecondsOnBothStores(): void
     {
         $dimension = 'principal';
         $pseudonym = 'aabbccddeeff00112233445566778899';

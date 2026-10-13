@@ -22,9 +22,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
      *  - eval/evalsha/script: interprets the bundle's Lua scripts by their
      *    shape — semaphore acquire/release, outstanding-challenge
      *    issue/solve, the rate limiter, the scope-issuance sliding
-     *    window, calibration confirm/correct and
- *    the outcome-ledger confirm/correct, mirroring the scripts'
- *    semantics. It also interprets the kiwicaptcha core's consume,
+     *    window, calibration confirm/correct, the step-up lock arm and
+     *    the outcome-ledger confirm/correct, mirroring the scripts'
+     *    semantics. It also interprets the kiwicaptcha core's consume,
  *    cancel, delete-if-pending and commit-result scripts, so the same
  *    fake drives the core RedisStorage for the cancellation endpoint's
  *    record transitions. `EVALSHA` resolves the sha back to the body
@@ -795,6 +795,23 @@ final class FakePredisClient extends \Predis\Client
             }
 
             return $n;
+        }
+
+        if (str_contains($script, 'Step-up lockout')) {
+            // RedisStepUpChallengeStore::armLockout: keys[1] the lock
+            // key; argv[1] the epoch-second deadline, argv[2] the PX
+            // budget in millis. A strictly greater deadline replaces
+            // the stored one with its budget; a shorter or equal
+            // request leaves a live lock untouched. Always answers 1.
+            $key = (string) $keys[0];
+            $deadline = (int) $rest[0];
+            $current = isset($this->strings[$key]) ? (int) $this->strings[$key] : 0;
+            if ($deadline > $current) {
+                $this->strings[$key] = (string) $deadline;
+                $this->fakePexpire([$key, (int) $rest[1]]);
+            }
+
+            return 1;
         }
 
         if (str_contains($script, 'Step-up totp step')) {
