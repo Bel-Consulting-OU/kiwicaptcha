@@ -75,8 +75,8 @@ jobs:
           printf '%s\n' "$ruleset_json" | bash "$GITHUB_WORKSPACE/tools/ci/tag-ruleset-check.sh" "$ruleset_id"
         env:
           GH_TOKEN: ${{ github.token }}
-      - name: preflight — the main branch ruleset makes authorized HEAD mean reviewed
-        # The authorized-HEAD equality below proves the tag points at
+      - name: preflight — the main branch ruleset makes the authorized head mean reviewed
+        # The authorized-head equality below proves the tag points at
         # the current main head; it means "reviewed and gated" only if
         # main is actually protected. This step fails closed unless the
         # main-branch-protection ruleset is live and complete:
@@ -85,7 +85,7 @@ jobs:
         # commits, linear history, deletion and force-push prohibitions,
         # and the promotion-gate aggregate among the required checks. A
         # main branch that is not provably protected invalidates the
-        # HEAD equality and refuses the release.
+        # head equality and refuses the release.
         run: |
           set -euo pipefail
           branch_ruleset_id="24996828"

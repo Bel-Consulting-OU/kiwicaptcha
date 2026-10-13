@@ -144,8 +144,15 @@ campaign_log_verdict() {
     fail_count=$(grep -c '^RESULT: FAIL' "$logf" 2>/dev/null)
     fail_count=${fail_count:-0}
     fail_detail=$(grep '^RESULT: FAIL' "$logf" 2>/dev/null | tail -n 1 | cut -d' ' -f5-)
+    assert_fail=$(grep '^ASSERT: FAIL' "$logf" 2>/dev/null | head -n 1 | cut -d' ' -f5-)
     if [ "$crc" -ne 0 ]; then
-        printf 'RED campaign exited %s: %s (see %s)' "$crc" "${fail_detail:-no RESULT: FAIL record in the log}" "$logf"
+        if [ -n "$fail_detail" ]; then
+            printf 'RED campaign exited %s: %s (see %s)' "$crc" "$fail_detail" "$logf"
+        elif [ -n "$assert_fail" ]; then
+            printf 'RED campaign exited %s with a failed assertion and no final record: %s (see %s)' "$crc" "$assert_fail" "$logf"
+        else
+            printf 'RED campaign exited %s without a RESULT: FAIL record (see %s)' "$crc" "$logf"
+        fi
         return 0
     fi
     if [ "$fail_count" -gt 0 ]; then
@@ -155,14 +162,18 @@ campaign_log_verdict() {
     pass_count=$(grep -c "^RESULT: PASS $c $prof " "$logf" 2>/dev/null)
     pass_count=${pass_count:-0}
     if [ "$pass_count" -eq 0 ]; then
-        printf 'RED exit 0 without a RESULT: PASS record for %s %s' "$c" "$prof"
+        if [ -n "$assert_fail" ]; then
+            printf 'RED exit 0 with a failed assertion and no final record: %s' "$assert_fail"
+        else
+            printf 'RED exit 0 without a RESULT: PASS record for %s %s' "$c" "$prof"
+        fi
         return 0
     fi
     if [ "$pass_count" -gt 1 ]; then
         printf 'RED %s RESULT: PASS records for %s %s; the contract allows exactly one' "$pass_count" "$c" "$prof"
         return 0
     fi
-    pass_detail=$(grep "^RESULT: PASS $c $prof " "$logf" | tail -n 1 | cut -d' ' -f6-)
+    pass_detail=$(grep "^RESULT: PASS $c $prof " "$logf" | tail -n 1 | cut -d' ' -f5-)
     printf 'GREEN %s' "$pass_detail"
 }
 
@@ -170,9 +181,10 @@ campaign_log_verdict() {
 # the fields the ledger requires. Prints nothing when the document
 # parses and is complete; prints the reason when it does not. Checked:
 # the schema marker, the non-empty strings (campaign, class, seed,
-# verdict, detail, source fingerprint, the started timestamp), a
-# numeric non-negative duration (the finished timestamp is started
-# plus duration), and the metric and economic line fields.
+# verdict, detail, source fingerprint, the three evidence digests —
+# product, harness, campaign — and the started timestamp), a numeric
+# non-negative duration (the finished timestamp is started plus
+# duration), and the metric and economic line fields.
 run_document_check() {
     [ -f "$1" ] || { echo "the document is missing at $1"; return 0; }
     python3 - "$1" <<'PYDOC'
@@ -191,7 +203,9 @@ elif doc.get("schema") != "kiwicaptcha.redteam.run/1":
     print("schema is %r, expected kiwicaptcha.redteam.run/1" % doc.get("schema"))
 else:
     empty = [k for k in ("campaign", "attackClass", "seed", "result",
-                         "detail", "source_fingerprint", "started")
+                         "detail", "source_fingerprint",
+                         "product_fingerprint", "harness_fingerprint",
+                         "campaign_fingerprint", "started")
              if not (isinstance(doc.get(k), str) and doc[k].strip())]
     if empty:
         print("missing or empty field(s): %s" % ", ".join(empty))
@@ -268,12 +282,14 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     sha_us=$(grep -o 'sha16_solve_us=[0-9]*' "$log" | head -n 1 | cut -d= -f2)
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     doc="$RT_DIR/engine/runs/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
-    # The shared writer (write-run.mjs) records the source fingerprint
-    # and the engine method and refuses any path outside engine/runs.
-    # An inline writer without those fields is how runs went stale
-    # silently — never again. The RUNTIME line (driver=<class>
-    # container_overrides=<n>) is the product-method provenance the
-    # ledger checks for method:product campaigns.
+    # The shared writer (write-run.mjs) records the THREE evidence
+    # digests (product, harness, campaign — engine/fingerprint.mjs)
+    # and the engine method, and refuses any path outside engine/runs
+    # or a campaign whose digest cannot be computed. An inline writer
+    # without those fields is how runs went stale silently — never
+    # again. The RUNTIME line (driver=<class> container_overrides=<n>)
+    # is the product-method provenance the ledger checks for
+    # method:product campaigns.
     runtime_line=$(grep '^RUNTIME:' "$log" | tail -n 1)
     runtime_driver=$(printf '%s' "$runtime_line" | sed -n 's/^RUNTIME: driver=\([^ ]*\).*/\1/p')
     runtime_overrides=$(printf '%s' "$runtime_line" | sed -n 's/^RUNTIME:.*container_overrides=\([0-9]*\).*/\1/p')
