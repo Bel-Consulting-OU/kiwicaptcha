@@ -350,6 +350,7 @@ jobs:
             assets/widget-locales.js \
             assets/widget-compat.js \
             assets/widget-shims.js \
+            assets/webauthn-ceremony.js \
             assets/widget.css
           echo "strict rebuild == committed/tested assets"
       - name: release manifest (SHA-256 + SRI)
@@ -361,7 +362,7 @@ jobs:
         # flattening ambiguity across multiple upload paths).
         run: |
           set -euo pipefail
-          ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
+          ( cd assets && shasum -a 256 kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js webauthn-ceremony.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
       - name: release asset contract (workflow lists == generated manifests)
         # The asset contract is re-proven here on the exact artifacts
         # about to be attested and published: every asset in
@@ -452,6 +453,7 @@ jobs:
             ${{ github.workspace }}/widget-locales.js
             ${{ github.workspace }}/widget-compat.js
             ${{ github.workspace }}/widget-shims.js
+            ${{ github.workspace }}/webauthn-ceremony.js
             ${{ github.workspace }}/widget.css
             ${{ github.workspace }}/execution-interpreter.js
             ${{ github.workspace }}/SHA256SUMS
@@ -498,6 +500,7 @@ jobs:
             "$GITHUB_WORKSPACE/widget-locales.js" \
             "$GITHUB_WORKSPACE/widget-compat.js" \
             "$GITHUB_WORKSPACE/widget-shims.js" \
+            "$GITHUB_WORKSPACE/webauthn-ceremony.js" \
             "$GITHUB_WORKSPACE/widget.css" \
             "$GITHUB_WORKSPACE/execution-interpreter.js" \
             "$GITHUB_WORKSPACE/SHA256SUMS" \
