@@ -9,12 +9,12 @@ Security patches are released for the **latest minor of every supported major li
 | `kiwicaptcha` (Rust core) | latest `1.x` (currently `1.7.0`). |
 | `kiwicaptcha-php` | latest `1.x`. |
 | `kiwicaptcha-risk` (Rust) | latest `0.1.x`, pre-1.0: patches land on `0.1`. |
-| `kiwicaptcha-risk-php` | latest `0.1.x`, pre-1.0: patches land on `0.1`. |
+| `kiwicaptcha-risk-php` | latest `1.0.x`: patches land on `1.0`. |
 | `kiwicaptcha-wasm` (assets + embed tooling) | current `2026-08-r2` solver protocol id; older protocol ids are not patched, so upgrade the asset set. |
 | Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) | latest release of each major. |
 
 Repository releases are **monorepo snapshots**: each artifact keeps its own independent version.
-Repository release tags and artifact versions are independent. For example, a repository `vX.Y.Z` release may contain `kiwicaptcha` `1.7.0`, `kiwicaptcha-php` `1.x`, the risk engines `0.1.x`, the current solver build, and the current Symfony bundle release.
+Repository release tags and artifact versions are independent. For example, a repository `vX.Y.Z` release may contain `kiwicaptcha` `1.7.0`, `kiwicaptcha-php` `1.x`, the PHP risk engine `1.0.x`, the Rust risk crate `0.1.0`, the current solver build, and the current Symfony bundle release.
 Advisories always name the **artifact and its version** (e.g. `kiwicaptcha (Rust core) 1.7.0`), never a bare repository tag.
 
 Users are expected to run the newest supported release.
@@ -35,8 +35,8 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
 
 ## Release and branch governance
 
-- **`refs/heads/main` is protected by an active branch ruleset**: pull requests are required (2 approving reviews for all changes; stale-review dismissal, last-push approval, review-thread resolution, `CODEOWNERS` review for `.github/workflows/**`, `protocol/**`, verifier/Redis code and build tooling).
-  All required security CI checks must pass (strict), currently 30 contexts. The count is the gating lane set the CI workflow emits per push. The version-matrix lanes gate through the two stable aggregators; the Redis 8 compatibility and PHP 8.6 nightly lanes are deliberately non-gating; the one-runner build-reproducibility lane runs weekly instead of per push. The set includes the performance-budgets gate, the quick-start end-to-end job, the PhpRedis Siteverify lane, the PHP core real-Redis fault/topology lane, the workflow-lint job, the two stable matrix aggregators and the release asset contract + governance fixtures job.
+- **`refs/heads/main` is protected by the active `main-branch-protection` ruleset (id 24996828)**. Pull requests are required: 2 approving reviews, stale-review dismissal, last-push approval, review-thread resolution and `CODEOWNERS` review, with the review surface mapped in `.github/CODEOWNERS`. Commits must be signed, linear history is required, deletion and force-push are blocked, and the bypass-actor list is empty.
+  The ruleset requires one aggregate context, `promotion-gate` (`.github/workflows/ci.yml`): its `needs()` list spans every gating job, a failed dependency skips the aggregate, and a skipped required check blocks the branch, so no broken job can coexist with a satisfied gate. The count of gating lanes is reviewed whenever a lane is added; the Redis 8 compatibility, PHP 8.6 nightly and manual hard-ratchet lanes are deliberately outside the aggregate.
   Version-matrix lanes gate through stable aggregators so future matrix expansion cannot silently change the externally visible check names.
   Deletion/force-push are blocked, linear history is required, and commits must be signed.
   No actor holds a ruleset bypass: both rulesets carry an empty
@@ -67,7 +67,7 @@ We ask for a 90-day coordinated-disclosure window from the report before public 
      A public mutable release can never be the outcome of a successful release run.
 - The workflow additionally fails instead of clobbering an existing release (`--clobber` is never used), and it refuses an existing release in the gate before any build or attestation work.
 - **Publication is CI-gated and ruleset-gated**: `.github/workflows/release.yml` re-verifies the live governance itself on every run, before building, attesting or publishing anything.
-  Its first step is the tag-ruleset preflight: the v* tag ruleset (id 20868582) must read as active, with the creation, deletion and non-fast-forward rules on `refs/tags/v*` and no routine bypass actor.
+  Its first steps are two ruleset preflights. The v* tag ruleset (id 20868582) must read as active, with the creation, deletion and non-fast-forward rules on `refs/tags/v*` and no routine bypass actor. The main-branch-protection ruleset (id 24996828) must read as active and complete: the review contract, signed commits, linear history, the deletion and force-push prohibitions, no bypass actors, and `promotion-gate` among the required checks. The authorized-head equality only means "reviewed and gated" when main is provably protected.
   The preflight fails closed, so a ruleset that is unreadable (including a 403 for the plain token) or missing any requirement refuses the release.
   The workflow then requires the exact tag-triggered CI run to have succeeded (head_sha + head_branch + event). It also requires the tag SHA to equal the current head of the authorized protected branch, a signed annotated tag pointing exactly at the workflow SHA, and the release asset contract to hold.
   The authorized branch is `main` by default; a maintenance release is cut only from an explicit protected `release/N.N` branch, selected through the `RELEASE_AUTHORIZED_BRANCH` repository variable.

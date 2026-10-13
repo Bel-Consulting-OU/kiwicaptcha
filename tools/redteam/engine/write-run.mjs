@@ -3,8 +3,21 @@
  * invokes this instead of an inline node -e that require()s an ESM
  * fingerprint module (require() of an ES module only works on recent
  * Node and throws ERR_REQUIRE_ESM on older ones). The writer computes
- * the source fingerprint once and records the engine method so the
- * ledger's method note is never a hard-coded fallback.
+ * the THREE evidence digests (product, harness, campaign) once and
+ * records the engine method so the ledger's method note is never a
+ * hard-coded fallback.
+ *
+ * The evidence identity: a run document is evidence only while all
+ * three digests still match the current tree (fingerprint.mjs). The
+ * product digest covers the code the campaigns attack (packages/,
+ * protocol/, integrations-platforms/, deploy/, the shipped wasm
+ * assets); the harness digest covers the machinery that produced the
+ * evidence (tools/redteam/engine, lib, target.sh, cluster.sh, the
+ * shared campaigns/lib); the campaign digest covers the campaign's own
+ * script and the lib files it names. source_fingerprint is still
+ * written as the alias of the product digest so pre-upgrade checks
+ * keep working during the transition; the ledger binds on the three
+ * new fields and treats their absence as stale evidence.
  *
  * Usage: node write-run.mjs <doc-path> <campaign> <class> <seed> <started> <duration> <rc> <verdict> <detail> <metric> <economic> <shaUs> <method> [driver] [containerOverrides]
  *
@@ -17,12 +30,16 @@
  * engine/runs/. A path outside that directory is refused: a shifted
  * argv must never scatter campaign-named files across the working
  * directory, and a mis-ordered call must fail loudly instead of
- * writing a document the ledger will later read as a real run.
+ * writing a document the ledger will later read as a real run. The
+ * writer also refuses to write when the campaign digest cannot be
+ * computed (no campaign script at tools/redteam/campaigns/<name>.sh):
+ * a document without its evidence identity must never land where the
+ * ledger will read it.
  */
 import { mkdirSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { join, resolve, sep, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sourceFingerprint } from "./fingerprint.mjs";
+import { productFingerprint, harnessFingerprint, campaignFingerprint } from "./fingerprint.mjs";
 
 const ENGINE_DIR = dirname(fileURLToPath(import.meta.url));
 const RUNS_DIR = join(ENGINE_DIR, "runs");
@@ -53,7 +70,24 @@ if (resolvedDoc !== resolvedRuns && !resolvedDoc.startsWith(resolvedRuns + sep))
     process.exit(3);
 }
 
-const fingerprint = sourceFingerprint();
+// The evidence identity is computed before anything is written: a
+// failure here (no campaign script, no git tree) refuses the write
+// with a named reason instead of landing a document the ledger would
+// have to refuse later.
+let product;
+let harness;
+let campaignDigest;
+try {
+    product = productFingerprint();
+    harness = harnessFingerprint();
+    campaignDigest = campaignFingerprint(campaign);
+} catch (err) {
+    console.error(
+        `write-run.mjs: REFUSING to write ${docPath}: the evidence digests could not be computed: ${err.message}`,
+    );
+    process.exit(5);
+}
+
 const methodField = method && method !== "" ? method : "offline-grammar (no local model consulted)";
 // The product-method provenance (optional 14th/15th arguments): the
 // booted driver class and its container override count.
@@ -74,7 +108,13 @@ writeFileSync(
             exit: Number(rc),
             result: verdict,
             detail,
-            source_fingerprint: fingerprint,
+            product_fingerprint: product,
+            harness_fingerprint: harness,
+            campaign_fingerprint: campaignDigest,
+            // Transition alias: the product digest under the legacy
+            // name, so existing source_fingerprint checks keep working
+            // while readers move to the three-field binding.
+            source_fingerprint: product,
             method: methodField,
             driver: driverField,
             container_overrides: overridesField,

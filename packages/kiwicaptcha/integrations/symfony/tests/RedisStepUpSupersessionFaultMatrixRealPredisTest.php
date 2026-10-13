@@ -357,9 +357,10 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
         self::assertNull($this->evalComplete($openId), 'dead end 1: the raw complete script answers nil for the superseded parent');
         self::assertSame($openRaw, $this->raw($openId), 'dead end 1: the parent record is byte-identical through every refused path');
 
-        // Shape 2: the escalator holding its own claim. The script
-        // kept the finalizing state and stamped the marker, so the
-        // authorized gate of the settle op has something to refuse.
+        // Shape 2: the escalator holding its own claim. The supersede
+        // transaction writes the whole terminal (state, stamp, marker)
+        // in one step, so the parent stands superseded the moment the
+        // script returns.
         $claimId = 'mxdeadendclaimparentid01';
         $claimChildId = 'mxdeadendclaimchildid001';
         $this->createParent($claimId, 'signup_email');
@@ -368,7 +369,7 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
         $claimChild = $this->spawnChild($claimId, $claimChildId);
         self::assertNotNull($this->store->supersedeDemandWithChild($claimId, $claimChild), 'dead end 2: the escalation of the claimed parent wins');
         $claimRaw = $this->raw($claimId);
-        self::assertSame('finalizing', $this->rawRecord($claimId)['state'] ?? '', 'dead end 2: the script kept the finalizing state field and stamped the marker only');
+        self::assertSame('superseded', $this->rawRecord($claimId)['state'] ?? '', 'dead end 2: the supersede transaction wrote the superseded terminal itself');
 
         self::assertNull($this->store->claimDemandFinalization($claimId, $this->now, 30), 'dead end 2: the marker refuses the claim');
         self::assertNull($this->store->settleDemandFinalization($claimId, StepUpDemandState::Authorized, $this->now), 'dead end 2: the wrapper settles nothing authorized on the superseded parent');
@@ -377,14 +378,12 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
         self::assertNull($this->evalComplete($claimId), 'dead end 2: the raw complete script answers nil against the marker');
         self::assertSame($claimRaw, $this->raw($claimId), 'dead end 2: the parent record is byte-identical through every refused path');
 
-        // The documented loser-denied lane: the denied terminal lands
-        // on the Redis lane where the state field was kept, while the
-        // array store answers null to the same call because its
-        // supersede moved the state field. This facet is part of the
-        // state-field divergence the differential suite pins.
-        self::assertNotNull($this->evalSettle($claimId, 'denied'), 'dead end 2: the raw denied settlement lands, the documented loser-denied lane');
-        self::assertSame('denied', $this->rawRecord($claimId)['state'] ?? '', 'dead end 2: the parent settled denied');
-        self::assertNull($this->store->settleDemandFinalization($claimId, StepUpDemandState::Authorized, $this->now), 'dead end 2: after the denied terminal the authorized settlement stays impossible');
+        // The superseded terminal is absorbing on the raw surface too:
+        // no settlement of any kind lands past it, because the terminal
+        // itself was the supersede transaction's output.
+        self::assertNull($this->evalSettle($claimId, 'denied'), 'dead end 2: the raw denied settlement is refused past the terminal');
+        self::assertNull($this->evalSettle($claimId, 'superseded'), 'dead end 2: a second superseded settlement is refused');
+        self::assertNull($this->store->settleDemandFinalization($claimId, StepUpDemandState::Authorized, $this->now), 'dead end 2: the authorized settlement stays impossible');
     }
 
     // ── helpers ─────────────────────────────────────────────────────

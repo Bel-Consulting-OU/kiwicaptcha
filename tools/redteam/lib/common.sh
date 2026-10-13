@@ -12,7 +12,11 @@
 #   <profile>/         scratch: redis db files, sqlite files, nginx cache
 #
 # Reporting contract, one line each on stdout:
-#   RESULT: PASS|FAIL <campaign> <profile> <detail>
+#   ASSERT: PASS|FAIL <campaign> <profile> <detail>   the intermediate
+#           assertion records, never the campaign verdict
+#   RESULT: PASS|FAIL <campaign> <profile> <summary>  the one final
+#           authoritative record; rt_finish prints exactly one as its
+#           last act and then exits with the verdict it states
 #   METRIC: <campaign> <profile> <key>=<value>
 #   ECONOMIC: <campaign> <profile> cost_per_accepted_abuse=<value> <note>
 
@@ -113,19 +117,24 @@ rt_verify_token() {
         "{\"token\":\"$token\",\"scope\":\"$scope\"}"
 }
 
-# The reporting helpers. FAIL accumulates; the campaign calls
-# rt_finish at the end and exits with the accumulated verdict.
+# The reporting helpers. Every helper counts one assertion, pass or
+# fail. FAIL accumulates; the campaign calls rt_finish at the end and
+# rt_finish prints the single authoritative RESULT line, then exits
+# with the verdict that line states.
 RT_FAILURES=0
+RT_ASSERTED=0
 RT_CAMPAIGN=unknown
 RT_PROFILE=default
 
 rt_report_pass() {
-    printf 'RESULT: PASS %s %s %s\n' "$RT_CAMPAIGN" "$RT_PROFILE" "$1"
+    RT_ASSERTED=$((RT_ASSERTED + 1))
+    printf 'ASSERT: PASS %s %s %s\n' "$RT_CAMPAIGN" "$RT_PROFILE" "$1"
 }
 
 rt_report_fail() {
+    RT_ASSERTED=$((RT_ASSERTED + 1))
     RT_FAILURES=$((RT_FAILURES + 1))
-    printf 'RESULT: FAIL %s %s %s\n' "$RT_CAMPAIGN" "$RT_PROFILE" "$1"
+    printf 'ASSERT: FAIL %s %s %s\n' "$RT_CAMPAIGN" "$RT_PROFILE" "$1"
 }
 
 rt_metric() {
@@ -137,6 +146,7 @@ rt_assert_eq() {
     want=$2
     what=$3
     if [ "$got" = "$want" ]; then
+        RT_ASSERTED=$((RT_ASSERTED + 1))
         return 0
     fi
     rt_report_fail "$what (got '$got', want '$want')"
@@ -148,19 +158,34 @@ rt_assert_contains() {
     needle=$2
     what=$3
     case "$haystack" in
-        *"$needle"*) return 0 ;;
+        *"$needle"*)
+            RT_ASSERTED=$((RT_ASSERTED + 1))
+            return 0
+            ;;
     esac
     rt_report_fail "$what (missing '$needle')"
     return 1
 }
 
+# The single authoritative final record. Every campaign ends here: on
+# any failure the RESULT: FAIL line is the last thing printed before
+# the exit, and on success the RESULT: PASS line (with the zero
+# failure count) is. A campaign that asserted nothing never passes:
+# that is a harness bug and fails in its own right.
 rt_finish() {
-    if [ "$RT_FAILURES" -eq 0 ]; then
-        exit 0
+    if [ "$RT_FAILURES" -gt 0 ]; then
+        printf 'RESULT: FAIL %s %s %d of %d assertions failed\n' \
+            "$RT_CAMPAIGN" "$RT_PROFILE" "$RT_FAILURES" "$RT_ASSERTED"
+        exit 1
     fi
-    printf 'RESULT: FAIL %s %s %d failed assertions\n' \
-        "$RT_CAMPAIGN" "$RT_PROFILE" "$RT_FAILURES" >&2
-    exit 1
+    if [ "$RT_ASSERTED" -eq 0 ]; then
+        printf 'RESULT: FAIL %s %s asserted nothing; that is a harness bug and fails in its own right\n' \
+            "$RT_CAMPAIGN" "$RT_PROFILE"
+        exit 1
+    fi
+    printf 'RESULT: PASS %s %s 0 of %d assertions failed\n' \
+        "$RT_CAMPAIGN" "$RT_PROFILE" "$RT_ASSERTED"
+    exit 0
 }
 
 # Boot the profile when no healthy target answers, remembering whether
@@ -184,7 +209,7 @@ rt_ensure_profile() {
     # scratch; the profile's own down cleans the ports first.
     if ! boot_profile; then
         rt_report_fail "target profile $profile failed to boot"
-        exit 1
+        rt_finish
     fi
     base=$(rt_base_url "$profile" 2>/dev/null || true)
     probe=$(curl -s --max-time 5 "$base/healthz" 2>/dev/null || true)
@@ -192,7 +217,7 @@ rt_ensure_profile() {
         *'"ok":true'* | ok*) ;;
         *)
             rt_report_fail "target profile $profile never answered healthz after boot"
-            exit 1
+            rt_finish
             ;;
     esac
     RT_OWNS_TARGET=1

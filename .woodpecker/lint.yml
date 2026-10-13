@@ -42,6 +42,18 @@ steps:
         cmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \
           packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md
         echo "accessibility documents byte-identical"
+      - |
+        set -eu
+        # The Woodpecker lanes are container-per-step: GitHub-only state
+        # variables (GITHUB_PATH, GITHUB_ENV, GITHUB_OUTPUT) never exist
+        # here and writing them has always been a silent no-op or an
+        # unbound-variable crash under set -u. The lint refuses any new
+        # occurrence so the class of bug stays dead.
+        if rg -n 'GITHUB_(PATH|ENV|OUTPUT)' .woodpecker/ ; then
+          echo "workflow lint: GitHub-only state variables in .woodpecker/ (see above)" >&2
+          exit 1
+        fi
+        echo "workflow lint: no GitHub-only state variables in the Woodpecker lanes"
       - sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
       - sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
       - bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt

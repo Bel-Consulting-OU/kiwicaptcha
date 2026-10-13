@@ -61,7 +61,7 @@ steps:
         cd "$$clean"
         composer init --no-interaction --name=ci/smoke
         composer config repositories.php '{"type": "path", "url": "'"$$clean"'/packages/kiwicaptcha-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-php": "1.0.0"}}}'
-        composer config repositories.risk '{"type": "path", "url": "'"$$clean"'/packages/kiwicaptcha-risk-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-risk-php": "0.1.0"}}}'
+        composer config repositories.risk '{"type": "path", "url": "'"$$clean"'/packages/kiwicaptcha-risk-php", "options": {"versions": {"kiwicaptcha/kiwicaptcha-risk-php": "1.0.0"}}}'
         composer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist
         test -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \
           || { echo 'risk-v1.lua not shipped in the published package'; exit 1; }

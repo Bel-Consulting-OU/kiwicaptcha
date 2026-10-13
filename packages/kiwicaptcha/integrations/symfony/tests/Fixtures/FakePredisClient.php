@@ -1021,6 +1021,11 @@ final class FakePredisClient extends \Predis\Client
             $child['created_at'] = $nowS;
             $this->strings[$childKey] = (string) json_encode($child, JSON_UNESCAPED_SLASHES);
             $this->fakePexpire([$childKey, $ttlMs]);
+            // The terminal lands in this one transaction, the same
+            // shape the production script writes: state, stamp and
+            // child link together.
+            $parent['state'] = 'superseded';
+            $parent['state_at'] = $nowS;
             $parent['superseded_by'] = (string) $rest[1];
             $this->strings[$parentKey] = (string) json_encode($parent, JSON_UNESCAPED_SLASHES);
             $this->fakePexpire([$parentKey, $ttlMs]);

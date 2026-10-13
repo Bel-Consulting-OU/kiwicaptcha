@@ -130,6 +130,83 @@ class_of() {
     esac
 }
 
+# campaign_log_verdict <campaign> <profile> <log> <rc> — the campaign
+# row verdict under the record contract. GREEN requires exit 0 AND
+# exactly one final authoritative RESULT: PASS record naming this
+# campaign and profile AND zero RESULT: FAIL records in the log;
+# anything else is RED with the specific reason. Prints
+# "<verdict> <detail>" on stdout, detail never empty.
+campaign_log_verdict() {
+    c=$1
+    prof=$2
+    logf=$3
+    crc=$4
+    fail_count=$(grep -c '^RESULT: FAIL' "$logf" 2>/dev/null)
+    fail_count=${fail_count:-0}
+    fail_detail=$(grep '^RESULT: FAIL' "$logf" 2>/dev/null | tail -n 1 | cut -d' ' -f5-)
+    if [ "$crc" -ne 0 ]; then
+        printf 'RED campaign exited %s: %s (see %s)' "$crc" "${fail_detail:-no RESULT: FAIL record in the log}" "$logf"
+        return 0
+    fi
+    if [ "$fail_count" -gt 0 ]; then
+        printf 'RED %s RESULT: FAIL record(s) in the log: %s' "$fail_count" "$fail_detail"
+        return 0
+    fi
+    pass_count=$(grep -c "^RESULT: PASS $c $prof " "$logf" 2>/dev/null)
+    pass_count=${pass_count:-0}
+    if [ "$pass_count" -eq 0 ]; then
+        printf 'RED exit 0 without a RESULT: PASS record for %s %s' "$c" "$prof"
+        return 0
+    fi
+    if [ "$pass_count" -gt 1 ]; then
+        printf 'RED %s RESULT: PASS records for %s %s; the contract allows exactly one' "$pass_count" "$c" "$prof"
+        return 0
+    fi
+    pass_detail=$(grep "^RESULT: PASS $c $prof " "$logf" | tail -n 1 | cut -d' ' -f6-)
+    printf 'GREEN %s' "$pass_detail"
+}
+
+# run_document_check <doc> — validates a persisted run document against
+# the fields the ledger requires. Prints nothing when the document
+# parses and is complete; prints the reason when it does not. Checked:
+# the schema marker, the non-empty strings (campaign, class, seed,
+# verdict, detail, source fingerprint, the started timestamp), a
+# numeric non-negative duration (the finished timestamp is started
+# plus duration), and the metric and economic line fields.
+run_document_check() {
+    [ -f "$1" ] || { echo "the document is missing at $1"; return 0; }
+    python3 - "$1" <<'PYDOC'
+import json, sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        doc = json.load(fh)
+except Exception as exc:
+    print("unreadable or unparseable (%s)" % exc)
+    raise SystemExit(0)
+
+if not isinstance(doc, dict):
+    print("the document is not a json object")
+elif doc.get("schema") != "kiwicaptcha.redteam.run/1":
+    print("schema is %r, expected kiwicaptcha.redteam.run/1" % doc.get("schema"))
+else:
+    empty = [k for k in ("campaign", "attackClass", "seed", "result",
+                         "detail", "source_fingerprint", "started")
+             if not (isinstance(doc.get(k), str) and doc[k].strip())]
+    if empty:
+        print("missing or empty field(s): %s" % ", ".join(empty))
+    elif doc.get("result") not in ("PASS", "FAIL"):
+        print("result is %r, not PASS or FAIL" % doc.get("result"))
+    elif not isinstance(doc.get("duration_s"), (int, float)) or doc["duration_s"] < 0:
+        print("duration_s is %r; the finished timestamp is started plus duration"
+              % doc.get("duration_s"))
+    elif not isinstance(doc.get("metrics"), dict) or not isinstance(doc["metrics"].get("raw"), str):
+        print("metrics.raw is missing or not a string (the metric line field)")
+    elif not isinstance(doc.get("economic"), str):
+        print("economic is missing or not a string (the economic line field)")
+PYDOC
+}
+
 # ---------- the full campaign battery (the gate's foundation) ----------
 # One row per documented campaign slot (17). A slot the configured
 # subset does not name, or whose script is absent, is printed as
@@ -167,34 +244,28 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     RAN_THIS_INVOCATION="$RAN_THIS_INVOCATION $campaign"
     started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     t0=$(date +%s)
-    if KIWI_RT_PROFILE="$KIWI_RT_PROFILE" bash "$RT_DIR/campaigns/$campaign.sh" >"$log" 2>&1; then
+    KIWI_RT_PROFILE="$KIWI_RT_PROFILE" bash "$RT_DIR/campaigns/$campaign.sh" >"$log" 2>&1
+    campaign_rc=$?
+    if [ "$campaign_rc" -eq 0 ]; then
         battery_passed=$((battery_passed + 1))
-        detail=$(grep '^RESULT: PASS' "$log" | tail -n 1 | cut -d' ' -f5-)
-        # The verdict stays GREEN on the exit code alone, but the detail
-        # must not claim more than was measured: a campaign that exited
-        # 0 without printing its RESULT line has asserted nothing.
-        record "$campaign" campaign GREEN "${detail:-exit 0 without a RESULT line}"
-        verdict=PASS
     else
         battery_failed="$battery_failed $campaign"
-        detail=$(grep '^RESULT: FAIL' "$log" | tail -n 1 | cut -d' ' -f5-)
-        record "$campaign" campaign RED "${detail:-campaign failed (see $log)}"
-        echo "exit-criteria: campaign $campaign FAILED (see $log)" >&2
-        verdict=FAIL
+        echo "exit-criteria: campaign $campaign exited $campaign_rc (see $log)" >&2
     fi
+    # The campaign verdict contract: exit 0 AND exactly one final
+    # RESULT: PASS record for this campaign and profile AND zero
+    # RESULT: FAIL records in the log. The run-document persistence
+    # check below completes the contract; anything else is RED with
+    # the specific reason.
+    verdict_line=$(campaign_log_verdict "$campaign" "$KIWI_RT_PROFILE" "$log" "$campaign_rc")
+    verdict=${verdict_line%% *}
+    detail=${verdict_line#* }
     # The run document is the ledger entry: this invocation's campaign
     # result, with its measured scale, is what THREATS.md will show.
     duration=$(( $(date +%s) - t0 ))
     metric_line=$(grep '^METRIC:' "$log" | tail -n 1 | cut -d' ' -f4-)
     economic_line=$(grep '^ECONOMIC:' "$log" | tail -n 1 | cut -d' ' -f4-)
     sha_us=$(grep -o 'sha16_solve_us=[0-9]*' "$log" | head -n 1 | cut -d= -f2)
-    if [ "$verdict" = "PASS" ]; then
-        detail=$(grep '^RESULT: PASS' "$log" | tail -n 1 | cut -d' ' -f5-)
-        detail=${detail:-exit 0 without a RESULT line}
-    else
-        detail=$(grep '^RESULT: FAIL' "$log" | tail -n 1 | cut -d' ' -f5-)
-        detail=${detail:-campaign failed without a RESULT line}
-    fi
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     doc="$RT_DIR/engine/runs/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
     # The shared writer (write-run.mjs) records the source fingerprint
@@ -206,9 +277,34 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     runtime_line=$(grep '^RUNTIME:' "$log" | tail -n 1)
     runtime_driver=$(printf '%s' "$runtime_line" | sed -n 's/^RUNTIME: driver=\([^ ]*\).*/\1/p')
     runtime_overrides=$(printf '%s' "$runtime_line" | sed -n 's/^RUNTIME:.*container_overrides=\([0-9]*\).*/\1/p')
+    doc_verdict=FAIL
+    if [ "$verdict" = "GREEN" ]; then
+        doc_verdict=PASS
+    fi
+    # A failed write, a missing or unparseable document, or a document
+    # that fails the schema validation turns the row RED: the ledger
+    # entry is part of the measured result, never a side note.
+    doc_ok=1
+    doc_reason=""
     if ! node "$RT_DIR/engine/write-run.mjs" \
-        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$([ "$verdict" = PASS ] && echo 0 || echo 1)" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}" "$runtime_driver" "$runtime_overrides"; then
+        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$campaign_rc" "$doc_verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "${KIWI_RT_METHOD:-offline-grammar (no local model consulted)}" "$runtime_driver" "$runtime_overrides"; then
+        doc_ok=0
+        doc_reason="the run document did not persist or validate (the writer failed; wanted $doc)"
         echo "exit-criteria: campaign $campaign failed to write its run document" >&2
+    else
+        doc_reason=$(run_document_check "$doc")
+        if [ -n "$doc_reason" ]; then
+            doc_ok=0
+            doc_reason="the run document did not persist or validate ($doc_reason)"
+            echo "exit-criteria: campaign $campaign wrote an invalid run document: $doc_reason" >&2
+        fi
+    fi
+    if [ "$verdict" != "GREEN" ]; then
+        record "$campaign" campaign RED "$detail${doc_reason:+; $doc_reason}"
+    elif [ "$doc_ok" != "1" ]; then
+        record "$campaign" campaign RED "$doc_reason"
+    else
+        record "$campaign" campaign GREEN "$detail"
     fi
 done
 
@@ -717,8 +813,10 @@ for pair in "d3.14-privacy:d3.14-privacy:privacy" "d3.17-cross-sdk-parity:d3.17-
         record "$name" "$kind" RED "$STALE_ARTIFACT ($log)"
     elif [ -f "$log" ] && grep -q "RESULT: FAIL" "$log"; then
         record "$name" "$kind" RED "$(grep 'RESULT: FAIL' "$log" | tail -1 | cut -d' ' -f5-)"
-    elif [ -f "$log" ]; then
+    elif [ -f "$log" ] && grep -q "^RESULT: PASS $campaign " "$log"; then
         record "$name" "$kind" GREEN "campaign green ($(grep -c 'ASSERT: PASS' "$log") asserted facts)"
+    elif [ -f "$log" ]; then
+        record "$name" "$kind" RED "exit 0 without a RESULT: PASS record for $campaign"
     else
         record "$name" "$kind" RED "no campaign log"
     fi

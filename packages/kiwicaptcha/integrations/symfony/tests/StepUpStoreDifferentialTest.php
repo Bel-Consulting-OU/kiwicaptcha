@@ -108,9 +108,9 @@ final class StepUpStoreDifferentialTest extends TestCase
      * both, so the follow-up superseded settlement lands only where
      * the state field was kept.
      */
-    public function testKnownDivergenceTheSupersededParentStateFieldDiffers(): void
+    public function testTheSupersededTerminalIsWrittenInsideTheSupersedeOnBothStores(): void
     {
-        [$arrayStore, $redisStore] = $this->stores();
+        [$arrayStore, $redisStore, $fake] = $this->stores();
         $parentId = 'statefielparentid0000001';
         $childId = 'statefielchildid00000001';
         $parent = StepUpDemand::mint($parentId, 'login', null, null, 'decision-1', self::BASE_NOW, 600);
@@ -127,13 +127,23 @@ final class StepUpStoreDifferentialTest extends TestCase
 
         self::assertNotNull($a);
         self::assertNotNull($r);
-        self::assertSame(StepUpDemandState::Superseded, $a->state, 'the array store moves the parent state field to superseded');
-        self::assertSame(StepUpDemandState::Finalizing, $r->state, 'known divergence: the Redis script keeps the pre-supersede state field and stamps superseded_by only');
+        // Raw-state parity: the whole terminal transition is the one
+        // supersede transaction on both stores. The parent carries the
+        // superseded state, the stamp and the child link together; no
+        // follow-up settlement exists on either lane.
+        self::assertSame(StepUpDemandState::Superseded, $a->state, 'the array store writes the superseded terminal');
+        self::assertSame(StepUpDemandState::Superseded, $r->state, 'the Redis script writes the superseded terminal in the same transaction');
         self::assertSame($childId, $a->supersededByDemandId);
         self::assertSame($childId, $r->supersededByDemandId, 'the marker itself agrees');
+        // Each stamp is that store's own supersede-time: the array
+        // store stamps its injected clock, the Redis script stamps the
+        // server clock it owns. The stores never share a clock, so the
+        // parity claim is the stamp provenance, not one shared value.
+        self::assertSame(self::BASE_NOW, $a->stateAt, 'the array store stamps its own clock');
+        self::assertSame((int) floor($fake->timeMs() / 1000), $r->stateAt, 'the Redis script stamps the server clock');
 
-        self::assertNull($arrayStore->settleDemandFinalization($parentId, StepUpDemandState::Superseded, self::BASE_NOW), 'the array store: the supersede already wrote the terminal, a second settle answers null');
-        self::assertNotNull($redisStore->settleDemandFinalization($parentId, StepUpDemandState::Superseded, self::BASE_NOW), 'known divergence: the Redis lane kept state finalizing, so the escalator follow-up settlement lands');
+        self::assertNull($arrayStore->settleDemandFinalization($parentId, StepUpDemandState::Superseded, self::BASE_NOW), 'the array store: the terminal already stands, a second settle answers null');
+        self::assertNull($redisStore->settleDemandFinalization($parentId, StepUpDemandState::Superseded, self::BASE_NOW), 'the Redis store: the terminal already stands, a second settle answers null');
         self::assertNull($arrayStore->settleDemandFinalization($parentId, StepUpDemandState::Authorized, self::BASE_NOW), 'the superseded parent authorizes through nothing on the array store');
         self::assertNull($redisStore->settleDemandFinalization($parentId, StepUpDemandState::Authorized, self::BASE_NOW), 'the superseded parent authorizes through nothing on the Redis store');
     }
