@@ -30,10 +30,12 @@ steps:
       curl -fsSL -o /tmp/symfony-cli.tar.gz \
         "https://github.com/symfony-cli/symfony-cli/releases/download/v$${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz"
       echo "$${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz" | sha256sum -c -
-      mkdir -p "$$HOME/.symfony5/bin"
-      tar -xzf /tmp/symfony-cli.tar.gz -C "$$HOME/.symfony5/bin" symfony
-      "$$HOME/.symfony5/bin/symfony" --version
-      echo "$$HOME/.symfony5/bin" >> "$$GITHUB_PATH"
+      # The binary lands in the shared workspace, never the step
+      # container's HOME: every later step is a fresh container and
+      # reaches it by absolute path. No GitHub-only state variables.
+      mkdir -p "$$CI_WORKSPACE/.ci-run-tmp/bin"
+      tar -xzf /tmp/symfony-cli.tar.gz -C "$$CI_WORKSPACE/.ci-run-tmp/bin" symfony
+      "$$CI_WORKSPACE/.ci-run-tmp/bin/symfony" --version
 
   environment:
     SYMFONY_CLI_VERSION: 5.20.0
@@ -45,7 +47,9 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -eu
 
-    symfony new kiwi-smoke --version=lts --webapp
+    cd "$$CI_WORKSPACE/.ci-run-tmp"
+
+    "$$CI_WORKSPACE/.ci-run-tmp/bin/symfony" new kiwi-smoke --version=lts --webapp
 
     '
 - name: require-the-bundle-from-packagist-(no-path-repository)
@@ -54,6 +58,8 @@ steps:
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -eu
+
+    cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
 
     composer require "bel-consulting/kiwicaptcha-symfony:$${KIWICAPTCHA_BUNDLE_VERSION:?KIWICAPTCHA_BUNDLE_VERSION must be provided}" --no-interaction --no-progress
 
@@ -65,7 +71,10 @@ steps:
   commands:
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
-  - php bin/console about
+  - |
+      set -eu
+      cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
+      php bin/console about
 - name: write-the-documented-minimum-configuration-(secret,-public-u
   image: php:8.3-cli
   commands:
@@ -73,6 +82,7 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
+      cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
       {
         echo "KIWI_SECRET_KEY=$${KIWI_SECRET_KEY}"
         echo "KIWI_PUBLIC_URL=http://127.0.0.1:8000"
@@ -88,6 +98,7 @@ steps:
   - set -eu
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - 'set -eu
+    cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
 
     php bin/console kiwicaptcha:doctor
 
@@ -114,6 +125,7 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
+      cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
       mkdir -p src/Form src/Controller templates
       cat > src/Form/CaptchaDemoType.php <<'PHP'
       <?php
@@ -207,7 +219,8 @@ steps:
   - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp"
   - |
       set -eu
-      symfony serve --no-tls --port=8000 --daemon
+      cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
+      "$$CI_WORKSPACE/.ci-run-tmp/bin/symfony" serve --no-tls --port=8000 --daemon
       for _ in $$(seq 1 60); do
         if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then
           echo "application server answering on 127.0.0.1:8000"
@@ -248,6 +261,7 @@ steps:
       node e2e.mjs
 
   - 'set -eu
+    cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
 
     composer remove bel-consulting/kiwicaptcha-symfony --no-interaction
 
@@ -269,6 +283,7 @@ steps:
 
     '
   - 'set -eu
+    cd "$$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke"
 
     test -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/kiwicaptcha-wasm.js
 

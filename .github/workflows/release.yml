@@ -75,6 +75,57 @@ jobs:
           printf '%s\n' "$ruleset_json" | bash "$GITHUB_WORKSPACE/tools/ci/tag-ruleset-check.sh" "$ruleset_id"
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: preflight — the main branch ruleset makes authorized HEAD mean reviewed
+        # The authorized-HEAD equality below proves the tag points at
+        # the current main head; it means "reviewed and gated" only if
+        # main is actually protected. This step fails closed unless the
+        # main-branch-protection ruleset is live and complete:
+        # enforcement active, targeting the default branch, zero bypass
+        # actors, PRs required with the review contract, the signed
+        # commits, linear history, deletion and force-push prohibitions,
+        # and the promotion-gate aggregate among the required checks. A
+        # main branch that is not provably protected invalidates the
+        # HEAD equality and refuses the release.
+        run: |
+          set -euo pipefail
+          branch_ruleset_id="24996828"
+          if ! ruleset_json="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$branch_ruleset_id")"; then
+            echo "refusing to release: cannot read the main branch ruleset $branch_ruleset_id" >&2
+            exit 1
+          fi
+          refuse() { echo "refusing to release: $1" >&2; exit 1; }
+          export ruleset_json
+          python3 - <<'PY'
+          import json, os, sys
+          rs = json.loads(os.environ["ruleset_json"])
+          def refuse(msg):
+              print(f"refusing to release: {msg}", file=sys.stderr)
+              sys.exit(1)
+          if rs.get("enforcement") != "active":
+              refuse("the main branch ruleset is not active")
+          inc = rs.get("conditions", {}).get("ref_name", {}).get("include", [])
+          if "~DEFAULT_BRANCH" not in inc:
+              refuse("the main branch ruleset does not target the default branch")
+          if rs.get("bypass_actors"):
+              refuse("the main branch ruleset carries bypass actors")
+          types = {r.get("type") for r in rs.get("rules", [])}
+          for needed in ("creation", "deletion", "non_fast_forward", "required_signatures", "required_linear_history", "pull_request"):
+              if needed not in types:
+                  refuse(f"the main branch ruleset is missing the {needed} rule")
+          pr = next((r for r in rs["rules"] if r.get("type") == "pull_request"), {})
+          params = pr.get("parameters", {})
+          if int(params.get("required_approving_review_count", 0)) < 2:
+              refuse("the main branch ruleset requires fewer than two approvals")
+          for flag in ("dismiss_stale_reviews_on_push", "require_code_owner_review", "required_review_thread_resolution"):
+              if not params.get(flag):
+                  refuse(f"the main branch ruleset does not enforce {flag}")
+          checks = next((r for r in rs["rules"] if r.get("type") == "required_status_checks"), {}).get("parameters", {}).get("required_status_checks", [])
+          if not any(c.get("context") == "promotion-gate" for c in checks):
+              refuse("the main branch ruleset does not require the promotion-gate aggregate")
+          print("main branch ruleset verified: active, complete, no bypass, promotion-gate required")
+          PY
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: gate — exact tag CI, authorized-HEAD equality, signed annotated tag, no existing release
         # The gate runs in a fixed order: an existing release is refused
         # first (releases are immutable), then the immutable-releases

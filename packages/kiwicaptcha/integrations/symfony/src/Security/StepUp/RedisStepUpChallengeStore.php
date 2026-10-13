@@ -389,7 +389,16 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         local pttl = redis.call('PTTL', KEYS[1])
         if pttl <= 0 then return nil end
         child['created_at'] = nowS
+        -- The whole terminal transition is this one script: the child
+        -- lands, the parent reaches the superseded terminal (state,
+        -- stamp and child link together, on the Redis clock), and the
+        -- family index repoints. No follow-up settlement exists, so a
+        -- crash can never leave parent-superseded and child-present
+        -- half-written or the parent in a claimed state behind the
+        -- marker.
         redis.call('SET', KEYS[2], cjson.encode(child), 'PX', pttl)
+        parent['state'] = 'superseded'
+        parent['state_at'] = nowS
         parent['superseded_by'] = ARGV[2]
         redis.call('SET', KEYS[1], cjson.encode(parent), 'PX', pttl)
         redis.call('SET', KEYS[3], ARGV[2], 'PX', pttl)

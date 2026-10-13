@@ -660,15 +660,9 @@ final class StepUpDemandFinalizer
 
             return StepUpFinalization::refusedDenied();
         }
-        // The superseded terminal in both stores: the Redis script
-        // leaves the claimed parent in its finalizing state with the
-        // child link written, so the terminal compare-and-set lands the
-        // state; the array store already wrote it (the settle then
-        // answers null and is skipped).
-        try {
-            $this->store->settleDemandFinalization($demand->id, StepUpDemandState::Superseded, $this->now());
-        } catch (\Throwable) {
-        }
+        // The superseded terminal landed atomically inside the store's
+        // supersede transaction: state, stamp and child link together.
+        // No follow-up settlement exists to lose.
         $this->logger?->info('kiwi step-up demand escalated to a strictly stronger factor', [
             'demand' => $child->id,
         ]);

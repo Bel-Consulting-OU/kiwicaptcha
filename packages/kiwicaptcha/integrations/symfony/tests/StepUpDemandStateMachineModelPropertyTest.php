@@ -245,18 +245,16 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 self::assertNull($store->claimDemandFinalization($parent, $h->now + 31, 30), 'a stale claimant never retakes a superseded demand');
             }
 
-            // The documented lane asymmetry (the Lua supersede comment):
-            // the Redis script left the claimed parent in its finalizing
-            // state with the marker written, so the fail-closed denied
-            // terminal may still land (losing the supersede race settles
-            // the loser denied and denial carries no authorization
-            // power); the array store already wrote the superseded
-            // terminal inside the supersede, so nothing lands there.
+            // The superseded terminal is absorbing on both stores: the
+            // supersede transaction wrote it (state, stamp and child
+            // link together), so no later settlement of any kind lands,
+            // and the parent authorizes through nothing.
             self::assertNull($h->array->settleDemandFinalization($parent, StepUpDemandState::Denied, $h->now));
-            self::assertNotNull($h->redis->settleDemandFinalization($parent, StepUpDemandState::Denied, $h->now));
-            self::assertTrue($h->redis->readDemand($parent)->state === StepUpDemandState::Denied);
-            self::assertNull($h->redis->settleDemandFinalization($parent, StepUpDemandState::Authorized, $h->now, 'email_otp'), 'the denied terminal is absorbing');
+            self::assertNull($h->redis->settleDemandFinalization($parent, StepUpDemandState::Denied, $h->now));
             self::assertTrue($h->array->readDemand($parent)->state === StepUpDemandState::Superseded);
+            self::assertTrue($h->redis->readDemand($parent)->state === StepUpDemandState::Superseded);
+            self::assertNull($h->array->settleDemandFinalization($parent, StepUpDemandState::Authorized, $h->now, 'email_otp'), 'the superseded terminal is absorbing');
+            self::assertNull($h->redis->settleDemandFinalization($parent, StepUpDemandState::Authorized, $h->now, 'email_otp'), 'the superseded terminal is absorbing');
 
             // The escalator follow-up from the claimed parent: only the
             // Redis lane still lands it, exactly once.
@@ -268,9 +266,9 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
             $child2 = $h->array->readDemand($parent2)->spawnChild($parent2.'cccccccccccccc', $h->now, 'decision-sup');
             self::assertNotNull($h->array->supersedeDemandWithChild($parent2, $child2));
             self::assertNotNull($h->redis->supersedeDemandWithChild($parent2, $child2));
-            self::assertNull($h->array->settleDemandFinalization($parent2, StepUpDemandState::Superseded, $h->now), 'the array store wrote the terminal inside the supersede');
-            self::assertNotNull($h->redis->settleDemandFinalization($parent2, StepUpDemandState::Superseded, $h->now), 'the escalator follow-up lands on the Redis lane');
-            self::assertNull($h->redis->settleDemandFinalization($parent2, StepUpDemandState::Superseded, $h->now), 'the terminal landed exactly once');
+            self::assertNull($h->array->settleDemandFinalization($parent2, StepUpDemandState::Superseded, $h->now), 'both stores wrote the terminal inside the supersede');
+            self::assertNull($h->redis->settleDemandFinalization($parent2, StepUpDemandState::Superseded, $h->now), 'both stores wrote the terminal inside the supersede');
+            self::assertNull($h->array->settleDemandFinalization($parent2, StepUpDemandState::Authorized, $h->now, 'email_otp'));
             self::assertNull($h->redis->settleDemandFinalization($parent2, StepUpDemandState::Authorized, $h->now, 'email_otp'));
         });
     }
@@ -939,10 +937,11 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 self::assertNotNull($answer, $ctx.' supersede ('.$lane.')');
                 self::assertSame($childId, $answer->supersededByDemandId, $ctx);
                 $landed = true;
-                if ($lane === 'array') {
-                    $parent->lanes['array']->state = StepUpDemandState::Superseded;
-                    $parent->lanes['array']->stateAt = $parent->lanes['array']->stateAt ?? $parent->createdAt;
-                }
+                // Both stores write the terminal inside the supersede
+                // transaction: state superseded, stamped at the
+                // supersede time, child link and index in the same step.
+                $parent->lanes[$lane]->state = StepUpDemandState::Superseded;
+                $parent->lanes[$lane]->stateAt = $h->now;
             } else {
                 self::assertNull($answer, $ctx.' supersede refusal ('.$lane.')');
             }

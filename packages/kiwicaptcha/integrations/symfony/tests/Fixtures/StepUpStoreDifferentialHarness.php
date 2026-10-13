@@ -60,11 +60,10 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
  *    never for value. The array store stamps its own clock second
  *    while the Redis scripts stamp the server second plus its
  *    sub-second millisecond remainder.
- *  - The lifecycle state is compared through a superseded-ness
- *    projection. After a successful supersede the array store moves
- *    the parent state field to superseded, while the Redis escalation
- *    script (per its documented contract) only stamps superseded_by
- *    and keeps the pre-supersede state. Every transition gate judges
+ *  - The lifecycle state compares raw. Both stores write the
+ *    superseded terminal inside the supersede transaction itself
+ *    (state, stamp and child link together), so no projection is
+ *    needed and the raw states must agree. Every transition gate judges
  *    the marker, so both stores refuse the same operations; the raw
  *    state field itself differs, and each store suite pins its own
  *    shape. The projection treats marker and state as the one
@@ -1023,7 +1022,7 @@ final class StepUpStoreDifferentialHarness
 
         return [
             'id' => $d->id,
-            'state' => $d->supersededByDemandId !== null ? StepUpDemandState::Superseded->value : $d->state->value,
+            'state' => $d->state->value,
             'supersededBy' => $d->supersededByDemandId,
             'parent' => $d->parentDemandId,
             'generation' => $d->generation,

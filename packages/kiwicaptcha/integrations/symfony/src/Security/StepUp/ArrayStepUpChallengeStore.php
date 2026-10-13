@@ -402,7 +402,9 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
                 ?? throw new \RuntimeException('The step-up demand record could not be persisted (undecodable shape)'),
             'expiresAt' => $expiresAt,
         ];
-        $this->demands[$parentDemandId] = ['record' => $parent->supersededBy($child->id), 'expiresAt' => $expiresAt];
+        // The same terminal shape the Redis script writes in one
+        // transaction: state superseded, stamped on this store's clock.
+        $this->demands[$parentDemandId] = ['record' => $parent->withState(StepUpDemandState::Superseded, $this->now())->supersededBy($child->id), 'expiresAt' => $expiresAt];
         $this->operationIndex[$child->operationDigest] = $child->id;
 
         return $this->demands[$parentDemandId]['record'];

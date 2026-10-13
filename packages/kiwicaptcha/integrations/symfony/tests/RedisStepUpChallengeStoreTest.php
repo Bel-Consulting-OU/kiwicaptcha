@@ -537,7 +537,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertNotNull($this->store->supersedeDemandWithChild(self::DEMAND_ID, $child), 'the escalator holding its claim supersedes');
         self::assertNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Authorized, 1700000003), 'a superseded demand never settles authorized');
         self::assertNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000040, 30), 'a stale claimant never retakes a superseded demand');
-        self::assertNotNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Superseded, 1700000004), 'the escalator follow-up settlement lands');
+        self::assertNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Superseded, 1700000004), 'the superseded terminal already landed inside the supersede transaction; no follow-up settlement exists');
         self::assertNull($this->store->completeDemand(self::DEMAND_ID, 1700000005, 300), 'a superseded demand never completes');
     }
 
