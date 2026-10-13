@@ -123,4 +123,6 @@ PYSOLVE
     printf 'ECONOMIC: %s sentinel failover_continuity=ok stale_primary=readonly\n' "$RT_CAMPAIGN"
 fi
 
+rt_metric "tamper_classes=11 acceptance_among_tampered=0 backends=redis,sentinel,sqlite,files,sidecar"
+
 rt_finish
