@@ -161,10 +161,21 @@ def mint_token(nonce_b64: str, counter: int, duration_ms: int = 5) -> str:
 
 
 def mutate_token(token: str, offset: int, replacement: str = "A") -> str:
-    """Flip one character of a real token at a bounded offset."""
+    """Flip one character of a real token at a bounded offset.
+
+    The mutation is guaranteed to change the token: when the
+    replacement equals the original character the next alphabet
+    character is used instead, so a forged-mutated verify can never be
+    the honest token replayed (which the deployment would rightly
+    accept once).
+    """
     if not token:
         return token
     pos = offset % len(token)
+    original = token[pos]
+    if replacement == original:
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        replacement = alphabet[(alphabet.index(original) + 1) % len(alphabet)] if original in alphabet else "K"
     return token[:pos] + replacement + token[pos + 1:]
 
 

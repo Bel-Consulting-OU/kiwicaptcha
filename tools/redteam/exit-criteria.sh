@@ -188,14 +188,12 @@ campaign_log_verdict() {
         return 0
     fi
     pass_detail=$(grep "$pass_pat" "$logf" | tail -n 1 | cut -d' ' -f5-)
-    case "$pass_detail" in
-      "0 of "[1-9]"0 assertions failed"|"0 of "[1-9]" assertions failed"|"0 of "[1-9][0-9][0-9]" assertions failed")
+    assert_total=$(printf '%s' "$pass_detail" | sed -n 's/^0 of \([0-9][0-9]*\) assertions failed$/\1/p')
+    if [ -n "$assert_total" ] && [ "$assert_total" -ge 1 ]; then
         printf 'GREEN %s' "$pass_detail"
-        ;;
-      *)
+    else
         printf 'RED the PASS record is not an rt_finish summary over a positive assertion count: %s' "$pass_detail"
-        ;;
-    esac
+    fi
 }
 
 # run_document_check <doc> — validates a persisted run document against
