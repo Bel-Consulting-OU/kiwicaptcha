@@ -175,15 +175,31 @@ These three milestones sit outside the package publication sequence
 but are tracked here so the checklist is the complete record of the
 open work. Each lists its pass criteria and its current status.
 
-The aggregate required check for protected `main` now exists as the
+The aggregate required check for protected `main` is the
 Woodpecker workflow `.woodpecker/promotion-gate.yml`: one
 `promotion-gate` status that witnesses the whole push-triggered
 functional matrix (lint, php-core, symfony, risk, rust, browser,
-redis-lanes, redis8, interop, compat-build, release-tools) and is red
-whenever any of them is. Enrolling that single check name in the main
+redis-lanes, redis8, interop, compat-build, release-tools). The gate
+verifies its dependencies through the Woodpecker server API at run
+time: the step queries every workflow status for the commit and exits
+non-zero unless each entry in its depends_on list reports success, so
+the gate is red whenever any dependency is failed, skipped or missing.
+The DAG orders the workflows; the API query is the verification.
+Enrolling that single check name in the main
 ruleset's required contexts is the governance step; individual lanes
 never need to become required checks, and the list of witnessed lanes
 is reviewed whenever a lane is added.
+
+### The widget accessibility re-qualification
+
+The October wave touched the widget's accessibility surface (the
+step-up dialog's Escape dismissal moved to a document-level capture
+listener with a watchdog teardown, and the identity palette refreshed
+the stylesheet). The automated cross-engine lane (714 assertions
+across chromium, firefox and webkit) is green at HEAD; the manual
+accessibility matrix rows stay `manual_pending` until the next human
+qualification run records them, per the checklist rule that a release
+touching the accessibility surface re-runs the manual qualification.
 
 ### Milestone A. Dedicated latency runner
 

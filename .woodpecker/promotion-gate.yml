@@ -3,11 +3,16 @@
 # pass/fail — the one status a forge ruleset should make required for
 # main and for release promotion, instead of dozens of individual jobs
 # (individual lanes flake; the aggregate is the stable required check
-# the audit's governance bar asks for). The lane itself runs no tests:
-# every entry in depends_on must finish green first, because Woodpecker
-# refuses to start a dependent workflow when a dependency failed.
-# Fails closed: a lane missing from the list below is a lane the gate
-# no longer witnesses — review this list whenever a lane is added.
+# the audit's governance bar asks for). The DAG in depends_on only
+# ORDERS the workflows; it is not the verification. The step below is:
+# at run time it queries the Woodpecker server API for the workflow
+# statuses of this pipeline's commit and exits non-zero unless every
+# entry in depends_on reports success — a failed, skipped, pending,
+# blocked or missing dependency closes the gate. The step fails closed:
+# an unreachable API, a pipeline whose commit is not this commit, a
+# missing built-in variable or missing query tools is a failure, never
+# a pass. A lane missing from the list below is a lane the gate no
+# longer witnesses — review this list whenever a lane is added.
 # Deliberately NOT listed: perf-latency (manual-only hard-ratchet, the
 # timing signal is loud but never a merge gate by design), assets and
 # the public-install lanes (manual-only), latency-regression
@@ -39,7 +44,54 @@ steps:
   - name: promotion-gate
     image: alpine:3.20
     commands:
+      - apk add --no-cache curl jq >/dev/null 2>&1 || true
       - |
         set -eu
-        echo "promotion-gate: every dependency workflow in depends_on finished green for ${CI_COMMIT_SHA}"
+        command -v curl >/dev/null 2>&1 || { echo "promotion-gate: FAIL: curl unavailable; failing closed" >&2; exit 1; }
+        command -v jq >/dev/null 2>&1 || { echo "promotion-gate: FAIL: jq unavailable; failing closed" >&2; exit 1; }
+        SERVER="$${CI_SYSTEM_URL:-https://ci.example}"
+        TOKEN="$${CI_TOKEN:-}"
+        SHA="$${CI_COMMIT_SHA:-}"
+        PIPELINE="$${CI_PIPELINE_NUMBER:-$${CI_BUILD_NUMBER:-}}"
+        REPO="$${CI_REPO:-}"
+        fail() { echo "promotion-gate: FAIL: $$*" >&2; exit 1; }
+        [ -n "$$TOKEN" ] || fail "no CI_TOKEN available"
+        [ -n "$$SHA" ] || fail "no CI_COMMIT_SHA available"
+        [ -n "$$PIPELINE" ] || fail "no CI_PIPELINE_NUMBER available"
+        [ -n "$$REPO" ] || fail "no CI_REPO available"
+        # The depends_on list above is the single source of truth: the
+        # verifier reads it back from the checked-out workflow file, so
+        # it can never drift from the declared DAG.
+        GATE_YML=".woodpecker/promotion-gate.yml"
+        [ -f "$$GATE_YML" ] || fail "the gate workflow file is missing from the workspace"
+        DEPENDS=$$(awk '/^depends_on:/{f=1; next} f && /^  - /{sub(/^  - /, ""); print; next} f{exit}' "$$GATE_YML")
+        [ -n "$$DEPENDS" ] || fail "no depends_on entries parsed from $$GATE_YML"
+        REPO_JSON=$$(curl -fsS -H "Authorization: Bearer $$TOKEN" "$$SERVER/api/repos/lookup/$$REPO") \
+          || fail "the Woodpecker API is unreachable at $$SERVER (repo lookup)"
+        REPO_ID=$$(printf '%s' "$$REPO_JSON" | jq -r '.id // empty')
+        [ -n "$$REPO_ID" ] || fail "repo lookup returned no id for $$REPO"
+        PIPELINE_JSON=$$(curl -fsS -H "Authorization: Bearer $$TOKEN" "$$SERVER/api/repos/$$REPO_ID/pipelines/$$PIPELINE") \
+          || fail "the Woodpecker API is unreachable at $$SERVER (pipeline $$PIPELINE)"
+        PIPE_SHA=$$(printf '%s' "$$PIPELINE_JSON" | jq -r '.commit // empty')
+        [ "$$PIPE_SHA" = "$$SHA" ] || fail "pipeline $$PIPELINE belongs to commit $${PIPE_SHA:-<none>}, not this commit ($$SHA)"
+        echo "promotion-gate: workflow statuses for commit $$SHA (pipeline $$PIPELINE):"
+        printf '%s\n' "$$PIPELINE_JSON" | jq -r '.workflows[] | "  \(.name)\t\(.status)"'
+        # Every depends_on workflow must report success: failed, skipped,
+        # pending, blocked, declined or missing all close the gate.
+        RC=0
+        for dep in $$DEPENDS; do
+          STATUS=$$(printf '%s' "$$PIPELINE_JSON" | jq -r --arg d "$$dep" '[.workflows[] | select(.name == $$d)][0].status // "MISSING"')
+          case "$$STATUS" in
+            success) echo "promotion-gate: dependency $$dep: success" ;;
+            *)
+              echo "promotion-gate: dependency $$dep: $$STATUS" >&2
+              RC=1
+              ;;
+          esac
+        done
+        if [ "$$RC" -ne 0 ]; then
+          echo "promotion-gate: FAIL: at least one dependency workflow did not succeed for $$SHA (table above)" >&2
+          exit 1
+        fi
+        echo "promotion-gate: every dependency workflow in depends_on finished green for $$SHA (verified through the server API)"
         echo "required-check name for the forge ruleset: promotion-gate"

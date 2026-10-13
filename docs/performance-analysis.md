@@ -83,7 +83,9 @@ not under architectural pressure, and a hosted-runner red is runner
 load until proven otherwise by the controlled protocol the release
 checklist already prescribes (dedicated runner, warm state, paired
 ABBA repeats, paired-distribution comparison). This is why the hard
-ratchet stays manual-only and never a merge gate.
+ratchet stays manual-only until the dedicated runner exists; the
+runner provisions the paired-comparison methodology that makes the
+gate a required check afterwards.
 
 ## Measurement tools
 
