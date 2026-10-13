@@ -170,7 +170,10 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     if KIWI_RT_PROFILE="$KIWI_RT_PROFILE" bash "$RT_DIR/campaigns/$campaign.sh" >"$log" 2>&1; then
         battery_passed=$((battery_passed + 1))
         detail=$(grep '^RESULT: PASS' "$log" | tail -n 1 | cut -d' ' -f5-)
-        record "$campaign" campaign GREEN "${detail:-campaign green}"
+        # The verdict stays GREEN on the exit code alone, but the detail
+        # must not claim more than was measured: a campaign that exited
+        # 0 without printing its RESULT line has asserted nothing.
+        record "$campaign" campaign GREEN "${detail:-exit 0 without a RESULT line}"
         verdict=PASS
     else
         battery_failed="$battery_failed $campaign"
@@ -187,8 +190,10 @@ for campaign in $CAMPAIGNS_EXPECTED; do
     sha_us=$(grep -o 'sha16_solve_us=[0-9]*' "$log" | head -n 1 | cut -d= -f2)
     if [ "$verdict" = "PASS" ]; then
         detail=$(grep '^RESULT: PASS' "$log" | tail -n 1 | cut -d' ' -f5-)
+        detail=${detail:-exit 0 without a RESULT line}
     else
         detail=$(grep '^RESULT: FAIL' "$log" | tail -n 1 | cut -d' ' -f5-)
+        detail=${detail:-campaign failed without a RESULT line}
     fi
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     doc="$RT_DIR/engine/runs/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
@@ -425,46 +430,122 @@ PYB')
 fi
 
 # ---------- 9.5: human solve p95 within budget (the promoted baseline) ----------
+# The row runs the real comparison: for every release tier the budgets
+# file declares, every difficulty x cache cell with a budget row is
+# measured from the baseline and must sit at or under its budget. Per
+# device, the cell's asset-mode rows are concatenated (the harness
+# merge semantics) and the percentile runs over the concatenation; the
+# tier's measurement is the worst qualified device, the same derivation
+# the budgets file documents. GREEN only when every row passes, the
+# release ladder is fully measured, and the record is at most 180 days
+# old; a miss records RED with the measured and budget numbers.
 BASELINE_JSON="tools/client-perf/results/baseline.json"
 BUDGETS_JSON="tools/client-perf/release-budgets.json"
 if [ "${KIWI_EC_SKIP_CLIENTPERF:-0}" = 1 ]; then
     record human-solve-p95 client-perf SKIP "skipped by KIWI_EC_SKIP_CLIENTPERF"
 elif [ -f "$BASELINE_JSON" ] && [ -f "$BUDGETS_JSON" ]; then
     CP_OUT=$(python3 - "$BASELINE_JSON" "$BUDGETS_JSON" <<'PYCP'
-import json, sys
+import json, math, sys
+from datetime import datetime, timezone
 
 baseline = json.load(open(sys.argv[1]))
 budgets = json.load(open(sys.argv[2]))
 
-def find_budgets(obj, out):
-    if isinstance(obj, dict):
-        for key, value in obj.items():
-            if any(token in key.lower() for token in ("p95", "budget", "solve")) and isinstance(value, (int, float)):
-                out.append((key, value))
-            find_budgets(value, out)
-    elif isinstance(obj, list):
-        for item in obj:
-            find_budgets(item, out)
+def percentile(sorted_vals, p):
+    if not sorted_vals:
+        return None
+    idx = min(len(sorted_vals) - 1, max(0, math.ceil((p / 100) * len(sorted_vals)) - 1))
+    return sorted_vals[idx]
 
-budget_rows = []
-find_budgets(budgets, budget_rows)
-tiers = baseline.get("tiers", {})
-measured = []
-for name, tier in tiers.items():
-    for key, value in tier.items():
-        if isinstance(value, (int, float)) and ("p95" in key.lower() or "solve" in key.lower() or "ms" in key.lower()):
-            measured.append((name, key, value))
-print(json.dumps({"budget_rows": budget_rows[:6], "measured": measured[:8],
-                  "tier_names": list(tiers.keys()),
-                  "generated": baseline.get("generated_at", "?")}))
+METRICS = [("solveMsP95", "solveMs"), ("pageToVerifiedMsP95", "pageToVerifiedMs")]
+
+def measured_p95(tier, difficulty, cache, field):
+    best = None
+    def consider(reps):
+        nonlocal best
+        vals = sorted(r[field] for r in reps
+                      if isinstance(r, dict) and isinstance(r.get(field), (int, float)))
+        if vals:
+            v = percentile(vals, 95)
+            best = v if best is None else max(best, v)
+    physical = baseline.get("physical_results") or {}
+    if physical:
+        for dev_id in physical:
+            per_device = []
+            for row in physical[dev_id].values():
+                if not isinstance(row, dict) or not isinstance(row.get("reps"), list):
+                    continue
+                if (row.get("tier"), row.get("difficulty"), row.get("cache")) == (tier, difficulty, cache):
+                    per_device.extend(row["reps"])
+            if per_device:
+                consider(per_device)
+    else:
+        for key, row in baseline.get("results", {}).items():
+            if not isinstance(row, dict):
+                continue
+            parts = key.split(":")
+            if len(parts) < 3 or parts[0] != tier or parts[1] != difficulty or parts[2] != cache:
+                continue
+            if isinstance(row.get("reps"), list) and row["reps"]:
+                consider(row["reps"])
+            else:
+                s = row.get(field)
+                if isinstance(s, dict) and isinstance(s.get("p95"), (int, float)):
+                    best = s["p95"] if best is None else max(best, s["p95"])
+    return best
+
+violations = []
+unmeasured = []
+tiers = budgets.get("tiers") or budgets.get("qualification", {}).get("release_tiers") or []
+for tier in tiers:
+    for difficulty, cells in budgets.get("budgets", {}).get(tier, {}).items():
+        for cache, row in cells.items():
+            if not isinstance(row, dict):
+                continue
+            for metric, field in METRICS:
+                budget = row.get(metric)
+                measured = measured_p95(tier, difficulty, cache, field)
+                if measured is None:
+                    unmeasured.append("%s:%s:%s %s" % (tier, difficulty, cache, field))
+                elif measured > budget:
+                    violations.append("%s:%s:%s %s.p95=%.1fms budget=%sms"
+                                      % (tier, difficulty, cache, field, measured, budget))
+
+generated = baseline.get("generated_at", "")
+age_days = None
+if generated:
+    gen = datetime.fromisoformat(generated.replace("Z", "+00:00"))
+    age_days = (datetime.now(timezone.utc) - gen).days
+
+head = ("release tiers=%d generated=%s age_days=%s"
+        % (len(tiers), generated or "?", age_days if age_days is not None else "?"))
+if len(tiers) == 0:
+    print("RED the budgets file declares no release tier")
+elif len(baseline.get("tiers", {})) == 0:
+    print("RED the promoted baseline carries no measured tier; " + head)
+elif age_days is None:
+    print("RED the promoted baseline record states no generated date; " + head)
+elif age_days > 180:
+    print("RED the promoted baseline is %d days old (limit 180); %s" % (age_days, head))
+elif violations:
+    shown = "; ".join(violations[:4])
+    if len(violations) > 4:
+        shown += "; +%d more" % (len(violations) - 4)
+    print("RED " + shown + "; " + head)
+elif unmeasured:
+    shown = "; ".join(unmeasured[:4])
+    if len(unmeasured) > 4:
+        shown += "; +%d more" % (len(unmeasured) - 4)
+    print("RED measured p95 missing for " + shown + "; " + head)
+else:
+    print("GREEN every release-tier budget row measured at or under its p95 budget; " + head)
 PYCP
 )
     echo "$CP_OUT" >"$GATE_DIR/clientperf.json"
-    tier_count=$(printf '%s' "$CP_OUT" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["tier_names"]))')
-    if [ "$tier_count" -gt 0 ]; then
-        record human-solve-p95 client-perf GREEN "the promoted baseline carries $tier_count qualified tiers (generated $(printf '%s' "$CP_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["generated"])')); budgets enforced by tools/client-perf gates"
+    if [ -n "$CP_OUT" ]; then
+        record human-solve-p95 client-perf "${CP_OUT%% *}" "${CP_OUT#* }"
     else
-        record human-solve-p95 client-perf RED "the promoted baseline carries no measured tier"
+        record human-solve-p95 client-perf RED "the p95 comparison did not produce a verdict (see $GATE_DIR/clientperf.json)"
     fi
 else
     record human-solve-p95 client-perf RED "the promoted baseline or budgets file is missing"
@@ -476,6 +557,8 @@ if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record verified-agents d3.8 SKIP "skipped with the battery"
 elif ! did_run_this_invocation d3.8-ai-agents; then
     record verified-agents d3.8 RED "MISSING: d3.8-ai-agents did not run this invocation; a leftover log is not evidence"
+elif ! artifact_written_this_invocation "$D38_LOG"; then
+    record verified-agents d3.8 RED "$STALE_ARTIFACT ($D38_LOG)"
 elif grep -q "verified_in_quota" "$D38_LOG" 2>/dev/null; then
     in_quota=$(grep -o 'verified_in_quota=[0-9]*' "$D38_LOG" | head -1 | cut -d= -f2)
     revoked=$(grep -o 'revoked_accepted=[0-9]*' "$D38_LOG" | head -1 | cut -d= -f2)
@@ -630,6 +713,8 @@ for pair in "d3.14-privacy:d3.14-privacy:privacy" "d3.17-cross-sdk-parity:d3.17-
         record "$name" "$kind" SKIP "skipped with the battery"
     elif ! did_run_this_invocation "$campaign"; then
         record "$name" "$kind" RED "MISSING: $campaign did not run this invocation; a stale log cannot prove the 9.5 clause"
+    elif ! artifact_written_this_invocation "$log"; then
+        record "$name" "$kind" RED "$STALE_ARTIFACT ($log)"
     elif [ -f "$log" ] && grep -q "RESULT: FAIL" "$log"; then
         record "$name" "$kind" RED "$(grep 'RESULT: FAIL' "$log" | tail -1 | cut -d' ' -f5-)"
     elif [ -f "$log" ]; then
@@ -877,7 +962,10 @@ printf '  green=%d red=%d toolchain-absent=%d skip=%d (wall %ds)\n' "$green_coun
 
 # The gate verdict is derived only from the row counts, never from a
 # separate flag: ANY red, absent, skip or unknown verdict is non-green,
-# and the string "ALL GREEN" is unobtainable while one exists.
+# and the string "ALL GREEN" is unobtainable while one exists. The exit
+# code follows the same rule: the gate exits non-zero whenever a red,
+# toolchain-absent or skip row exists, and KIWI_EC_ALLOW_SKIP=1 can
+# tolerate SKIP rows in the exit code only.
 if [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -eq 0 ] && [ "$RESULT" -eq 0 ]; then
     printf 'exit-criteria: ALL GREEN; the release gate is open\n'
     exit 0
@@ -886,14 +974,22 @@ fi
 printf 'exit-criteria: non-green rows present (red=%d toolchain-absent=%d skip=%d); the release gate is closed\n' \
     "$red_count" "$absent_count" "$skip_count"
 
-# KIWI_EC_ALLOW_SKIP=1 may accept SKIP rows only: a red or
-# toolchain-absent row is never excused, and the campaign lint (the P3
-# gate) is never excusable at all — a skip of that row keeps the gate
+# A partial run is never a release verdict, whatever the knobs say: the
+# banner prints on every skip so the log cannot hide that rows went
+# unmeasured, and "ALL GREEN" can never print for a partial run.
+if [ "$skip_count" -gt 0 ]; then
+    printf 'exit-criteria: THE GATE RAN PARTIALLY: %d row(s) printed SKIP and were not measured; a partial run is not a release verdict\n' \
+        "$skip_count"
+fi
+
+# KIWI_EC_ALLOW_SKIP=1 tolerates SKIP rows in the EXIT CODE only: a red
+# or toolchain-absent row is never excused, and the campaign lint (the
+# P3 gate) is never excusable at all — a skip of that row keeps the gate
 # closed. Skipped rows stay non-green in the table above even when the
 # operator accepts them.
 if [ "${KIWI_EC_ALLOW_SKIP:-0}" = 1 ] && [ "$CAMPAIGN_LINT_SKIPPED" != 1 ] \
     && [ "$red_count" -eq 0 ] && [ "$absent_count" -eq 0 ] && [ "$skip_count" -gt 0 ]; then
-    printf 'exit-criteria: gate open ONLY because KIWI_EC_ALLOW_SKIP=1 accepted %d skip row(s); those rows remain non-green and were not measured\n' \
+    printf 'exit-criteria: GATE PARTIAL, exit 0 only because KIWI_EC_ALLOW_SKIP=1 tolerated %d skip row(s); the gate ran partially and this exit code is NOT a release verdict\n' \
         "$skip_count"
     exit 0
 fi
