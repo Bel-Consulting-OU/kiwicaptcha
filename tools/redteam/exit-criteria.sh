@@ -81,6 +81,10 @@ mkdir -p "$GATE_DIR"
 SEED_HEX=${KIWI_RT_SEED#0x}
 RESULT=0
 START_TS=$(date +%s)
+# The invocation start timestamp every artifact freshness check compares
+# against: an artifact written before GATE_T0 is a leftover from an
+# earlier invocation, never this run's evidence.
+GATE_T0=$START_TS
 
 ROWS=()
 # record <name> <kind> <verdict> <measured-value>
@@ -212,6 +216,26 @@ did_run_this_invocation() {
     esac
 }
 
+# artifact_written_this_invocation <path> — true only when the file
+# exists AND its mtime is at or after this invocation's start timestamp
+# (GATE_T0). did_run_this_invocation proves a campaign ran; a clause row
+# that reads an artifact also needs that artifact to be THIS run's
+# output, so a leftover file from an earlier invocation can never green
+# a row. mtime is read with the BSD form first and the GNU form as the
+# fallback (macOS stat -f %m, Linux stat -c %Y).
+artifact_written_this_invocation() {
+    [ -f "$1" ] || return 1
+    mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
+    case "$mtime" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$mtime" -ge "$GATE_T0" ]
+}
+
+# The single RED reason for a missing-or-stale clause artifact, so the
+# table states the rule and not just a filename.
+STALE_ARTIFACT="artifact predates this invocation; a leftover file is not evidence"
+
 # ---------- 9.5: zero open findings >= medium ----------
 open_count=0
 for manifest in "$RT_DIR"/findings/*.json; do
@@ -232,6 +256,8 @@ if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record value-class-costs d3.3 SKIP "skipped with the battery"
 elif ! did_run_this_invocation d3.3-pow-economics; then
     record value-class-costs d3.3 RED "MISSING: d3.3-pow-economics did not run this invocation; a leftover economics table is not evidence"
+elif ! artifact_written_this_invocation "$D33_JSON"; then
+    record value-class-costs d3.3 RED "$STALE_ARTIFACT ($D33_JSON)"
 elif [ -f "$D33_JSON" ]; then
     fails=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(",".join(d["fail_rows"]) or "-")' "$D33_JSON")
     complete=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["table_complete"]).lower())' "$D33_JSON")
@@ -267,6 +293,8 @@ if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record d3.5-targets d3.5 SKIP "skipped with the battery"
 elif ! did_run_this_invocation d3.5-credential-stuffing; then
     record d3.5-targets d3.5 RED "MISSING: d3.5-credential-stuffing did not run this invocation; a leftover summary is not evidence"
+elif ! artifact_written_this_invocation "$D35_SUMMARY"; then
+    record d3.5-targets d3.5 RED "$STALE_ARTIFACT ($D35_SUMMARY)"
 elif [ -f "$D35_SUMMARY" ]; then
     python3 - "$D35_SUMMARY" <<'PYD35' >"$GATE_DIR/d35-verdict.txt" 2>&1
 import json, sys
@@ -311,6 +339,8 @@ if [ "${KIWI_EC_SKIP_CAMPAIGNS:-0}" = 1 ]; then
     record d3.5-economics d3.5 SKIP "skipped with the battery"
 elif ! did_run_this_invocation d3.5-credential-stuffing; then
     record d3.5-economics d3.5 RED "MISSING: d3.5-credential-stuffing did not run this invocation; a leftover summary is not evidence"
+elif ! artifact_written_this_invocation "$D35_SUMMARY"; then
+    record d3.5-economics d3.5 RED "$STALE_ARTIFACT ($D35_SUMMARY)"
 elif [ -f "$D35_SUMMARY" ] && [ -f "$D35_REF" ]; then
     ECON_LINE=$(python3 - "$D35_SUMMARY" "$D35_REF" <<'PYECON'
 import json, sys
@@ -347,8 +377,14 @@ else
 fi
 
 # ---------- 9.5: confirmed-legitimate escalation <= 0.1% and denial = 0 ----------
+# The probe reads the target coordinates from runs/env/<profile>.env;
+# target.sh rewrites that file on every successful boot, so a stale env
+# file means this invocation never booted its own target and the probe
+# refuses to run rather than aim at an unverified deployment.
 if [ "${KIWI_EC_SKIP_BASELINE:-0}" = 1 ]; then
     record confirmed-legit baseline SKIP "skipped by KIWI_EC_SKIP_BASELINE"
+elif ! artifact_written_this_invocation "$RT_DIR/runs/env/$KIWI_RT_PROFILE.env"; then
+    record confirmed-legit baseline RED "$STALE_ARTIFACT (runs/env/$KIWI_RT_PROFILE.env)"
 else
     BASE_OUT=$(BASE="$GATE_DIR" sh -c '
         KIWI_RT_DIR='"$RT_DIR"'/campaigns/lib python3 - <<PYB
@@ -382,9 +418,9 @@ PYB')
     if [ -z "$allowed" ]; then
         record confirmed-legit baseline RED "the honest baseline probe failed (no target)"
     elif [ "$denied" = "0" ] && [ "$escalated" = "0" ]; then
-        record confirmed-legit baseline GREEN "confirmed-legitimate escalations=${escalated:-0}/100 (bound 0.1%: 0), denials=${denied:-0}, allowed=${allowed:-0}/100"
+        record confirmed-legit baseline GREEN "confirmed-legitimate escalations=${escalated:-0}/100 (this n=100 measures zero escalations in 100 honest solves; a 0.1 percent bound needs n=1000), denials=${denied:-0}, allowed=${allowed:-0}/100"
     else
-        record confirmed-legit baseline RED "escalated=${escalated:-?}/100 denied=${denied:-?} (bounds: 0.1% and 0)"
+        record confirmed-legit baseline RED "escalated=${escalated:-?}/100 denied=${denied:-?} (bounds: 0.1% and 0; the 0.1 percent bound needs n=1000)"
     fi
 fi
 

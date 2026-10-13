@@ -265,7 +265,7 @@ bootstrap target; the compressed caps are re-baselined for the
 step-up surface of the eager core — the step-up dialog machinery,
 the email-ownership factor UI and the rendered-demand attribute
 fallback); every widget-risk.js copy (the lazy adaptive-risk
-module) is 42,552 bytes raw, 12,423 bytes gzip and 10,653 bytes
+module) is 42,552 bytes raw, 12,473 bytes gzip and 10,714 bytes
 brotli against caps of 49,152 / 20,000 / 16,000; every
 widget-telemetry.js copy is 5,621 bytes raw, 2,104 bytes gzip and 1,780
 bytes brotli against caps of 8,192 / 2,500 / 2,000; every
@@ -276,18 +276,20 @@ per language in a fixed key order, rebuilt into the same registered
 object shape at module scope — which removed the repeated key names
 and restored translation headroom without a cap raise); every
 widget-compat.js copy is 32,096 bytes raw, 9,420 bytes gzip and 8,174
-bytes brotli against caps of 32,768 / 12,000 / 10,000; every
+bytes brotli against caps of 33,096 / 12,000 / 10,000; every
 widget-shims.js copy (the standalone incumbent API shims, fetched only
 by a page presenting the provider globals or Altcha / Friendly Captcha
-markup over a plain driver bootstrap) is 25,102 bytes raw, 7,332 bytes
-gzip and 6,299 bytes brotli against caps of 36,000 / 12,000 / 10,000;
+markup over a plain driver bootstrap) is 25,015 bytes raw, 7,326 bytes
+gzip and 6,287 bytes brotli against caps of 36,000 / 12,000 / 10,000;
 every
 execution-interpreter copy (execution-interpreter.js, the lazy
 ExecutionChallengeV1 asset) is 49,426 bytes raw, 14,623 bytes gzip and
 12,521 bytes brotli, against caps of 56,000 / 16,500 / 14,000 bytes; the
-same budgets section also records the measured raw bytes of the worker
-at 155,097 bytes, the wasm glue runtime at 125,053 bytes and the widget
-stylesheet at 14,984 bytes, each byte-identical across the three
+same budgets section also records the measured sizes of the worker
+(158,934 raw / 54,747 gzip / 37,622 brotli), the wasm glue
+runtime (127,009 raw / 45,213 gzip / 36,368 brotli), the widget
+stylesheet (11,145 raw) and the webauthn ceremony module
+(2,103 raw), each raw figure byte-identical across the
 copies. Since the r8 glue-embedding change the worker row describes the
 assembled release asset (tools/embed-worker: the `var window = self;`
 prelude plus the full wasm glue text plus the worker solver source —
@@ -370,8 +372,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone: 123,588 bytes
-raw, 35,785 gzip and 30,023 brotli (the record's
+any memory-hard challenge — is the eager core alone:   124672 bytes
+raw,    36039 gzip and    30247 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits within the 37,000-byte cap after the step-up demand
 dialog and carrier-escalation wave added the interactive step-up
@@ -395,7 +397,7 @@ record's budget rows, equality-gated):
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
   challenge, an armed response or a glue-less SHA-256 solve (42,552
-  raw / 12,423 gzip / 10,653
+  raw / 12,473 gzip / 10,714
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
   it/nl/pl/pt/ar, RTL included). The eager core keeps English and
@@ -410,11 +412,11 @@ record's budget rows, equality-gated):
   brotli);
 - `widget-compat.js`, the incumbent compatibility loader, delivered
   inside the `/api.js` loader response and never fetched elsewhere
-  (32,183 raw / 9,423 gzip / 8,191 brotli);
+  (32,096 raw / 9,420 gzip / 8,174 brotli);
 - `widget-shims.js`, the standalone incumbent API shims (the provider
   globals over a plain driver bootstrap, plus the Altcha and Friendly
   Captcha element conventions), fetched only by a page that uses one of
-  those surfaces (25,102 raw / 7,332 gzip / 6,299 brotli).
+  those surfaces (25,015 raw / 7,326 gzip / 6,287 brotli).
 
 The execution-orchestration delivery is a deliberate split, not eager
 bloat:

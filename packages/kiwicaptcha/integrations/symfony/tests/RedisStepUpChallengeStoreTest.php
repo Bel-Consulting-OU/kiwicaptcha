@@ -114,6 +114,36 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertTrue($this->store->markTotpStep(self::PRINCIPAL, 1001, 90), 'a strictly newer step wins');
     }
 
+    public function testTheLockArmArmsAndNeverShortensALiveLock(): void
+    {
+        // The differential sweep leaves the lockout deadline out of
+        // its projection, so this pin walks the emulated lock-arm
+        // lane: the epoch-second deadline the interface names, the
+        // no-shorten rule and the expiry read.
+        $dimension = 'principal';
+        $pseudonym = 'aabbccddeeff00112233445566778899';
+        $lockKey = '{kiwi:test-ns}:stepup:lockout:lock:'.$dimension.':'.$pseudonym;
+        $now = 1700000000;
+        $this->redis->setTimeMs($now * 1000);
+
+        $this->store->armLockout($dimension, $pseudonym, $now, 600);
+
+        self::assertSame($now + 600, $this->store->lockoutUntil($dimension, $pseudonym, $now), 'the lock answers the epoch-second deadline');
+        self::assertSame((string) ($now + 600), $this->redis->strings[$lockKey] ?? null, 'the stored value is the deadline itself');
+        self::assertSame(600 * 1000 + 60_000, $this->redis->expirations[$lockKey] ?? null, 'the key carries the millisecond PX budget');
+
+        // A shorter request never shortens a live lock: the stored
+        // deadline and its budget survive untouched.
+        $this->store->armLockout($dimension, $pseudonym, $now + 10, 300);
+        self::assertSame($now + 600, $this->store->lockoutUntil($dimension, $pseudonym, $now + 10), 'the shorter arm leaves the deadline standing');
+        self::assertSame((string) ($now + 600), $this->redis->strings[$lockKey] ?? null, 'the shorter arm wrote nothing');
+        self::assertSame(600 * 1000 + 60_000, $this->redis->expirations[$lockKey] ?? null, 'the shorter arm left the budget alone');
+
+        // Past the deadline the lock reads dead on the advanced clock.
+        $this->redis->setTimeMs($this->redis->timeMs() + 601 * 1000);
+        self::assertSame(0, $this->store->lockoutUntil($dimension, $pseudonym, $now + 601), 'a passed deadline reads 0');
+    }
+
     public function testTheAtomicFactorCompletionConsumesBothRecordsTogether(): void
     {
         $id = 'ccccccccccccccccccccccc';

@@ -1182,7 +1182,15 @@
       announce(kiwiT("statusStepUp"));
       if (typeof document === "undefined" || !document.body) { fail("Challenge failed"); return; }
       var escDismiss = function (ev) {
-        if (gone()) { document.removeEventListener("keydown", escDismiss, true); return; }
+        if (gone()) {
+          // The flow died (reset, destroy, retry re-init) while the
+          // dialog stood: tear the overlay down too, or a stale
+          // full-viewport modal of a dead generation would block the
+          // page with Escape refused.
+          document.removeEventListener("keydown", escDismiss, true);
+          try { overlay.remove(); } catch (e) {}
+          return;
+        }
         if (ev && (ev.key === "Escape" || ev.key === "Esc")) { ev.stopPropagation(); close(); }
       };
       document.addEventListener("keydown", escDismiss, true);
@@ -1197,7 +1205,16 @@
       document.body.appendChild(overlay);
       var completePath = null;
       var focusRestorer = setInterval(function () {
-        if (gone() || !overlay.isConnected) { clearInterval(focusRestorer); return; }
+        if (gone() || !overlay.isConnected) {
+          clearInterval(focusRestorer);
+          // The generation died while the dialog stood (reset, retry
+          // re-init, destroy): tear the page-blocking overlay down
+          // here, within one tick, instead of stranding it until some
+          // keypress wakes the stale listener.
+          document.removeEventListener("keydown", escDismiss, true);
+          if (overlay.isConnected) { try { overlay.remove(); } catch (e) {} }
+          return;
+        }
         var active = document.activeElement;
         if (active && (active === document.body || !overlay.contains(active))) {
           var target = ui.codeForm.hidden ? ui.emailInput : ui.codeInput;
@@ -1297,9 +1314,13 @@
           }
         }
         stopFlowWatch();
-        if (gone()) { try { overlay.remove(); } catch (e) {} return; }
-        if (!granted) {
+        if (gone()) {
+          document.removeEventListener("keydown", escDismiss, true);
           try { overlay.remove(); } catch (e) {}
+          return;
+        }
+        if (!granted) {
+          close();
           fail("Challenge failed");
           return;
         }
@@ -1323,6 +1344,10 @@
         }
       } finally {
         stopFlowWatch();
+        // The exception path: the listener goes with the overlay, and
+        // focus is left where the exception found it (close() would
+        // restore it a second time when it already ran).
+        document.removeEventListener("keydown", escDismiss, true);
         if (overlay.isConnected) { try { overlay.remove(); } catch (e) {} }
       }
     }

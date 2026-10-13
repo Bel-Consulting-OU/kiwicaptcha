@@ -256,11 +256,16 @@ $establishVictims = static function (RtWire $wire, array $accounts, int $from, i
 /**
  * The fixture self-check: the user source the firewall authenticates
  * against must answer every sampled account with exactly the true
- * password the driver derived from the same leaked-list corpus. This
- * is the harness-fault tripwire for the walk below: a wire refusal of
- * a valid credential is classified as the product's denial, so any
- * real drift between the driver's table and the booted user source is
- * caught here, loudly, before a single row is measured.
+ * password the driver derived from the same leaked-list corpus. The
+ * boot check samples a fixed prefix of the corpus as a tripwire, not
+ * a full proof. The full guarantee is the shared
+ * RtD35Accounts::passwordOf provider the driver and the user source
+ * both read, so one table feeds both sides of the walk. An unsampled
+ * drift can pass the sample and it then surfaces as a blocked row in
+ * the ledger, never as a false compromise: the walk classifies the
+ * wire refusal of a valid credential as the product's denial, so the
+ * run loses its blocked_valid evidence and fails honestly instead of
+ * reporting a grant that never happened.
  */
 $fixtureSelfCheck = static function (RtCampaignKernel $kernel) use ($hotVictims, $rowsTotal): void {
     $provider = $kernel->getContainer()->get(\KiwiRt\RtLeakedListUserProvider::class);
@@ -726,6 +731,11 @@ for ($first = 0; $first < $hotVictims; $first += $victimsPerBatch) {
 
                 break;
             }
+            if (str_starts_with($victimOutcome, 'http:')) {
+                // The wire broke: a harness fault, still fatal.
+                fwrite(STDERR, "FATAL: the wire broke on a valid credential (victim row $vIndex, attempt $k, outcome $victimOutcome)\n");
+                exit(2);
+            }
             // An Allow: the threshold has not been crossed yet; the
             // next attack row continues the spread.
         }
@@ -758,16 +768,21 @@ $established = \count($legitActors);
 
 $legitHomeTotal = 0;
 $legitHomeBlocked = 0;
+$legitHomeDenied = 0;
 $legitSameAsnTotal = 0;
 $legitSameAsnBlocked = 0;
+$legitSameAsnDenied = 0;
 $legitTravelTotal = 0;
 $legitTravelBlocked = 0;
+$legitTravelDenied = 0;
 $legitTargetedTotal = 0;
 $legitTargetedBlocked = 0;
+$legitTargetedDenied = 0;
 $ntHome = 0;
 $ntHomeB = 0;
 $ntSame = 0;
 $ntSameB = 0;
+$baselineDenied = 0;
 $legitSample = min(300, $established);
 for ($a = 0; $a < $legitSample; $a++) {
     if (getenv('KIWI_RT_DEBUG') && $a % 100 === 0) {
@@ -781,19 +796,28 @@ for ($a = 0; $a < $legitSample; $a++) {
         $probe->cookies = $actor->cookies;
         $outcome = $baselineWire->login($probe, $account, RtD35Accounts::passwordOf($a));
         $blocked = $outcome === 'withheld';
+        // The deny-floor lane: a refused bound login is the other way
+        // the product can fail a legitimate return, so every probe's
+        // denial books separately instead of vanishing.
+        $denied = $outcome === 'invalid';
+        $baselineDenied += $denied ? 1 : 0;
         if ($withTarget) {
             $legitTargetedTotal++;
             $legitTargetedBlocked += $blocked ? 1 : 0;
+            $legitTargetedDenied += $denied ? 1 : 0;
         }
         if ($kind === 'home') {
             $legitHomeTotal++;
             $legitHomeBlocked += $blocked ? 1 : 0;
+            $legitHomeDenied += $denied ? 1 : 0;
         } elseif ($kind === 'same_asn') {
             $legitSameAsnTotal++;
             $legitSameAsnBlocked += $blocked ? 1 : 0;
+            $legitSameAsnDenied += $denied ? 1 : 0;
         } else {
             $legitTravelTotal++;
             $legitTravelBlocked += $blocked ? 1 : 0;
+            $legitTravelDenied += $denied ? 1 : 0;
         }
         // The baseline probes must never lock their owner out: a
         // withheld login is completed through the enrolled factor so
@@ -814,10 +838,18 @@ for ($a = 0; $a < $legitSample; $a++) {
         $d2 = $baselineWire->login($sameProbe, $account, RtD35Accounts::passwordOf($a));
         $ntHome++;
         $ntSame++;
-        $ntHomeB += $d1 === 'withheld' ? 1 : 0;
-        $ntSameB += $d2 === 'withheld' ? 1 : 0;
+        // A denied bound login is a false positive in its own right:
+        // the figure the 0.001 bound reads must charge it, or a
+        // deny-floor deployment hides legitimate denials behind the
+        // withheld-only numerator.
+        $ntHomeB += ($d1 === 'withheld' || $d1 === 'invalid') ? 1 : 0;
+        $ntSameB += ($d2 === 'withheld' || $d2 === 'invalid') ? 1 : 0;
+        $baselineDenied += ($d1 === 'invalid' ? 1 : 0) + ($d2 === 'invalid' ? 1 : 0);
     }
 }
+// The false-positive figure the 0.001 bound judges: a withheld or a
+// denied bound return charges the numerator, so the deny-floor
+// deployment cannot hide legitimate denials from the bound.
 $legitFpRate = ($ntHome + $ntSame) > 0 ? ($ntHomeB + $ntSameB) / ($ntHome + $ntSame) : 1.0;
 
 $phaseLog('return');
@@ -945,12 +977,17 @@ $summary = [
         'sample' => $legitSample,
         'home_blocked' => $legitHomeBlocked,
         'home_total' => $legitHomeTotal,
+        'home_denied' => $legitHomeDenied,
         'same_asn_blocked' => $legitSameAsnBlocked,
         'same_asn_total' => $legitSameAsnTotal,
+        'same_asn_denied' => $legitSameAsnDenied,
         'travel_blocked' => $legitTravelBlocked,
         'travel_total' => $legitTravelTotal,
+        'travel_denied' => $legitTravelDenied,
         'targeted_blocked' => $legitTargetedBlocked,
         'targeted_total' => $legitTargetedTotal,
+        'targeted_denied' => $legitTargetedDenied,
+        'baseline_denied' => $baselineDenied,
         'false_positive_rate' => round($legitFpRate, 6),
         'false_positive_bound' => 0.001,
         'step_up_then_return_ok' => $stepUpThenReturnOk,
@@ -985,6 +1022,17 @@ fprintf(
     $driverClass,
     $auditOverrides,
     $driverIsKernel ? 'yes' : 'no',
+);
+// The baseline denial figure rides beside RUNTIME in the METRIC
+// shape the collectors keep, on STDERR: the stdout stream stays the
+// pure JSON summary file, so a non-JSON line there would break the
+// wrapper's summary parse.
+fprintf(
+    STDERR,
+    "METRIC: baseline_denied=%d false_positive_rate=%.6f false_positive_bound=%.3f\n",
+    $baselineDenied,
+    $legitFpRate,
+    0.001,
 );
 
 $pass = $escalatedWithinN

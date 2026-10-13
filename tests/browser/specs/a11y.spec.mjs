@@ -886,5 +886,29 @@ test.describe('KiwiCaptcha WCAG 2.2 AA evidence', () => {
     await expect(dialog.locator('[data-kiwi-stepup-msg], [role="status"]').last()).not.toBeEmpty();
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
+
+    // A reset while the dialog stands must not strand the page-blocking
+    // modal of the dead generation: the stale dialog (its address
+    // filled, its message stale) is torn down within a watchdog tick.
+    // Reset re-arms the idle widget and the fixture's 403 route may
+    // start a fresh generation whose own dialog stands again, so the
+    // steady state this pins is: any standing dialog starts from an
+    // empty address, and the stale one never comes back.
+    await page.evaluate(() => {
+      const w = document.querySelector('[data-kiwi-widget]');
+      delete w.dataset.kiwiStarted;
+      window.__kiwiCaptchaCore.core.scan(document);
+    });
+    await expect(dialog).toBeVisible({ timeout: 30_000 });
+    await dialog.locator('input[type="email"]').fill('visitor@example.com');
+    await page.evaluate(() => {
+      const w = document.querySelector('[data-kiwi-widget]');
+      window.KiwiCaptcha.reset(w.dataset.kiwiInstance);
+    });
+    await expect(async () => {
+      const inputs = page.locator('[data-kiwi-stepup] [role="dialog"] input[type="email"]');
+      await expect(inputs).toHaveCount(1, { timeout: 500 });
+      await expect(inputs).toHaveValue('', { timeout: 500 });
+    }).toPass({ timeout: 10_000 });
   });
 });

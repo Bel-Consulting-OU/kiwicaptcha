@@ -74,15 +74,13 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
  *    is the harness model, asserted against the raw Redis counter on
  *    every step, and against the array store behaviorally through the
  *    reserve and release answers that built the model.
- *  - lockoutUntil is left out of the sweep because the two stores
- *    genuinely diverge on it. The array store answers epoch seconds,
- *    the Redis store answers milliseconds, and the interface contract
- *    says epoch seconds. The pin lives on the real-Predis lane
- *    (StepUpStoreDifferentialRealPredisTest) because the emulated
- *    client never interprets the lock-arm script at all: its arm
- *    branch falls through and writes nothing. armLockout itself stays
- *    in the pool: it exercises the array store, and nothing in the
- *    sweep reads the deadline back.
+ *  - lockoutUntil stays out of the projection sweep: armLockout
+ *    writes and the pool never reads the deadline back. The deadline
+ *    contract itself is parity. Both stores answer epoch seconds,
+ *    the unit the interface contract names, and the fake emulates
+ *    the lock-arm script, so the emulated lane arms the deadline
+ *    exactly like the real one. The dedicated pins in the store
+ *    suites carry that parity.
  *  - The emulated client never lazily expires an armed key, so a
  *    reservation release is only emitted inside its lease window.
  *    Past the window the fake would answer true while the array store
