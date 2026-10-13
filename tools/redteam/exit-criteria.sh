@@ -159,7 +159,8 @@ campaign_log_verdict() {
         printf 'RED %s RESULT: FAIL record(s) in the log: %s' "$fail_count" "$fail_detail"
         return 0
     fi
-    pass_count=$(grep -c "^RESULT: PASS $c $prof " "$logf" 2>/dev/null)
+    pass_pat="^RESULT: PASS $(printf '%s' "$c" | sed 's/[.]/[.]/g') $(printf '%s' "$prof" | sed 's/[.]/[.]/g') "
+    pass_count=$(grep -c "$pass_pat" "$logf" 2>/dev/null)
     pass_count=${pass_count:-0}
     if [ "$pass_count" -eq 0 ]; then
         if [ -n "$assert_fail" ]; then
@@ -173,18 +174,36 @@ campaign_log_verdict() {
         printf 'RED %s RESULT: PASS records for %s %s; the contract allows exactly one' "$pass_count" "$c" "$prof"
         return 0
     fi
-    pass_detail=$(grep "^RESULT: PASS $c $prof " "$logf" | tail -n 1 | cut -d' ' -f5-)
+    # The GREEN path enforces the same assertion contract rt_finish
+    # does, so a campaign that never routes through rt_finish (or one
+    # whose failure counter was lost to a subshell) cannot pass on a
+    # forged or counter-blind record: any ASSERT: FAIL line in the log
+    # is a failure, and a log with no ASSERT lines at all asserted
+    # nothing, which is a harness bug in its own right.
+    logged_assert_fail=$(grep -c '^ASSERT: FAIL' "$logf" 2>/dev/null)
+    logged_assert_fail=${logged_assert_fail:-0}
+    logged_assert_total=$(grep -c '^ASSERT:' "$logf" 2>/dev/null)
+    logged_assert_total=${logged_assert_total:-0}
+    if [ "$logged_assert_fail" -gt 0 ]; then
+        printf 'RED %s ASSERT: FAIL record(s) in the log beside the PASS record: %s' "$logged_assert_fail" "$assert_fail"
+        return 0
+    fi
+    if [ "$logged_assert_total" -eq 0 ]; then
+        printf 'RED the PASS record carries zero ASSERT records; a campaign that asserted nothing proved nothing'
+        return 0
+    fi
+    pass_detail=$(grep "$pass_pat" "$logf" | tail -n 1 | cut -d' ' -f5-)
     printf 'GREEN %s' "$pass_detail"
 }
 
 # run_document_check <doc> — validates a persisted run document against
 # the fields the ledger requires. Prints nothing when the document
 # parses and is complete; prints the reason when it does not. Checked:
-# the schema marker, the non-empty strings (campaign, class, seed,
-# verdict, detail, source fingerprint, the three evidence digests —
-# product, harness, campaign — and the started timestamp), a numeric
-# non-negative duration (the finished timestamp is started plus
-# duration), and the metric and economic line fields.
+# the schema marker; the non-empty strings (campaign, class, seed,
+# verdict, detail, source fingerprint, the three evidence digests, and
+# the started timestamp); a numeric non-negative duration; and the
+# metric and economic line fields, which must be non-empty strings so
+# a row never goes green without a recorded scale and economics.
 run_document_check() {
     [ -f "$1" ] || { echo "the document is missing at $1"; return 0; }
     python3 - "$1" <<'PYDOC'
@@ -214,10 +233,10 @@ else:
     elif not isinstance(doc.get("duration_s"), (int, float)) or doc["duration_s"] < 0:
         print("duration_s is %r; the finished timestamp is started plus duration"
               % doc.get("duration_s"))
-    elif not isinstance(doc.get("metrics"), dict) or not isinstance(doc["metrics"].get("raw"), str):
-        print("metrics.raw is missing or not a string (the metric line field)")
-    elif not isinstance(doc.get("economic"), str):
-        print("economic is missing or not a string (the economic line field)")
+    elif not isinstance(doc.get("metrics"), dict) or not isinstance(doc["metrics"].get("raw"), str) or not doc["metrics"]["raw"].strip():
+        print("metrics.raw is missing, empty, or not a string (the metric line field)")
+    elif not isinstance(doc.get("economic"), str) or not doc["economic"].strip():
+        print("economic is missing, empty, or not a string (the economic line field)")
 PYDOC
 }
 

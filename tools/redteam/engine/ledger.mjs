@@ -273,6 +273,7 @@ function refusalNoteOf(ev, campaign) {
     if (digest !== null) {
         return {
             status: "RED",
+            digestMismatch: true,
             verdict: `stale run: ${digest}`,
             evidence: `STALE: ${digest}. Re-run the campaign against the current tree; a leftover run is never a pass.`,
         };
@@ -305,11 +306,29 @@ function selectRun(campaign) {
     }
     const newest = events.length > 0 ? events[events.length - 1] : null;
     if (selected !== null) {
+        // Every refused event above the selection is disclosed, not
+        // just the newest one: a genuine same-seed current-digest FAIL
+        // must never vanish behind a newer unrelated refusal.
+        const above = [];
+        for (const ev of events) {
+            if (ev === selected) break;
+            if (ev.kind !== "doc" || ev === selected) continue;
+            const note = refusalNoteOf(ev, campaign);
+            if (note !== null) above.push({ ev, note });
+        }
+        const buriedFail = above.find(
+            ({ ev, note }) =>
+                ev.run?.result === "FAIL" &&
+                ev.run?.seed === selected.run.seed &&
+                note.digestMismatch !== true,
+        );
         return {
             run: selected.run,
             file: selected.file,
             note: null,
             newerRefusal: newest !== selected ? refusalNoteOf(newest, campaign) : null,
+            buriedRefusals: above,
+            buriedFail: buriedFail ?? null,
         };
     }
     const note = newest !== null
@@ -363,8 +382,9 @@ function productMethodGap(run) {
 
 function statusOf(run, campaign) {
     // Defensive fail-closed re-check: a selected run already passed
-    // every check, but the tree is hashed again here so a digest that
-    // changed mid-generation can never ride through as GREEN.
+    // every check, and the digests were computed once at load; this
+    // re-derives the refusal verdict so no caller can bypass the
+    // contract by handing statusOf an unvetted document.
     const digest = digestRefusal(run, campaign);
     if (digest !== null) {
         return {
@@ -393,8 +413,16 @@ function statusOf(run, campaign) {
  * older qualifying run is stated in the row instead of hiding.
  */
 function evidenceSuffix(selection) {
-    if (!selection.newerRefusal) return "";
-    return ` (a newer run document was refused: ${selection.newerRefusal.verdict})`;
+    const notes = [];
+    if (selection.buriedFail) {
+        notes.push(`a newer run of this campaign under the current tree and seed recorded FAIL (${selection.buriedFail.ev.file}); the row is RED until a fresh PASS supersedes it`);
+    }
+    for (const { note } of selection.buriedRefusals ?? []) {
+        notes.push(note.verdict);
+    }
+    if (selection.newerRefusal) notes.push(selection.newerRefusal.verdict);
+    if (notes.length === 0) return "";
+    return ` (refused or failed run documents sit above the selected run: ${notes.join("; ")})`;
 }
 
 /**
@@ -438,7 +466,11 @@ const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
     if (!sel.run) {
         return `| ${attackClass} | ${sel.note.verdict} | ${sel.note.status} | ${sel.note.evidence} |`;
     }
-    const { status, verdict, evidence } = statusOf(sel.run, campaign);
+    let { status, verdict, evidence } = statusOf(sel.run, campaign);
+    if (sel.buriedFail) {
+        status = "RED";
+        evidence = `RED: ${sel.buriedFail.ev.file} recorded FAIL under the current tree and seed; the older PASS below it is not the newest word. ${evidence}`;
+    }
     return `| ${attackClass} | ${verdict} | ${status} | ${evidence}${evidenceSuffix(sel)} |`;
 }).flat();
 
@@ -480,8 +512,11 @@ const threats = `# THREATS
 
 The living output of the automated red-team engine (change.md Part 10).
 Generated from the runs ledger by \`tools/redteam/engine/ledger.mjs\`;
-regenerate with the orchestrator. Status GREEN means a real recorded
-run of the campaign's required result held while binding the CURRENT
+regenerate with the orchestrator. Status GREEN means a recorded run of
+the campaign's required result holds under the current seed and the
+current product, harness and campaign digests; the digests prove which
+tree a run measured, and the recorded result, metrics and economics
+are trusted as written (they are not re-measured or signed here) while binding the CURRENT
 product, harness and campaign digests (engine/fingerprint.mjs), RED
 means it did not, NOT RUN means this environment has no run document
 for the campaign (that is not a pass and is never omitted from this

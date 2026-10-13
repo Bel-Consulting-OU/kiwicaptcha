@@ -93,7 +93,6 @@ jobs:
             echo "refusing to release: cannot read the main branch ruleset $branch_ruleset_id" >&2
             exit 1
           fi
-          refuse() { echo "refusing to release: $1" >&2; exit 1; }
           export ruleset_json
           python3 - <<'PY'
           import json, os, sys

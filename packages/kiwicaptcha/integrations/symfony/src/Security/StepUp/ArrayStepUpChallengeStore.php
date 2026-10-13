@@ -404,6 +404,9 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         ];
         // The same terminal shape the Redis script writes in one
         // transaction: state superseded, stamped on this store's clock.
+        // The order is load-bearing: withState stamps the terminal at
+        // now, and supersededBy preserves an existing stateAt, so
+        // reversing them would silently stamp createdAt instead.
         $this->demands[$parentDemandId] = ['record' => $parent->withState(StepUpDemandState::Superseded, $this->now())->supersededBy($child->id), 'expiresAt' => $expiresAt];
         $this->operationIndex[$child->operationDigest] = $child->id;
 

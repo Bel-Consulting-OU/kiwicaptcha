@@ -650,9 +650,23 @@ final class StepUpDemandFinalizer
         $child = $demand->spawnChild(StepUpChallenge::mintId(), $this->now(), $raisedByDecisionId, $requirement);
         $superseded = $this->store->supersedeDemandWithChild($demand->id, $child);
         if ($superseded === null) {
-            // The family transaction refused (a concurrent escalation
-            // won, or the parent expired inside the claim): fail closed,
-            // the demand settles denied, never authorized.
+            // The family transaction refused. Two distinct shapes: a
+            // concurrent escalation already won (the parent's superseded
+            // terminal stands, written by the winner's own transaction)
+            // or the parent expired inside the claim. The first settles
+            // nothing — the absorbing terminal is already there and a
+            // denied settlement would answer null and throw — it
+            // returns the same refused answer. The second settles
+            // denied, fail closed, never authorized.
+            $current = $this->store->readDemand($demand->id);
+            if ($current !== null && $current->superseded()) {
+                $this->logger?->info('kiwi step-up demand escalation lost the supersede race; the standing terminal answers', [
+                    'demand' => $demand->id,
+                    'child' => $current->supersededByDemandId,
+                ]);
+
+                return StepUpFinalization::refusedDenied();
+            }
             $this->settle($demand->id, StepUpDemandState::Denied);
             $this->logger?->info('kiwi step-up demand escalation refused; the demand settled denied', [
                 'demand' => $demand->id,

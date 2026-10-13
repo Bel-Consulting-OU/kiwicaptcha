@@ -2264,7 +2264,6 @@ jobs:
       - docker-reference-deployment
       - php-core-real-redis
       - phpredis-siteverify
-      - redis-compat
       - risk-rust
       - risk-php
       - risk-parity
@@ -2292,3 +2291,4 @@ jobs:
       - name: witness
         run: |
           echo "promotion-gate: every functional job in needs() finished green for ${GITHUB_SHA}"
+          echo "deliberately outside the gate: php-nightly (non-gating), perf-latency-quiet (dispatch-only), redis-compat (continue-on-error advisory)"

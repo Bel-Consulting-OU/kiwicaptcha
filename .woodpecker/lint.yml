@@ -54,6 +54,18 @@ steps:
           exit 1
         fi
         echo "workflow lint: no GitHub-only state variables in the Woodpecker lanes"
+        # The promotion gate waits on every depends_on entry; a renamed
+        # or deleted lane would leave it waiting forever with no signal
+        # (a required-check block, fail-closed but silent). Every entry
+        # must name an existing workflow file.
+        for dep in $(sed -n '/^depends_on:/,/^steps:/p' .woodpecker/promotion-gate.yml | sed -n 's/^  - //p'); do
+          [ -n "$$dep" ] || continue
+          test -f ".woodpecker/$$dep.yml" || {
+            echo "workflow lint: promotion-gate depends on $$dep, but .woodpecker/$$dep.yml does not exist" >&2
+            exit 1
+          }
+        done
+        echo "workflow lint: every promotion-gate dependency names an existing lane"
       - sh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh
       - sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
       - bash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt
