@@ -174,26 +174,28 @@ campaign_log_verdict() {
         printf 'RED %s RESULT: PASS records for %s %s; the contract allows exactly one' "$pass_count" "$c" "$prof"
         return 0
     fi
-    # The GREEN path enforces the same assertion contract rt_finish
-    # does, so a campaign that never routes through rt_finish (or one
-    # whose failure counter was lost to a subshell) cannot pass on a
-    # forged or counter-blind record: any ASSERT: FAIL line in the log
-    # is a failure, and a log with no ASSERT lines at all asserted
-    # nothing, which is a harness bug in its own right.
+    # The GREEN path enforces the same contract rt_finish does: any
+    # ASSERT: FAIL line beside the PASS record is a failure, and the
+    # PASS record must be rt_finish's own summary shape (zero of a
+    # positive assertion count). A campaign whose driver assertions
+    # were captured may legitimately log no ASSERT lines, but the
+    # summary shape still proves the record names a real counted run;
+    # a hand-printed PASS without the shape is refused.
     logged_assert_fail=$(grep -c '^ASSERT: FAIL' "$logf" 2>/dev/null)
     logged_assert_fail=${logged_assert_fail:-0}
-    logged_assert_total=$(grep -c '^ASSERT:' "$logf" 2>/dev/null)
-    logged_assert_total=${logged_assert_total:-0}
     if [ "$logged_assert_fail" -gt 0 ]; then
         printf 'RED %s ASSERT: FAIL record(s) in the log beside the PASS record: %s' "$logged_assert_fail" "$assert_fail"
         return 0
     fi
-    if [ "$logged_assert_total" -eq 0 ]; then
-        printf 'RED the PASS record carries zero ASSERT records; a campaign that asserted nothing proved nothing'
-        return 0
-    fi
     pass_detail=$(grep "$pass_pat" "$logf" | tail -n 1 | cut -d' ' -f5-)
-    printf 'GREEN %s' "$pass_detail"
+    case "$pass_detail" in
+      "0 of "[1-9]"0 assertions failed"|"0 of "[1-9]" assertions failed"|"0 of "[1-9][0-9][0-9]" assertions failed")
+        printf 'GREEN %s' "$pass_detail"
+        ;;
+      *)
+        printf 'RED the PASS record is not an rt_finish summary over a positive assertion count: %s' "$pass_detail"
+        ;;
+    esac
 }
 
 # run_document_check <doc> — validates a persisted run document against

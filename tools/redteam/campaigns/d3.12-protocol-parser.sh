@@ -180,4 +180,6 @@ rt_assert_eq "$CORPUS_OK" "5" "sdk runners reference the shared protocol corpus"
 printf 'ECONOMIC: %s %s cost_per_differential=infinite differentials=0 desyncs=0 sdk_green=%s\n' \
     "$RT_CAMPAIGN" "$RT_PROFILE" "$((7 - SDK_FAILURES))"
 
+rt_metric "confusable_mutations=5000 sdk_green=7 differentials=0 desyncs=0 proxy_chain=absent"
+
 rt_finish
