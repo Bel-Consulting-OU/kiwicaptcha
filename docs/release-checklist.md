@@ -24,6 +24,13 @@ each one can block a tag on data that ages:
   device-indexed evidence; nothing outside that list is a physical
   prerequisite. Re-record the baseline on physical devices when the
   qualification window or the asset set changes.
+  Current state: the recorded baseline is the execution-grammar-v5
+  recording against the earlier client asset set, so the validator
+  refuses it against the current tree and the Performance budgets job
+  is red by design. The refusal is correct: physical measurements are
+  never rebound onto an asset set the device never ran. The fix is a
+  fresh physical run against the final frozen candidate; editing the
+  recorded hashes is not.
 - Protocol manifest check: `bash tools/ci/protocol-manifest-check.sh`
   (also a required CI lane). The execution-v1 register must agree
   across the manifest, the PHP core, the Rust core and the interpreter

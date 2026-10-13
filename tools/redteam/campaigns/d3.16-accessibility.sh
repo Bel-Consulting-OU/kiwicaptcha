@@ -14,6 +14,20 @@
 #
 # Required result: every validator green, zero Playwright failures on
 # the selected engines.
+#
+# The verdicts are split. The automated compatibility lane (the
+# validator corpora and the Playwright matrix) is what the ASSERT
+# records and the final RESULT speak for. The manual qualification
+# state travels in its own machine-readable record per matrix, and the
+# gate parses it:
+#   QUALIFICATION: qualified <matrix>
+#   QUALIFICATION: pending manual_rows=<n> <matrix>
+# A pending state is not a campaign failure: the validators behave
+# exactly as documented while required manual rows stay unqualified,
+# so the script exits 0 and the run document persists. The d3.16 row
+# of the exit-criteria gate renders that state as PENDING (non-green)
+# with the matrices and manual row counts named, and GREEN only when
+# every matrix reports qualified.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -38,7 +52,11 @@ done
 # certification while manual qualification rows stay manual-pending
 # (the documented honesty state of the matrix). The campaign asserts
 # the two machine-checkable properties: every validator rejection is
-# exactly a manual-pending row, and nothing else blocks.
+# exactly a manual-pending row, and nothing else blocks. The manual
+# qualification state itself goes out on the dedicated QUALIFICATION
+# record per matrix, which the gate reads separately from the ASSERT
+# result: the automated lane can be green while the release row must
+# stay non-green until every required manual row has passed.
 for pair in "autofill-matrix.json:validate-autofill-qualification.mjs" \
     "accessibility-matrix.json:validate-accessibility-qualification.mjs"; do
     matrix=${pair%%:*}
@@ -46,10 +64,12 @@ for pair in "autofill-matrix.json:validate-autofill-qualification.mjs" \
     out=$(node "$REPO_ROOT/tools/ci/$validator" "$REPO_ROOT/tests/browser/qualification/$matrix" 2>&1)
     if [ $? -eq 0 ]; then
         rt_report_pass "qualification registry $matrix fully validated"
+        printf 'QUALIFICATION: qualified %s\n' "$matrix"
     elif printf '%s' "$out" | grep -q 'REJECTED' \
         && printf '%s' "$out" | grep -Eq 'manual_pending|not "pass"|not qualified within the window'; then
         manual=$(printf '%s' "$out" | grep -c 'manual_pending')
         rt_report_pass "qualification registry $matrix: only manual-pending rows block release ($manual rows)"
+        printf 'QUALIFICATION: pending manual_rows=%s %s\n' "$manual" "$matrix"
     else
         rt_report_fail "qualification registry $matrix rejected for reasons beyond manual rows"
     fi

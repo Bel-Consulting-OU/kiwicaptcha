@@ -1490,15 +1490,18 @@ jobs:
         run: |
           set -euo pipefail
           # Production source, browser release assets, public READMEs and
-          # the workflows themselves must not carry internal-history
-          # commentary (review identifiers, round labels, severity tags,
-          # behavior-history narration, or references to the wrong
-          # upstream product). Changelogs and release notes are the
-          # designated home for history; an informational step surfaces
-          # drift there without failing.
-          # round labels must be whole-word (an unanchored 'round[- ]?[0-9]+'
-          # also matches CSS transitions like 'background 0.2s ease').
-          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b''|the o''ld''|previousl''y''|previous implementatio''n''|catastroph''ic''|ApexMa''il'
+          # the workflows themselves must not carry internal-provenance
+          # commentary: review identifiers, internal round labels, or
+          # references to the wrong upstream product. Ordinary technical
+          # English is never a violation (compatibility prose says "the
+          # old epoch" and means it); the scan targets identifiers that
+          # can only come from an internal tracker. Round labels are
+          # whole-word (an unanchored 'round[- ]?[0-9]+' also matches
+          # CSS transitions), and the P-digit shape requires a following
+          # word boundary that is not a clause hyphen, so the P0-1
+          # criterion ids stay legal while a bare P0 severity tag does
+          # not.
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|\bP[0-3]\b(?![-_0-9])''|ApexMa''il'
           if rg -n -i \
             --glob '!CHANGELOG*' \
             --glob '!**/CHANGELOG*' \
@@ -1514,7 +1517,7 @@ jobs:
       - name: excluded-category match count (changelogs/workflows, informational)
         run: |
           echo "excluded-category matches (changelogs/workflows):"
-          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|round[- ]?[0-9]''+''|\bP[0-3]\b'
+          PATTERN='audit( round)? #[0-9]''+''|audit roun''d''|round[- ]?[0-9]''+''|\bP[0-3]\b(?![-_0-9])'
           rg -n -i --glob '*CHANGELOG*' --glob '.github/**' "$PATTERN" . 2>/dev/null | wc -l
 
   package-cargo:
@@ -2244,13 +2247,16 @@ jobs:
       - name: adversarial mutation corpus of the accessibility-qualification validator
         run: node tools/ci/test-validate-accessibility-qualification.mjs
   promotion-gate:
-    # The single aggregate required check for protected main. needs()
-    # gives the exact gate semantics on GitHub: a failed dependency
-    # skips this job, and a skipped required check blocks the branch —
-    # a broken functional job can never produce a green gate. The two
-    # deliberate exclusions are the nightly non-gating matrix and the
-    # dispatch-only manual hard-ratchet benchmark.
+    # The single aggregate required check for protected main. The
+    # always() guard keeps this job live when a dependency fails or
+    # is skipped: the step then inspects every needs result and fails
+    # unless all of them succeeded, so the check concludes failure —
+    # never the skip that GitHub would otherwise accept for a required
+    # check. The two deliberate exclusions from needs are the nightly
+    # non-gating matrix and the dispatch-only manual hard-ratchet
+    # benchmark.
     name: promotion-gate
+    if: ${{ !cancelled() }}
     needs:
       - rust
       - quick-start
@@ -2288,6 +2294,18 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - name: assert every dependency succeeded
+        # The assertion lives in tools/ci/promotion-gate-needs-check.py,
+        # and the step first runs that file's synthetic state harness
+        # (all success / failure / skipped / cancelled / empty), so the
+        # checked-out logic is proven on the exact commit being gated
+        # before it judges the live needs map.
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 tools/ci/promotion-gate-needs-check.py
+          python3 tools/ci/promotion-gate-needs-check.py --assert
       - name: witness
         run: |
           echo "promotion-gate: every functional job in needs() finished green for ${GITHUB_SHA}"

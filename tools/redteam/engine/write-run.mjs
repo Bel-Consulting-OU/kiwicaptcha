@@ -19,12 +19,21 @@
  * keep working during the transition; the ledger binds on the three
  * new fields and treats their absence as stale evidence.
  *
- * Usage: node write-run.mjs <doc-path> <campaign> <class> <seed> <started> <duration> <rc> <verdict> <detail> <metric> <economic> <shaUs> <method> [driver] [containerOverrides]
+ * Usage: node write-run.mjs <doc-path> <campaign> <class> <seed> <started> <duration> <rc> <verdict> <detail> <metric> <economic> <shaUs> <method> [driver] [containerOverrides] [profile] [topology]
  *
  * The optional `driver` and `containerOverrides` arguments carry the
  * product-method provenance the ledger checks: for a method:product
  * campaign the driver must name a Kernel subclass and the override
  * count must be present and zero, or the ledger refuses GREEN.
+ *
+ * The optional `profile` and `topology` arguments bind the document to
+ * the deployment shape the battery measured (schema /2): the target
+ * profile name and the replication topology that profile boots. The
+ * profile falls back to the KIWI_RT_PROFILE environment variable (the
+ * battery's own knob, default "redis") and the topology falls back to
+ * "single-primary". The ledger selects only documents whose profile
+ * and topology equal its own, so a pass under one deployment shape can
+ * never be quoted as a pass under another.
  *
  * The document path MUST be the first argument and MUST live under
  * engine/runs/. A path outside that directory is refused: a shifted
@@ -93,16 +102,25 @@ const methodField = method && method !== "" ? method : "offline-grammar (no loca
 // booted driver class and its container override count.
 const driverField = args[13] && args[13] !== "" ? args[13] : null;
 const overridesField = args[14] !== undefined && args[14] !== "" ? Number(args[14]) : null;
+// The deployment binding (optional 16th/17th arguments): the target
+// profile the battery ran under and the replication topology that
+// profile boots. The fallbacks mirror the battery's own resolution:
+// KIWI_RT_PROFILE or "redis" (exit-criteria.sh's default), and the
+// single-primary reference topology.
+const profileField = args[15] && args[15] !== "" ? args[15] : (process.env.KIWI_RT_PROFILE || "redis");
+const topologyField = args[16] && args[16] !== "" ? args[16] : "single-primary";
 
 mkdirSync(RUNS_DIR, { recursive: true });
 writeFileSync(
     docPath,
     JSON.stringify(
         {
-            schema: "kiwicaptcha.redteam.run/1",
+            schema: "kiwicaptcha.redteam.run/2",
             campaign,
             attackClass: cls,
             seed,
+            profile: profileField,
+            topology: topologyField,
             started,
             duration_s: Number(duration),
             exit: Number(rc),
