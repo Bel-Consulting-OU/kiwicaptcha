@@ -9,6 +9,11 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandSendLease;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandSendSettlement;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorCompletion;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
@@ -82,6 +87,93 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
         self::assertCount(0, $this->reporter->reports, 'an escalated completion books no credit');
         self::assertFalse($this->store->recentStepUpSuccess(self::PRINCIPAL, 900, $this->now), 'an escalated completion books no enrollment marker');
         self::assertNull($this->store->readDemand($demandId)?->factor, 'the parent retains no completed factor');
+    }
+
+    public function testAnEscalationThatLosesTheSupersedeRaceRefusesCleanlyPastTheStandingTerminal(): void
+    {
+        // The concurrent race: this worker holds its claim and walks
+        // into the escalation, and between its claim and its supersede
+        // another worker's escalation wins the family transaction. The
+        // loser's supersede then refuses against the winner's standing
+        // terminal, and the loser must answer the same refused-denied
+        // as any other refusal (the absorbing terminal answers null to
+        // a denied settlement, and the loser must not turn that into a
+        // thrown failure). The racing store below runs the winner's
+        // whole transaction inside the loser's supersede call, the
+        // deterministic stand-in for the interleaving.
+        $racing = new class($this->store) implements StepUpChallengeStore {
+            public function __construct(private readonly StepUpChallengeStore $real)
+            {
+            }
+
+            public function supersedeDemandWithChild(string $parentDemandId, StepUpDemand $child): ?StepUpDemand
+            {
+                // The deterministic stand-in for the interleaving: the
+                // winner's whole transaction lands inside this loser's
+                // supersede call, which then refuses against the
+                // standing terminal.
+                $parent = $this->real->readDemand($parentDemandId);
+                if ($parent === null) {
+                    return null;
+                }
+                $winner = $parent->spawnChild('winnerchildid000000000001', $parent->createdAt + 1, 'decision-winner');
+                $this->real->supersedeDemandWithChild($parentDemandId, $winner);
+
+                // The loser's own supersede refuses against the marker
+                // the winner's transaction just wrote.
+                return null;
+            }
+
+            public function readDemand(string $demandId): ?StepUpDemand
+            {
+                return $this->real->readDemand($demandId);
+            }
+
+            public function create(StepUpChallenge $challenge, int $ttlSecs): string { return $this->real->create($challenge, $ttlSecs); }
+            public function read(string $challengeId): ?StepUpChallenge { return $this->real->read($challengeId); }
+            public function consume(string $challengeId): ?StepUpChallenge { return $this->real->consume($challengeId); }
+            public function recordFailure(string $challengeId, int $maxAttempts): int { return $this->real->recordFailure($challengeId, $maxAttempts); }
+            public function countBegin(string $principalPseudonym, int $windowSecs): int { return $this->real->countBegin($principalPseudonym, $windowSecs); }
+            public function createDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createDemand($demand, $ttlSecs); }
+            public function consumeDemand(string $demandId): ?StepUpDemand { return $this->real->consumeDemand($demandId); }
+            public function completeDemand(string $demandId, int $now, int $ttlSecs): ?StepUpDemand { return $this->real->completeDemand($demandId, $now, $ttlSecs); }
+            public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion { return $this->real->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash); }
+            public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string { return $this->real->completedFactorOf($sessionHash, $scope, $now); }
+            public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand { return $this->real->claimDemandFinalization($demandId, $now, $claimSecs); }
+            public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand { return $this->real->settleDemandFinalization($demandId, $state, $now, $factor); }
+            public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand { return $this->real->recordDemandEffect($demandId, $effect, $now); }
+            public function demandIdForOperation(string $operationDigest): ?string { return $this->real->demandIdForOperation($operationDigest); }
+            public function createRootDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createRootDemand($demand, $ttlSecs); }
+            public function claimDemandSendLease(string $demandId, int $resendAfterSecs, int $leaseSecs): ?StepUpDemandSendLease { return $this->real->claimDemandSendLease($demandId, $resendAfterSecs, $leaseSecs); }
+            public function settleDemandSendLease(StepUpDemandSendSettlement $settlement): bool { return $this->real->settleDemandSendLease($settlement); }
+            public function reserveMailQuota(string $reservationId, array $budgetKeys, array $limits, int $windowSecs, int $leaseSecs): bool { return $this->real->reserveMailQuota($reservationId, $budgetKeys, $limits, $windowSecs, $leaseSecs); }
+            public function commitMailQuota(string $reservationId): void { $this->real->commitMailQuota($reservationId); }
+            public function releaseMailQuota(string $reservationId): bool { return $this->real->releaseMailQuota($reservationId); }
+            public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void { $this->real->saveTotpSecret($principalPseudonym, $secretRaw); }
+            public function findTotpSecret(string $principalPseudonym): ?string { return $this->real->findTotpSecret($principalPseudonym); }
+            public function markTotpStep(string $principalPseudonym, int $step, int $ttlSecs): bool { return $this->real->markTotpStep($principalPseudonym, $step, $ttlSecs); }
+            public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void { $this->real->markStepUpSuccess($principalPseudonym, $ttlSecs, $now); }
+            public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool { return $this->real->recentStepUpSuccess($principalPseudonym, $withinSecs, $now); }
+            public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void { $this->real->markSessionStepUpSuccess($sessionId, $principalPseudonym, $factor, $ttlSecs, $now); }
+            public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool { return $this->real->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, $withinSecs, $now); }
+            public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int { return $this->real->countLockoutFailure($dimension, $pseudonym, $windowSecs); }
+            public function lockoutUntil(string $dimension, string $pseudonym, int $now): int { return $this->real->lockoutUntil($dimension, $pseudonym, $now); }
+            public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void { $this->real->armLockout($dimension, $pseudonym, $now, $ttlSecs); }
+            public function clearLockout(string $dimension, string $pseudonym): void { $this->real->clearLockout($dimension, $pseudonym); }
+        };
+        $finalizer = $this->finalizer('step_up', $racing);
+        $demandId = $this->completedEmailOtpDemand($finalizer);
+
+        $finalization = $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+
+        self::assertFalse($finalization->authorized, 'the loser of the race never authorizes');
+        self::assertSame(StepUpFinalization::REFUSED_DENIED, $finalization->reason, 'the refusal is the clean refused-denied answer');
+        self::assertNull($finalization->demand, 'the loser mints no child of its own');
+        $standing = $this->store->readDemand($demandId);
+        self::assertTrue($standing->superseded(), 'the winner terminal stands');
+        self::assertSame('winnerchildid000000000001', $standing->supersededByDemandId, 'the winner child keeps the family');
+        self::assertTrue($standing->state === StepUpDemandState::Superseded, 'the terminal the winner wrote is untouched');
+        self::assertCount(0, $this->reporter->reports, 'no credit is booked on the refusal');
     }
 
     public function testAFreshAllowReassessmentSettlesAuthorized(): void
@@ -208,10 +300,10 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
         return StepUpResult::proved($challenge, StepUpFactorAssurance::emailOtp());
     }
 
-    private function finalizer(string $minimum): StepUpDemandFinalizer
+    private function finalizer(string $minimum, ?StepUpChallengeStore $store = null): StepUpDemandFinalizer
     {
         return new StepUpDemandFinalizer(
-            $this->store,
+            $store ?? $this->store,
             new StepUpCompletionCredit($this->reporter, self::MASTER),
             null,
             $this->gateway($minimum),

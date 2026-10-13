@@ -1076,11 +1076,11 @@ final class FakePredisClient extends \Predis\Client
             if ($leaseUntil > 0) {
                 $recovered = 1;
             } else {
-                if ($priorSends >= (int) $rest[1]) {
+                if ($priorSends >= (int) $rest[0]) {
                     return null;
                 }
                 if ($priorSends >= 1 && $priorLast !== null) {
-                    $wait = ($priorLast + (int) $rest[2]) - $nowS;
+                    $wait = ($priorLast + (int) $rest[1]) - $nowS;
                     if ($wait > 0) {
                         return json_encode(['refused' => 'resend_wait', 'wait' => $wait], JSON_UNESCAPED_SLASHES);
                     }
