@@ -445,6 +445,14 @@ function statusOf(run, campaign) {
         };
     }
     if (run.result === "PASS") {
+        const recorded = `${run.economic ?? ""} ${run.metrics?.raw ?? ""}`;
+        if (/manual_qualification=pending\b/.test(recorded)) {
+            return {
+                status: "PENDING",
+                verdict: "manual qualification pending",
+                evidence: `PENDING: the automated lane held (${run.detail ?? "see run document"}), but the recorded economics carry manual_qualification=pending; the required manual matrices have not passed. ${scaleNote(run)}`,
+            };
+        }
         return { status: "GREEN", verdict: run.economic ?? "attacker uneconomic", evidence: scaleNote(run) };
     }
     return { status: "RED", verdict: run.detail ?? "see run document", evidence: scaleNote(run) };
@@ -463,9 +471,21 @@ function evidenceSuffix(selection) {
     for (const { note } of selection.buriedRefusals ?? []) {
         notes.push(note.verdict);
     }
-    if (selection.newerRefusal) notes.push(selection.newerRefusal.verdict);
+    if (selection.newerRefusal && selection.newerRefusal !== (selection.buriedRefusals ?? []).slice(-1)[0]?.note) {
+        notes.push(selection.newerRefusal.verdict);
+    }
     if (notes.length === 0) return "";
-    return ` (refused or failed run documents sit above the selected run: ${notes.join("; ")})`;
+    // Identical refusal verdicts collapse to one mention with a count:
+    // forty pre-upgrade documents must not become a forty-line wall.
+    const unique = [...new Set(notes)];
+    const disclosed = unique.slice(0, 3).map((v) => {
+        const n = notes.filter((x) => x === v).length;
+        return n > 1 ? `${v} (x${n})` : v;
+    });
+    if (unique.length > 3) {
+        disclosed.push(`${unique.length - 3} more distinct refusal reason(s)`);
+    }
+    return ` (refused or failed run documents sit above the selected run: ${disclosed.join("; ")})`;
 }
 
 /**
@@ -513,6 +533,9 @@ const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
     if (sel.buriedFail) {
         status = "RED";
         evidence = `RED: ${sel.buriedFail.ev.file} recorded FAIL under the current tree and seed; the older PASS below it is not the newest word. ${evidence}`;
+    }
+    if (status === "PENDING") {
+        return `| ${attackClass} | ${verdict} | PENDING | ${evidence} |`;
     }
     return `| ${attackClass} | ${verdict} | ${status} | ${evidence}${evidenceSuffix(sel)} |`;
 }).flat();

@@ -104,6 +104,15 @@ else
 fi
 
 rt_metric "engines=$ENGINES specs=$SPECS"
-printf 'ECONOMIC: %s %s autofill_decoy_fills=0 escalations=0\n' "$RT_CAMPAIGN" "$RT_PROFILE"
+# The manual qualification state rides the recorded economics so the
+# ledger's row carries it: pending while any matrix has manual rows,
+# qualified only when every matrix reports qualified.
+QUAL_STATE=pending
+QUAL_TOTAL=$(grep -c 'QUALIFICATION: qualified' "$LOG")
+PENDING_TOTAL=$(grep -c 'QUALIFICATION: pending' "$LOG" || true)
+[ "$QUAL_TOTAL" -ge 2 ] && [ "$PENDING_TOTAL" -eq 0 ] && QUAL_STATE=qualified
+printf 'ECONOMIC: %s %s autofill_decoy_fills=0 escalations=0 manual_qualification=%s\n' \
+    "$RT_CAMPAIGN" "$RT_PROFILE" "$QUAL_STATE"
+rt_metric "qualification=$QUAL_STATE engines=$ENGINES specs=$SPECS"
 
 rt_finish

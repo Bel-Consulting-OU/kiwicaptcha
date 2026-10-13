@@ -398,7 +398,20 @@ for campaign in $CAMPAIGNS_EXPECTED; do
             qual_qualified=${qual_qualified:-0}
             row_detail="automated lane green ($detail); manual qualification PENDING in $qual_pending_count of $qual_total matrices ($pending_matrices); qualified matrices: $qual_qualified"
         else
-            row_detail="$detail; every qualification matrix reports qualified (no manual row pending)"
+            # The GREEN path pins the required matrix set by name: a
+            # log whose only record is QUALIFICATION: qualified
+            # <arbitrary-name> must never read as fully qualified.
+            missing_required=""
+            for required_matrix in autofill-matrix.json accessibility-matrix.json; do
+                grep -q "^QUALIFICATION: qualified $required_matrix\$" "$log" 2>/dev/null \
+                    || missing_required="$missing_required $required_matrix"
+            done
+            if [ -n "$missing_required" ]; then
+                row_verdict=RED
+                row_detail="the qualification records do not cover required matrix(es):$missing_required"
+            else
+                row_detail="$detail; every qualification matrix reports qualified (no manual row pending)"
+            fi
         fi
     fi
     if [ "$row_verdict" != "GREEN" ]; then
