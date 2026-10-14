@@ -1287,6 +1287,20 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
             ? $m->demands[$parentId]->expiresAt
             : (int) $h->array->readDemand($parentId)?->expiresAt;
 
+        // A zero-extra-TTL child spawns from the parent, so it inherits
+        // the parent's family digest and principal: the family
+        // continuity the stores enforce. The forged-expiry shape (a
+        // nonzero extra TTL) keeps the direct mint, and the supersede
+        // refusal those callers assert fires on the expiry gate.
+        if ($extraTtl === 0) {
+            $parent = $h->array->readDemand($parentId);
+            if ($parent === null) {
+                throw new \RuntimeException('the parent of the child to spawn is not in the store');
+            }
+
+            return $parent->spawnChild($childId, $h->now, 'decision-child', $required);
+        }
+
         return StepUpDemand::mint(
             $childId,
             $scope,

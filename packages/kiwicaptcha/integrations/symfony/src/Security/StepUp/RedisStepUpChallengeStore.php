@@ -401,6 +401,10 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- reference store enforces, so a forged link can never sit in
         -- the family index.
         if type(child['parent_demand_id']) ~= 'string' or child['parent_demand_id'] ~= parent['id'] then return nil end
+        -- The child is the same family: a child filed under another
+        -- family digest would orphan the parent's family (the index
+        -- repoints under the child's key).
+        if type(child['family_digest']) ~= 'string' or child['family_digest'] ~= parent['family_digest'] then return nil end
         local pttl = redis.call('PTTL', KEYS[1])
         if pttl <= 0 then return nil end
         child['created_at'] = nowS

@@ -1010,8 +1010,12 @@ final class FakePredisClient extends \Predis\Client
                 return null;
             }
             // The lineage is exact in both directions, the same rule
-            // the production script enforces.
+            // the production script enforces, and the child is the same
+            // family.
             if (($child['parent_demand_id'] ?? null) !== ($parent['id'] ?? null)) {
+                return null;
+            }
+            if (($child['family_digest'] ?? null) !== ($parent['family_digest'] ?? null)) {
                 return null;
             }
             $ttlMs = $this->expirations[$parentKey] ?? null;

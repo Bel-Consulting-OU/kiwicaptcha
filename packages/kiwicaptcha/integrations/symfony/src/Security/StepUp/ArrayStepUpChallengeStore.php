@@ -209,7 +209,16 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         unset($this->challenges[$challengeId]);
         $completed = $demand->withState(StepUpDemandState::Completed, $now);
         $this->demands[$demandId] = ['record' => $completed, 'expiresAt' => $demand->expiresAt];
-        $family = $snapshot?->family;
+        // The marker's factor identity: the stored snapshot when the
+        // record carries one, the kind's own ladder rung otherwise (the
+        // same fallback the Redis script's kind tables perform, so the
+        // dev/test lane records the marker a production replay reads).
+        $family = $snapshot?->family
+            ?? match ($challenge->kind) {
+                StepUpChallengeKind::EmailOtp, StepUpChallengeKind::EmailOwnership => 'email_otp',
+                StepUpChallengeKind::Totp => 'totp',
+                StepUpChallengeKind::WebAuthn => 'webauthn',
+            };
         if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash
             && $scope !== null && $challenge->scope === $scope
             && \is_string($family) && $family !== '') {
@@ -409,8 +418,10 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
             return null;
         }
         // The child inherits the parent's remaining lifetime and its
-        // exact authorization deadline: any other shape refuses.
-        if ($child->expiresAt !== $parent->expiresAt || $child->parentDemandId !== $parent->id) {
+        // exact authorization deadline and family: any other shape
+        // refuses (a child under another family digest would orphan the
+        // parent's family when the index repoints).
+        if ($child->expiresAt !== $parent->expiresAt || $child->parentDemandId !== $parent->id || $child->familyDigest !== $parent->familyDigest) {
             return null;
         }
         $expiresAt = $entry['expiresAt'];
