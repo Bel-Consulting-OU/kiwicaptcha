@@ -1593,8 +1593,20 @@ final class RiskGateway implements LoginDecisionGate
         if ($request === null) {
             return null;
         }
+        try {
+            // The guarded resolution, the same rule every lane of the
+            // plane follows: a throwing application resolver answers
+            // null (the engine then carries no principal), never an
+            // uncaught error escaping the request as a 500.
+            return $this->principalResolver->resolve($request, $scope);
+        } catch (\Throwable $e) {
+            $this->logger?->warning('kiwicaptcha.risk: the principal resolver threw; the request carries no principal', [
+                'scope' => $scope,
+                'reason' => $e->getMessage(),
+            ]);
 
-        return $this->principalResolver->resolve($request, $scope);
+            return null;
+        }
     }
 
     private function tryScopeId(string $scope): ?int

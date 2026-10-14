@@ -42,6 +42,21 @@ interface StepUpChallengeStore
     public function create(StepUpChallenge $challenge, int $ttlSecs): string;
 
     /**
+     * Persist a fresh challenge record and, when it carries a demand
+     * binding, atomically admit it as the demand's one active
+     * challenge. The demand must be live, open and never superseded,
+     * and the challenge must not outlive it. One script (or the
+     * single-process equivalent) decides both writes, so two
+     * concurrent begins of one demand can never both stand. A
+     * demandless challenge (the enrollment ceremonies) stores like
+     * {@see self::create()}. Refusals throw
+     * {@see StepUpDemandAdmissionRefused} with nothing stored.
+     *
+     * @throws StepUpDemandAdmissionRefused when the demand refuses the admission
+     */
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string;
+
+    /**
      * The live record of a challenge id, or null when absent or
      * expired. Non-consuming.
      *

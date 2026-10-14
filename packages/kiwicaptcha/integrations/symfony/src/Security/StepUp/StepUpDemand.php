@@ -49,7 +49,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainId;
  */
 final class StepUpDemand
 {
-    private const SCHEMA_VERSION = 3;
+    private const SCHEMA_VERSION = 4;
 
     /** The maximum deliveries one demand funds: the initial code plus one resend. */
     public const MAX_SENDS = 2;
@@ -554,9 +554,13 @@ final class StepUpDemand
 
     /**
      * Bind the one active factor challenge of this demand. The
-     * challenge expiry may never outlive the parent demand, and at most
-     * one challenge is live per demand at a time: a second generation
-     * while one is active refuses (null).
+     * challenge expiry may never outlive the parent demand. A live
+     * prior challenge is replaced: the store consumes the prior record
+     * in the same transaction, so a late completion of that record can
+     * never answer. The stamp then moves to the new challenge, which
+     * keeps "at most one live challenge per demand" true while the
+     * bounded resend stays a fresh begin. The stores own the atomicity;
+     * this model method stamps the demand side of that one move.
      */
     public function admitFactorChallenge(string $challengeId, int $challengeExpiresAt, int $now): ?self
     {
@@ -564,11 +568,6 @@ final class StepUpDemand
             return null;
         }
         if ($challengeExpiresAt > $this->expiresAt) {
-            return null;
-        }
-        if ($this->activeChallengeId !== null
-            && $this->activeChallengeExpiresAt !== null
-            && $this->activeChallengeExpiresAt > $now) {
             return null;
         }
 
@@ -794,16 +793,16 @@ final class StepUpDemand
         if ($supersededBy !== null && (!\is_string($supersededBy) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $supersededBy) !== 1)) {
             return null;
         }
-        // The family digest and the principal: absent on records
-        // predating them. A legacy record falls back to its operation
-        // digest, which was the family key the previous version
-        // indexed it under, so the remaining TTL keeps a coherent
-        // family.
+        // The family digest and the principal are load-bearing on this
+        // wire shape (v4): a v3 record predating them decodes as absent
+        // — the schema boundary change that introduced the family/subject
+        // binding deliberately invalidates the records of the earlier
+        // wire shape instead of preserving transparent compatibility
+        // for their remaining TTL. Fail closed toward re-demand.
         $familyDigest = $record['family_digest'] ?? null;
-        if ($familyDigest !== null && (!\is_string($familyDigest) || preg_match('/^[0-9a-f]{64}$/D', $familyDigest) !== 1)) {
+        if (!\is_string($familyDigest) || preg_match('/^[0-9a-f]{64}$/D', $familyDigest) !== 1) {
             return null;
         }
-        $familyDigest = $familyDigest !== null && $familyDigest !== '' ? $familyDigest : $digest;
         $principalPseudonym = $record['principal_pseudonym'] ?? null;
         if ($principalPseudonym !== null && (!\is_string($principalPseudonym) || $principalPseudonym === '' || strlen($principalPseudonym) > 256)) {
             return null;

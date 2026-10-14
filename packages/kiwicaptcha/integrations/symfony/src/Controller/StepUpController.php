@@ -489,7 +489,13 @@ final class StepUpController
             $this->tokenStorage?->setToken($pending->getWrapped());
         }
         try {
+            // The guarded resolution: a throwing application resolver
+            // answers null (every caller refuses unresolvable
+            // principals), never an uncaught error escaping the
+            // controller as a 500.
             return $this->principalResolver?->resolve($request, $scope);
+        } catch (\Throwable) {
+            return null;
         } finally {
             if ($pending !== null) {
                 $this->tokenStorage?->setToken($pending);

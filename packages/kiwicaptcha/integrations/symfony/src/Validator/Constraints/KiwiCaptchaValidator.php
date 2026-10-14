@@ -2434,11 +2434,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             return $this->reassessRedeemedGrantWithoutFinalizer($payload, $constraint, $request);
         }
         $resolvedRequest = $request ?? $this->requestStack->getMainRequest();
+        // The guarded resolution: a throwing application resolver makes
+        // the redemption refuse (fail closed), never a 500 escaping the
+        // validator.
         $material = new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationMaterial(
             $this->canonicalOperationFields($constraint->scope),
             $this->submittedTargetFields($constraint->scope),
             $this->authoritativeBindingOf($constraint, $request),
-            $resolvedRequest !== null ? $this->principalResolver?->resolve($resolvedRequest, $constraint->scope) : null,
+            $this->resolvePrincipalGuarded($resolvedRequest, $constraint->scope),
         );
         // An operation-bound demand's binding must reproduce on the
         // redemption exactly like the mint reproduced it: the same
@@ -2644,10 +2647,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                     return false;
                 }
 
-                // The same principal fallback the mint uses: divergent
-                // resolver wiring must not strand an authorized family
-                // behind a key the replay cannot reproduce.
-                $principal = $operation->principal ?? $this->principalResolver?->resolve($request, $constraint->scope);
+                // The one authoritative principal, exactly like the mint:
+                // the authenticated principal, cross-checked against the
+                // operation's own when it names one. The replay gate
+                // hashes the same subject the mint bound, so a family
+                // minted under one principal can never be replayed by
+                // another.
+                $principal = $this->authoritativePrincipalOf($request, $constraint->scope, $operation->principal);
+                if ($principal === null) {
+                    return false;
+                }
 
                 return $this->stepUpFinalizer->operationAuthorizedContents(
                     $constraint->scope,
@@ -2662,7 +2671,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 return false;
             }
 
-            $principal = $this->principalResolver?->resolve($request, $constraint->scope);
+            $principal = $this->resolvePrincipalGuarded($request, $constraint->scope);
 
             return $this->stepUpFinalizer->operationAuthorized(
                 $constraint->scope,
@@ -2747,7 +2756,11 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
 
                 return null;
             }
-            $principal = $operation->principal ?? $this->principalResolver?->resolve($request, $constraint->scope);
+            // The one authoritative principal: the authenticated one,
+            // cross-checked against the operation's own when it names
+            // one (a disagreement refuses the mint, never prefers a
+            // side). The demand binds exactly this principal.
+            $principal = $this->authoritativePrincipalOf($request, $constraint->scope, $operation->principal);
 
             return $this->recordOperationBoundDemand(
                 $disposition,
@@ -2755,6 +2768,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 $request,
                 $requirement,
                 $finalizer,
+                $principal,
                 fn () => $finalizer->mintBoundDemand(
                     $constraint->scope,
                     $operation->logicalOperationId,
@@ -2780,7 +2794,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             return null;
         }
 
-        $principal = $this->principalResolver?->resolve($request, $constraint->scope);
+        $principal = $this->resolvePrincipalGuarded($request, $constraint->scope);
 
         return $this->recordOperationBoundDemand(
             $disposition,
@@ -2788,6 +2802,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             $request,
             $requirement,
             $finalizer,
+            $principal,
             fn () => $finalizer->mintFinancialDemand(
                 $constraint->scope,
                 $operationId,
@@ -2809,7 +2824,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      * mint call, and the request-attribute plus per-form routing
      * bookkeeping. The mint callable arrives from the lane (the
      * resolver-fed or the form-field recipe); the bookkeeping is one
-     * and the same.
+     * and the same. The principal arrives already resolved by the
+     * lane's one authoritative resolution — this tail never resolves
+     * again, so the minted demand and the recorded bookkeeping can
+     * never disagree about the subject.
      *
      * @param callable(): ?string $mint
      */
@@ -2819,23 +2837,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         Request $request,
         ?ChainRequirement $requirement,
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer $finalizer,
+        ?string $principal,
         callable $mint,
     ): ?string {
-        try {
-            $principal = $this->principalResolver?->resolve($request, $constraint->scope);
-        } catch (\Throwable $e) {
-            // A throwing principal resolver is the same refusal the
-            // mint closure's own resolve would produce: a typed
-            // step-up demand without a principal, never an uncaught
-            // error leaking out of the validator.
-            $principal = null;
-            $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; the principal resolver threw', [
-                'scope' => $constraint->scope,
-                'reason' => $e->getMessage(),
-            ]);
-
-            return null;
-        }
         if ($principal === null || $principal === '') {
             $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; no authenticated principal resolves', [
                 'scope' => $constraint->scope,
@@ -2862,6 +2866,57 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         }
 
         return $demandId;
+    }
+
+    /**
+     * The one guarded principal resolution every lane shares: a throwing
+     * application resolver answers null (the lane refuses, fail closed),
+     * never an uncaught error leaking out of the validator as a 500.
+     * Empty answers normalize to null. Every principal-resolver
+     * invocation of this validator goes through this helper.
+     */
+    private function resolvePrincipalGuarded(?Request $request, string $scope): ?string
+    {
+        if ($request === null || $this->principalResolver === null) {
+            return null;
+        }
+        try {
+            $principal = $this->principalResolver->resolve($request, $scope);
+        } catch (\Throwable $e) {
+            $this->logger?->info('KiwiCaptcha: the principal resolver threw; the lane refuses', [
+                'scope' => $scope,
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
+
+        return \is_string($principal) && $principal !== '' ? $principal : null;
+    }
+
+    /**
+     * The one authoritative principal of an operation-bound lane: the
+     * authenticated principal, cross-checked against the operation's
+     * own when it names one. {@see StepUpOperation::principal} is
+     * documented as the authenticated principal the operation belongs
+     * to, so a resolver that supplies a different one is a disagreement
+     * the plane refuses, never a value to prefer. Null when nothing
+     * authenticates, the resolution fails, or the two disagree.
+     */
+    private function authoritativePrincipalOf(?Request $request, string $scope, ?string $operationPrincipal): ?string
+    {
+        $authenticated = $this->resolvePrincipalGuarded($request, $scope);
+        if ($operationPrincipal !== null && $operationPrincipal !== '') {
+            if ($authenticated === null || !hash_equals($operationPrincipal, $authenticated)) {
+                $this->logger?->info('KiwiCaptcha: the operation-bound lane refused; the operation names a principal the request does not authenticate', [
+                    'scope' => $scope,
+                ]);
+
+                return null;
+            }
+        }
+
+        return $authenticated;
     }
 
     /**

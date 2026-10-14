@@ -1249,6 +1249,23 @@ final class FakePredisClient extends \Predis\Client
             if (($ch['demand_id'] ?? null) !== $demandId || ($de['id'] ?? null) !== $demandId) {
                 return ['crossed'];
             }
+            // The demand/challenge identity binding, the script's own
+            // rule: scope equality always, session equality for a
+            // session-bound demand, and the login demand's principal
+            // subject. A crossed session, scope or subject completes
+            // nothing.
+            if (($ch['scope'] ?? null) !== ($de['scope'] ?? null)) {
+                return ['crossed'];
+            }
+            if (\is_string($de['session_hash'] ?? null) && $de['session_hash'] !== ''
+                && ($ch['session_hash'] ?? null) !== $de['session_hash']) {
+                return ['crossed'];
+            }
+            if (\is_string($de['op_kind'] ?? null) && $de['op_kind'] === 'login'
+                && \is_string($de['principal_pseudonym'] ?? null) && $de['principal_pseudonym'] !== ''
+                && ($ch['subject'] ?? null) !== $de['principal_pseudonym']) {
+                return ['crossed'];
+            }
             if (!empty($de['superseded_by'])) {
                 return ['spent'];
             }
@@ -1321,11 +1338,95 @@ final class FakePredisClient extends \Predis\Client
             if ($hint !== '' && $scopeHint !== '' && ($ch['session_hash'] ?? null) === $hint
                 && ($ch['scope'] ?? null) === $scopeHint
                 && \is_string($family) && $family !== '') {
-                $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$de['expires_at'];
-                $this->fakePexpire([$indexKey, $ttl * 1000]);
+                // The monotonic-rank write: a weaker completion never
+                // overwrites a stronger entry (a legacy three-part entry
+                // reads as rank 0), the same rule the script runs.
+                $prior = $this->strings[$indexKey] ?? null;
+                $priorRank = 0;
+                if (\is_string($prior)) {
+                    $priorParts = explode('|', $prior);
+                    if (\count($priorParts) === 4 && is_numeric($priorParts[2])) {
+                        $priorRank = (int) $priorParts[2];
+                    }
+                }
+                if ((int) $rank >= $priorRank) {
+                    $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$rank.'|'.$de['expires_at'];
+                    $this->fakePexpire([$indexKey, $ttl * 1000]);
+                }
             }
 
             return ['ok', (string) $craw, $encoded];
+        }
+
+        if (str_contains($script, 'Step-up challenge admission')) {
+            // RedisStepUpChallengeStore::createAdmittedChallenge: keys[1]
+            // the challenge record, keys[2] the demand record; argv[1]
+            // the record JSON, argv[2] the challenge TTL seconds,
+            // argv[3] the challenge id, argv[4] the challenge key
+            // prefix. The demand must be live, open, never superseded;
+            // the challenge must not outlive it; a live prior challenge
+            // is replaced (deleted in the same move). One transaction:
+            // refusal stores nothing.
+            $challengeKey = (string) $keys[0];
+            $demandKey = (string) $keys[1];
+            $record = (string) $rest[0];
+            $ttl = (int) $rest[1];
+            $challengeId = (string) $rest[2];
+            $challengePrefix = (string) $rest[3];
+            $draw = $this->strings[$demandKey] ?? null;
+            if ($draw === null) {
+                return null;
+            }
+            $de = json_decode((string) $draw, true);
+            if (!\is_array($de)) {
+                unset($this->strings[$demandKey], $this->expirations[$demandKey]);
+
+                return null;
+            }
+            if (!empty($de['superseded_by']) || ($de['state'] ?? null) !== 'open') {
+                return null;
+            }
+            $now = (int) floor($this->timeMs() / 1000);
+            if (!is_numeric($de['expires_at'] ?? null) || (int) $de['expires_at'] <= $now) {
+                return null;
+            }
+            // The admitted challenge never outlives its demand: the
+            // window derives from the challenge's own creation stamp and
+            // the demand's expiry (one PHP-clock domain), never the fake
+            // server clock, so the clamp stays sound under clock skew —
+            // the same rule the script runs.
+            $ch = json_decode((string) $record, true);
+            if (!\is_array($ch) || !is_numeric($ch['created_at'] ?? null)) {
+                return null;
+            }
+            $challengeExpiresAt = (int) $ch['created_at'] + $ttl;
+            if ($challengeExpiresAt > (int) $de['expires_at']) {
+                $challengeExpiresAt = (int) $de['expires_at'];
+            }
+            $challengeTtl = max(1, $challengeExpiresAt - $now);
+            if (is_numeric($ch['expires_at'] ?? null) && (int) $ch['expires_at'] > $challengeExpiresAt) {
+                $ch['expires_at'] = $challengeExpiresAt;
+                $record = (string) json_encode($ch, JSON_UNESCAPED_SLASHES);
+            }
+            $pttl = $this->expirations[$demandKey] ?? null;
+            if ($pttl === null || $pttl <= 0) {
+                return null;
+            }
+            if (isset($this->strings[$challengeKey])) {
+                return null;
+            }
+            $this->strings[$challengeKey] = $record;
+            $this->fakePexpire([$challengeKey, $challengeTtl * 1000]);
+            $activeId = $de['active_challenge_id'] ?? null;
+            $activeUntil = is_numeric($de['active_challenge_expires_at'] ?? null) ? (int) $de['active_challenge_expires_at'] : 0;
+            if (\is_string($activeId) && $activeId !== '' && $activeUntil > $now) {
+                unset($this->strings[$challengePrefix.$activeId], $this->expirations[$challengePrefix.$activeId]);
+            }
+            $de['active_challenge_id'] = $challengeId;
+            $de['active_challenge_expires_at'] = $challengeExpiresAt;
+            $this->strings[$demandKey] = (string) json_encode($de, JSON_UNESCAPED_SLASHES);
+
+            return 1;
         }
 
         if (str_contains($script, 'Outstanding challenge issuance')) {

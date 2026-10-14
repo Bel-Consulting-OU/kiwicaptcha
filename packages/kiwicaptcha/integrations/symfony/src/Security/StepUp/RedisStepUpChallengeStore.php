@@ -258,6 +258,25 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           or type(de['id']) ~= 'string' or de['id'] ~= ARGV[1] then
           return {'crossed'}
         end
+        -- The demand/challenge identity binding, judged on the stored
+        -- records alone: a challenge answers exactly its own demand's
+        -- scope, a session-bound demand is completed only by a challenge
+        -- of that same session, and a login demand is completed only by
+        -- a challenge of the principal the demand was minted for. A
+        -- crossed session, scope or subject completes nothing — the
+        -- presented binding may match the challenge perfectly and the
+        -- completion still refuses, because the proof earned belongs to
+        -- another browser, scope or account than the demand names.
+        if type(ch['scope']) ~= 'string' or ch['scope'] ~= de['scope'] then return {'crossed'} end
+        if type(de['session_hash']) == 'string' and de['session_hash'] ~= ''
+          and (type(ch['session_hash']) ~= 'string' or ch['session_hash'] ~= de['session_hash']) then
+          return {'crossed'}
+        end
+        if type(de['op_kind']) == 'string' and de['op_kind'] == 'login'
+          and type(de['principal_pseudonym']) == 'string' and de['principal_pseudonym'] ~= ''
+          and (type(ch['subject']) ~= 'string' or ch['subject'] ~= de['principal_pseudonym']) then
+          return {'crossed'}
+        end
         -- A superseded demand completes nothing, whatever its state
         -- field still says: escalation replaced it with a stronger
         -- child, and the weak proof must not land behind the family's
@@ -326,13 +345,110 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- session hash and scope, and the write lands only when both
         -- hints equal the stored record's own fields, so one scope's
         -- history can never overwrite another's.
+        --
+        -- The write is monotonic in the ladder rank: the entry carries
+        -- the completing proof's own rank, and a weaker completion never
+        -- overwrites a stronger one — the history can never regress
+        -- from webauthn to email_otp however the completions interleave,
+        -- and a weaker demand's TTL can never extend a stronger proof's
+        -- lifetime (the weaker completion writes nothing at all). A
+        -- legacy three-part entry (before the rank rode the value) reads
+        -- as rank 0: any ladder completion moves it forward.
         if ARGV[4] ~= '' and ARGV[5] ~= '' and type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[4]
           and type(ch['scope']) == 'string' and ch['scope'] == ARGV[5]
           and type(de['expires_at']) == 'number'
           and type(family) == 'string' and family ~= '' then
-          redis.call('SET', KEYS[3], ch['scope']..'|'..family..'|'..tostring(math.floor(de['expires_at'])), 'EX', ttl)
+          local prior = redis.call('GET', KEYS[3])
+          local priorRank = 0
+          if type(prior) == 'string' then
+            -- The fields are never empty, so the non-empty split yields
+            -- exactly one token per field: four means the ranked shape
+            -- (scope|family|rank|expiry) and the third token is the
+            -- rank; three is the legacy unranked shape and reads as 0.
+            local count = 0
+            local third = nil
+            for token in string.gmatch(prior, '([^|]+)') do
+              count = count + 1
+              if count == 3 then third = token end
+            end
+            if count == 4 and third ~= nil and tonumber(third) ~= nil then
+              priorRank = tonumber(third)
+            end
+          end
+          local completedRank = tonumber(rank) or 0
+          if completedRank >= priorRank then
+            redis.call('SET', KEYS[3], ch['scope']..'|'..family..'|'..tostring(completedRank)..'|'..tostring(math.floor(de['expires_at'])), 'EX', ttl)
+          end
         end
         return {'ok', craw, cjson.encode(de)}
+        LUA;
+
+    /**
+     * The challenge-admission script: the atomic create-and-admit of
+     * one demand-bound challenge. The demand must be present, open,
+     * never superseded, and live (the Redis clock judges every expiry);
+     * the challenge must not outlive the demand. The admission replaces
+     * any prior live challenge of the demand: its record is deleted in
+     * this same script, so a late completion of that record can never
+     * answer. The stamp then moves to the new challenge, so at most one
+     * live challenge per demand holds at any instant while the bounded
+     * resend stays a fresh begin. Two concurrent begins of one demand
+     * serialize: the loser's NX misses and nothing of theirs stands.
+     * Every refusal answers nil with nothing stored, fail closed. A
+     * demandless challenge never reaches this script (the caller stores
+     * it with plain SET NX). ARGV: [1] record JSON, [2] ttl secs,
+     * [3] challenge id, [4] challenge key prefix.
+     */
+    private const DEMAND_ADMIT_SCRIPT = <<<'LUA'
+        -- Step-up challenge admission: create + admit, one transaction.
+        local draw = redis.call('GET', KEYS[2])
+        if not draw then return nil end
+        local dok, de = pcall(cjson.decode, draw)
+        if not dok or type(de) ~= 'table' then
+          redis.call('DEL', KEYS[2])
+          return nil
+        end
+        if type(de['superseded_by']) == 'string' and de['superseded_by'] ~= '' then return nil end
+        if de['state'] ~= 'open' then return nil end
+        local t = redis.call('TIME')
+        local now = tonumber(t[1])
+        if type(de['expires_at']) ~= 'number' or de['expires_at'] <= now then return nil end
+        local cok, ch = pcall(cjson.decode, ARGV[1])
+        if not cok or type(ch) ~= 'table' then return nil end
+        -- The admitted challenge never outlives its demand: a TTL that
+        -- would is clamped to the demand's remaining authorization
+        -- window (a resend late in the window issues a shorter-lived
+        -- code, never a refusal). The window is derived from the
+        -- challenge's own creation stamp, never the server clock: the
+        -- record's created_at and the demand's expires_at are one clock
+        -- domain (the minting PHP side), so the clamp stays sound even
+        -- under server-clock skew.
+        if type(ch['created_at']) ~= 'number' then return nil end
+        local challengeExpiresAt = math.floor(ch['created_at']) + tonumber(ARGV[2])
+        if challengeExpiresAt > de['expires_at'] then challengeExpiresAt = math.floor(de['expires_at']) end
+        local challengeTtl = challengeExpiresAt - now
+        if challengeTtl < 1 then challengeTtl = 1 end
+        if type(ch['expires_at']) ~= 'number' or ch['expires_at'] > challengeExpiresAt then
+          ch['expires_at'] = challengeExpiresAt
+        end
+        local craw = cjson.encode(ch)
+        local pttl = redis.call('PTTL', KEYS[2])
+        if pttl <= 0 then return nil end
+        local ok = redis.call('SET', KEYS[1], craw, 'EX', challengeTtl, 'NX')
+        if not ok then return nil end
+        -- The replace: the prior live challenge of this demand dies in
+        -- the same transaction that stamps the new one.
+        if type(de['active_challenge_id']) == 'string' and de['active_challenge_id'] ~= '' then
+          local activeUntil = 0
+          if type(de['active_challenge_expires_at']) == 'number' then activeUntil = de['active_challenge_expires_at'] end
+          if activeUntil > now then
+            redis.call('DEL', ARGV[4] .. de['active_challenge_id'])
+          end
+        end
+        de['active_challenge_id'] = ARGV[3]
+        de['active_challenge_expires_at'] = challengeExpiresAt
+        redis.call('SET', KEYS[2], cjson.encode(de), 'PX', pttl)
+        return 1
         LUA;
 
     /**
@@ -621,6 +737,35 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return $challenge->id;
     }
 
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        if ($challenge->demandId === null) {
+            // The demandless ceremonies (enrollment creation, the drain
+            // shapes) store like any other: they authorize nothing and
+            // admit through no demand.
+            return $this->create($challenge, $ttlSecs);
+        }
+        // The admission script decides both writes atomically: a
+        // refused admission (nil) stores nothing and answers the typed
+        // refusal; a script shape violation is a backend error, fail
+        // closed. The record JSON rides ARGV[1], the TTL ARGV[2], the
+        // challenge id ARGV[3], the challenge key prefix ARGV[4].
+        $answer = $this->redis->eval(
+            self::DEMAND_ADMIT_SCRIPT,
+            2,
+            $this->challengeKey($challenge->id),
+            $this->demandKey($challenge->demandId),
+            (string) json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES),
+            (string) max(1, $ttlSecs),
+            $challenge->id,
+            $this->prefix.'challenge:',
+        );
+
+        return (int) $answer === 1
+            ? $challenge->id
+            : throw new StepUpDemandAdmissionRefused('the demand refused the challenge admission');
+    }
+
     /**
      * Whether a SET reply affirms the write. The reply shape is
      * client-specific: a real Predis client answers a
@@ -760,7 +905,21 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             return null;
         }
         $parts = explode('|', $value);
-        if (\count($parts) !== 3 || $parts[0] !== $scope || (int) $parts[2] <= $now) {
+        // The rank rides the value (scope|family|rank|expires); a legacy
+        // three-part entry predating it stays readable for its own TTL.
+        // The embedded expiry is re-checked on every read: a key whose
+        // TTL outlives its entry's authorization window answers nothing.
+        if (\count($parts) !== 4 && \count($parts) !== 3) {
+            return null;
+        }
+        if ($parts[0] !== $scope || !\is_string($parts[1])) {
+            return null;
+        }
+        $expiry = (int) $parts[\count($parts) - 1];
+        if ($expiry <= $now) {
+            return null;
+        }
+        if (\count($parts) === 4 && preg_match('/^[0-9]+$/', $parts[2]) !== 1) {
             return null;
         }
 

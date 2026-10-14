@@ -38,6 +38,11 @@ final class FailingDemandEffectStepUpChallengeStore implements StepUpChallengeSt
         return $this->inner->create($challenge, $ttlSecs);
     }
 
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        return $this->inner->createAdmittedChallenge($challenge, $ttlSecs);
+    }
+
     public function read(string $challengeId): ?StepUpChallenge
     {
         return $this->inner->read($challengeId);

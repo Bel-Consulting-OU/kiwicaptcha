@@ -48,6 +48,15 @@ final class FailingCreateStepUpChallengeStore implements StepUpChallengeStore
         return $this->inner->create($challenge, $ttlSecs);
     }
 
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        if ($this->failCreate) {
+            throw new \RuntimeException('store refused the record');
+        }
+
+        return $this->inner->createAdmittedChallenge($challenge, $ttlSecs);
+    }
+
     /** @return list<string> */
     public function recorded(): array
     {

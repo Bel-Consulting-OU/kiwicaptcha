@@ -309,9 +309,48 @@ final class StepUpChallenge
         return rtrim(strtr(base64_encode(random_bytes(16)), '+/', '-_'), '=');
     }
 
-    public function withAttempts(int $attempts): self
+    /**
+     * The record with its expiry clamped to the demand's authorization
+     * window: an admission that would outlive its demand shortens the
+     * record to the window instead (the code dies with the
+     * authorization it funds). Only a shortening applies, and the
+     * shortened expiry never precedes the record's own creation: under
+     * clock-domain skew between the store and the minting lane the
+     * record stays the shortest valid shape rather than refusing.
+     */
+    public function withClampedExpiry(int $expiresAt): self
     {
+        $target = max($expiresAt, $this->createdAt + 1);
+        if ($target >= $this->expiresAt) {
+            return $this;
+        }
+
         return new self(
+            $this->id,
+            $this->kind,
+            $this->principalPseudonym,
+            $this->targetPseudonym,
+            $this->scope,
+            $this->returnPath,
+            $this->reason,
+            $this->createdAt,
+            $target,
+            $this->maxAttempts,
+            $this->attempts,
+            $this->codeHash,
+            $this->ceremony,
+            $this->sessionHash,
+            $this->clientSecretHash,
+            $this->targetOwned,
+            $this->bootstrapAuthorized,
+            $this->subjectPseudonym,
+            $this->demandId,
+            $this->factor,
+        );
+    }
+
+    public function withAttempts(int $attempts): self
+    {        return new self(
             $this->id,
             $this->kind,
             $this->principalPseudonym,
