@@ -213,6 +213,22 @@ console.log(
 //    benchmark process; the harness freezes the PHP configuration and
 //    browser path itself. The child's cwd stays the caller's directory,
 //    so relative --out paths land in the invoking repository.
+//
+//    An ABSENT --out is resolved against the invoking repository too.
+//    The harness would otherwise default it to its own results
+//    directory, which inside this launcher is the frozen worktree: a
+//    successful multi-hour run would write its results into a tree the
+//    cleanup below deletes, and the documented certifying command
+//    (`run-frozen.mjs --tiers <tier>`, no --out) would silently destroy
+//    its own evidence. The injection gives every run an explicit,
+//    durable destination in the caller's repository; an explicit --out
+//    on the command line is never touched.
+const childArgs = [...args];
+if (!childArgs.some((a) => a === '--out' || a.startsWith('--out='))) {
+  const date = new Date().toISOString().slice(0, 10);
+  childArgs.push('--out', join(REPO_ROOT, 'tools', 'client-perf', 'results', `results-${date}.json`));
+  console.log(`run-frozen: no --out given; results will be written to ${join(REPO_ROOT, 'tools', 'client-perf', 'results', `results-${date}.json`)} (the invoking repository, never the frozen worktree)`);
+}
 const childEnv = {
   PATH: process.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin',
   HOME: process.env.HOME ?? tmpdir(),
@@ -224,7 +240,7 @@ const childEnv = {
   KIWI_PERF_FROZEN_TREE: tree,
   PLAYWRIGHT_BROWSERS_PATH: browsersDir,
 };
-const child = spawn(process.execPath, [join(tree, 'tools', 'client-perf', 'client-perf.mjs'), ...args], {
+const child = spawn(process.execPath, [join(tree, 'tools', 'client-perf', 'client-perf.mjs'), ...childArgs], {
   stdio: 'inherit',
   env: childEnv,
 });
