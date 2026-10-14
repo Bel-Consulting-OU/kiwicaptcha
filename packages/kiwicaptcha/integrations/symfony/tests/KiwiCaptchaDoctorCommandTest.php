@@ -1363,6 +1363,34 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         );
     }
 
+    public function testDoctorAdvisesOnTheExplicitLegacyKidModeEscapeHatch(): void
+    {
+        // The explicit strict_kid_verification false is the legacy any-kid
+        // single-secret migration escape hatch: the keyring check must
+        // surface it as an explicit advisory (a warning, never a failing
+        // check) naming the escape hatch and the strict default, while
+        // the strict default keeps the check passing with the armed mode
+        // named.
+        $legacy = $this->doctorWithConfig(static function (array $config): array {
+            $config['strict_kid_verification'] = false;
+
+            return $config;
+        });
+        $legacy->execute([]);
+
+        $display = $legacy->getDisplay();
+        self::assertStringContainsString('[WARN] Keyring state', $display, 'a non-strict configuration surfaces an advisory, never a failing check');
+        self::assertStringNotContainsString(''.self::failTag().' Keyring state', $display);
+        self::assertStringContainsString('legacy any-kid single-secret path', $display);
+        self::assertStringContainsString('strict_kid_verification: true', $display, 'the advisory must name the escape hatch remediation');
+        self::assertSame(Command::SUCCESS, $legacy->getStatusCode(), 'the advisory must not fail the deploy gate');
+
+        $strict = $this->doctorWithConfig(null);
+        $strict->execute([]);
+        self::assertStringContainsString('[PASS] Keyring state', $strict->getDisplay());
+        self::assertStringContainsString('strict current-kid resolution', $strict->getDisplay(), 'the strict default names the armed kid-resolution mode');
+    }
+
     public function testDoctorWarnsOnAShortExecutionKey(): void
     {
         $tester = $this->doctorWithConfig(static function (array $config): array {

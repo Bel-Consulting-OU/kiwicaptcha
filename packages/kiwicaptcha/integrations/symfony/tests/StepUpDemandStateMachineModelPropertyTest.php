@@ -744,7 +744,6 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         $scope = $reuseDemandId !== null
             ? $m->demands[$reuseDemandId]->scope
             : 'w'.preg_replace('/[^A-Za-z0-9]/', '', $ctx).mt_rand(0, 999999);
-        $digest = StepUpOperationDigest::none($scope);
         $required = match (mt_rand(0, 2)) {
             1 => new FactorRequirement(FactorRequirement::EMAIL_OTP, FactorRequirement::EMAIL_OTP, 1),
             2 => new FactorRequirement(FactorRequirement::TOTP, FactorRequirement::TOTP, 2),
@@ -752,7 +751,12 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         };
         $id = $m->nextDemandId();
         $decision = 'decision-'.preg_replace('/[^A-Za-z0-9]/', '', $ctx);
-        $demand = StepUpDemand::mint($id, $scope, null, null, $decision, $h->now, self::TTL, StepUpOperationBindingKind::None, $digest, null, null, false, null, $required);
+        $demand = StepUpDemand::mint($id, $scope, null, null, $decision, $h->now, self::TTL, StepUpOperationBindingKind::None, '', null, null, false, null, $required);
+        // The family identity is the minted record's own family digest,
+        // the key the stores actually index. A stateless mint folds its
+        // unguessable id in, so every fresh stateless root owns a family
+        // of its own and no standing tip can exist for it yet.
+        $digest = $demand->familyDigest;
 
         $tip = $m->familyTip[$digest] ?? null;
         $tipLive = $tip !== null && $m->demands[$tip]->present;
@@ -794,6 +798,7 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         $wrongBinding = mt_rand(0, 3) === 0;
         $presented = $wrongBinding ? str_repeat('b', 64) : $challenge->binding;
         $hint = $challenge->sessionHash !== null && mt_rand(0, 1) === 0 ? $challenge->sessionHash : null;
+        $scopeHint = $hint !== null ? $challenge->scope : null;
 
         $crossed = $demand === null || $challenge->demandId !== $demandId;
         $rankOk = $demand === null
@@ -808,8 +813,8 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
             && !$wrongBinding
             && $rankOk;
 
-        $arrayAnswer = $h->array->completeFactor($challengeId, $demandId, $presented, $h->now, $hint);
-        $redisAnswer = $h->redis->completeFactor($challengeId, $demandId, $presented, $h->now, $hint);
+        $arrayAnswer = $h->array->completeFactor($challengeId, $demandId, $presented, $h->now, $hint, $scopeHint);
+        $redisAnswer = $h->redis->completeFactor($challengeId, $demandId, $presented, $h->now, $hint, $scopeHint);
 
         if ($ok) {
             self::assertNotNull($arrayAnswer, $ctx.' completeFactor');
@@ -823,7 +828,9 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 $demand->lanes[$lane]->stateAt = $h->now;
             }
             if ($challenge->sessionHash !== null && $hint === $challenge->sessionHash) {
-                $m->completedIndex[$challenge->sessionHash] = ['scope' => $challenge->scope, 'family' => $challenge->family, 'expiresAt' => $demand->expiresAt];
+                // The marker history is keyed per (session, scope) pair,
+                // the same derivation both stores run.
+                $m->completedIndex[$challenge->sessionHash.'|'.$challenge->scope] = ['sessionHash' => $challenge->sessionHash, 'scope' => $challenge->scope, 'family' => $challenge->family, 'expiresAt' => $demand->expiresAt];
             }
         } else {
             self::assertNull($arrayAnswer, $ctx.' completeFactor refusal');
@@ -949,7 +956,9 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         if ($landed) {
             $parent->supersededBy = $childId;
             $m->demands[$childId] = ModelDemand::fromChild($child, $parentId, $parent, $h->now);
-            $m->familyTip[$child->operationDigest] = $childId;
+            // The stores repoint the index under the child's own family
+            // digest (an escalation child inherits its parent's).
+            $m->familyTip[$child->familyDigest] = $childId;
         } else {
             self::assertNull($h->array->readDemand($childId), $ctx.' the refused child was never written');
             self::assertNull($h->redis->readDemand($childId), $ctx.' the refused child was never written');
@@ -1126,13 +1135,13 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         }
         foreach ($m->familyTip as $digest => $tipId) {
             $expected = $m->demands[$tipId]->present ? $tipId : null;
-            self::assertSame($expected, $h->array->demandIdForOperation($digest), $ctx.' family tip (array)');
-            self::assertSame($expected, $h->redis->demandIdForOperation($digest), $ctx.' family tip (redis)');
+            self::assertSame($expected, $h->array->demandIdForFamily($digest), $ctx.' family tip (array)');
+            self::assertSame($expected, $h->redis->demandIdForFamily($digest), $ctx.' family tip (redis)');
         }
-        foreach ($m->completedIndex as $sessionHash => $entry) {
+        foreach ($m->completedIndex as $entry) {
             $expected = $h->now < $entry['expiresAt'] ? $entry['family'] : null;
-            self::assertSame($expected, $h->array->completedFactorOf($sessionHash, $entry['scope'], $h->now), $ctx.' escalation marker (array)');
-            self::assertSame($expected, $h->redis->completedFactorOf($sessionHash, $entry['scope'], $h->now), $ctx.' escalation marker (redis)');
+            self::assertSame($expected, $h->array->completedFactorOf($entry['sessionHash'], $entry['scope'], $h->now), $ctx.' escalation marker (array)');
+            self::assertSame($expected, $h->redis->completedFactorOf($entry['sessionHash'], $entry['scope'], $h->now), $ctx.' escalation marker (redis)');
         }
     }
 
@@ -1451,10 +1460,10 @@ final class StepUpDemandWalkModel
     /** @var array<string, ModelChallenge> */
     public array $challenges = [];
 
-    /** @var array<string, string> operation digest -> family tip id */
+    /** @var array<string, string> family digest -> family tip id */
     public array $familyTip = [];
 
-    /** @var array<string, array{scope: string, family: string, expiresAt: int}> session hash -> escalation marker */
+    /** @var array<string, array{sessionHash: string, scope: string, family: string, expiresAt: int}> (session hash, scope) -> escalation marker */
     public array $completedIndex = [];
 
     private int $counter = 0;

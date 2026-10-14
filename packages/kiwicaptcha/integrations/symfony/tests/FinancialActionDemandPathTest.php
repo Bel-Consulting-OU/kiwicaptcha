@@ -302,7 +302,10 @@ final class FinancialActionDemandPathTest extends TestCase
      */
     private function alreadyAuthorizedPublic(ArrayStepUpChallengeStore $store, string $operationId, array $contents): bool
     {
-        return $this->finalizer($store)->operationAuthorized(self::SCOPE, $operationId, $contents);
+        // The same principal and session the mint recorded: the durable
+        // authorization belongs to the browser and principal that
+        // earned it.
+        return $this->finalizer($store)->operationAuthorized(self::SCOPE, $operationId, $contents, 'user-42');
     }
 
     private function alreadyAuthorized(KiwiCaptchaValidator $validator, KiwiCaptcha $constraint, Request $request): bool

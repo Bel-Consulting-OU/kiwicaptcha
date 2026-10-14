@@ -107,7 +107,7 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
         self::assertCount(2, $this->familyKeys(), 'retry 1: exactly one child exists, the retry minted no second child');
         self::assertSame($childId, $this->store->readDemand($parentId)?->supersededByDemandId, 'retry 1: the parent names exactly the first child');
         self::assertSame($familyKeys, $this->familyKeys(), 'retry 1: the family membership is unchanged');
-        self::assertSame($childId, $this->store->demandIdForOperation($digest), 'retry 1: the family index still names the first child');
+        self::assertSame($childId, $this->store->demandIdForFamily($digest), 'retry 1: the family index still names the first child');
 
         // A second retry after the first: identical refusal, identical state.
         self::assertNull($this->store->supersedeDemandWithChild($parentId, $child), 'retry 2: the exact supersede call answers null again');
@@ -284,7 +284,7 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
         self::assertSame($childId, $this->rawIndex($digest), 'lost reply: the family index names the child');
         self::assertTrue((bool) $this->store->readDemand($parentId)?->superseded(), 'lost reply: the store reads the parent as superseded');
         self::assertNotNull($this->store->readDemand($childId), 'lost reply: the store reads the child as present');
-        self::assertSame($childId, $this->store->demandIdForOperation($digest), 'lost reply: the family tip is the child');
+        self::assertSame($childId, $this->store->demandIdForFamily($digest), 'lost reply: the family tip is the child');
         $parentRaw = $this->raw($parentId);
         $childRaw = $this->raw($childId);
 
@@ -395,7 +395,10 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
         $stored = $this->store->createDemand($demand, self::TTL);
         self::assertSame($id, $stored, 'the parent demand persists under its own id');
 
-        return $demand->operationDigest;
+        // The family identity is the record's own family digest, the
+        // key the stores index: the escalation child inherits it, so
+        // every index read here names the same family.
+        return $demand->familyDigest;
     }
 
     /** The escalation child minted from the live parent record. */
@@ -470,7 +473,7 @@ final class RedisStepUpSupersessionFaultMatrixRealPredisTest extends TestCase
             3,
             self::PREFIX.'emd:'.$parentId,
             self::PREFIX.'emd:'.$child->id,
-            self::PREFIX.'emi:'.$child->operationDigest,
+            self::PREFIX.'emi:'.$child->familyDigest,
             (string) json_encode($child->toArray(), JSON_UNESCAPED_SLASHES),
             $child->id,
         );

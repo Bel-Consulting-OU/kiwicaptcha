@@ -52,7 +52,7 @@ final class HmacKeyRotationLifecycleTest extends TestCase
         $revokedChallenge = $issuer2->issue('login', self::IP);
 
         $context1 = new VerificationSecurityContext(2, self::KEY_A, [], []);
-        self::assertSame([], $context1->acceptedKeys(), 'stage 1: no historical secrets means the legacy single-secret path (empty ring)');
+        self::assertSame([2 => self::KEY_A], $context1->acceptedKeys(), 'stage 1: the default strict mode wires the current key alone as the ring (empty historical map)');
         $verifier1 = $this->verifier($storage, $context1, []);
         $outcome = $verifier1->verify($this->solveToken($challenge1), self::KEY_A, 'login', self::IP);
         self::assertTrue($outcome->isOk(), sprintf(
@@ -152,18 +152,20 @@ final class HmacKeyRotationLifecycleTest extends TestCase
         ));
     }
 
-    public function testDefaultLegacyAnyKidSingleSecretSemanticsAreUnchanged(): void
+    public function testExplicitFalseKeepsTheLegacyAnyKidSingleSecretSemantics(): void
     {
-        // Default (strictKidMode false, empty historical map): the ring
-        // stays empty and the core's legacy single-secret path accepts
-        // any record kid under the current secret — the legacy
-        // single-secret semantics are preserved byte-for-byte.
+        // The explicit strictKidMode false is the legacy any-kid
+        // single-secret migration escape hatch: with an empty historical
+        // map the ring stays empty and the core's legacy single-secret
+        // path accepts any record kid under the current secret, so an
+        // existing deployment keeps verifying until it opts into the
+        // strict default.
         $storage = new ArrayStorage();
         $issuer5 = $this->issuer($storage, 5, self::KEY_A);
         $foreignChallenge = $issuer5->issue('login', self::IP);
 
-        $legacyContext = new VerificationSecurityContext(3, self::KEY_A, [], []);
-        self::assertSame([], $legacyContext->acceptedKeys(), 'default: the legacy empty ring is untouched');
+        $legacyContext = new VerificationSecurityContext(3, self::KEY_A, [], [], null, null, strictKidMode: false);
+        self::assertSame([], $legacyContext->acceptedKeys(), 'the explicit false keeps the legacy empty ring');
         $legacyVerifier = $this->verifier($storage, $legacyContext, []);
         $outcome = $legacyVerifier->verify($this->solveToken($foreignChallenge), self::KEY_A, 'login', self::IP);
         self::assertTrue($outcome->isOk(), sprintf(
@@ -179,7 +181,7 @@ final class HmacKeyRotationLifecycleTest extends TestCase
         // idempotency identity changes between the legacy empty ring and
         // the strict current-key ring — a cached provider result cannot
         // outlive the mode switch.
-        $legacy = new VerificationSecurityContext(3, self::KEY_A, [], []);
+        $legacy = new VerificationSecurityContext(3, self::KEY_A, [], [], null, null, strictKidMode: false);
         $strict = new VerificationSecurityContext(3, self::KEY_A, [], [], null, null, strictKidMode: true);
         self::assertNotSame($legacy->contextDigest(), $strict->contextDigest(), 'the strict ring must change the security-context digest');
     }

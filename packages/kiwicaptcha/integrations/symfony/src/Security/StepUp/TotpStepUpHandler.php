@@ -320,7 +320,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             return false;
         }
 
-        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash) !== null;
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash, $challenge->scope) !== null;
     }
 
     /**

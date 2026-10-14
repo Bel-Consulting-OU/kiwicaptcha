@@ -560,7 +560,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             return false;
         }
 
-        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash) !== null;
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash, $challenge->scope) !== null;
     }
 
     private function creationOptions(StepUpChallenge $challenge, string $challengeBytes, string $host): PublicKeyCredentialCreationOptions

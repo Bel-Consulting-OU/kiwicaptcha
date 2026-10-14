@@ -1203,21 +1203,25 @@ final class FakePredisClient extends \Predis\Client
         if (str_contains($script, 'Step-up factor completion')) {
             // RedisStepUpChallengeStore completeFactor: keys[1] the
             // challenge record, keys[2] the demand record, keys[3] the
-            // escalation index; argv[1] the demand id, argv[2] now,
-            // argv[3] the presented binding hash, argv[4] the session
-            // hash hint ('' skips the index write). One atomic
-            // challenge+demand transition: the checks run in the
-            // script's order, and the winner consumes the challenge and
-            // completes the demand in one step. The judged factor
-            // identity is the stored challenge's own server-held
-            // snapshot, never a caller argument.
+            // escalation index; argv[1] the demand id, argv[2] the
+            // caller's clock (never read: the real script reads the
+            // server TIME), argv[3] the presented binding hash, argv[4]
+            // the session hash hint, argv[5] the scope hint ('' skips
+            // the index write). One atomic challenge+demand transition:
+            // the checks run in the script's order, and the winner
+            // consumes the challenge and completes the demand in one
+            // step. The judged factor identity is the stored challenge's
+            // own server-held snapshot, never a caller argument. Every
+            // clock decision reads the fake server time, the same
+            // Redis-owned clock semantics the script runs.
             $challengeKey = (string) $keys[0];
             $demandKey = (string) $keys[1];
             $indexKey = (string) $keys[2];
             $demandId = (string) $rest[0];
-            $now = (int) $rest[1];
+            $now = (int) floor($this->timeMs() / 1000);
             $binding = (string) $rest[2];
             $hint = (string) $rest[3];
+            $scopeHint = (string) $rest[4];
             $craw = $this->strings[$challengeKey] ?? null;
             if ($craw === null) {
                 return ['missing_challenge'];
@@ -1307,8 +1311,11 @@ final class FakePredisClient extends \Predis\Client
             // The escalation index stores the factor identity the record
             // itself carries, never a caller argument: a completion
             // cannot poison the future assurance escalation by claiming
-            // a stronger factor than its challenge proves.
-            if ($hint !== '' && ($ch['session_hash'] ?? null) === $hint
+            // a stronger factor than its challenge proves. The write
+            // requires both hints to equal the stored record's own
+            // fields, the same gate the script runs.
+            if ($hint !== '' && $scopeHint !== '' && ($ch['session_hash'] ?? null) === $hint
+                && ($ch['scope'] ?? null) === $scopeHint
                 && \is_string($family) && $family !== '') {
                 $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$de['expires_at'];
                 $this->fakePexpire([$indexKey, $ttl * 1000]);

@@ -15,6 +15,8 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Tests\CapturingEmailOwnershipSender;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage;
+use Symfony\Component\HttpFoundation\Session\Session;
 
 /**
  * The escalation family of the step-up demand plane, the send lease and
@@ -30,6 +32,11 @@ use Symfony\Component\HttpFoundation\Request;
 final class StepUpDemandEscalationTest extends TestCase
 {
     private const MASTER = 'kiwi-step-up-master-0123456789abcdef';
+
+    /** The browser session id mintRoot pins; begin-flow tests present it as the continuity cookie. */
+    private const SESSION_ID = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
+
+    private const COOKIE_NAME = '__Host-kiwi-session';
 
     /** The store clock of the test, advanced explicitly. */
     private int $now = 1700000000;
@@ -48,7 +55,7 @@ final class StepUpDemandEscalationTest extends TestCase
             $this->store,
             new StepUpTicket(self::MASTER),
             $this->sender,
-            null,
+            new \BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie(),
             null,
             'signup',
             self::MASTER,
@@ -70,7 +77,7 @@ final class StepUpDemandEscalationTest extends TestCase
         $first = $this->mintRoot($digest, 'decision-1');
         $second = $this->mintRoot($digest, 'decision-2');
         self::assertSame($first, $second, 'a second root for one operation never mints; the standing demand serves');
-        $live = $this->store->demandIdForOperation($digest);
+        $live = $this->store->demandIdForFamily($this->familyOf($first));
         self::assertSame($first, $live);
         self::assertSame(0, $this->store->readDemand($first)?->generation);
     }
@@ -88,7 +95,7 @@ final class StepUpDemandEscalationTest extends TestCase
         $stored = $this->store->readDemand('childid00000000000000001');
         self::assertNotNull($stored, 'the child exists');
         self::assertSame($parent, $stored->parentDemandId, 'the child names its parent for auditability');
-        self::assertSame('childid00000000000000001', $this->store->demandIdForOperation($digest), 'the family index points at the child');
+        self::assertSame('childid00000000000000001', $this->store->demandIdForFamily($this->familyOf($parent)), 'the family index points at the child');
     }
 
     public function testASupersededParentFundsNothingAndASecondEscalationRefuses(): void
@@ -107,7 +114,7 @@ final class StepUpDemandEscalationTest extends TestCase
         $parent = $this->mintRoot($digest, 'decision-1');
         $this->now += 601;
         self::assertNull($this->store->readDemand($parent), 'the expired parent is gone from the store');
-        self::assertNull($this->store->demandIdForOperation($digest), 'the family dies with its expiry');
+        self::assertNull($this->store->demandIdForFamily($digest . str_repeat('a', 64)), 'the family dies with its expiry');
     }
 
     public function testAChildIdCollisionRefusesTheWholeTransaction(): void
@@ -240,34 +247,50 @@ final class StepUpDemandEscalationTest extends TestCase
         self::assertNull($this->escalate($denied, 'childid00000000000000003', 'decision-6'), 'a denied demand never funds a fresh sibling');
     }
 
-    public function testMintDemandEscalatesInsteadOfRefreshingTheWindow(): void
+    public function testAMintRepeatServesTheStandingDemandUnchanged(): void
     {
+        // The audited contract: a factor completion, not a second mint,
+        // is what earns progression through the ladder. A repeat mint
+        // of the same browser's still-open demand serves the standing
+        // demand untouched, same factor requirement, same window.
         $session = str_repeat('b', 64);
         $first = $this->factor->mintDemand('signup', $session, null, 'decision-1');
         self::assertNotNull($first);
         $root = $this->store->readDemand($first);
         self::assertSame(0, $root->generation);
+        $firstRequirement = $root->requiredFactor;
 
         $this->now += 200;
         $second = $this->factor->mintDemand('signup', $session, null, 'decision-2');
-        self::assertNotSame($first, $second, 'the reassessment mints the child, not a second root');
-        $child = $this->store->readDemand($second);
-        self::assertSame($first, $child->parentDemandId);
-        self::assertSame($root->expiresAt, $child->expiresAt, 'the reassessment never refreshes the authorization window');
-        self::assertSame('decision-1', $child->decisionId);
-        self::assertSame('decision-2', $child->raisedByDecisionId);
-        self::assertTrue($this->store->readDemand($first)->superseded());
+        self::assertSame($first, $second, 'the repeat mint serves the standing demand, never a child');
+        $standing = $this->store->readDemand($second);
+        self::assertSame(0, $standing->generation, 'no escalation happened at mint');
+        self::assertSame($firstRequirement, $standing->requiredFactor, 'the factor requirement is unchanged');
+        self::assertSame($root->expiresAt, $standing->expiresAt, 'the authorization window is never refreshed');
+        self::assertSame('decision-1', $standing->decisionId, 'the original decision stays authoritative');
+        self::assertFalse($this->store->readDemand($first)->superseded(), 'the standing demand was never superseded');
+
+        // A different browser names a different family: it neither sees
+        // nor supersedes the first browser's demand.
+        $otherSession = str_repeat('d', 64);
+        $other = $this->factor->mintDemand('signup', $otherSession, null, 'decision-3');
+        self::assertNotSame($first, $other, 'another browser mints its own family');
+        self::assertNotNull($other);
+        self::assertTrue($this->store->readDemand($other)->state->isOpen(), 'the other browser family is independently open');
+        self::assertFalse($this->store->readDemand($first)->superseded(), 'the other browser never superseded the first family');
     }
 
-    public function testAMintPastTheFamilyCapKeepsTheStandingDemand(): void
+    public function testRepeatedMintsNeverRefreshTheWindow(): void
     {
         $session = str_repeat('c', 64);
         $tip = $this->factor->mintDemand('signup', $session, null, 'decision-1');
-        for ($generation = 1; $generation <= StepUpDemand::MAX_GENERATION; $generation++) {
-            $tip = $this->factor->mintDemand('signup', $session, null, 'decision-'.$generation + 1);
+        $expiresAt = $this->store->readDemand($tip)->expiresAt;
+        for ($i = 1; $i <= 5; $i++) {
+            $this->now += 60;
+            $tip = $this->factor->mintDemand('signup', $session, null, 'decision-'.$i + 1);
         }
-        $root = $this->factor->mintDemand('signup', $session, null, 'decision-final');
-        self::assertSame($tip, $root, 'past the cap the standing demand serves; no fresh TTL ever');
+        self::assertSame($expiresAt, $this->store->readDemand($tip)->expiresAt, 'no repeat mint ever refreshes the authorization window');
+        self::assertSame(0, $this->store->readDemand($tip)->generation, 'repeats never escalate the family');
     }
 
     // ── item 10: the store-owned send lease ─────────────────────────
@@ -396,6 +419,7 @@ final class StepUpDemandEscalationTest extends TestCase
             'demand' => $demand,
             'email' => 'visitor@example.com',
         ]);
+        $request->cookies->set($this->cookieName(), self::SESSION_ID);
         $response = $this->factor->begin($request);
         self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
         self::assertCount(1, $this->sender->codes, 'the delivered code went out');
@@ -408,6 +432,7 @@ final class StepUpDemandEscalationTest extends TestCase
             'email' => 'visitor@example.com',
         ]);
         $this->now += 61;
+        $second->cookies->set($this->cookieName(), self::SESSION_ID);
         $response = $this->factor->begin($second);
         self::assertSame(200, $response->getStatusCode());
         self::assertCount(2, $this->sender->codes);
@@ -420,6 +445,7 @@ final class StepUpDemandEscalationTest extends TestCase
             'demand' => $demand,
             'email' => 'visitor@example.com',
         ]);
+        $request->cookies->set(self::COOKIE_NAME, self::SESSION_ID);
         $response = $this->factor->begin($request);
         self::assertSame(200, $response->getStatusCode());
         // The demand is one send in; the resend spacing holds the second
@@ -432,9 +458,29 @@ final class StepUpDemandEscalationTest extends TestCase
 
     // ── helpers ─────────────────────────────────────────────────────
 
+    private function cookieName(): string
+    {
+        return self::COOKIE_NAME;
+    }
+
+    /** The index key of a live demand: the family digest it was filed under. */
+    private function familyOf(string $demandId): string
+    {
+        $demand = $this->store->readDemand($demandId);
+        if ($demand === null) {
+            throw new \RuntimeException('the demand '.$demandId.' is not in the store');
+        }
+
+        return $demand->familyDigest;
+    }
+
     private function mintRoot(string $digest, string $decisionId): string
     {
-        $demand = StepUpDemand::mint(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(), 'signup', null, null, $decisionId, $this->now, 600, StepUpOperationBindingKind::None, $digest);
+        // The session pin keeps the family key deterministic: a
+        // session-bound mint folds the session into the family digest,
+        // so two mints naming the same operation and session share one
+        // family, exactly the production pairing.
+        $demand = StepUpDemand::mint(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(), 'signup', hash('sha256', self::SESSION_ID), null, $decisionId, $this->now, 600, StepUpOperationBindingKind::None, $digest);
 
         return $this->store->createRootDemand($demand, 600);
     }

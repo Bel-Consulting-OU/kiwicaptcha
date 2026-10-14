@@ -207,8 +207,13 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      * kept and re-armed within its remaining lifetime, exactly like the
      * lifecycle complete op. The escalation index write rides the same
      * script: the completed factor is recorded under the session hash
-     * and scope, but only when the hint matches the stored session
-     * binding. The factor requirement rides the same script: the
+     * and scope pair, but only when the hints match the stored session
+     * binding and the stored scope. Every clock decision (the expiry
+     * comparisons, the state stamp, the remaining TTL) is taken on the
+     * Redis server time read inside the script, never on the calling
+     * worker's clock. ARGV[2] stays in the argv shape for call-site
+     * compatibility and is never read. The factor requirement rides
+     * the same script: the
      * demand's stored requirement is judged against the factor identity
      * the stored challenge record carries, never a caller argument.
      * That identity is the record's server-held snapshot resolved at
@@ -227,8 +232,14 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- grant proves the email_otp rung, the weakest of the ladder.
         -- The tables are also the coherence check of the record's own
         -- factor snapshot and the fallback for the pre-snapshot shape.
+        -- Every clock decision below is taken on the Redis server time
+        -- (TIME), never on the calling worker's clock, so a skewed
+        -- fleet judges one expiry with one clock. ARGV[2] keeps its
+        -- argv slot for call-site compatibility and is never read.
         local KIND_FAMILY = { email_otp = 'email_otp', email_ownership = 'email_otp', totp = 'totp', webauthn = 'webauthn' }
         local KIND_RANK = { email_otp = 1, email_ownership = 1, totp = 2, webauthn = 3 }
+        local t = redis.call('TIME')
+        local now = tonumber(t[1])
         local craw = redis.call('GET', KEYS[1])
         if not craw then return {'missing_challenge'} end
         local cok, ch = pcall(cjson.decode, craw)
@@ -254,7 +265,6 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- atomic read here.
         if type(de['superseded_by']) == 'string' and de['superseded_by'] ~= '' then return {'spent'} end
         if de['state'] ~= 'open' then return {'spent'} end
-        local now = tonumber(ARGV[2])
         if type(ch['expires_at']) ~= 'number' or ch['expires_at'] <= now then return {'expired'} end
         if type(de['expires_at']) ~= 'number' or de['expires_at'] <= now then return {'expired'} end
         local bound = (type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[3])
@@ -311,9 +321,14 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- The escalation index stores the factor identity the record
         -- itself carries, never a caller argument: a completion cannot
         -- poison the future assurance escalation by claiming a stronger
-        -- factor than its challenge proves.
-        if ARGV[4] ~= '' and type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[4]
-          and type(ch['scope']) == 'string' and type(de['expires_at']) == 'number'
+        -- factor than its challenge proves. The index is keyed per
+        -- (session, scope) pair: the key was derived from the hinted
+        -- session hash and scope, and the write lands only when both
+        -- hints equal the stored record's own fields, so one scope's
+        -- history can never overwrite another's.
+        if ARGV[4] ~= '' and ARGV[5] ~= '' and type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[4]
+          and type(ch['scope']) == 'string' and ch['scope'] == ARGV[5]
+          and type(de['expires_at']) == 'number'
           and type(family) == 'string' and family ~= '' then
           redis.call('SET', KEYS[3], ch['scope']..'|'..family..'|'..tostring(math.floor(de['expires_at'])), 'EX', ttl)
         end
@@ -688,14 +703,17 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return $this->demandTransition($demandId, 'complete', (string) $now, (string) max(1, $ttlSecs));
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion
     {
-        // The index key rides as a declared key even when the hint is
+        // The index key rides as a declared key even when the hints are
         // absent: the script skips the write, and a declared-but-unused
-        // key keeps the eval cluster-safe.
+        // key keeps the eval cluster-safe. The completion clock work
+        // runs on the Redis server time inside the script; the $now
+        // argument names the calling lane's clock and is not read by
+        // this backend.
         $indexKey = $sessionHash !== null && preg_match('/^[0-9a-f]{64}$/D', $sessionHash) === 1
-            ? $this->completedIndexKey($sessionHash)
-            : $this->completedIndexKey(str_repeat('0', 64));
+            ? $this->completedIndexKey($sessionHash, $scope)
+            : $this->completedIndexKey(str_repeat('0', 64), null);
         $answer = $this->redis->eval(
             self::COMPLETE_FACTOR_SCRIPT,
             3,
@@ -706,6 +724,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             (string) $now,
             $presentedBindingHash,
             $sessionHash ?? '',
+            $scope ?? '',
         );
         if (!\is_array($answer) || ($answer[0] ?? null) !== 'ok' || \count($answer) !== 3) {
             return null;
@@ -732,7 +751,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         if (preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
             return null;
         }
-        $value = $this->redis->get($this->completedIndexKey($sessionHash));
+        $value = $this->redis->get($this->completedIndexKey($sessionHash, $scope));
         if (!\is_string($value) || $value === '') {
             return null;
         }
@@ -744,10 +763,21 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return FactorRequirement::isFamily($parts[1]) ? $parts[1] : null;
     }
 
-    /** The escalation index key of one continuity session hash. */
-    private function completedIndexKey(string $sessionHash): string
+    /**
+     * The escalation index key of one (session hash, scope) pair. The
+     * completion history is keyed per pair, so the progressive ladder
+     * of one scope survives a completion of another scope under the
+     * same continuity session. The scope rides as its SHA-256 digest
+     * instead of its raw spelling: the key stays bounded and opaque
+     * whatever the scope contains, and the session hash keeps its own
+     * 64-hex validation. An absent or malformed scope derives the
+     * all-zero placeholder, which the script's hint gate never writes.
+     */
+    private function completedIndexKey(string $sessionHash, ?string $scope): string
     {
-        return $this->prefix.'emdone:'.$sessionHash;
+        $valid = $scope !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) === 1;
+
+        return $this->prefix.'emdone:'.$sessionHash.':'.($valid ? hash('sha256', $scope) : str_repeat('0', 64));
     }
 
     public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand
@@ -789,12 +819,12 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return $this->decodeDemand($answer);
     }
 
-    public function demandIdForOperation(string $operationDigest): ?string
+    public function demandIdForFamily(string $familyDigest): ?string
     {
-        if (preg_match('/^[0-9a-f]{64}$/D', $operationDigest) !== 1) {
-            throw new \InvalidArgumentException('The step-up operation digest must be a 64-char lowercase hex digest');
+        if (preg_match('/^[0-9a-f]{64}$/D', $familyDigest) !== 1) {
+            throw new \InvalidArgumentException('The step-up family digest must be a 64-char lowercase hex digest');
         }
-        $tip = $this->redis->get($this->operationIndexKey($operationDigest));
+        $tip = $this->redis->get($this->operationIndexKey($familyDigest));
 
         return \is_string($tip) && $tip !== '' && $this->demandExists($tip) ? $tip : null;
     }
@@ -805,7 +835,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             self::DEMAND_ROOT_SCRIPT,
             2,
             $this->demandKey($demand->id),
-            $this->operationIndexKey($demand->operationDigest),
+            $this->operationIndexKey($demand->familyDigest),
             (string) json_encode($demand->toArray(), JSON_UNESCAPED_SLASHES),
             (string) (max(1, $ttlSecs) * 1000),
             $this->prefix.'emd:',
@@ -826,7 +856,7 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             3,
             $this->demandKey($parentDemandId),
             $this->demandKey($child->id),
-            $this->operationIndexKey($child->operationDigest),
+            $this->operationIndexKey($child->familyDigest),
             (string) json_encode($child->toArray(), JSON_UNESCAPED_SLASHES),
             $child->id,
         );
@@ -941,13 +971,13 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
     }
 
     /** The escalation family index key: the digest is the family identity. */
-    private function operationIndexKey(string $operationDigest): string
+    private function operationIndexKey(string $familyDigest): string
     {
-        if (preg_match('/^[0-9a-f]{64}$/D', $operationDigest) !== 1) {
-            throw new \InvalidArgumentException('The step-up operation digest must be a 64-char lowercase hex digest');
+        if (preg_match('/^[0-9a-f]{64}$/D', $familyDigest) !== 1) {
+            throw new \InvalidArgumentException('The step-up family digest must be a 64-char lowercase hex digest');
         }
 
-        return $this->prefix.'emi:'.$operationDigest;
+        return $this->prefix.'emi:'.$familyDigest;
     }
 
     private function quotaKey(string $reservationId): string

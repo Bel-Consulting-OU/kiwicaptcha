@@ -201,12 +201,16 @@ final class StepUpOperationResolverTest extends TestCase
                 'amount_minor' => '50000000',
                 'currency' => 'EUR',
                 'beneficiary_id' => 'bob',
-            ])),
+            ]), 'user-42'),
             'the replay gate refuses the same operation with swapped contents',
         );
         self::assertTrue(
-            $this->finalizer($store)->operationAuthorizedContents(self::SCOPE, 'tx-001', StepUpOperationDigest::canonicalOperationContent($contents)),
+            $this->finalizer($store)->operationAuthorizedContents(self::SCOPE, 'tx-001', StepUpOperationDigest::canonicalOperationContent($contents), 'user-42'),
             'the replay gate answers the identical contents',
+        );
+        self::assertFalse(
+            $this->finalizer($store)->operationAuthorizedContents(self::SCOPE, 'tx-001', StepUpOperationDigest::canonicalOperationContent($contents), 'someone-else'),
+            'the replay gate refuses another principal: the durable authorization belongs to the browser and principal that earned it',
         );
         self::assertSame(StepUpDemandState::Authorized, $store->readDemand((string) $demandId)?->state);
     }
@@ -307,7 +311,7 @@ final class StepUpOperationResolverTest extends TestCase
             $scope = 'wire_transfer';
             $canonical = SpyStepUpOperationResolver::$operation->canonicalProtectedContents;
             $finalizer = $container->get(StepUpDemandFinalizer::class);
-            $demandId = $finalizer->mintBoundDemand($scope, 'tx-spy-001', $canonical);
+            $demandId = $finalizer->mintBoundDemand($scope, 'tx-spy-001', $canonical, null, null, null, 600, false, 'user-42');
             self::assertNotNull($demandId, 'the replacement-fed mint recorded the demand');
             $store = $container->get('kiwi_captcha.step_up.store');
             self::assertNotNull($store->completeDemand((string) $demandId, time(), 300), 'the factor completion landed on the container store');

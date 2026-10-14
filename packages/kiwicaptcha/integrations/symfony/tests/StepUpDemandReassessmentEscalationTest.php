@@ -137,12 +137,12 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
             public function createDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createDemand($demand, $ttlSecs); }
             public function consumeDemand(string $demandId): ?StepUpDemand { return $this->real->consumeDemand($demandId); }
             public function completeDemand(string $demandId, int $now, int $ttlSecs): ?StepUpDemand { return $this->real->completeDemand($demandId, $now, $ttlSecs); }
-            public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion { return $this->real->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash); }
+            public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion { return $this->real->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash, $scope); }
             public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string { return $this->real->completedFactorOf($sessionHash, $scope, $now); }
             public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand { return $this->real->claimDemandFinalization($demandId, $now, $claimSecs); }
             public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand { return $this->real->settleDemandFinalization($demandId, $state, $now, $factor); }
             public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand { return $this->real->recordDemandEffect($demandId, $effect, $now); }
-            public function demandIdForOperation(string $operationDigest): ?string { return $this->real->demandIdForOperation($operationDigest); }
+            public function demandIdForFamily(string $operationDigest): ?string { return $this->real->demandIdForFamily($operationDigest); }
             public function createRootDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createRootDemand($demand, $ttlSecs); }
             public function claimDemandSendLease(string $demandId, int $resendAfterSecs, int $leaseSecs): ?StepUpDemandSendLease { return $this->real->claimDemandSendLease($demandId, $resendAfterSecs, $leaseSecs); }
             public function settleDemandSendLease(StepUpDemandSendSettlement $settlement): bool { return $this->real->settleDemandSendLease($settlement); }

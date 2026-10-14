@@ -290,6 +290,7 @@ final class StepUpDemandFinalizer
         ?string $decisionId = null,
         int $ttlSecs = 600,
         bool $quarantine = false,
+        ?string $principalPseudonym = null,
     ): ?string {
         return $this->mintBoundDemand(
             $scope,
@@ -300,6 +301,7 @@ final class StepUpDemandFinalizer
             $decisionId,
             $ttlSecs,
             $quarantine,
+            $principalPseudonym,
         );
     }
 
@@ -322,6 +324,7 @@ final class StepUpDemandFinalizer
         ?string $decisionId = null,
         int $ttlSecs = 600,
         bool $quarantine = false,
+        ?string $principalPseudonym = null,
     ): ?string {
         $binding = StepUpOperationDigest::financialBinding(
             $this->operationBindingMaster,
@@ -354,6 +357,7 @@ final class StepUpDemandFinalizer
             $quarantine,
             null,
             $required,
+            $principalPseudonym,
         );
         try {
             return $this->store->createRootDemand($demand, $ttlSecs);
@@ -389,11 +393,15 @@ final class StepUpDemandFinalizer
         string $scope,
         string $serverOwnedOperationId,
         array $canonicalContentFields,
+        ?string $principalPseudonym = null,
+        ?string $sessionHash = null,
     ): bool {
         return $this->operationAuthorizedContents(
             $scope,
             $serverOwnedOperationId,
             StepUpOperationDigest::canonicalOperationContent($canonicalContentFields),
+            $principalPseudonym,
+            $sessionHash,
         );
     }
 
@@ -410,6 +418,8 @@ final class StepUpDemandFinalizer
         string $scope,
         string $serverOwnedOperationId,
         string $canonicalContent,
+        ?string $principalPseudonym = null,
+        ?string $sessionHash = null,
     ): bool {
         if ($this->operationBindingMaster === '') {
             return false;
@@ -421,7 +431,12 @@ final class StepUpDemandFinalizer
                 $serverOwnedOperationId,
                 $canonicalContent,
             );
-            $tipId = $this->store->demandIdForOperation($binding['identity']);
+            // The family key reproduces the mint's subject binding
+            // (principal beside session): the durable authorization
+            // belongs to the browser and principal that earned it; a
+            // different session or principal misses, fail toward re-demand.
+            $familyDigest = hash('sha256', $binding['identity'] . "\0" . $scope . "\0" . ($principalPseudonym ?? '') . "\0" . ($sessionHash ?? ''));
+            $tipId = $this->store->demandIdForFamily($familyDigest);
             if (!\is_string($tipId) || $tipId === '') {
                 return false;
             }

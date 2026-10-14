@@ -53,10 +53,13 @@ done
 # (the documented honesty state of the matrix). The campaign asserts
 # the two machine-checkable properties: every validator rejection is
 # exactly a manual-pending row, and nothing else blocks. The manual
-# qualification state itself goes out on the dedicated QUALIFICATION
-# record per matrix, which the gate reads separately from the ASSERT
-# result: the automated lane can be green while the release row must
-# stay non-green until every required manual row has passed.
+# qualification state goes out on the dedicated QUALIFICATION record
+# per matrix, and the per-matrix outcome accumulates in the counting
+# variables right here, in the same loop that emits the records, so
+# the economics field below reads the campaign's own truth instead of
+# scraping a log that never carried it.
+QUAL_TOTAL=0
+PENDING_TOTAL=0
 for pair in "autofill-matrix.json:validate-autofill-qualification.mjs" \
     "accessibility-matrix.json:validate-accessibility-qualification.mjs"; do
     matrix=${pair%%:*}
@@ -65,11 +68,13 @@ for pair in "autofill-matrix.json:validate-autofill-qualification.mjs" \
     if [ $? -eq 0 ]; then
         rt_report_pass "qualification registry $matrix fully validated"
         printf 'QUALIFICATION: qualified %s\n' "$matrix"
+        QUAL_TOTAL=$((QUAL_TOTAL + 1))
     elif printf '%s' "$out" | grep -q 'REJECTED' \
         && printf '%s' "$out" | grep -Eq 'manual_pending|not "pass"|not qualified within the window'; then
         manual=$(printf '%s' "$out" | grep -c 'manual_pending')
         rt_report_pass "qualification registry $matrix: only manual-pending rows block release ($manual rows)"
         printf 'QUALIFICATION: pending manual_rows=%s %s\n' "$manual" "$matrix"
+        PENDING_TOTAL=$((PENDING_TOTAL + 1))
     else
         rt_report_fail "qualification registry $matrix rejected for reasons beyond manual rows"
     fi
@@ -106,10 +111,10 @@ fi
 rt_metric "engines=$ENGINES specs=$SPECS"
 # The manual qualification state rides the recorded economics so the
 # ledger's row carries it: pending while any matrix has manual rows,
-# qualified only when every matrix reports qualified.
+# qualified only when every matrix reports qualified. The counters
+# come from the validator loop's own emission, not from the Playwright
+# log, which only ever held the browser lane's output.
 QUAL_STATE=pending
-QUAL_TOTAL=$(grep -c 'QUALIFICATION: qualified' "$LOG")
-PENDING_TOTAL=$(grep -c 'QUALIFICATION: pending' "$LOG" || true)
 [ "$QUAL_TOTAL" -ge 2 ] && [ "$PENDING_TOTAL" -eq 0 ] && QUAL_STATE=qualified
 printf 'ECONOMIC: %s %s autofill_decoy_fills=0 escalations=0 manual_qualification=%s\n' \
     "$RT_CAMPAIGN" "$RT_PROFILE" "$QUAL_STATE"

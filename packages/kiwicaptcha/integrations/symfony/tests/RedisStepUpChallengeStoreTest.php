@@ -334,7 +334,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         $this->store->create($sessionChallenge, 300);
         $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
         $this->store->createDemand($this->demand(self::DEMAND_ID, $binding), 300);
-        self::assertNotNull($this->store->completeFactor($id, self::DEMAND_ID, (string) $binding, 1700000000, $sessionChallenge->sessionHash));
+        self::assertNotNull($this->store->completeFactor($id, self::DEMAND_ID, (string) $binding, 1700000000, $sessionChallenge->sessionHash, $sessionChallenge->scope));
         self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf((string) $binding, 'login', 1700000000), 'the marker names the completed factor');
         self::assertNull($this->store->completedFactorOf((string) $binding, 'signup', 1700000000), 'the marker is scoped');
         self::assertNull($this->store->completedFactorOf((string) $binding, 'login', 1700003001), 'the marker dies with the demand lifetime');
@@ -373,7 +373,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
         $this->store->createDemand($this->demand(self::DEMAND_ID, $binding), 300);
 
-        $completion = $this->store->completeFactor($id, self::DEMAND_ID, (string) $binding, 1700000000, $challenge->sessionHash);
+        $completion = $this->store->completeFactor($id, self::DEMAND_ID, (string) $binding, 1700000000, $challenge->sessionHash, $challenge->scope);
 
         self::assertNotNull($completion);
         self::assertSame(FactorRequirement::EMAIL_OTP, $completion->completedFactor, 'the completion answers the factor the record proves, not the lane identity');
@@ -541,9 +541,128 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertNull($this->store->completeDemand(self::DEMAND_ID, 1700000005, 300), 'a superseded demand never completes');
     }
 
-    private function demand(string $id, ?string $sessionHash): StepUpDemand
+    public function testTheCompletionHistoryIsKeyedPerSessionAndScope(): void
     {
-        return StepUpDemand::mint($id, 'login', $sessionHash, null, null, 1700000000, 300);
+        // The audited finding: one index slot per session let a
+        // completion in one scope overwrite the history another scope
+        // of the same session had earned, resetting the progressive
+        // ladder. The index key is now per (session hash, scope) pair.
+        $this->redis->setTimeMs(1700000000 * 1000);
+        $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
+        $checkoutDemand = 'scopeladderdemchk000000001';
+        $loginDemand = 'scopeladderdemlgn000000001';
+        $totpChallenge = StepUpChallenge::begin(
+            'scopeladderchktotp0000001',
+            StepUpChallengeKind::Totp,
+            self::PRINCIPAL,
+            null,
+            'checkout',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            null,
+            null,
+            self::SESSION_ID,
+            false,
+            false,
+            null,
+            $checkoutDemand,
+        );
+        $this->store->create($totpChallenge, 300);
+        $this->store->createDemand($this->demand($checkoutDemand, $binding, 'checkout'), 300);
+        $emailChallenge = StepUpChallenge::begin(
+            'scopeladderchemail000001',
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL,
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            str_repeat('a', 64),
+            null,
+            self::SESSION_ID,
+            false,
+            false,
+            null,
+            $loginDemand,
+        );
+        $this->store->create($emailChallenge, 300);
+        $this->store->createDemand($this->demand($loginDemand, $binding, 'login'), 300);
+
+        // The checkout scope completes its totp rung: its marker stands,
+        // the untouched login scope still reads empty.
+        self::assertNotNull($this->store->completeFactor($totpChallenge->id, $checkoutDemand, (string) $binding, 1700000000, $totpChallenge->sessionHash, 'checkout'));
+        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf((string) $binding, 'checkout', 1700000000), 'the checkout marker names the totp rung');
+        self::assertNull($this->store->completedFactorOf((string) $binding, 'login', 1700000000), 'the login scope has no history yet');
+
+        // The login scope completes its own (weaker) rung: the checkout
+        // history survives untouched, the ladder is not reset.
+        $this->redis->setTimeMs(1700000100 * 1000);
+        self::assertNotNull($this->store->completeFactor($emailChallenge->id, $loginDemand, (string) $binding, 1700000100, $emailChallenge->sessionHash, 'login'));
+        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf((string) $binding, 'login', 1700000100), 'the login marker names its own rung');
+        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf((string) $binding, 'checkout', 1700000100), 'the checkout history survives the login completion');
+
+        // The raw key shape: one key per (session hash, scope) pair, the
+        // scope carried as its digest, the value prefixed with the
+        // stored scope.
+        $checkoutKey = '{kiwi:test-ns}:stepup:emdone:'.((string) $binding).':'.hash('sha256', 'checkout');
+        $loginKey = '{kiwi:test-ns}:stepup:emdone:'.((string) $binding).':'.hash('sha256', 'login');
+        self::assertStringStartsWith('checkout|', (string) ($this->redis->strings[$checkoutKey] ?? ''), 'the checkout marker sits under its own key');
+        self::assertStringStartsWith('login|', (string) ($this->redis->strings[$loginKey] ?? ''), 'the login marker sits under its own key');
+
+        // Each marker dies with its own demand lifetime, per key.
+        $this->redis->setTimeMs((1700000000 + 301) * 1000);
+        self::assertNull($this->store->completedFactorOf((string) $binding, 'checkout', 1700000301), 'the checkout marker died with its demand');
+        self::assertNull($this->store->completedFactorOf((string) $binding, 'login', 1700000301), 'the login marker died with its demand');
+    }
+
+    public function testTheCompletionClockIsTheRedisServerTime(): void
+    {
+        // The audited finding: the completion script took its clock from
+        // the calling worker (ARGV), so a skewed node judged expiries
+        // against the wrong second. The script now reads the Redis
+        // server TIME: a caller claiming a live demand on a record the
+        // server has expired is refused, with both records untouched.
+        $id = 'clockskewchallenged000001';
+        $this->store->create($this->challenge($id), 300);
+        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        $challenge = $this->store->read($id);
+        self::assertNotNull($challenge);
+        $secretHash = (string) $challenge->clientSecretHash;
+        // The fake server clock moves past both records' expiry while
+        // the calling lane still claims a live second.
+        $this->redis->setTimeMs((1700000000 + 301) * 1000);
+
+        self::assertNull($this->store->completeFactor($id, self::DEMAND_ID, $secretHash, 1700000100, null), 'the server clock refuses the expired pair');
+        self::assertNotNull($this->store->read($id), 'the expired-clock refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand(self::DEMAND_ID)?->state->isOpen(), 'the expired-clock refusal completed no demand');
+
+        // The control: the same shaped pair, the server clock back
+        // inside the lifetime. The completion lands, and its stamp and
+        // remaining TTL both derive from the server second, not the
+        // (identical here) caller second.
+        $this->redis->setTimeMs(1700000100 * 1000);
+        $id2 = 'clockskewchallenged000002';
+        $this->store->create($this->challenge($id2), 300);
+        $challenge2 = $this->store->read($id2);
+        self::assertNotNull($challenge2);
+        $completion = $this->store->completeFactor($id2, self::DEMAND_ID, (string) $challenge2->clientSecretHash, 1700000100, null);
+        self::assertNotNull($completion, 'the live pair completes on the server clock');
+        $demandKey = '{kiwi:test-ns}:stepup:emd:'.self::DEMAND_ID;
+        $stored = json_decode((string) $this->redis->strings[$demandKey], true);
+        self::assertIsArray($stored);
+        self::assertSame(1700000100, $stored['state_at'] ?? null, 'the state stamp is the server second');
+        self::assertSame(200 * 1000, $this->redis->expirations[$demandKey] ?? null, 'the remaining TTL is the server-second arithmetic');
+    }
+
+    private function demand(string $id, ?string $sessionHash, string $scope = 'login'): StepUpDemand
+    {
+        return StepUpDemand::mint($id, $scope, $sessionHash, null, null, 1700000000, 300);
     }
 
     private function challenge(string $id): StepUpChallenge

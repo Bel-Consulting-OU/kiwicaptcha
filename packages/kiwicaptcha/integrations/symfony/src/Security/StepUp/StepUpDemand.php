@@ -127,6 +127,19 @@ final class StepUpDemand
          * exactly the missing one.
          */
         public readonly ?StepUpEffectsJournal $effects = null,
+        /**
+         * The family index identity: the key the stores' one-live-demand
+         * index is filed under, deliberately separate from the
+         * operation digest. The operation digest is the recipe the
+         * finalization reproduces; the family digest names who the
+         * family belongs to. Anonymous carriers fold in the browser
+         * session (or the unguessable mint for a stateless first
+         * visit); authenticated lanes fold in the principal beside the
+         * session.
+         */
+        public readonly string $familyDigest = '',
+        /** The pseudonymous principal of the bound operation, null on the unbound lanes. */
+        public readonly ?string $principalPseudonym = null,
     ) {
     }
 
@@ -160,6 +173,7 @@ final class StepUpDemand
         bool $quarantine = false,
         ?string $parentDemandId = null,
         ?FactorRequirement $requiredFactor = null,
+        ?string $principalPseudonym = null,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up demand TTL must be positive');
@@ -176,6 +190,23 @@ final class StepUpDemand
         // operation share a family and two logical operations never do.
         if ($identityDigest !== null) {
             $digest = $identityDigest;
+        }
+
+        // The family digest is the index identity, deliberately
+        // separate from the operation digest: the operation digest is
+        // the recipe finalization reproduces, the family digest names
+        // who the family belongs to. A session-bound demand folds the
+        // browser session in; a stateless first visit folds the
+        // unguessable mint in, so every such 403 carries its own
+        // demand; the authenticated lanes fold the principal beside
+        // the session.
+        $cleanPrincipal = $principalPseudonym === null || $principalPseudonym === '' ? null : self::principal($principalPseudonym);
+        if ($identityDigest !== null) {
+            $familyDigest = hash('sha256', $digest . "\0" . self::scope($scope) . "\0" . ($cleanPrincipal ?? '') . "\0" . (self::sessionHash($sessionHash) ?? ''));
+        } elseif ($sessionHash !== null && $sessionHash !== '') {
+            $familyDigest = hash('sha256', $digest . "\0" . self::sessionHash($sessionHash));
+        } else {
+            $familyDigest = hash('sha256', $digest . "\0" . 'stateless:' . self::id($id));
         }
 
         return new self(
@@ -205,7 +236,22 @@ final class StepUpDemand
             $requiredFactor,
             0,
             null,
+            null,
+            $familyDigest,
+            $cleanPrincipal,
         );
+    }
+
+    /**
+     * The family key of an anonymous carrier demand, reproduced by the
+     * durable-authorized replay for a session-bound demand. A stateless
+     * mint folds the unguessable demand id into its family, so the
+     * replay can never reproduce it: the durable shortcut does not
+     * apply, fail toward re-demand.
+     */
+    public static function familyKeyForAnonymous(string $operationDigest, ?string $sessionHash): string
+    {
+        return hash('sha256', self::operationDigest($operationDigest) . "\0" . self::sessionHash($sessionHash));
     }
 
     /** The demand after one delivery: the send counter advanced by one. */
@@ -239,6 +285,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -273,6 +321,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -311,6 +361,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -351,6 +403,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -385,6 +439,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -419,6 +475,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -487,6 +545,10 @@ final class StepUpDemand
             // The escalation child is a fresh open record: it inherits
             // no effects journal (its own terminal journals its own).
             null,
+            // The child is the same family and the same subject: the
+            // escalation changes the factor, never the ownership.
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -538,6 +600,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $this->effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -621,6 +685,8 @@ final class StepUpDemand
             'generation' => $this->generation,
             'raised_by_decision_id' => $this->raisedByDecisionId,
             'fx' => $this->effects?->toArray(),
+            'family_digest' => $this->familyDigest,
+            'principal_pseudonym' => $this->principalPseudonym,
         ];
 
         return $record;
@@ -728,6 +794,20 @@ final class StepUpDemand
         if ($supersededBy !== null && (!\is_string($supersededBy) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $supersededBy) !== 1)) {
             return null;
         }
+        // The family digest and the principal: absent on records
+        // predating them. A legacy record falls back to its operation
+        // digest, which was the family key the previous version
+        // indexed it under, so the remaining TTL keeps a coherent
+        // family.
+        $familyDigest = $record['family_digest'] ?? null;
+        if ($familyDigest !== null && (!\is_string($familyDigest) || preg_match('/^[0-9a-f]{64}$/D', $familyDigest) !== 1)) {
+            return null;
+        }
+        $familyDigest = $familyDigest !== null && $familyDigest !== '' ? $familyDigest : $digest;
+        $principalPseudonym = $record['principal_pseudonym'] ?? null;
+        if ($principalPseudonym !== null && (!\is_string($principalPseudonym) || $principalPseudonym === '' || strlen($principalPseudonym) > 128)) {
+            return null;
+        }
         $leaseUntilMs = $record['lease_until'] ?? null;
         if ($leaseUntilMs !== null && !\is_int($leaseUntilMs)) {
             return null;
@@ -805,6 +885,8 @@ final class StepUpDemand
             $generation,
             $raisedBy,
             $effects,
+            $familyDigest,
+            $principalPseudonym,
         );
     }
 
@@ -839,6 +921,8 @@ final class StepUpDemand
             $this->generation,
             $this->raisedByDecisionId,
             $effects,
+            $this->familyDigest,
+            $this->principalPseudonym,
         );
     }
 
@@ -909,6 +993,22 @@ final class StepUpDemand
         }
         if (preg_match('/^[0-9a-f]{64}$/D', $value) !== 1) {
             throw new \InvalidArgumentException('The session hash of a step-up demand must be a 64-char lowercase hex digest');
+        }
+
+        return $value;
+    }
+
+    private static function principal(?string $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        // The application's principal resolver owns the pseudonym's
+        // alphabet; the demand bounds the length and refuses control
+        // characters so the wire stays clean and the family key stays
+        // stable.
+        if (strlen($value) > 128 || preg_match('/[\x00-\x1f\x7f]/', $value) === 1) {
+            throw new \InvalidArgumentException('The principal pseudonym of a step-up demand must be 1-128 chars without control characters');
         }
 
         return $value;

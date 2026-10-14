@@ -231,29 +231,19 @@ final class EmailOwnershipStepUp
         }
         $demand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $sessionHash, $chainId, $decisionId, $now, $this->ttlSecs, $operationBindingKind, $operationDigest, null, null, false, null, $requirement);
         try {
-            $tipId = $this->store->demandIdForOperation($demand->operationDigest);
+            // The family digest is browser/subject-bound (mint folded
+            // the session, or the unguessable mint for a stateless
+            // visit), so this lookup finds only this visitor's family.
+            $tipId = $this->store->demandIdForFamily($demand->familyDigest);
             if (\is_string($tipId)) {
                 $parent = $this->store->readDemand($tipId);
                 if ($parent !== null && !$parent->expired($now) && !$parent->superseded() && !$parent->state->isTerminal()) {
-                    if ($parent->canEscalate()) {
-                        // The re-raised demand of one operation demands
-                        // strictly more than its parent: the child's
-                        // requirement escalates past the family's
-                        // standing requirement, resolved by the same
-                        // ladder the mint used for the root.
-                        $childRequirement = $parent->requiredFactor === null
-                            ? $requirement
-                            : ($this->factorResolver?->requiredFactor($scope, null, new StepUpFactorContext($parent->requiredFactor->family)) ?? $requirement);
-                        $child = $parent->spawnChild(StepUpChallenge::mintId(), $now, $decisionId, $childRequirement);
-                        $superseded = $this->store->supersedeDemandWithChild($parent->id, $child);
-                        if ($superseded !== null) {
-                            return $child->id;
-                        }
-                    }
-
-                    // The family cap is reached, or a concurrent
-                    // escalation won the transaction: the standing tip
-                    // serves. Never a fresh TTL.
+                    // A repeat mint of the same browser's still-open
+                    // demand serves the standing demand unchanged: the
+                    // same factor requirement, the same expiry, never a
+                    // fresh window. Assurance escalates only through
+                    // the finalizer's factor-completion reassessment —
+                    // never because a mint happened twice.
                     return $tipId;
                 }
             }
@@ -569,6 +559,7 @@ final class EmailOwnershipStepUp
             $binding,
             $now,
             $challenge->sessionHash,
+            $challenge->scope,
         );
         if ($completion === null) {
             return self::json(['status' => 'failed', 'failure_code' => StepUpResult::FAIL_UNKNOWN_CHALLENGE], Response::HTTP_UNPROCESSABLE_ENTITY);
@@ -886,13 +877,20 @@ final class EmailOwnershipStepUp
      * never re-demand. False for every other state, absent operation or
      * store failure (fail-closed toward re-demand, never a silent pass).
      */
-    public function isOperationAuthorized(string $operationDigest): bool
+    public function isOperationAuthorized(string $operationDigest, ?string $sessionHash): bool
     {
         if ($operationDigest === '') {
             return false;
         }
         try {
-            $tipId = $this->store->demandIdForOperation($operationDigest);
+            // The family key reproduces the mint's browser binding: the
+            // durable authorization belongs to the browser that earned
+            // it. Another browser's family never answers this lookup,
+            // and a stateless-minted family (unguessable mint in the
+            // key) can never be reproduced at all — both fail toward
+            // re-demand.
+            $familyDigest = StepUpDemand::familyKeyForAnonymous($operationDigest, $sessionHash);
+            $tipId = $this->store->demandIdForFamily($familyDigest);
             if (!\is_string($tipId) || $tipId === '') {
                 return false;
             }

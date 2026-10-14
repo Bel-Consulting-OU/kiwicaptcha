@@ -133,19 +133,27 @@ interface StepUpChallengeStore
      * verified subject and the completed factor are both derived from
      * the stored challenge, never from a caller argument.
      *
-     * $sessionHash is the completion index hint: when it names the
-     * stored session binding, the script also records the completed
-     * factor under that session hash and scope, the parent factor a
-     * child demand escalates past. Null skips the index write.
+     * $sessionHash and $scope are the completion index hints. When the
+     * session hash names the stored session binding and the scope names
+     * the stored scope, the completion also records the completed factor
+     * under that (session hash, scope) pair, the parent factor a child
+     * demand escalates past. The pair keying keeps the ladder of
+     * one scope intact when another scope of the same session completes
+     * its own factor. Null hints skip the index write. On the Redis
+     * backend every expiry judgement and stamp of this transition runs
+     * on the Redis server time; the reference backend honors $now as
+     * its own store clock.
      */
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion;
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion;
 
     /**
      * The factor family the live completion marker records for a
      * continuity session hash and scope, or null when none stands. The
      * marker is the strongest-factor history the escalation reads: a
      * demand minted after a completed one must require a strictly
-     * stronger factor than the family this answers.
+     * stronger factor than the family this answers. The history is
+     * keyed per (session hash, scope) pair, so the answer names only
+     * the completions of exactly this scope.
      */
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string;
 
@@ -186,7 +194,7 @@ interface StepUpChallengeStore
      * answers for the family's tip: a superseded parent's index entry
      * names its child, never the dead parent.
      */
-    public function demandIdForOperation(string $operationDigest): ?string;
+    public function demandIdForFamily(string $familyDigest): ?string;
 
     /**
      * Mint the root demand of an operation family, atomically with the
@@ -210,7 +218,7 @@ interface StepUpChallengeStore
      * creating the child is exactly the state this transaction makes
      * impossible. Answers the superseded parent record, or null on any
      * refusal (a concurrent escalation won; the caller keeps reading
-     * the family tip through {@see self::demandIdForOperation()}).
+     * the family tip through {@see self::demandIdForFamily()}).
      */
     public function supersedeDemandWithChild(string $parentDemandId, StepUpDemand $child): ?StepUpDemand;
 
