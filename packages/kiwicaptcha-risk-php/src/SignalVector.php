@@ -43,23 +43,47 @@ final class SignalVector
         return new self(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
-    /** Accepts snake_case keys per the fixtures (missing keys default to 0). */
+    /**
+     * Accepts snake_case keys per the fixtures; a missing key defaults
+     * to 0. The decode is integer-only, exactly like the Rust twin's
+     * serde decode and like {@see RiskWeights::fromArray()}. A float, a
+     * numeric string or an array would otherwise be silently cast here
+     * while the Rust parser rejects it. The canonical fixture hash,
+     * whose number formatting differs between the languages, would then
+     * diverge. The 0..1000 range stays the constructor's own contract.
+     */
     public static function fromArray(array $data): self
     {
+        $int = static function (array $row, string $key): int {
+            if (!\array_key_exists($key, $row)) {
+                return 0;
+            }
+            $value = $row[$key];
+            if (!\is_int($value)) {
+                throw new \InvalidArgumentException(sprintf(
+                    'Signal vector field %s must be an integer (got %s); floats, numeric strings and arrays are not admissible because the canonical fixture hash must be identical in PHP and Rust',
+                    $key,
+                    get_debug_type($value),
+                ));
+            }
+
+            return $value;
+        };
+
         return new self(
-            sourceFast: (int) ($data['source_fast'] ?? 0),
-            sourceSlow: (int) ($data['source_slow'] ?? 0),
-            subnetFast: (int) ($data['subnet_fast'] ?? 0),
-            issueDebt: (int) ($data['issue_debt'] ?? 0),
-            badProof: (int) ($data['bad_proof'] ?? 0),
-            malformed: (int) ($data['malformed'] ?? 0),
-            replay: (int) ($data['replay'] ?? 0),
-            actionFailure: (int) ($data['action_failure'] ?? 0),
-            scopeSwitch: (int) ($data['scope_switch'] ?? 0),
-            globalPressure: (int) ($data['global_pressure'] ?? 0),
-            networkRisk: (int) ($data['network_risk'] ?? 0),
-            trustCredit: (int) ($data['trust_credit'] ?? 0),
-            principalCredit: (int) ($data['principal_credit'] ?? 0),
+            sourceFast: $int($data, 'source_fast'),
+            sourceSlow: $int($data, 'source_slow'),
+            subnetFast: $int($data, 'subnet_fast'),
+            issueDebt: $int($data, 'issue_debt'),
+            badProof: $int($data, 'bad_proof'),
+            malformed: $int($data, 'malformed'),
+            replay: $int($data, 'replay'),
+            actionFailure: $int($data, 'action_failure'),
+            scopeSwitch: $int($data, 'scope_switch'),
+            globalPressure: $int($data, 'global_pressure'),
+            networkRisk: $int($data, 'network_risk'),
+            trustCredit: $int($data, 'trust_credit'),
+            principalCredit: $int($data, 'principal_credit'),
         );
     }
 
@@ -83,12 +107,20 @@ final class SignalVector
         ];
     }
 
+    /**
+     * The JSON object form. The payload must decode to a JSON object,
+     * never a list and never a scalar. A list would otherwise reach
+     * {@see self::fromArray()} with no snake_case keys and answer a
+     * silent all-zero vector, which is a wrong answer dressed as a
+     * valid one.
+     */
     public static function fromJson(string $json): self
     {
-        $data = json_decode($json, true);
-        if (!is_array($data)) {
+        $data = json_decode($json, false);
+        if (!$data instanceof \stdClass) {
             throw new \InvalidArgumentException('SignalVector JSON must decode to an object');
         }
-        return self::fromArray($data);
+
+        return self::fromArray((array) $data);
     }
 }
