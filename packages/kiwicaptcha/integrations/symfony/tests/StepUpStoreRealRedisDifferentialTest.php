@@ -41,9 +41,9 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
 {
     private const PREFIX = '{kiwi:realdiff}:stepup:';
 
-    private const P1 = '00112233445566778899aabbccddeeff';
+    private const PRINCIPAL_A = '00112233445566778899aabbccddeeff';
 
-    private const P2 = 'ffeeddccbbaa99887766554433221100';
+    private const PRINCIPAL_B = 'ffeeddccbbaa99887766554433221100';
 
     private const SCOPE = 'checkout';
 
@@ -116,7 +116,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $challenge = StepUpChallenge::begin(
                 StepUpChallenge::mintId(),
                 StepUpChallengeKind::EmailOtp,
-                self::P1,
+                self::PRINCIPAL_A,
                 null,
                 self::SCOPE,
                 null,
@@ -161,12 +161,12 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $demand = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess'), null, null, $now, 600);
             $store->createDemand($demand, 600);
             $first = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, self::SCOPE, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-1'), null, 'sess', false, false, null, $demand->id,
             );
             $firstId = $store->createAdmittedChallenge($first, 600);
             $second = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, self::SCOPE, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-2'), null, 'sess', false, false, null, $demand->id,
             );
             $secondId = $store->createAdmittedChallenge($second, 600);
@@ -203,7 +203,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $demand = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess'), null, null, $now, 600);
             $store->createDemand($demand, 600);
             $challenge = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, self::SCOPE, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
                 $now, 100000, 5, hash('sha256', 'code'), null, 'sess', false, false, null, $demand->id,
             );
             $id = $store->createAdmittedChallenge($challenge, 100000);
@@ -239,7 +239,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $strongDemand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $session, null, null, $now, 600);
             $store->createDemand($strongDemand, 600);
             $strong = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::WebAuthn, self::P1, null, $scope, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::WebAuthn, self::PRINCIPAL_A, null, $scope, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'ceremony'), 'assertion', 'sess', false, false, null, $strongDemand->id,
             );
             $store->create($strong, 600);
@@ -249,7 +249,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $weakDemand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $session, null, null, $now, 600);
             $store->createDemand($weakDemand, 600);
             $weak = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, $scope, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, $scope, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code'), null, 'sess', false, false, null, $weakDemand->id,
             );
             $store->create($weak, 600);
@@ -286,7 +286,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $demandA = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess-a'), null, null, $now, 600);
             $store->createDemand($demandA, 600);
             $chalA = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, self::SCOPE, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-a'), null, 'sess-b', false, false, null, $demandA->id,
             );
             $store->create($chalA, 600);
@@ -296,20 +296,20 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $demandB = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess'), null, null, $now, 600);
             $store->createDemand($demandB, 600);
             $chalB = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, 'login', null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, 'login', null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-b'), null, 'sess', false, false, null, $demandB->id,
             );
             $store->create($chalB, 600);
             $crossedScope = $store->completeFactor($chalB->id, $demandB->id, (string) $chalB->sessionHash, $now, (string) $chalB->sessionHash, 'login');
 
-            // Account switch: a login demand for P1, a challenge proving P2.
+            // Account switch: a login demand for PRINCIPAL_A, a challenge proving PRINCIPAL_B.
             $demandC = StepUpDemand::mint(
                 StepUpChallenge::mintId(), self::SCOPE, null, null, null, $now, 600,
-                StepUpOperationBindingKind::Login, hash('sha256', 'op'), null, null, false, null, null, self::P1,
+                StepUpOperationBindingKind::Login, hash('sha256', 'op'), null, null, false, null, null, self::PRINCIPAL_A,
             );
             $store->createDemand($demandC, 600);
             $chalC = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P2, null, self::SCOPE, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_B, null, self::SCOPE, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-c'), null, null, false, false, null, $demandC->id,
             );
             $store->create($chalC, 600);
@@ -350,7 +350,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
         $base = StepUpDemand::mint(
             StepUpChallenge::mintId(), $scope, $session, 'ChainId_0000000000001', 'decision-roundtrip',
             $now, 600, StepUpOperationBindingKind::RequestBinding, $opDigest, $opDigest, $contentDigest,
-            false, null, $required, self::P1,
+            false, null, $required, self::PRINCIPAL_A,
         );
         $expected = $base->spawnChild(StepUpChallenge::mintId(), $now, 'decision-raised', null)->withEffects(
             StepUpEffectsJournal::none()
@@ -362,7 +362,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $store->createDemand($expected, 600);
             $decoded = $store->readDemand($expected->id);
             $challenge = StepUpChallenge::begin(
-                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, $scope, null, 'step_up',
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, $scope, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code'), null, 'sess', false, false, null, $expected->id,
             );
             $store->createAdmittedChallenge($challenge, 600);
@@ -402,7 +402,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
         $now = $this->clock->now;
         $rich = $this->richDemand($now);
         $challenge = StepUpChallenge::begin(
-            StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::P1, null, self::SCOPE, null, 'step_up',
+            StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
             $now, 600, 5, hash('sha256', 'code'), null, 'sess-rich', false, false, null, $rich->id,
         );
 
@@ -462,7 +462,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
         $now = $this->clock->now;
         $rich = $this->richDemand($now);
         $challenge = StepUpChallenge::begin(
-            StepUpChallenge::mintId(), StepUpChallengeKind::WebAuthn, self::P1, null, self::SCOPE, null, 'step_up',
+            StepUpChallenge::mintId(), StepUpChallengeKind::WebAuthn, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
             $now, 600, 5, hash('sha256', 'ceremony'), 'assertion', 'sess-rich', false, false, null, $rich->id,
         );
 
@@ -524,7 +524,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
         $demand = StepUpDemand::mint(
             StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess-rich'), 'ChainId_0000000000001', 'decision-rich',
             $now, 600, StepUpOperationBindingKind::RequestBinding, $opDigest, $opDigest, $contentDigest,
-            false, null, new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3), self::P1,
+            false, null, new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3), self::PRINCIPAL_A,
         );
 
         return $demand->withEffects(

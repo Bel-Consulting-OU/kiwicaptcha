@@ -34,9 +34,9 @@ final class StepUpBindingAdversarialTest extends TestCase
 {
     private const MASTER = '0123456789abcdef0123456789abcdef';
 
-    private const P1 = '00112233445566778899aabbccddeeff';
+    private const PRINCIPAL_A = '00112233445566778899aabbccddeeff';
 
-    private const P2 = 'ffeeddccbbaa99887766554433221100';
+    private const PRINCIPAL_B = 'ffeeddccbbaa99887766554433221100';
 
     private const SCOPE = 'checkout';
 
@@ -93,7 +93,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $challenge = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             self::SCOPE,
             null,
@@ -147,7 +147,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $challenge = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             'checkout',
             null,
@@ -179,8 +179,8 @@ final class StepUpBindingAdversarialTest extends TestCase
 
     /**
      * An account switch inside one session never completes a login demand:
-     * the demand was minted for principal P1, and a challenge of principal
-     * P2 in the same session answers another account.
+     * the demand was minted for principal PRINCIPAL_A, and a challenge of principal
+     * PRINCIPAL_B in the same session answers another account.
      */
     public function testAnAccountSwitchInsideOneSessionCompletesNothing(): void
     {
@@ -194,20 +194,20 @@ final class StepUpBindingAdversarialTest extends TestCase
             $this->now,
             600,
             StepUpOperationBindingKind::Login,
-            StepUpOperationDigest::login('login', self::P1),
+            StepUpOperationDigest::login('login', self::PRINCIPAL_A),
             null,
             null,
             false,
             null,
             null,
-            self::P1,
+            self::PRINCIPAL_A,
         );
         $this->store->createDemand($demand, 600);
 
         $challenge = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P2,
+            self::PRINCIPAL_B,
             null,
             'login',
             null,
@@ -261,7 +261,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $webauthn = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::WebAuthn,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             self::SCOPE,
             null,
@@ -303,7 +303,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $email = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             self::SCOPE,
             null,
@@ -363,7 +363,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $first = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             self::SCOPE,
             null,
@@ -384,7 +384,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $second = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             self::SCOPE,
             null,
@@ -423,7 +423,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $ghost = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::P1,
+            self::PRINCIPAL_A,
             null,
             self::SCOPE,
             null,
