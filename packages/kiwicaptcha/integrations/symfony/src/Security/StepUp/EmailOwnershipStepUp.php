@@ -195,17 +195,14 @@ final class EmailOwnershipStepUp
      * then carries no demand, and begin() refuses every code request,
      * fail-closed).
      *
-     * A live demand already standing for the same operation identity is
-     * never silently replaced by a fresh root. The reassessment's
-     * demand is minted as its escalation child: one atomic store
-     * transaction supersedes the parent and creates the child. The
-     * child inherits the parent's authorization deadline, its decision
-     * id, its operation identity, its browser binding and its chain
-     * identity unchanged, and records the reassessment's decision id
-     * separately as `raisedByDecisionId`. Past the family depth cap
-     * (or on a lost escalation race) the standing demand keeps serving:
-     * the authorization window of an operation is the first demand's,
-     * and no reassessment extends it.
+     * The family digest is browser/subject-bound, so the family
+     * lookup finds only this visitor's family: a repeat mint serves
+     * the standing open demand unchanged (same factor requirement,
+     * same window, never a fresh TTL and never an escalation), and a
+     * different visitor mints its own family. The ladder progresses
+     * only through the finalizer's factor-completion reassessment, and
+     * the authorization window of a family is its first demand's: no
+     * mint extends it.
      */
     public function mintDemand(
         string $scope,

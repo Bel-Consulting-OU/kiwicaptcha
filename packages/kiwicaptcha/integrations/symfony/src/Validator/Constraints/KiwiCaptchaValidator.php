@@ -2440,8 +2440,39 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             $this->authoritativeBindingOf($constraint, $request),
             $resolvedRequest !== null ? $this->principalResolver?->resolve($resolvedRequest, $constraint->scope) : null,
         );
+        // An operation-bound demand's binding must reproduce on the
+        // redemption exactly like the mint reproduced it: the same
+        // resolver seam resolves the operation here, and the operation
+        // id plus canonical contents ride into the finalization so a
+        // split-bound demand's binding compare has real bytes to judge.
+        // A resolution failure strands the redemption (fail-closed, the
+        // visitor re-demands), never a digest-mismatch refusal against
+        // empty arguments.
+        $operationId = null;
+        $canonicalContent = null;
+        if (isset($this->operationBoundScopes[$constraint->scope])) {
+            if ($this->operationResolver !== null && $resolvedRequest !== null) {
+                try {
+                    $operation = $this->operationResolver->resolve($resolvedRequest, $constraint->scope);
+                    $operationId = $operation->logicalOperationId;
+                    $canonicalContent = $operation->canonicalProtectedContents;
+                } catch (\Throwable $e) {
+                    $this->logger?->info('KiwiCaptcha: the redeemed grant refused; the protected operation did not resolve', [
+                        'scope' => $constraint->scope,
+                        'reason' => $e->getMessage(),
+                    ]);
+
+                    return false;
+                }
+            } else {
+                $operationId = $request !== null ? $request->attributes->get(self::OPERATION_ID_ATTRIBUTE) : null;
+                $operationId = \is_string($operationId) && $operationId !== '' ? $operationId : null;
+                $fields = $operationId !== null ? $this->canonicalOperationFields($constraint->scope) : null;
+                $canonicalContent = $fields !== [] ? \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest::canonicalOperationContent($fields) : null;
+            }
+        }
         try {
-            $finalization = $finalizer->finalizeGrant($payload['demandId'], $material, $request);
+            $finalization = $finalizer->finalizeGrant($payload['demandId'], $material, $request, 'email_ownership', $operationId, $canonicalContent);
         } catch (\Throwable $e) {
             $this->logger?->info('KiwiCaptcha: the step-up demand finalization is unavailable', [
                 'scope' => $constraint->scope,
@@ -2613,11 +2644,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                     return false;
                 }
 
+                // The same principal fallback the mint uses: divergent
+                // resolver wiring must not strand an authorized family
+                // behind a key the replay cannot reproduce.
+                $principal = $operation->principal ?? $this->principalResolver?->resolve($request, $constraint->scope);
+
                 return $this->stepUpFinalizer->operationAuthorizedContents(
                     $constraint->scope,
                     $operation->logicalOperationId,
                     $operation->canonicalProtectedContents,
-                    $operation->principal,
+                    $principal,
                     $this->presentedSessionHashOf($request),
                 );
             }
@@ -2785,7 +2821,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer $finalizer,
         callable $mint,
     ): ?string {
-        $principal = $this->principalResolver?->resolve($request, $constraint->scope);
+        try {
+            $principal = $this->principalResolver?->resolve($request, $constraint->scope);
+        } catch (\Throwable $e) {
+            // A throwing principal resolver is the same refusal the
+            // mint closure's own resolve would produce: a typed
+            // step-up demand without a principal, never an uncaught
+            // error leaking out of the validator.
+            $principal = null;
+            $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; the principal resolver threw', [
+                'scope' => $constraint->scope,
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
         if ($principal === null || $principal === '') {
             $this->logger?->info('KiwiCaptcha: the operation-bound step-up demand refused; no authenticated principal resolves', [
                 'scope' => $constraint->scope,

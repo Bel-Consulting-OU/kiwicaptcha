@@ -805,7 +805,7 @@ final class StepUpDemand
         }
         $familyDigest = $familyDigest !== null && $familyDigest !== '' ? $familyDigest : $digest;
         $principalPseudonym = $record['principal_pseudonym'] ?? null;
-        if ($principalPseudonym !== null && (!\is_string($principalPseudonym) || $principalPseudonym === '' || strlen($principalPseudonym) > 128)) {
+        if ($principalPseudonym !== null && (!\is_string($principalPseudonym) || $principalPseudonym === '' || strlen($principalPseudonym) > 256)) {
             return null;
         }
         $leaseUntilMs = $record['lease_until'] ?? null;
@@ -1007,8 +1007,8 @@ final class StepUpDemand
         // alphabet; the demand bounds the length and refuses control
         // characters so the wire stays clean and the family key stays
         // stable.
-        if (strlen($value) > 128 || preg_match('/[\x00-\x1f\x7f]/', $value) === 1) {
-            throw new \InvalidArgumentException('The principal pseudonym of a step-up demand must be 1-128 chars without control characters');
+        if (strlen($value) > 256 || preg_match('/[\x00-\x1f\x7f]/', $value) === 1) {
+            throw new \InvalidArgumentException('The principal pseudonym of a step-up demand must be 1-256 bytes without control characters');
         }
 
         return $value;
