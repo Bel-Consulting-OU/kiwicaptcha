@@ -569,6 +569,11 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
+     * Reports the keyring state and the kid-resolution mode. A
+     * non-strict configuration is the explicit legacy migration escape
+     * hatch, so it surfaces an advisory (a warning, never a failing
+     * check) naming the escape hatch and the strict default it defers.
+     *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkKeyring(): array
@@ -587,20 +592,26 @@ final class KiwiCaptchaDoctorCommand extends Command
                 return ['FAIL', sprintf('historical kid %d exceeds the current kid %d: a future key would extend the rollback guard', (int) $historicalKid, $kid)];
             }
         }
-        if ($kid > 1 && $historical === []) {
-            return [self::LEVEL_WARN, sprintf('kid %d has no historical secrets: verification of older records falls back to the legacy any-kid path', $kid)];
-        }
         $note = sprintf(
             'kid %d, %d historical secret(s), %d revoked',
             $kid,
             \count($historical),
             \count($revoked),
         );
+        if (!($this->config['strict_kid_verification'] ?? true)) {
+            return [self::LEVEL_WARN, sprintf(
+                '%s: strict_kid_verification is disabled, so the legacy any-kid single-secret path accepts any record kid under the current secret. This explicit false is the migration escape hatch; set strict_kid_verification: true (the default) to enforce strict current-kid resolution',
+                $note,
+            )];
+        }
+        if ($kid > 1 && $historical === []) {
+            return [self::LEVEL_WARN, sprintf('kid %d has no historical secrets: strict mode rejects records under older kids with UnknownKid, so move each superseded kid into secrets_by_kid before the rotation', $kid)];
+        }
         if ($kid === 1 && $historical === [] && $revoked === []) {
-            return ['PASS', $note.' (single-key ring, no rotation)'];
+            return ['PASS', $note.' (single-key ring, strict current-kid resolution)'];
         }
 
-        return ['PASS', $note];
+        return ['PASS', $note.', strict current-kid resolution'];
     }
 
     /**

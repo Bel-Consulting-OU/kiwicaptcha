@@ -88,8 +88,13 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         self::assertSame(2, $second->requiredFactor->assuranceRank, 'totp is the strictly stronger rung');
     }
 
-    public function testAReRaisedOperationEscalatesItsFamilyChild(): void
+    public function testARepeatMintServesTheStandingDemandAndOnlyAFactorCompletionEscalates(): void
     {
+        // The audited contract: minting again never escalates anything.
+        // The repeat mint of the same browser serves the same standing
+        // demand, same factor requirement, same window. The ladder
+        // progresses only through the finalizer's factor-completion
+        // reassessment (pinned in the escalation suites).
         $factor = $this->factor(new StepUpFactorResolver('email_otp'));
         $sessionHash = hash('sha256', $this->sessionValue);
 
@@ -100,13 +105,13 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         self::assertNull($this->store->completedFactorOf($sessionHash, 'signup', $this->now), 'no completion marker exists');
 
         $secondId = (string) $factor->mintDemand('signup', $sessionHash, null, null);
+        self::assertSame($first, $secondId, 'the repeat mint serves the standing demand, never a child');
         $second = $this->store->readDemand($secondId);
         self::assertNotNull($second);
-        self::assertNotSame($first, $secondId, 'the re-raised step-up supersedes the family with a child');
-        self::assertNotNull($second->requiredFactor);
-        self::assertSame(FactorRequirement::TOTP, $second->requiredFactor->family, 'the family child demands strictly more than its parent required');
-        self::assertSame(2, $second->requiredFactor->assuranceRank);
-        self::assertTrue($this->store->readDemand($first)?->superseded(), 'the parent handed its authorization to the child');
+        self::assertSame($firstDemand->requiredFactor, $second->requiredFactor, 'the factor requirement is unchanged');
+        self::assertSame($firstDemand->expiresAt, $second->expiresAt, 'the authorization window is never refreshed');
+        self::assertFalse($this->store->readDemand($first)->superseded(), 'the standing demand was never superseded');
+        self::assertSame(0, $second->generation);
     }
 
     public function testTheCompletionConsumesBothRecordsInOneTransition(): void
@@ -282,7 +287,7 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         self::assertNotNull($this->store->read($challenge->id), 'the binding refusal consumed nothing');
 
         // The right pair, the right browser: exactly one transition.
-        $right = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash);
+        $right = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash, $challenge->scope);
         self::assertNotNull($right);
         self::assertSame($demand->id, $right->demandId);
         self::assertSame('00112233445566778899aabbccddeeff', $right->verifiedSubjectPseudonym, 'the verified subject derives from the stored challenge');
@@ -447,7 +452,7 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         );
         $this->store->create($challenge, 600);
 
-        $completion = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash);
+        $completion = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash, $challenge->scope);
         self::assertNotNull($completion, 'the custom factor the snapshot names answers the demand naming it');
         self::assertSame(FactorRequirement::TOTP, $completion->completedFactor, 'the completed factor is the family the record proves');
         self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf(hash('sha256', $this->sessionValue), 'signup', $this->now), 'the escalation marker stores the record-derived family');

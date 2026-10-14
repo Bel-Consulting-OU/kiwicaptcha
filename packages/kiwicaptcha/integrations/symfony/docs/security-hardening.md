@@ -241,12 +241,15 @@ model (see
 
 ## Strict current-kid verification
 
-`strict_kid_verification: true` makes the verifier resolve
+`strict_kid_verification` defaults to true: the verifier resolves
 `record.kid == currentKid` exactly from the very first deployment,
-instead of the legacy any-kid single-secret mode. Enable it on a fresh
-deployment for an exact keyring; with a historical ring it changes
-nothing, because the rotation ring is already exact per kid. Any other
-kid then fails with `UnknownKid` before signature work.
+instead of the legacy any-kid single-secret mode. With a historical
+ring the mode changes nothing, because the rotation ring is already
+exact per kid. Any other kid fails with `UnknownKid` before signature
+work. The explicit `strict_kid_verification: false` is the migration
+escape hatch for an existing deployment: it restores the legacy
+any-kid single-secret semantics. Keep it only for a documented
+migration window and return to the strict default.
 
 ## Identifier validation
 

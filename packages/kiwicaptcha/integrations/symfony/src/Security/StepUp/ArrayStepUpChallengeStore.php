@@ -145,7 +145,7 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return $completed;
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion
     {
         // The same gate order the Redis script runs: presence, decode
         // (the records round-trip through the strict wire decode at
@@ -202,14 +202,18 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         // stores the factor identity the record itself carries, never a
         // caller argument: a completion cannot poison the future
         // assurance escalation by claiming a stronger factor than its
-        // challenge proves.
+        // challenge proves. The marker is keyed per (session, scope)
+        // pair, the same derivation the Redis script uses, and the
+        // write requires both hints to equal the record's own fields,
+        // so one scope's history can never overwrite another's.
         unset($this->challenges[$challengeId]);
         $completed = $demand->withState(StepUpDemandState::Completed, $now);
         $this->demands[$demandId] = ['record' => $completed, 'expiresAt' => $demand->expiresAt];
         $family = $snapshot?->family;
         if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash
+            && $scope !== null && $challenge->scope === $scope
             && \is_string($family) && $family !== '') {
-            $this->completedIndex[$sessionHash] = [
+            $this->completedIndex[$this->completedIndexKey($sessionHash, $scope)] = [
                 'value' => $challenge->scope.'|'.$family.'|'.$demand->expiresAt,
                 'expiresAt' => $demand->expiresAt,
             ];
@@ -218,7 +222,7 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return StepUpFactorCompletion::fromRecords($challenge, $completed);
     }
 
-    /** @var array<string, array{value: string, expiresAt: int}> session hash -> escalation marker */
+    /** @var array<string, array{value: string, expiresAt: int}> (session hash, scope) key -> escalation marker */
     private array $completedIndex = [];
 
     public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
@@ -226,9 +230,9 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if (preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
             return null;
         }
-        $entry = $this->completedIndex[$sessionHash] ?? null;
+        $entry = $this->completedIndex[$this->completedIndexKey($sessionHash, $scope)] ?? null;
         if ($entry === null || $now >= $entry['expiresAt']) {
-            unset($this->completedIndex[$sessionHash]);
+            unset($this->completedIndex[$this->completedIndexKey($sessionHash, $scope)]);
 
             return null;
         }
@@ -238,6 +242,22 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         }
 
         return FactorRequirement::isFamily($parts[1]) ? $parts[1] : null;
+    }
+
+    /**
+     * The escalation marker key of one (session hash, scope) pair: the
+     * same derivation the Redis store applies to its own key family.
+     * The scope rides as its SHA-256 digest instead of its raw
+     * spelling, so the key stays bounded whatever the scope contains,
+     * and the session hash keeps its own 64-hex validation. An absent
+     * or malformed scope derives the all-zero placeholder, which the
+     * write gate never produces.
+     */
+    private function completedIndexKey(string $sessionHash, ?string $scope): string
+    {
+        $valid = $scope !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) === 1;
+
+        return $sessionHash.':'.($valid ? hash('sha256', $scope) : str_repeat('0', 64));
     }
 
     public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand
@@ -337,15 +357,15 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
     /** @var array<string, string> operation digest -> the family tip's demand id */
     private array $operationIndex = [];
 
-    public function demandIdForOperation(string $operationDigest): ?string
+    public function demandIdForFamily(string $familyDigest): ?string
     {
-        $tipId = $this->operationIndex[$operationDigest] ?? null;
+        $tipId = $this->operationIndex[$familyDigest] ?? null;
         if ($tipId === null) {
             return null;
         }
         // An expired tip leaves no family: the index dies with it.
         if (!$this->liveDemand($tipId) instanceof StepUpDemand) {
-            unset($this->operationIndex[$operationDigest]);
+            unset($this->operationIndex[$familyDigest]);
 
             return null;
         }
@@ -358,12 +378,12 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         // One atomic decision, single-process by construction here: a
         // live family tip stands, a dead one is replaced. A standing
         // tip is answered as-is, never refreshed.
-        $live = $this->demandIdForOperation($demand->operationDigest);
+        $live = $this->demandIdForFamily($demand->familyDigest);
         if ($live !== null) {
             return $live;
         }
         $this->createDemand($demand, $ttlSecs);
-        $this->operationIndex[$demand->operationDigest] = $demand->id;
+        $this->operationIndex[$demand->familyDigest] = $demand->id;
 
         return $demand->id;
     }
@@ -408,7 +428,7 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         // now, and supersededBy preserves an existing stateAt, so
         // reversing them would silently stamp createdAt instead.
         $this->demands[$parentDemandId] = ['record' => $parent->withState(StepUpDemandState::Superseded, $this->now())->supersededBy($child->id), 'expiresAt' => $expiresAt];
-        $this->operationIndex[$child->operationDigest] = $child->id;
+        $this->operationIndex[$child->familyDigest] = $child->id;
 
         return $this->demands[$parentDemandId]['record'];
     }

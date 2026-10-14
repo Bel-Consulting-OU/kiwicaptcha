@@ -19,16 +19,18 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * under a superseded kid still verifies (rotation grace), a freshly
  * issued challenge resolves the current secret, and the core's
  * rollback/forward guard still rejects future keys, because a record
- * kid above the newest ring key is unknown. With an empty historical
- * map the ring stays empty: the core's legacy single-secret path stays,
- * verify() with the current secret keeps the pre-rotation behavior
- * byte-for-byte. With strictKidMode enabled, strict keyring resolution
- * is enabled even before the first rotation: the ring is always
- * [currentKid => currentSecret] even when the historical map is empty.
- * The verifier then strictly resolves record.kid == currentKid from
- * the very first deployment (any other kid -> UnknownKid). With a
- * non-empty historical map strict mode returns historical + current
- * (rotation grace preserved), never the current key alone.
+ * kid above the newest ring key is unknown. strictKidMode defaults to
+ * true. With an empty historical map the ring is always
+ * [currentKid => currentSecret], so the verifier strictly resolves
+ * record.kid == currentKid from the very first deployment (any other
+ * kid -> UnknownKid). With a non-empty historical map strict mode
+ * returns historical + current (rotation grace preserved), never the
+ * current key alone. The explicit strictKidMode false is the legacy
+ * any-kid single-secret migration escape hatch. With an empty
+ * historical map that mode keeps the ring empty: the core's legacy
+ * single-secret path accepts any record kid under the current secret,
+ * and verify() with the current secret keeps that behavior
+ * byte-for-byte.
  *
  * contextDigest() hashes a versioned canonical serialization of the
  * whole signing context. It covers a version marker, the issuer and
@@ -56,7 +58,7 @@ final class VerificationSecurityContext
         private readonly array $revokedKids,
         private readonly ?string $issuer = null,
         private readonly ?string $region = null,
-        private readonly bool $strictKidMode = false,
+        private readonly bool $strictKidMode = true,
     ) {
         // Defense-in-depth guard: canonicalization happens exactly once,
         // in the extension, and is the single source of truth. A
@@ -75,13 +77,13 @@ final class VerificationSecurityContext
     /**
      * The effective verification keyring: the historical secrets_by_kid
      * map merged with the current signing key, numerically sorted by
-     * kid. Empty when there are no historical secrets, which keeps the
-     * core's legacy single-secret verification path untouched. With
-     * strictKidMode enabled the ring is always the current key even when
-     * the historical map is empty, so the verifier strictly resolves
-     * record.kid == currentKid from the first deployment.
+     * kid. strictKidMode defaults to true, so with an empty historical
+     * map the ring is the current key alone and the verifier strictly
+     * resolves record.kid == currentKid from the first deployment.
      * With a non-empty historical map the ring stays historical +
-     * current (rotation grace preserved).
+     * current (rotation grace preserved). The explicit false keeps the
+     * legacy empty ring with an empty historical map (any-kid
+     * single-secret semantics).
      *
      * @return array<int, string>
      */

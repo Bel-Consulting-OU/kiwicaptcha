@@ -78,7 +78,7 @@ final class StepUpStoreDifferentialTest extends TestCase
 
         self::assertNull($a, 'the array store refuses the forged parent link');
         self::assertNull($r, 'the Redis script refuses it too: the lineage is exact in both directions, so a forged link can never sit in the family index');
-        self::assertNull($redisStore->demandIdForOperation($forged->operationDigest), 'no family index entry points at the refused child');
+        self::assertNull($redisStore->demandIdForFamily($forged->operationDigest), 'no family index entry points at the refused child');
         self::assertNull($redisStore->readDemand($forged->id), 'the refused child was never written');
         self::assertFalse((bool) $redisStore->readDemand($parent->id)?->superseded(), 'the parent stays live when the child refuses');
     }
@@ -128,6 +128,110 @@ final class StepUpStoreDifferentialTest extends TestCase
         self::assertNull($redisStore->settleDemandFinalization($parentId, StepUpDemandState::Superseded, self::BASE_NOW), 'the Redis store: the terminal already stands, a second settle answers null');
         self::assertNull($arrayStore->settleDemandFinalization($parentId, StepUpDemandState::Authorized, self::BASE_NOW), 'the superseded parent authorizes through nothing on the array store');
         self::assertNull($redisStore->settleDemandFinalization($parentId, StepUpDemandState::Authorized, self::BASE_NOW), 'the superseded parent authorizes through nothing on the Redis store');
+    }
+
+    /**
+     * The scoped completion history, pinned for parity. The escalation
+     * index is keyed per (session hash, scope) pair on both stores. One
+     * scope's completion must never overwrite the history another scope
+     * of the same session earned, and every probe must answer
+     * identically on the array store and the Redis script path.
+     */
+    public function testTheScopedCompletionHistoryAgreesOnBothStores(): void
+    {
+        [$arrayStore, $redisStore, $fake] = $this->stores();
+        $fake->setTimeMs(self::BASE_NOW * 1000);
+        $sessionId = 'differential-session-00000001';
+        $binding = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::sessionHash($sessionId);
+
+        $checkoutDemand = 'paritydemchk0000000000001';
+        $loginDemand = 'paritydemlgn0000000000001';
+        $scenario = static function (ArrayStepUpChallengeStore|RedisStepUpChallengeStore $store) use ($binding, $checkoutDemand, $loginDemand, $sessionId): array {
+            $totp = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
+                $store instanceof ArrayStepUpChallengeStore ? 'paritychalchkarray00001' : 'paritychalchkredis00001',
+                \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind::Totp,
+                '00112233445566778899aabbccddeeff',
+                null,
+                'checkout',
+                null,
+                'post_solve_step_up_required',
+                self::BASE_NOW,
+                600,
+                5,
+                null,
+                null,
+                $sessionId,
+                false,
+                false,
+                null,
+                $checkoutDemand,
+            );
+            $store->create($totp, 600);
+            $store->createDemand(StepUpDemand::mint($checkoutDemand, 'checkout', $binding, null, null, self::BASE_NOW, 600), 600);
+            $email = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
+                $store instanceof ArrayStepUpChallengeStore ? 'paritychalemlarray0001' : 'paritychalemlredis0001',
+                \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind::EmailOtp,
+                '00112233445566778899aabbccddeeff',
+                null,
+                'login',
+                null,
+                'post_solve_step_up_required',
+                self::BASE_NOW,
+                600,
+                5,
+                str_repeat('a', 64),
+                null,
+                $sessionId,
+                false,
+                false,
+                null,
+                $loginDemand,
+            );
+            $store->create($email, 600);
+            $store->createDemand(StepUpDemand::mint($loginDemand, 'login', $binding, null, null, self::BASE_NOW, 600), 600);
+
+            $answers = [];
+            $answers['before'] = [
+                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW),
+                $store->completedFactorOf($binding, 'login', self::BASE_NOW),
+            ];
+            $totpDone = $store->completeFactor($totp->id, $checkoutDemand, $binding, self::BASE_NOW, $totp->sessionHash, 'checkout');
+            $answers['afterTotp'] = [
+                $totpDone !== null,
+                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW),
+                $store->completedFactorOf($binding, 'login', self::BASE_NOW),
+            ];
+            $emailDone = $store->completeFactor($email->id, $loginDemand, $binding, self::BASE_NOW + 10, $email->sessionHash, 'login');
+            $answers['afterEmail'] = [
+                $emailDone !== null,
+                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW + 10),
+                $store->completedFactorOf($binding, 'login', self::BASE_NOW + 10),
+                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW + 601),
+                $store->completedFactorOf($binding, 'login', self::BASE_NOW + 601),
+            ];
+
+            return $answers;
+        };
+
+        $a = $scenario($arrayStore);
+        $r = $scenario($redisStore);
+
+        // The ladder: no history, the totp completion recorded under its
+        // scope alone, then the email completion recorded under its own
+        // scope without touching the checkout history. Every answer,
+        // including the per-scope expiries, is identical.
+        self::assertSame([null, null], $a['before']);
+        self::assertSame([true, 'totp', null], $a['afterTotp']);
+        self::assertSame([true, 'totp', 'email_otp', null, null], $a['afterEmail']);
+        self::assertSame($a, $r, 'the scoped completion history diverged between the stores');
+
+        // The raw Redis shape: one key per (session hash, scope) pair,
+        // the scope carried as its digest, each value prefixed with the
+        // stored scope.
+        foreach (['checkout' => 'totp', 'login' => 'email_otp'] as $scope => $family) {
+            $raw = $fake->strings['{kiwi:diff}:stepup:emdone:'.$binding.':'.hash('sha256', $scope)] ?? null;
+            self::assertSame($scope.'|'.$family.'|'.(self::BASE_NOW + 600), $raw, 'the '.$scope.' marker sits under its pair key with the stored value');
+        }
     }
 
     /**

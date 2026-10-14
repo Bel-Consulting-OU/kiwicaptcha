@@ -469,51 +469,157 @@ final class StepUpEmailOwnershipTest extends TestCase
         $store = new ArrayStepUpChallengeStore();
         $sender = new CapturingEmailOwnershipSender();
         $factor = $this->factor($store, $sender, $cookie);
+        // Distinct visitors (distinct sessions) share only the address:
+        // each mints and begins its own family, and the per-address
+        // bound caps the address at the third window.
+        // Each visitor presents a distinct 32-hex continuity value (the
+        // cookie's own shape), so each mints and begins its own family.
+        $visitorSession = static fn (int $i): string => str_pad((string) $i, 8, '0', STR_PAD_LEFT).substr($sessionValue, 0, 24);
         for ($i = 0; $i < 3; $i++) {
-            // Each begin rides its own demand (fresh send credit), the
-            // per-address bound still caps the third window.
-            $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-            $answer = $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand));
+            $session = $visitorSession($i);
+            $demand = (string) $factor->mintDemand('signup', hash('sha256', $session), null, null);
+            $answer = $factor->begin($this->emailRequest($cookie, $session, 'visitor@example.com', $demand));
             self::assertSame(200, $answer->getStatusCode(), "begin $i stays inside the per-address bound");
         }
-        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-        $fourth = $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand));
+        $fourthSession = $visitorSession(3);
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $fourthSession), null, null);
+        $fourth = $factor->begin($this->emailRequest($cookie, $fourthSession, 'visitor@example.com', $demand));
         self::assertSame(429, $fourth->getStatusCode(), 'the fourth begin for the address is rate limited');
         self::assertSame('step_up_rate_limited', json_decode((string) $fourth->getContent(), true)['error'] ?? null);
 
         // A different address on the same source is still fine: the
         // per-address window does not poison the per-source window.
-        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-        $other = $factor->begin($this->emailRequest($cookie, $sessionValue, 'other@example.com', $demand));
+        $otherSession = $visitorSession(90);
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $otherSession), null, null);
+        $other = $factor->begin($this->emailRequest($cookie, $otherSession, 'other@example.com', $demand));
         self::assertSame(200, $other->getStatusCode());
     }
 
     public function testTheDomainBoundAndTheDeploymentBudgetHold(): void
     {
         $cookie = new ContinuityCookie();
-        $sessionValue = (string) $cookie->mint();
+        // Distinct visitors, each its own family: the shared surfaces
+        // the bounds police are the address domain and the deployment.
+        $visitorSession = static fn (string $tag): string => substr(hash('sha256', $tag), 0, 32);
         // The per-domain bound at 2: the third distinct address of one
         // domain refuses, whatever its own fresh per-address window.
         $store = new ArrayStepUpChallengeStore();
         $factor = $this->factor(new ArrayStepUpChallengeStore(), new CapturingEmailOwnershipSender(), $cookie, maxBeginsPerDomain: 2);
-        foreach (['a@example.com', 'b@example.com'] as $address) {
-            $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-            $answer = $factor->begin($this->emailRequest($cookie, $sessionValue, $address, $demand));
+        foreach (['a@example.com', 'b@example.com'] as $i => $address) {
+            $session = $visitorSession('dm'.$i);
+            $demand = (string) $factor->mintDemand('signup', hash('sha256', $session), null, null);
+            $answer = $factor->begin($this->emailRequest($cookie, $session, $address, $demand));
             self::assertSame(200, $answer->getStatusCode(), "the domain window admits $address");
         }
-        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-        $third = $factor->begin($this->emailRequest($cookie, $sessionValue, 'c@example.com', $demand));
+        $thirdSession = $visitorSession('dm2');
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $thirdSession), null, null);
+        $third = $factor->begin($this->emailRequest($cookie, $thirdSession, 'c@example.com', $demand));
         self::assertSame(429, $third->getStatusCode(), 'the third address of the domain is rate limited');
 
         // The deployment budget at 1: the second begin anywhere
         // refuses (a fresh store isolates the counter).
         $budgetStore = new ArrayStepUpChallengeStore();
         $budgetFactor = $this->factor($budgetStore, new CapturingEmailOwnershipSender(), $cookie, maxBeginsGlobal: 1);
-        $demand = (string) $budgetFactor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-        self::assertSame(200, $budgetFactor->begin($this->emailRequest($cookie, $sessionValue, 'one@other.com', $demand))->getStatusCode());
-        $demand = (string) $budgetFactor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
-        $second = $budgetFactor->begin($this->emailRequest($cookie, $sessionValue, 'two@other.com', $demand));
+        $oneSession = $visitorSession('gb0');
+        $demand = (string) $budgetFactor->mintDemand('signup', hash('sha256', $oneSession), null, null);
+        self::assertSame(200, $budgetFactor->begin($this->emailRequest($cookie, $oneSession, 'one@other.com', $demand))->getStatusCode());
+        $twoSession = $visitorSession('gb1');
+        $demand = (string) $budgetFactor->mintDemand('signup', hash('sha256', $twoSession), null, null);
+        $second = $budgetFactor->begin($this->emailRequest($cookie, $twoSession, 'two@other.com', $demand));
         self::assertSame(429, $second->getStatusCode(), 'the deployment budget caps every begin');
+    }
+
+    // ── the audited cross-browser isolation matrix ───────────────────
+
+    public function testAnAuthorizedEmailFamilyNeverAnswersAnotherBrowser(): void
+    {
+        // The full journey: browser A mints, proves address ownership
+        // and redeems the grant, settling the family authorized. The
+        // durable-authorized answer must then name exactly browser A:
+        // browser B presenting the same address (its own session, its
+        // own family) is re-demanded, never handed A's terminal.
+        $cookie = new ContinuityCookie();
+        $sessionA = (string) $cookie->mint();
+        $sessionB = (string) $cookie->mint();
+        self::assertSame(32, strlen($sessionB));
+        $store = new ArrayStepUpChallengeStore();
+        $sender = new CapturingEmailOwnershipSender();
+        $factor = $this->factor($store, $sender, $cookie);
+        $sessionAHash = hash('sha256', $sessionA);
+        $sessionBHash = hash('sha256', $sessionB);
+
+        $demand = (string) $factor->mintDemand('signup', $sessionAHash, null, null);
+        $begin = $factor->begin($this->emailRequest($cookie, $sessionA, 'visitor@example.com', $demand));
+        self::assertSame(200, $begin->getStatusCode());
+        $ticket = (string) json_decode((string) $begin->getContent(), true)['challenge'];
+        $code = (string) $sender->lastCode();
+        $complete = $factor->complete($this->completeRequest($cookie, $sessionA, $ticket, $code, $demand));
+        self::assertSame(200, $complete->getStatusCode(), (string) $complete->getContent());
+        $grant = (string) json_decode((string) $complete->getContent(), true)['grant'];
+
+        // The grant redeems for A and settles the family authorized.
+        $violations = $this->validate($store, $sender, $cookie, $sessionA, $grant, 'signup', 'visitor@example.com');
+        self::assertCount(0, $violations, 'the grant redeems for its own browser');
+        // The unit-level validator fixture carries no finalizer, so the
+        // authorized terminal is settled here explicitly through the
+        // same finalizer the kernel wires (the kernel journey test
+        // covers the wired redemption end to end).
+        $finalizer = new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer(
+            $store,
+            new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit(new \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter(), self::MASTER),
+            null, null, null, null, null, null,
+            static fn (): int => time(),
+            self::MASTER,
+        );
+        $finalization = $finalizer->finalizeGrant(
+            $demand,
+            new \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationMaterial(
+                formFields: [EmailOwnershipStepUp::EMAIL_FIELD => 'visitor@example.com'],
+            ),
+            null,
+            'email_otp',
+        );
+        self::assertTrue($finalization->authorized, 'the completed email factor settles authorized');
+
+        // The digest this carrier's mint used: the anonymous pre-issue
+        // lane binds none($scope), folded with the browser session into
+        // the family key.
+        $digest = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest::none('signup');
+        self::assertTrue($factor->isOperationAuthorized($digest, $sessionAHash), 'the earning browser replays its authorization');
+        self::assertFalse($factor->isOperationAuthorized($digest, $sessionBHash), 'another browser never inherits the terminal');
+        self::assertFalse($factor->isOperationAuthorized($digest, null), 'a sessionless lookup never inherits either');
+    }
+
+    public function testTwoVisitorsSharingAScopeCarryDistinctFamilies(): void
+    {
+        // The scope-wide family collision the audit found: two
+        // anonymous visitors, same signup scope. Each 403 names its own
+        // demand, neither family ever supersedes the other, and a
+        // terminal in one family leaves the other independently open.
+        $cookie = new ContinuityCookie();
+        $store = new ArrayStepUpChallengeStore();
+        $sender = new CapturingEmailOwnershipSender();
+        $factor = $this->factor($store, $sender, $cookie);
+
+        $sessions = [(string) $cookie->mint(), (string) $cookie->mint()];
+        $demandIds = [];
+        foreach ($sessions as $i => $value) {
+            $sessionHash = hash('sha256', $value);
+            $demandIds[$i] = (string) $factor->mintDemand('signup', $sessionHash, null, null);
+            $demand = $store->readDemand($demandIds[$i]);
+            self::assertNotNull($demand, "visitor $i holds its own demand");
+            self::assertSame($sessionHash, $demand->sessionHash, "visitor $i's demand is bound to its own session");
+        }
+        self::assertNotSame($demandIds[0], $demandIds[1], 'distinct visitors hold distinct demands');
+        self::assertNotSame($store->readDemand($demandIds[0])->familyDigest, $store->readDemand($demandIds[1])->familyDigest, 'distinct visitors hold distinct families');
+        for ($repeat = 0; $repeat < 5; $repeat++) {
+            foreach ($sessions as $i => $value) {
+                $again = (string) $factor->mintDemand('signup', hash('sha256', $value), null, null);
+                self::assertSame($demandIds[$i], $again, "visitor $i's repeat mint serves its own standing demand");
+            }
+        }
+        self::assertFalse($store->readDemand($demandIds[0])->superseded(), 'no cross-family supersession happened');
+        self::assertFalse($store->readDemand($demandIds[1])->superseded(), 'no cross-family supersession happened');
     }
 
     // ── the carrier semantics ───────────────────────────────────────

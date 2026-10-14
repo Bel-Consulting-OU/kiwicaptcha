@@ -1391,10 +1391,10 @@ final class ConfigurationTest extends TestCase
         $this->process(['argon2_max_verification_runtime_ms' => 300001]);
     }
 
-    public function testStrictKidVerificationDefaultsToFalse(): void
+    public function testStrictKidVerificationDefaultsToTrue(): void
     {
-        self::assertFalse($this->process()['strict_kid_verification'], 'strict_kid_verification defaults to false (legacy any-kid single-secret semantics)');
-        self::assertTrue($this->process(['strict_kid_verification' => true])['strict_kid_verification']);
+        self::assertTrue($this->process()['strict_kid_verification'], 'strict_kid_verification defaults to true (strict current-kid resolution from the first deployment)');
+        self::assertFalse($this->process(['strict_kid_verification' => false])['strict_kid_verification'], 'the explicit false is the legacy any-kid single-secret migration escape hatch');
     }
 
     public function testResumeClaimTtlSecsDefaultsAndBounds(): void

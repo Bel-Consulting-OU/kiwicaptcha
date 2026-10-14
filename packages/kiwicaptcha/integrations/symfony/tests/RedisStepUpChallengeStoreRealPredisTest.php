@@ -32,7 +32,8 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
 {
     private const PRINCIPAL = '00112233445566778899aabbccddeeff';
 
-    private const NOW = 1700000000;
+    /** The leg clock: the real server second the store scripts judge. */
+    private int $now = 0;
 
     private const PREFIX = '{kiwi:rpreal}:stepup:';
 
@@ -59,12 +60,13 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         } catch (\Throwable $e) {
             self::markTestSkipped('Redis unreachable: '.$e->getMessage());
         }
+        $this->now = time();
         $this->store = new RedisStepUpChallengeStore($this->client, self::PREFIX);
         $this->handler = new TotpStepUpHandler(
             $this->store,
             new StepUpTicket(self::MASTER),
             'sha1', 6, 1, 300, 5, 100, 900, '/kiwi/step-up/complete',
-            static fn (): int => self::NOW,
+            fn (): int => $this->now,
             self::MASTER,
         );
     }
@@ -116,7 +118,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             null,
             null,
             null,
-            static fn (): int => self::NOW,
+            fn (): int => $this->now,
             self::MASTER,
         );
         $demandId = (string) $finalizer->mintLoginDemand('login', self::PRINCIPAL, null, 600);
@@ -137,7 +139,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $clientSecret = (string) ($body['client_secret'] ?? '');
         self::assertNotSame('', $clientSecret, 'a stateless begin returns its one-time client secret');
 
-        $code = TotpCode::at($secretRaw, TotpCode::stepOf(self::NOW), 'sha1', 6);
+        $code = TotpCode::at($secretRaw, TotpCode::stepOf($this->now), 'sha1', 6);
         $result = $this->handler->complete($this->completeRequest($ticket, $code, $clientSecret));
         self::assertSame(StepUpResultStatus::Succeeded, $result->status, 'the record was persisted and consumed end to end');
         $finalization = $finalizer->finalizeLogin($result, 'login');
@@ -240,14 +242,14 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
      */
     private function enrollFirstTime(): string
     {
-        $this->store->markSessionStepUpSuccess('sess-real', self::PRINCIPAL, 'email_otp', 900, self::NOW);
+        $this->store->markSessionStepUpSuccess('sess-real', self::PRINCIPAL, 'email_otp', 900, $this->now);
 
         return $this->handler->enroll(self::PRINCIPAL, 'sess-real');
     }
 
     private function challengeIdOf(string $ticket): string
     {
-        $payload = (new StepUpTicket(self::MASTER))->verify($ticket, self::NOW);
+        $payload = (new StepUpTicket(self::MASTER))->verify($ticket, $this->now);
         self::assertIsArray($payload);
 
         return (string) $payload['challengeId'];
@@ -263,7 +265,7 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             'login',
             null,
             'post_solve_step_up_required',
-            self::NOW,
+            $this->now,
             300,
             5,
             str_repeat('a', 64),

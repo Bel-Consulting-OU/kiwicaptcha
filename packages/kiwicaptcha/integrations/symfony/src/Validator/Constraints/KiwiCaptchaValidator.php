@@ -2617,6 +2617,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                     $constraint->scope,
                     $operation->logicalOperationId,
                     $operation->canonicalProtectedContents,
+                    $operation->principal,
+                    $this->presentedSessionHashOf($request),
                 );
             }
             $operationId = $request->attributes->get(self::OPERATION_ID_ATTRIBUTE);
@@ -2624,10 +2626,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 return false;
             }
 
+            $principal = $this->principalResolver?->resolve($request, $constraint->scope);
+
             return $this->stepUpFinalizer->operationAuthorized(
                 $constraint->scope,
                 $operationId,
                 $this->canonicalOperationFields($constraint->scope),
+                $principal,
+                $this->presentedSessionHashOf($request),
             );
         }
         if ($this->emailOwnership === null || !isset($this->emailCarrierScopes[$constraint->scope])) {
@@ -2642,7 +2648,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             return false;
         }
 
-        return $this->emailOwnership->isOperationAuthorized($digest);
+        return $this->emailOwnership->isOperationAuthorized($digest, $this->presentedSessionHashOf($request));
     }
 
     /**
@@ -2705,6 +2711,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
 
                 return null;
             }
+            $principal = $operation->principal ?? $this->principalResolver?->resolve($request, $constraint->scope);
 
             return $this->recordOperationBoundDemand(
                 $disposition,
@@ -2721,6 +2728,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                     $disposition->decisionId,
                     600,
                     $disposition->quarantined,
+                    $principal,
                 ),
             );
         }
@@ -2735,6 +2743,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
 
             return null;
         }
+
+        $principal = $this->principalResolver?->resolve($request, $constraint->scope);
 
         return $this->recordOperationBoundDemand(
             $disposition,
@@ -2751,6 +2761,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 $disposition->decisionId,
                 600,
                 $disposition->quarantined,
+                $principal,
             ),
         );
     }

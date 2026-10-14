@@ -1059,8 +1059,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // (record kid above the newest ring key) still rejects future
         // keys. The same context feeds the Siteverify security-context
         // digest below, so the wired keyring and the digested keyring
-        // can never diverge. With an empty historical map the ring stays
-        // empty and the core's legacy single-secret path is untouched.
+        // can never diverge. strict_kid_verification defaults to true:
+        // with an empty historical map the ring is the current key alone
+        // (strict current-kid resolution from the first deployment), and
+        // the explicit false keeps the legacy empty ring (any-kid
+        // single-secret semantics) for a migrating deployment.
         $securityContext = new VerificationSecurityContext(
             $config['kid'],
             $config['secret_key'],

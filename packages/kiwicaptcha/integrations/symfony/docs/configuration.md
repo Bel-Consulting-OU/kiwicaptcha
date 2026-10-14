@@ -1227,21 +1227,21 @@ is never forced) are the privacy contract; see
     #                                       # if storage is RedisStorage, or
     #                                       # the redis_dsn client is used
     #                                       # when redis_dsn is set
-    # strict_kid_verification: false        # OPTIONAL strict current-kid
-    #                                       # verification: when true,
-    #                                       # strict keyring resolution is
-    #                                       # enabled even before the first
-    #                                       # rotation: the current kid must
-    #                                       # match from the first deployment
+    # strict_kid_verification: true         # strict current-kid
+    #                                       # verification (the default):
+    #                                       # the current kid must match
+    #                                       # from the first deployment
     #                                       # (any other kid -> UnknownKid),
     #                                       # and historical keys keep
     #                                       # verifying under rotation grace
     #                                       # when secrets_by_kid is
     #                                       # populated (historical +
     #                                       # current, never the current key
-    #                                       # alone). Default false keeps
+    #                                       # alone). The explicit false is
     #                                       # the legacy any-kid
-    #                                       # single-secret semantics (see
+    #                                       # single-secret migration escape
+    #                                       # hatch for an existing
+    #                                       # deployment (see
     #                                       # security-hardening.md).
     # resume_claim_ttl_secs: 60             # recovery-derivation claim lease
     #                                       # (min 60): must cover the

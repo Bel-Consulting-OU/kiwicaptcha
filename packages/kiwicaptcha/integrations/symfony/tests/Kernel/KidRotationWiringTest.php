@@ -66,17 +66,37 @@ final class KidRotationWiringTest extends TestCase
         self::assertSame([1], $verifier->getArgument('revokedKids'));
     }
 
-    public function testDefaultsKeepCurrentBehavior(): void
+    public function testDefaultsWireTheStrictCurrentKeyRing(): void
     {
+        // The fresh-install default is strict_kid_verification: true, so
+        // the default wiring resolves the current key alone as the ring:
+        // the verifier strictly resolves record.kid == currentKid from
+        // the very first deployment.
         $container = $this->load([]);
         $container->compile();
 
         self::assertNull($container->getDefinition('kiwi_captcha.config')->getArgument(12));
         self::assertSame(1, $container->getDefinition('kiwi_captcha.config')->getArgument(13));
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
-        self::assertSame([], $verifier->getArgument('secretsByKid'));
+        self::assertSame([1 => str_repeat('a', 32)], $verifier->getArgument('secretsByKid'));
         self::assertSame([], $verifier->getArgument('revokedKids'));
         self::assertNull($verifier->getArgument('expectedIssuer'));
+    }
+
+    public function testExplicitFalseKeepsTheLegacyAnyKidRing(): void
+    {
+        // The migration escape hatch: the explicit strict_kid_verification
+        // false restores the legacy any-kid single-secret semantics, so an
+        // existing deployment keeps the empty ring with an empty
+        // historical map and the core's legacy verification path.
+        $container = $this->load([
+            'kid' => 3,
+            'strict_kid_verification' => false,
+        ]);
+        $container->compile();
+
+        $verifier = $container->getDefinition('kiwi_captcha.verifier');
+        self::assertSame([], $verifier->getArgument('secretsByKid'), 'the explicit false wires the legacy empty ring (any-kid single-secret semantics)');
     }
 
     public function testHistoricalSecretsReachTheVerifierAsCanonicalIntKeys(): void

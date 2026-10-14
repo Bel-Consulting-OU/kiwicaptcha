@@ -12,7 +12,6 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandSendSettlement;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpEffectsJournal;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind;
-use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
 
 /**
  * The randomized differential engine of the two step-up stores. The
@@ -299,9 +298,13 @@ final class StepUpStoreDifferentialHarness
     {
         return function (string $ctx): void {
             $scope = self::SCOPES[mt_rand(0, \count(self::SCOPES) - 1)];
-            $digest = StepUpOperationDigest::none($scope);
             $id = $this->nextDemandId();
             $demand = $this->mintDemand($id, $scope);
+            // The family identity is the demand record's own family
+            // digest, the key the stores actually index: a stateless
+            // mint folds its unguessable id in, so every fresh root
+            // owns a family of its own.
+            $digest = $demand->familyDigest;
             $a = $this->arrayStore->createRootDemand($demand, self::RECORD_TTL);
             $r = $this->redisStore->createRootDemand($demand, self::RECORD_TTL);
             ($this->assert)($a === $r, $ctx.': the root mint answered different ids ('.$a.' vs '.$r.')');
@@ -447,7 +450,7 @@ final class StepUpStoreDifferentialHarness
                 $this->demands[$id]['state'] = StepUpDemandState::Superseded;
                 $this->demands[$id]['supersededBy'] = $child->id;
                 $this->registerDemand($child->id, $child);
-                $this->families[$child->operationDigest] = $child->id;
+                $this->families[$child->familyDigest] = $child->id;
             } else {
                 ($this->assert)($a === null && $r === null, $ctx.'('.$id.'): an illegal supersede must refuse equivalently');
             }
@@ -587,11 +590,14 @@ final class StepUpStoreDifferentialHarness
                 // The completion lane: the correct binding (the stored
                 // session hash, or the minted client secret hash), a
                 // wrong-binding probe, or a hint-less completion that
-                // skips the escalation marker.
+                // skips the escalation marker. The scope hint is the
+                // record's own scope, the value the marker key derives
+                // from.
                 $binding = $roll === 1 ? str_repeat('f', 64) : $challenge['binding'];
                 $hint = $roll === 2 ? null : $this->hintFor($challenge);
-                $a = $this->arrayStore->completeFactor($id, $demandId, $binding, $this->clock->now, $hint);
-                $r = $this->redisStore->completeFactor($id, $demandId, $binding, $this->clock->now, $hint);
+                $scopeHint = $hint !== null ? $challenge['record']->scope : null;
+                $a = $this->arrayStore->completeFactor($id, $demandId, $binding, $this->clock->now, $hint, $scopeHint);
+                $r = $this->redisStore->completeFactor($id, $demandId, $binding, $this->clock->now, $hint, $scopeHint);
                 ($this->assert)(($a === null) === ($r === null), $ctx.'('.$id.' -> '.$demandId.',roll='.$roll.'): one store completed a pair the other refused');
                 if ($a !== null && $r !== null) {
                     ($this->assert)($a->challengeId === $r->challengeId && $a->demandId === $r->demandId, $ctx.': the completion identities diverge');
@@ -646,8 +652,8 @@ final class StepUpStoreDifferentialHarness
     {
         return function (string $ctx): void {
             $digest = array_rand($this->families);
-            $a = $this->arrayStore->demandIdForOperation($digest);
-            $r = $this->redisStore->demandIdForOperation($digest);
+            $a = $this->arrayStore->demandIdForFamily($digest);
+            $r = $this->redisStore->demandIdForFamily($digest);
             ($this->assert)($a === $r, $ctx.': the family tips diverge ('.$a.' vs '.$r.')');
         };
     }
@@ -980,8 +986,8 @@ final class StepUpStoreDifferentialHarness
             ($this->assert)($a === $r, $ctx.': challenge '.$id.' projections diverge: '.json_encode($a).' vs '.json_encode($r));
         }
         foreach ($this->families as $digest => $label) {
-            $a = $this->arrayStore->demandIdForOperation($digest);
-            $r = $this->redisStore->demandIdForOperation($digest);
+            $a = $this->arrayStore->demandIdForFamily($digest);
+            $r = $this->redisStore->demandIdForFamily($digest);
             ($this->assert)($a === $r, $ctx.': family tip of '.$label.' diverges: '.$a.' vs '.$r);
         }
         foreach ($this->sessionMarks as $mark) {
