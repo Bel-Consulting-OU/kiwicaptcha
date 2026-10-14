@@ -236,6 +236,15 @@ final class StepUpOperationResolverTest extends TestCase
             'user-42',
         );
         $kernel = new class ('test', true) extends TestKernel {
+            // The anonymous kernel's cache dir is stable across edits of
+            // this file (md5 of the mangled class name), so a compiled
+            // container from an earlier shape would silently answer the
+            // wiring checks: this run compiles fresh.
+            public function getCacheDir(): string
+            {
+                return parent::getCacheDir().'-'.bin2hex(random_bytes(6));
+            }
+
             protected function build(ContainerBuilder $container): void
             {
                 parent::build($container);
@@ -272,6 +281,14 @@ final class StepUpOperationResolverTest extends TestCase
                         'secret' => 'test-secret',
                         'test' => true,
                     ]);
+                    // The authenticated principal the scenario models:
+                    // the operation names user-42, the request
+                    // authenticates user-42 — the agreement the
+                    // authoritative-principal rule requires on the
+                    // replay lane.
+                    $container->register(\BelConsulting\KiwiCaptchaBundle\Risk\PrincipalResolverInterface::class, FakePrincipalResolver::class)
+                        ->setArgument('$principal', 'user-42')
+                        ->setPublic(true);
                     $container->loadFromExtension('kiwi_captcha', [
                         'secret_key' => '0123456789abcdef0123456789abcdef',
                         'redis_service' => 'resolver.seam.fake.redis',
@@ -315,12 +332,19 @@ final class StepUpOperationResolverTest extends TestCase
             self::assertNotNull($demandId, 'the replacement-fed mint recorded the demand');
             $store = $container->get('kiwi_captcha.step_up.store');
             self::assertNotNull($store->completeDemand((string) $demandId, time(), 300), 'the factor completion landed on the container store');
-            $settled = $finalizer->finalizeGrant((string) $demandId, new StepUpOperationMaterial(), null, 'email_otp', 'tx-spy-001', $canonical);
-            self::assertTrue($settled->authorized, 'the replacement-bound demand settles authorized');
+            // The material reproduces the demand's subject: a
+            // principal-bound demand finalizes only for the principal it
+            // was minted for (an anonymous material refuses, fail
+            // closed).
+            $anonymous = $finalizer->finalizeGrant((string) $demandId, new StepUpOperationMaterial(), null, 'email_otp', 'tx-spy-001', $canonical);
+            self::assertFalse($anonymous->authorized, 'a principal-bound demand refuses an anonymous finalization');
+            $settled = $finalizer->finalizeGrant((string) $demandId, new StepUpOperationMaterial(principalPseudonym: 'user-42'), null, 'email_otp', 'tx-spy-001', $canonical);
+            self::assertTrue($settled->authorized, 'the replacement-bound demand settles authorized for its own principal');
 
             $request = Request::create('/', 'POST', ['amount_minor' => '1']);
             $request->attributes->set(KiwiCaptchaValidator::OPERATION_ID_ATTRIBUTE, 'tx-spy-001');
             $gate = new \ReflectionMethod(KiwiCaptchaValidator::class, 'operationStepUpAlreadyAuthorized');
+            $dbgPrincipal = (new \ReflectionProperty(KiwiCaptchaValidator::class, 'principalResolver'))->getValue($validator);
             self::assertTrue($gate->invoke($validator, new KiwiCaptcha(['scope' => $scope]), $request, null), 'the replay gate authorizes through the replacement');
             self::assertSame([['scope' => $scope, 'operationId' => 'tx-spy-001']], SpyStepUpOperationResolver::$resolved, 'the resolution ran on the replacement exactly once');
         } finally {

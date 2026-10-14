@@ -36,6 +36,13 @@ final class RecordingStepUpChallengeStore implements StepUpChallengeStore
         return $this->inner->create($challenge, $ttlSecs);
     }
 
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        $this->records[] = (string) json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES);
+
+        return $this->inner->createAdmittedChallenge($challenge, $ttlSecs);
+    }
+
     /** @return list<string> */
     public function recorded(): array
     {

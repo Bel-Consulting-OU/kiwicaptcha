@@ -21,11 +21,18 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
  */
 final class StepUpOperationDigest
 {
-    private const PURPOSE = 'kiwi/v1/stepup-operation-digest';
+    /**
+     * v2: the canonical field encoding is length-prefixed (injective),
+     * so the recipe version moved with it. A digest minted under v1
+     * never reproduces under v2 — demands minted before the change are
+     * dead by their TTL (and the demand schema boundary refuses them
+     * outright), fail toward re-demand.
+     */
+    private const PURPOSE = 'kiwi/v2/stepup-operation-digest';
 
-    private const IDENTITY_INFO = 'kiwi/v1/stepup-op-identity';
+    private const IDENTITY_INFO = 'kiwi/v2/stepup-op-identity';
 
-    private const CONTENT_INFO = 'kiwi/v1/stepup-op-content';
+    private const CONTENT_INFO = 'kiwi/v2/stepup-op-content';
 
     private const HKDF_SALT = 'kiwicaptcha/deploy-salt/v1';
 
@@ -41,13 +48,7 @@ final class StepUpOperationDigest
      */
     public static function formFields(string $scope, array $fields): string
     {
-        ksort($fields);
-        $material = '';
-        foreach ($fields as $name => $value) {
-            $material .= $name.'='.trim($value)."\0";
-        }
-
-        return self::hash(StepUpOperationBindingKind::FormFields, $scope, $material);
+        return self::hash(StepUpOperationBindingKind::FormFields, $scope, self::canonicalOperationContent($fields));
     }
 
     /** The digest of the authoritative transaction binding identity. */
@@ -127,9 +128,14 @@ final class StepUpOperationDigest
     /**
      * The canonical operation content encoding: the named fields sorted
      * by name so the submission order is irrelevant, each trimmed. The
-     * caller names the fields the protected operation carries (amount,
-     * currency, recipient, ...); the encoding is stable across machines
-     * and workers.
+     * encoding is length-prefixed: every name and every value rides
+     * behind its own byte length. The map-to-bytes function is
+     * therefore injective — no two distinct field maps can produce the
+     * same canonical bytes, however the names or values embed
+     * delimiters (NULs, '=' signs, newlines). A delimiter-joined
+     * spelling is not injective, because an interior NUL could forge a
+     * field boundary; the v2 recipe moved with the encoding, so v1
+     * digests never reproduce under v2.
      *
      * @param array<string, string> $fields
      */
@@ -138,7 +144,9 @@ final class StepUpOperationDigest
         ksort($fields);
         $material = '';
         foreach ($fields as $name => $value) {
-            $material .= $name.'='.trim((string) $value)."\0";
+            $name = (string) $name;
+            $value = trim((string) $value);
+            $material .= \strlen($name).':'.$name.\strlen($value).':'.$value;
         }
 
         return $material;

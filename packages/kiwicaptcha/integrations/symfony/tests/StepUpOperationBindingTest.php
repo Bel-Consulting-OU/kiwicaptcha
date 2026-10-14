@@ -331,11 +331,18 @@ final class StepUpOperationBindingTest extends TestCase
         self::assertNotNull($admitted);
         self::assertSame($challengeId, $admitted->activeChallengeId);
 
-        // A second generation while the first is live refuses.
-        $second = $admitted->admitFactorChallenge(StepUpChallenge::mintId(), $challengeExpiry, $this->now);
-        self::assertNull($second, 'at most one active factor challenge per demand');
+        // A second generation replaces the live one (the stores consume
+        // the prior record in the same transaction): the stamp moves to
+        // the new challenge, so at most one live challenge per demand
+        // holds at any instant while the bounded resend stays a fresh
+        // begin. The replaced stamp is exactly the new challenge's.
+        $secondId = StepUpChallenge::mintId();
+        $second = $admitted->admitFactorChallenge($secondId, $challengeExpiry, $this->now);
+        self::assertNotNull($second, 'a live challenge is replaced, never refused');
+        self::assertSame($secondId, $second->activeChallengeId);
 
-        // After the first challenge expires, a new generation is admitted.
+        // After the challenge expires, a new generation is admitted the
+        // same way.
         $this->now = $challengeExpiry + 1;
         $third = $admitted->admitFactorChallenge(StepUpChallenge::mintId(), $demand->expiresAt, $this->now);
         self::assertNotNull($third);

@@ -230,7 +230,9 @@ final class StepUpStoreDifferentialTest extends TestCase
         // stored scope.
         foreach (['checkout' => 'totp', 'login' => 'email_otp'] as $scope => $family) {
             $raw = $fake->strings['{kiwi:diff}:stepup:emdone:'.$binding.':'.hash('sha256', $scope)] ?? null;
-            self::assertSame($scope.'|'.$family.'|'.(self::BASE_NOW + 600), $raw, 'the '.$scope.' marker sits under its pair key with the stored value');
+            // The rank rides the value: the monotonic marker carries the
+            // completing proof's own ladder rank beside its expiry.
+            self::assertSame($scope.'|'.$family.'|'.\BelConsulting\KiwiCaptchaBundle\Security\StepUp\FactorRequirement::rankOf($family).'|'.(self::BASE_NOW + 600), $raw, 'the '.$scope.' marker sits under its pair key with the stored value');
         }
     }
 

@@ -162,7 +162,24 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         }
 
         try {
-            $this->store->create($challenge, $this->ttlSecs);
+            $this->store->createAdmittedChallenge($challenge, $this->ttlSecs);
+        } catch (StepUpDemandAdmissionRefused $e) {
+            // The demand refused the admission (it already holds a live
+            // challenge, or it is spent): nothing was stored, so the
+            // reservation releases and the begin answers the retryable
+            // active-challenge refusal.
+            try {
+                $this->store->releaseMailQuota($reservationId);
+            } catch (\Throwable) {
+            }
+
+            return $this->refusal(
+                $context,
+                Response::HTTP_CONFLICT,
+                'step_up_challenge_active',
+                'A verification challenge is already in progress; complete it or wait for it to expire.',
+                ['Retry-After' => (string) $this->ttlSecs],
+            );
         } catch (\Throwable $e) {
             // Proven pre-handoff failure: nothing was handed to the
             // transport, so the reservation releases (the mail capacity

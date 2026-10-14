@@ -54,6 +54,58 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return $challenge->id;
     }
 
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        if ($challenge->demandId === null) {
+            // The demandless ceremonies (enrollment creation, the drain
+            // shapes) store like any other: they authorize nothing and
+            // admit through no demand.
+            return $this->create($challenge, $ttlSecs);
+        }
+        $demand = $this->liveDemand($challenge->demandId);
+        if ($demand === null || !$demand->state->isOpen() || $demand->superseded()) {
+            throw new StepUpDemandAdmissionRefused('the demand is absent, not open, or superseded');
+        }
+        $now = $this->now();
+        if ($demand->expired($now)) {
+            throw new StepUpDemandAdmissionRefused('the demand has expired');
+        }
+        // The admitted challenge never outlives its demand, and the
+        // clamp stays in the mint-lane clock domain (the challenge's own
+        // created_at plus its TTL, against the demand's authorization
+        // deadline): a resend late in the window issues a shorter-lived
+        // code, never a refusal, and no store-clock value ever feeds the
+        // record's own expiry. The store TTL budget is separate.
+        $challengeExpiresAt = min($challenge->createdAt + max(1, $ttlSecs), $demand->expiresAt);
+        $challenge = $challenge->withClampedExpiry($challengeExpiresAt);
+        // The replace semantics: the new begin supersedes any prior live
+        // challenge of the same demand — its record is consumed here, in
+        // the same all-or-nothing move that stamps the new one, so at
+        // most one live challenge per demand holds at any instant and a
+        // late completion of the old code can never answer. A refused
+        // admission (unreachable in the single-process store after the
+        // guards above, but kept for the contract) restores the replaced
+        // challenge; nothing new is stored.
+        $activeId = $demand->activeChallengeId;
+        $activeUntil = $demand->activeChallengeExpiresAt ?? 0;
+        $replaced = $activeId !== null && $activeUntil > $now ? $this->challenges[$activeId] ?? null : null;
+        if ($replaced !== null) {
+            unset($this->challenges[$activeId]);
+        }
+        $id = $this->create($challenge, max(1, $challengeExpiresAt - $now));
+        $admitted = $demand->admitFactorChallenge($id, $challengeExpiresAt, $now);
+        if ($admitted === null) {
+            unset($this->challenges[$id]);
+            if ($replaced !== null) {
+                $this->challenges[$activeId] = $replaced;
+            }
+            throw new StepUpDemandAdmissionRefused('the demand refused the challenge admission');
+        }
+        $this->demands[$demand->id] = ['record' => $admitted, 'expiresAt' => $demand->expiresAt];
+
+        return $id;
+    }
+
     public function read(string $challengeId): ?StepUpChallenge
     {
         return $this->live($challengeId);
@@ -162,6 +214,27 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if ($challenge->demandId !== $demandId || $demand->id !== $demandId) {
             return null;
         }
+        // The demand/challenge identity binding, judged on the stored
+        // records alone: a challenge answers exactly its own demand's
+        // scope, a session-bound demand is completed only by a challenge
+        // of that same session, and a login demand is completed only by
+        // a challenge of the principal the demand was minted for (the
+        // identity-factory pseudonym both records carry). A crossed
+        // session, scope or subject completes nothing — the presented
+        // binding may match the challenge perfectly and the completion
+        // still refuses, because the proof earned belongs to another
+        // browser, scope or account than the demand names.
+        if ($challenge->scope !== $demand->scope) {
+            return null;
+        }
+        if ($demand->sessionHash !== null && $challenge->sessionHash !== $demand->sessionHash) {
+            return null;
+        }
+        if ($demand->operationBindingKind === StepUpOperationBindingKind::Login
+            && $demand->principalPseudonym !== null
+            && $challenge->principalSubject() !== $demand->principalPseudonym) {
+            return null;
+        }
         // A superseded demand completes nothing, whatever its state
         // field still says: escalation replaced it with a stronger
         // child. Same gate the Redis script runs.
@@ -222,8 +295,29 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash
             && $scope !== null && $challenge->scope === $scope
             && \is_string($family) && $family !== '') {
-            $this->completedIndex[$this->completedIndexKey($sessionHash, $scope)] = [
-                'value' => $challenge->scope.'|'.$family.'|'.$demand->expiresAt,
+            // The monotonic-rank write: a completion never moves the
+            // (session, scope) history backwards. The entry carries the
+            // completing proof's own ladder rank and its own demand's
+            // expiry, and a weaker (or equally ranked stale) completion
+            // never overwrites a stronger one — the weaker demand's TTL
+            // can never extend the stronger proof's lifetime, and the
+            // history can never regress from webauthn to email_otp
+            // however the completions interleave.
+            $rank = FactorRequirement::rankOf($family);
+            $key = $this->completedIndexKey($sessionHash, $scope);
+            $prior = $this->completedIndex[$key] ?? null;
+            if ($prior !== null) {
+                $priorParts = explode('|', (string) $prior['value']);
+                // A legacy three-part entry (before the rank rode the
+                // value) reads as rank 0: any ladder completion moves it
+                // forward, never backward.
+                $priorRank = \count($priorParts) === 4 ? (int) $priorParts[2] : 0;
+                if ($rank < $priorRank) {
+                    return StepUpFactorCompletion::fromRecords($challenge, $completed);
+                }
+            }
+            $this->completedIndex[$key] = [
+                'value' => $challenge->scope.'|'.$family.'|'.$rank.'|'.$demand->expiresAt,
                 'expiresAt' => $demand->expiresAt,
             ];
         }
@@ -246,7 +340,15 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
             return null;
         }
         $parts = explode('|', $entry['value']);
-        if (\count($parts) !== 3 || $parts[0] !== $scope) {
+        // The rank rides the value (scope|family|rank|expires); a legacy
+        // three-part entry predating it stays readable for its own TTL.
+        if (\count($parts) !== 4 && \count($parts) !== 3) {
+            return null;
+        }
+        if ($parts[0] !== $scope || !\is_string($parts[1])) {
+            return null;
+        }
+        if (\count($parts) === 4 && preg_match('/^[0-9]+$/', $parts[2]) !== 1) {
             return null;
         }
 

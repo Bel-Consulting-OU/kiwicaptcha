@@ -440,7 +440,16 @@ final class EmailOwnershipStepUp
             $claimed->id,
         );
         try {
-            $this->store->create($challenge, $this->ttlSecs);
+            $this->store->createAdmittedChallenge($challenge, $this->ttlSecs);
+        } catch (StepUpDemandAdmissionRefused) {
+            // The demand already holds a live challenge (or is spent):
+            // nothing was stored, the reservation and the send credit
+            // both return, and the begin answers the retryable
+            // active-challenge refusal.
+            $this->releaseQuota($delivery->reservationId());
+            $this->settleLease(new StepUpDemandSendSettlement($claimed->id, $lease->leaseUntilMs, $lease->claimAt, $lease->priorSends, $lease->priorLastSentAt, false));
+
+            return self::json(['error' => 'step_up_challenge_active', 'message' => 'A verification challenge is already in progress; complete it or wait for it to expire.'], Response::HTTP_CONFLICT);
         } catch (\Throwable) {
             // Pre-handoff refusal: the reservation and the send credit
             // both return, fail closed on the record.

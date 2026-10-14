@@ -226,7 +226,20 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             null,
             $context->demandId,
         );
-        $this->store->create($challenge, $this->challengeTtlSecs);
+        try {
+            $this->store->createAdmittedChallenge($challenge, $this->challengeTtlSecs);
+        } catch (StepUpDemandAdmissionRefused) {
+            // The demand already holds a live challenge (or is spent):
+            // nothing was stored, the begin answers the retryable
+            // active-challenge refusal.
+            return $this->refusal(
+                $context,
+                Response::HTTP_CONFLICT,
+                'step_up_challenge_active',
+                'A verification challenge is already in progress; complete it or wait for it to expire.',
+                ['Retry-After' => (string) $this->challengeTtlSecs],
+            );
+        }
 
         return $this->presentation($context, $challenge, $now);
     }

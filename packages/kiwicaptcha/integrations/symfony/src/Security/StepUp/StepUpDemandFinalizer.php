@@ -171,6 +171,21 @@ final class StepUpDemandFinalizer
             if ($standing === null || $standing->expired($this->now()) || !$standing->state->isOpen() || $standing->superseded()) {
                 return null;
             }
+            // The recovered standing record must belong to this login
+            // in full: the same scope, the same browser session and the
+            // same principal recipe the caller presents. A collision on
+            // the id is otherwise a way to be handed another login's
+            // demand, so every binding is re-checked here, fail closed.
+            if ($standing->operationBindingKind !== StepUpOperationBindingKind::Login
+                || $standing->scope !== $scope
+                || ($standing->sessionHash ?? null) !== ($sessionHash ?? null)
+                || !hash_equals($standing->operationDigest, StepUpOperationDigest::login($scope, $principalPseudonym))) {
+                $this->logger?->info('kiwi step-up demand mint refused: the standing record of that id is not this login', [
+                    'demand' => $standing->id,
+                ]);
+
+                return null;
+            }
 
             return $standing->id;
         }
@@ -248,7 +263,12 @@ final class StepUpDemandFinalizer
             if (!$demand->superseded()) {
                 if ($demand->state !== StepUpDemandState::Open
                     || $demand->operationBindingKind !== StepUpOperationBindingKind::Login
-                    || !hash_equals($demand->operationDigest, $computed)) {
+                    || !hash_equals($demand->operationDigest, $computed)
+                    // The browser binding is re-checked beside the
+                    // principal recipe: a demand minted for another
+                    // session is never handed to this begin, however
+                    // well the login recipe reproduces.
+                    || ($demand->sessionHash ?? null) !== ($sessionHash ?? null)) {
                     return null;
                 }
 
@@ -537,18 +557,28 @@ final class StepUpDemandFinalizer
      * operation and the same contents. The same op + contents answers
      * the existing authorization idempotently; a different op or
      * changed contents is rejected. Null when the demand is not an
-     * authorized terminal or the binding does not reproduce.
+     * authorized terminal or the binding does not reproduce. A demand
+     * that names its principal reproduces only for that principal: the
+     * presented pseudonym must match in constant time, and a bound
+     * demand presented without a principal reproduces nothing (fail
+     * closed — the subject-bound authorization is never answered
+     * anonymously).
      */
     public function reproduce(
         string $demandId,
         ?string $operationId,
         ?string $canonicalContent,
+        ?string $principalPseudonym = null,
     ): ?StepUpDemand {
         $demand = $this->liveDemand($demandId);
         if ($demand === null || $demand->state !== StepUpDemandState::Authorized) {
             return null;
         }
         if (!$this->operationBindingMatches($demand, $operationId, $canonicalContent)) {
+            return null;
+        }
+        if ($demand->principalPseudonym !== null
+            && ($principalPseudonym === null || !hash_equals($demand->principalPseudonym, $principalPseudonym))) {
             return null;
         }
 
@@ -575,6 +605,25 @@ final class StepUpDemandFinalizer
             }
 
             return StepUpFinalization::refusedState($demand->state);
+        }
+        // The subject reproduction, before any state move: a demand
+        // that names its principal (the family/subject rewrite carries
+        // the pseudonym on every bound lane) authorizes only for the
+        // principal the finalization presents. The dual-digest compare
+        // of the split binding reproduces the operation, never the
+        // subject — an exact demand/grant path could otherwise finalize
+        // another principal's demand by presenting the same operation.
+        // Constant-time, and refused without spending the claim.
+        if ($demand->principalPseudonym !== null) {
+            $presented = $material->principalPseudonym;
+            if ($presented === null || $presented === ''
+                || !hash_equals($demand->principalPseudonym, $presented)) {
+                $this->logger?->info('kiwi step-up demand finalization refused: the presenting principal does not reproduce the demand subject', [
+                    'demand' => $demand->id,
+                ]);
+
+                return StepUpFinalization::refusedDigest();
+            }
         }
         // The recipe rerun, before any state move: the digest the stored
         // binding kind prescribes, computed over the caller's material.

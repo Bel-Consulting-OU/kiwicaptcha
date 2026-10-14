@@ -399,7 +399,7 @@ final class LiveDefectRegressionTest extends TestCase
         $store = new ArrayStepUpChallengeStore($this->clock());
         $sender = new CapturingStepUpCodeSender();
         $handler = $this->otpHandler($store, $sender);
-        $response = $handler->begin($this->beginRequest(), $this->context(json: true));
+        $response = $handler->begin($this->beginRequest(), $this->mintedContext($store, json: true));
         self::assertSame(200, $response->getStatusCode());
         self::assertNotNull($sender->lastCode(), 'the accepted begin delivers the code');
         $body = json_decode((string) $response->getContent(), true);
@@ -419,13 +419,15 @@ final class LiveDefectRegressionTest extends TestCase
         $sender = new CapturingStepUpCodeSender();
         $handler = $this->otpHandler($store, $sender, maxBegins: 1);
         $store->failCreate = true;
-        $response = $handler->begin($this->beginRequest(), $this->context());
+        $context = $this->mintedContext($store);
+        $response = $handler->begin($this->beginRequest(), $context);
         self::assertSame(503, $response->getStatusCode());
         self::assertNull($sender->lastCode(), 'nothing is handed to the transport before the record exists');
         // The reservation released: the mail capacity returns. A retry
-        // must still be able to reserve.
+        // must still be able to reserve (the same standing demand — a
+        // re-begin of one pending login).
         $store->failCreate = false;
-        $retry = $handler->begin($this->beginRequest(), $this->context());
+        $retry = $handler->begin($this->beginRequest(), $context);
         self::assertSame(200, $retry->getStatusCode(), 'the released reservation lets a retry reserve again');
     }
 
@@ -435,7 +437,7 @@ final class LiveDefectRegressionTest extends TestCase
         $sender = new CapturingStepUpCodeSender();
         $sender->throwOnSend = new \RuntimeException('transport refused');
         $handler = $this->otpHandler($store, $sender, maxBegins: 1);
-        $response = $handler->begin($this->beginRequest(), $this->context());
+        $response = $handler->begin($this->beginRequest(), $this->mintedContext($store));
         self::assertSame(503, $response->getStatusCode());
         // Ambiguous = spent: the reservation commits, so the next begin
         // sees the spent budget (maxBegins 1 is now used).
@@ -632,6 +634,30 @@ final class LiveDefectRegressionTest extends TestCase
             $json ? StepUpContext::MODE_JSON : StepUpContext::MODE_HTML,
             demandId: \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
         );
+    }
+
+    /**
+     * The context of a begin whose demand actually stands: the demand
+     * plane mints the record before any handler begin (the controller
+     * refuses a begin whose mint failed), so the direct-handler tests
+     * mint the demand their context names before beginning.
+     */
+    private function mintedContext(StepUpChallengeStore $store, bool $json = false): StepUpContext
+    {
+        $context = $this->context(json: $json);
+        $demand = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand::mint(
+            $context->demandId ?? 'spareDemandId000000001',
+            $context->scope,
+            null,
+            null,
+            null,
+            ($this->clock())(),
+            900,
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::None,
+        );
+        $store->createDemand($demand, 900);
+
+        return $context;
     }
 
     private function beginRequest(): Request

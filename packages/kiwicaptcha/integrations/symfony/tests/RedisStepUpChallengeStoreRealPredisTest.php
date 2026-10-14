@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpContext;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResultStatus;
@@ -232,6 +233,95 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
         $this->store->commitMailQuota('real.0.3');
         self::assertFalse($this->store->releaseMailQuota('real.0.3'), 'a committed reservation never releases');
         self::assertSame('1', $this->client->get(self::PREFIX.'emb:'.$dom), 'the committed spend stands');
+    }
+
+    public function testTheFactorHistoryNeverRegressesFromStrongToWeakOnTheRealClient(): void
+    {
+        // The monotonic prior-rank parse, on the real server: the ranked
+        // index entry the webauthn completion wrote must survive the
+        // later email_otp completion of the same (session, scope) pair.
+        // The bug this pins: the prior-rank parse double-counted the
+        // ranked shape to eight tokens, so the monotonic gate never read
+        // the stored rank and the weaker completion overwrote the
+        // stronger one, regressing the history to email_otp.
+        $session = hash('sha256', 'sess');
+        $scope = 'checkout';
+
+        $strongDemand = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            $scope,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+        );
+        $this->store->createDemand($strongDemand, 600);
+        $strong = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::WebAuthn,
+            self::PRINCIPAL,
+            null,
+            $scope,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'ceremony-challenge'),
+            'assertion',
+            'sess',
+            false,
+            false,
+            null,
+            $strongDemand->id,
+        );
+        $this->store->create($strong, 600);
+        self::assertNotNull(
+            $this->store->completeFactor($strong->id, $strongDemand->id, $session, $this->now, $session, $scope),
+            'the webauthn completion must land on the real server',
+        );
+        self::assertSame('webauthn', $this->store->completedFactorOf($session, $scope, $this->now));
+
+        $weakDemand = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            $scope,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+        );
+        $this->store->createDemand($weakDemand, 600);
+        $weak = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL,
+            null,
+            $scope,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'code'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $weakDemand->id,
+        );
+        $this->store->create($weak, 600);
+        self::assertNotNull(
+            $this->store->completeFactor($weak->id, $weakDemand->id, $session, $this->now, $session, $scope),
+            'the weaker email_otp completion still lands on the real server',
+        );
+        self::assertSame(
+            'webauthn',
+            $this->store->completedFactorOf($session, $scope, $this->now),
+            'the weaker completion never regresses the monotonic factor history on the real server',
+        );
     }
 
     /**

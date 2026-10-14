@@ -106,6 +106,11 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
             {
             }
 
+            public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+            {
+                return $this->real->createAdmittedChallenge($challenge, $ttlSecs);
+            }
+
             public function supersedeDemandWithChild(string $parentDemandId, StepUpDemand $child): ?StepUpDemand
             {
                 // The deterministic stand-in for the interleaving: the

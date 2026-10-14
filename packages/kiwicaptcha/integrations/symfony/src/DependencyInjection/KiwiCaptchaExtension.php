@@ -2445,12 +2445,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 // The factor requirement source: every demand snapshots
                 // the factor it requires, escalated strictly past the
                 // factor the family's completion history holds. The
-                // resolver serves the built-in assurance ladder only; a
-                // default handler outside the ladder runs without the
-                // snapshot rather than failing the container.
+                // resolver serves the built-in assurance ladder only,
+                // and only over handlers that actually exist: a custom
+                // default runs without the snapshot, and a custom-only
+                // deployment (no ladder handler registered) never gets a
+                // resolver demanding webauthn out of thin air — demands
+                // no registered factor could satisfy.
                 $resolverDefault = null;
                 foreach (array_merge([$stepUpDefault], ['webauthn', 'totp', 'email_otp']) as $candidate) {
-                    if (\is_string($candidate) && FactorRequirement::isFamily($candidate)) {
+                    if (\is_string($candidate) && FactorRequirement::isFamily($candidate) && isset($stepUpHandlers[$candidate])) {
                         $resolverDefault = $candidate;
                         break;
                     }
@@ -3325,7 +3328,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The authenticated principal resolver of the financial
             // demand path: the demand records the browser session of
             // exactly the principal the operation belongs to.
-            ->setArgument('$principalResolver', $container->has(PrincipalResolverInterface::class) ? new Reference(PrincipalResolverInterface::class) : null)
+            ->setArgument('$principalResolver', new Reference(PrincipalResolverInterface::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
             // The per-form demand routing: a minted demand is filed
             // under the validating field's constraint instance, and the
             // form type's finishView() claims exactly that entry (the
