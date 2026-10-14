@@ -592,7 +592,11 @@ final class StepUpChallenge
             if ($demandId !== null) {
                 throw $fail('a creation ceremony carries no demand id');
             }
-        } elseif ($demandId !== null && preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
+        } elseif ($demandId !== null && (!\is_string($demandId) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1)) {
+            // The type guard is load-bearing: a corrupt record whose
+            // demand_id is a JSON number, boolean or array must answer
+            // the typed refusal, never an uncaught TypeError out of
+            // preg_match on a non-string subject.
             throw $fail('demand_id must be the base64url id shape');
         }
 
