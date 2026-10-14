@@ -196,9 +196,9 @@ final class EmailOwnershipStepUp
      * fail-closed).
      *
      * The family digest is browser/subject-bound, so the family
-     * lookup finds only this visitor's family: a repeat mint serves
-     * the standing open demand unchanged (same factor requirement,
-     * same window, never a fresh TTL and never an escalation), and a
+     * lookup finds only this visitor's family. A repeat mint serves
+     * the standing open demand unchanged: same factor requirement,
+     * same window, never a fresh TTL and never an escalation. A
      * different visitor mints its own family. The ladder progresses
      * only through the finalizer's factor-completion reassessment, and
      * the authorization window of a family is its first demand's: no
