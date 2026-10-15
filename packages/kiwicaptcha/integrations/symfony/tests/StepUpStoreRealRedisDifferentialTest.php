@@ -302,7 +302,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
             $store->create($chalB, 600);
             $crossedScope = $store->completeFactor($chalB->id, $demandB->id, (string) $chalB->sessionHash, $now, (string) $chalB->sessionHash, 'login');
 
-            // Account switch: a login demand for PRINCIPAL_A, a challenge proving PRINCIPAL_B.
+            // Account switch: a login demand for one principal, a challenge proving the other.
             $demandC = StepUpDemand::mint(
                 StepUpChallenge::mintId(), self::SCOPE, null, null, null, $now, 600,
                 StepUpOperationBindingKind::Login, hash('sha256', 'op'), null, null, false, null, null, self::PRINCIPAL_A,
