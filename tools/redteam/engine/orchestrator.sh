@@ -277,9 +277,29 @@ for campaign in $CAMPAIGNS; do
     printf '%s\n' "$OUT"
     metric_line=$(printf '%s\n' "$OUT" | grep '^METRIC:' | tail -n 1 | cut -d' ' -f4-)
     economic_line=$(printf '%s\n' "$OUT" | grep '^ECONOMIC:' | tail -n 1 | cut -d' ' -f4-)
+    # A zero exit status is not a pass by itself: the run document is the
+    # ledger entry, so the campaign must have written its own PASS record
+    # for this profile. A campaign that answered not-applicable measured
+    # nothing, and a campaign that wrote no record at all is equally not a
+    # pass: both are recorded under their own verdict and close the run,
+    # because the orchestrator drives one profile and that profile is the
+    # reference one, where every campaign is applicable. The storage
+    # backends are driven by target.sh matrix, not from here.
     if [ "$rc" -eq 0 ]; then
-        verdict=PASS
         detail=$(printf '%s\n' "$OUT" | grep '^RESULT: PASS' | head -n 1 | cut -d' ' -f5-)
+        if [ -n "$detail" ]; then
+            verdict=PASS
+        else
+            na_detail=$(printf '%s\n' "$OUT" | grep '^RESULT: not-applicable' | tail -n 1 | cut -d' ' -f5-)
+            if [ -n "$na_detail" ]; then
+                verdict=NOT-APPLICABLE
+                detail="the campaign reported not-applicable on this profile: $na_detail"
+            else
+                verdict=UNRECORDED
+                detail="exit 0 without either a RESULT: PASS or a RESULT: not-applicable record"
+            fi
+            RESULT=1
+        fi
     else
         verdict=FAIL
         detail=$(printf '%s\n' "$OUT" | grep '^RESULT: FAIL' | tail -n 1 | cut -d' ' -f5-)

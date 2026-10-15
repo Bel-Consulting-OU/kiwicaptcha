@@ -41,6 +41,10 @@
 # the reference table's rental rate; the measured accepted-abuse yield
 # through both planes is zero, so the cost per accepted abuse is
 # unbounded while the escalation ladder holds.
+#
+# A storage profile carries no redis url: the engine plane writes the
+# sharded risk store and the wire plane needs the per-address redis
+# limiter, so the campaign reports not-applicable there.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,6 +54,16 @@ RT_CAMPAIGN=d3.4-proxy-pools
 rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 PROFILE_BASE=$(rt_base_url "$RT_PROFILE")
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
+
+# The engine plane drives the sharded risk store and the wire plane
+# needs the per-address redis limiter, which the storage router
+# answers unavailable by design. With no redis url every pooled
+# issuance would answer 503 and the red would say nothing about the
+# pool defenses.
+if [ -z "$REDIS_URL" ]; then
+    rt_not_applicable "this profile carries no redis url; the engine plane writes the sharded risk store and the wire plane needs the per-address redis limiter"
+    rt_finish
+fi
 
 WIRE_PORT=6472
 IP_COUNT=${KIWI_RT_D34_IPS:-$((10000 * KIWI_RT_SCALE / 100))}

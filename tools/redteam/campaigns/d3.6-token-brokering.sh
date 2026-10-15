@@ -32,6 +32,10 @@
 # Economic metric: a brokered token costs one solve and yields zero
 # accepted relays, so the resale value of a solved token is zero; the
 # cost per accepted relayed abuse is unbounded.
+#
+# A storage profile carries no redis url: the two fleet nodes share one
+# redis record store and the stockpile cap is the redis limiter, so the
+# campaign reports not-applicable there.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -41,6 +45,17 @@ RT_CAMPAIGN=d3.6-token-brokering
 rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
 PROFILE_BASE=$(rt_base_url "$RT_PROFILE")
+
+# The cross-node legs need two nodes over one shared record store, and
+# the stockpile leg needs the redis limiter; the storage router
+# carries neither (a configured budget there is refused as
+# unavailable by design). Routing the relay legs at the profile wire
+# would measure only half the claim, so the campaign is honest as a
+# whole and names the missing capability.
+if [ -z "$REDIS_URL" ]; then
+    rt_not_applicable "this profile carries no redis url; the two fleet nodes share one redis record store and the stockpile cap is the redis limiter"
+    rt_finish
+fi
 
 NODE_A=6474
 NODE_B=6475

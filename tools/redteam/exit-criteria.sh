@@ -196,7 +196,18 @@ campaign_log_verdict() {
         if [ -n "$assert_fail" ]; then
             printf 'RED exit 0 with a failed assertion and no final record: %s' "$assert_fail"
         else
-            printf 'RED exit 0 without a RESULT: PASS record for %s %s' "$c" "$prof"
+            # A campaign that answered not-applicable measured nothing on
+            # the profile the battery runs, where every campaign is
+            # applicable: it is RED for the same reason an absent record
+            # is, and the reason names which of the two happened.
+            na_count=$(grep -c "^RESULT: not-applicable $(printf '%s' "$c" | sed 's/[.]/[.]/g') " "$logf" 2>/dev/null)
+            na_count=${na_count:-0}
+            if [ "$na_count" -gt 0 ]; then
+                na_detail=$(grep "^RESULT: not-applicable " "$logf" | tail -n 1 | cut -d' ' -f5-)
+                printf 'RED the campaign declared itself not-applicable on %s, where it must run: %s' "$prof" "$na_detail"
+            else
+                printf 'RED exit 0 without a RESULT: PASS record for %s %s' "$c" "$prof"
+            fi
         fi
         return 0
     fi

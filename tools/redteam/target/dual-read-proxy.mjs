@@ -8,25 +8,32 @@
 // Two jobs, both about the same bytes:
 //
 //   1. The dual read. Every ambiguous byte stream in the corpus is
-//      parsed twice by this file, once with Content-Length framing and
-//      once with Transfer-Encoding framing. Each reading reports where
-//      the first request's body ends and whether a complete second
-//      request survives in the remainder. A case where the two readings
-//      disagree about that boundary is a stream two servers can read as
-//      two different conversations: that is the whole of request
-//      smuggling, and the corpus is selected for it.
+//      parsed under each framing a server might pick: the first declared
+//      Content-Length, the last declared Content-Length, and
+//      Transfer-Encoding. A reading that ends the first request's body
+//      early leaves a complete second request in the remainder, which is
+//      the whole of request smuggling: one set of bytes, two
+//      conversations. Every case that claims to smuggle must have at
+//      least one such reading, and the harness refuses a corpus case
+//      that cannot, because a case that cannot smuggle tests nothing.
 //
-//   2. The live differential. Each stream is then sent to the origin on
-//      a fresh connection, verbatim. The origin must answer
+//   2. The live differential. Each stream is then sent verbatim to the
+//      origin on a fresh connection, twice. The origin must answer
 //      deterministically, must never answer twice on one connection,
-//      and must never execute the smuggled second request — which is
+//      and must never execute the smuggled second request, which is
 //      aimed at the canary path, so an executed smuggle is visible as
-//      the canary's own answer arriving on a connection that only asked
+//      that path's own answer arriving on a connection that asked only
 //      for the outer request.
 //
-// Exit status is 0 only when every case survives both jobs. A case that
-// smuggled, answered twice, or answered nothing at all is printed as a
-// failure and closes the leg.
+// The canary is the strong signal: an execution is unambiguous evidence
+// that an interpretation ran bytes the caller never sent as a request.
+// Answering twice on one connection is the weaker signal, and a stream
+// whose readings agree on the boundary is a legal pipelined pair rather
+// than a desync, so a red on the count alone says less. Both are
+// checked, and each case prints which readings left what.
+//
+// Exit status is 0 only when the corpus is well formed, the canary is
+// reachable, and every case survives. Anything else closes the leg.
 //
 // Usage:
 //   node dual-read-proxy.mjs --cases --origin 127.0.0.1:18085
@@ -38,10 +45,12 @@ const CANARY_PATH = '/healthz';
 const CANARY_MARK = '"ok":true';
 const ORDINARY_PATH = '/verify';
 const JSON_TYPE = 'content-type: application/json';
+const READ_TIMEOUT_MS = 1500;
 
-/** The framing a reading of a byte stream is judged under. */
-const CONTENT_LENGTH = 'content-length';
-const TRANSFER_ENCODING = 'transfer-encoding';
+/** The framings a server may pick when a stream declares more than one. */
+const FIRST_LENGTH = 'first-content-length';
+const LAST_LENGTH = 'last-content-length';
+const ENCODING = 'transfer-encoding';
 
 function headerEnd(buf) {
     const crlf = buf.indexOf('\r\n\r\n');
@@ -67,12 +76,13 @@ function headerLines(buf, end) {
         .filter((line) => line !== '');
 }
 
-function fieldValue(lines, name) {
-    // A header whose name carries trailing whitespace before the colon
-    // is not that header: a framing decision must not read
-    // `transfer-encoding : chunked` as transfer-encoding. The reading
-    // records it as the malformed line it is, and that record is what
-    // makes such a stream ambiguous rather than harmless.
+/**
+ * Every value of a header field, in order. A header whose name carries
+ * whitespace before the colon is not that header, so a framing decision
+ * never reads `transfer-encoding : chunked` as transfer-encoding; the
+ * malformed line is recorded separately instead.
+ */
+function fieldValues(lines, name) {
     const found = [];
     for (const line of lines.slice(1)) {
         const colon = line.indexOf(':');
@@ -109,119 +119,106 @@ function chunkedLength(buf, from) {
     }
 }
 
+/** Whether the bytes at $from open a request line. */
+function opensRequest(buf, from) {
+    if (from >= buf.length) {
+        return false;
+    }
+
+    return /^(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH) \//.test(buf.subarray(from, from + 12).toString('latin1'));
+}
+
 /**
- * Read one request off the front of a stream under the named framing
- * and report the body boundary the reading arrives at. `ambiguous`
- * marks the headers a conforming server must refuse rather than pick a
- * winner from: a frame repeated, a frame whose name is misspelled with
- * embedded whitespace, or both frames present at once.
+ * Read one stream under every framing a server might choose, and report
+ * where each reading ends the first request's body. A reading that ends
+ * it before the stream does leaves a complete trailing request, which is
+ * what a desyncing front end and back end disagree about.
  */
-function read(stream, framing) {
+function dualRead(stream) {
     const end = headerEnd(stream);
     if (end === null) {
-        return null;
+        return { ambiguous: false, boundaries: {}, trailing: [], smuggles: false, malformedFrameName: false };
     }
     const lines = headerLines(stream, end);
-    const lengths = fieldValue(lines, CONTENT_LENGTH);
-    const encodings = fieldValue(lines, TRANSFER_ENCODING);
-    const spacing = /transfer-encoding\s+:|\bcontent-length\s+:/i.test(stream.subarray(0, end.at).toString('latin1'));
+    const lengths = fieldValues(lines, 'content-length');
+    const encodings = fieldValues(lines, 'transfer-encoding');
+    const malformedFrameName = /transfer-encoding\s+:|\bcontent-length\s+:/i.test(
+        stream.subarray(0, end.at).toString('latin1'),
+    );
     const bodyAt = end.at + end.width;
-    let ambiguous = lengths.length > 1 || encodings.length > 1 || spacing;
+    let ambiguous = lengths.length > 1 || encodings.length > 1 || malformedFrameName;
     if (lengths.length > 0 && encodings.length > 0) {
         ambiguous = true;
     }
-    let bodyEnd = null;
-    if (framing === CONTENT_LENGTH) {
-        if (lengths.length > 0) {
-            const declared = parseInt(lengths[lengths.length - 1], 10);
-            bodyEnd = Number.isFinite(declared) && declared >= 0 ? bodyAt + declared : null;
+
+    const boundaries = {};
+    const note = (framing, offset) => {
+        if (offset === null) {
+            boundaries[framing] = null;
+
+            return;
         }
-    } else if (encodings.some((value) => value.toLowerCase().includes('chunked'))) {
+        const at = bodyAt + offset;
+        // A reading whose body runs past the end of the stream cannot
+        // frame this request at all, which is not the same as framing it
+        // at the end.
+        boundaries[framing] = at > stream.length ? null : at;
+    };
+    if (lengths.length > 0) {
+        note(FIRST_LENGTH, parseInt(lengths[0], 10) >= 0 ? parseInt(lengths[0], 10) : null);
+        note(LAST_LENGTH, parseInt(lengths[lengths.length - 1], 10) >= 0 ? parseInt(lengths[lengths.length - 1], 10) : null);
+    } else {
+        boundaries[FIRST_LENGTH] = null;
+        boundaries[LAST_LENGTH] = null;
+    }
+    if (encodings.some((value) => value.toLowerCase().includes('chunked'))) {
         const length = chunkedLength(stream, bodyAt);
-        bodyEnd = length === null ? null : bodyAt + length;
-    }
-    if (bodyEnd !== null && bodyEnd > stream.length) {
-        // The body the reading asks for is not all here: the stream
-        // cannot be read that way at all. `short` keeps the reading
-        // distinct from "no frame at all" (null) and from a complete
-        // one, so a corpus case can assert which readings survive.
-        return { lines, bodyEnd: null, short: true, ambiguity: ambiguous };
+        note(ENCODING, length);
+    } else {
+        boundaries[ENCODING] = null;
     }
 
-    return { lines, bodyEnd, short: false, ambiguity: ambiguous };
+    const trailing = [];
+    for (const [framing, at] of Object.entries(boundaries)) {
+        if (at !== null && at < stream.length && opensRequest(stream, at)) {
+            trailing.push(framing);
+        }
+    }
+
+    return { ambiguous, boundaries, trailing, smuggles: trailing.length > 0, malformedFrameName };
 }
 
-function dualRead(stream) {
-    const byLength = read(stream, CONTENT_LENGTH);
-    const byEncoding = read(stream, TRANSFER_ENCODING);
-    const survives = (reading) => reading !== null && reading.bodyEnd !== null && reading.bodyEnd < stream.length;
-    const smuggles = survives(byLength) || survives(byEncoding);
-
-    return { byLength, byEncoding, smuggles };
+/** One corpus entry, with what its bytes are meant to be able to do. */
+function probe(name, payload, expectSmuggle) {
+    return { name, payload: Buffer.from(payload, 'latin1'), expectSmuggle };
 }
 
-function probe(name, payload) {
-    return { name, payload: Buffer.from(payload, 'latin1') };
-}
+const CANARY_TAIL = `GET ${CANARY_PATH} HTTP/1.1\r\nHost: x\r\n\r\n`;
+const LF_CANARY_TAIL = `GET ${CANARY_PATH} HTTP/1.1\nHost: x\n\n`;
 
-/** One ambiguous stream: outer request, then the smuggled canary. */
-function smuggled(framing, canaryAfter = true) {
-    const tail = canaryAfter ? `GET ${CANARY_PATH} HTTP/1.1\r\nHost: x\r\n\r\n` : '';
-    if (framing === 'cl-then-te') {
-        const body = '0\r\n\r\n';
-
-        return `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\n`
-            + `content-length: ${body.length + tail.length}\r\ntransfer-encoding: chunked\r\n\r\n`
-            + body + tail;
-    }
-    if (framing === 'te-then-cl') {
-        const body = `5\r\nAAAAA\r\n0\r\n\r\n`;
-
-        return `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\n`
-            + `transfer-encoding: chunked\r\ncontent-length: ${body.length}\r\n\r\n`
-            + body + tail;
-    }
-    if (framing === 'obfuscated-te') {
-        const body = `5\r\nAAAAA\r\n0\r\n\r\n`;
-
-        return `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\n`
-            + `transfer-encoding : chunked\r\ncontent-length: ${body.length}\r\n\r\n`
-            + body + tail;
-    }
-    if (framing === 'duplicate-length') {
-        // The first length is fully consumed by the first request, so a
-        // server that honours the LAST duplicate starts the smuggled
-        // request one byte in; a server that honours the first refuses.
-        const body = 'AAAAA';
-
-        return `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\n`
-            + `content-length: ${body.length}\r\ncontent-length: ${body.length + tail.length}\r\n\r\n`
-            + body + tail;
-    }
-
-    // Bare-LF terminators: a server that accepts them as line endings
-    // frames the body one byte shorter than one that does not.
-    const body = 'AAAAA';
-
-    return `POST ${ORDINARY_PATH} HTTP/1.1\nHost: x\n${JSON_TYPE}\n`
-        + `content-length: ${body.length + tail.length}\ntransfer-encoding: chunked\n\n`
-        + body + tail;
-}
-
+/**
+ * The ambiguity corpus. Each smuggled case declares a length or framing
+ * that leaves the canary tail outside the first request under at least
+ * one reading; the reading-only probes deliberately carry no tail, and
+ * they are kept because a server that mis-frames them answers wrongly
+ * without smuggling, which the deterministic replay check still sees.
+ */
 const CORPUS = [
-    probe('cl-te', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 26\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n`),
-    probe('te-cl', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n`),
-    probe('te-dup', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\ntransfer-encoding: identity\r\n\r\n0\r\n\r\n`),
-    probe('te-obfuscated', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ntransfer-encoding : chunked\r\n\r\n5\r\nAAAAA\r\n0\r\n\r\n`),
-    probe('cl-dup', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 5\r\ncontent-length: 26\r\n\r\nAAAAA`),
-    probe('cl-te-smuggled', smuggled('cl-then-te')),
-    probe('te-cl-smuggled', smuggled('te-then-cl')),
-    probe('obfuscated-te-smuggled', smuggled('obfuscated-te')),
-    probe('duplicate-length-smuggled', smuggled('duplicate-length')),
-    probe('bare-lf-smuggled', smuggled('bare-lf')),
-    // The canary alone, on its own connection: the control that proves
-    // the canary is reachable and its mark is what an execution shows.
-    probe('canary-control', `GET ${CANARY_PATH} HTTP/1.1\r\nHost: x\r\n\r\n`),
+    probe('cl-te', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 26\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n`, false),
+    probe('te-cl', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n`, false),
+    probe('te-dup', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ntransfer-encoding: chunked\r\ntransfer-encoding: identity\r\n\r\n0\r\n\r\n`, false),
+    probe('te-obfuscated', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ntransfer-encoding : chunked\r\n\r\n5\r\nAAAAA\r\n0\r\n\r\n`, false),
+    probe('cl-dup', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 5\r\ncontent-length: 26\r\n\r\nAAAAA${CANARY_TAIL}`, true),
+    probe('cl-te-smuggled', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 5\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n${CANARY_TAIL}`, true),
+    probe('te-cl-smuggled', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ntransfer-encoding: chunked\r\ncontent-length: 5\r\n\r\n0\r\n\r\n${CANARY_TAIL}`, true),
+    probe('obfuscated-te-smuggled', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ntransfer-encoding : chunked\r\ncontent-length: 5\r\n\r\n0\r\n\r\n${CANARY_TAIL}`, true),
+    probe('duplicate-length-smuggled', `POST ${ORDINARY_PATH} HTTP/1.1\r\nHost: x\r\n${JSON_TYPE}\r\ncontent-length: 5\r\ncontent-length: 69\r\n\r\nAAAAA${CANARY_TAIL}`, true),
+    // The bare-LF case: a reader that accepts bare LF as a line ending
+    // and frames by the declared length must leave the tail outside the
+    // body. The declared length covers only the five body bytes, and the
+    // tail starts immediately at that boundary with no separator, so
+    // every reading that stops at the length sees a request line there.
+    probe('bare-lf-smuggled', `POST ${ORDINARY_PATH} HTTP/1.1\nHost: x\n${JSON_TYPE}\ncontent-length: 5\ntransfer-encoding: chunked\n\nAAAAA${LF_CANARY_TAIL}`, true),
 ];
 
 function targetOf(origin) {
@@ -234,7 +231,7 @@ function targetOf(origin) {
 }
 
 /** Send one stream verbatim and collect everything the origin answers. */
-function send(target, payload, timeoutMs = 1500) {
+function send(target, payload, timeoutMs = READ_TIMEOUT_MS) {
     return new Promise((resolve) => {
         let data = '';
         let settled = false;
@@ -260,10 +257,27 @@ function send(target, payload, timeoutMs = 1500) {
     });
 }
 
+/**
+ * The status line of the first response, anchored to a line start so a
+ * body that merely quotes an HTTP status can never be read as one.
+ */
+function firstStatus(data) {
+    return /(?:^|\r?\n)HTTP\/1\.[01] (\d{3})/.exec(data)?.[1] ?? 'none';
+}
+
+/** Responses seen on the connection, counted at line starts only. */
 function responsesIn(data) {
-    const matched = data.match(/HTTP\/1\.[01] /g);
+    const matched = data.match(/(?:^|\r?\n)HTTP\/1\.[01] /g);
 
     return matched === null ? 0 : matched.length;
+}
+
+function describe(reading) {
+    const parts = Object.entries(reading.boundaries)
+        .map(([framing, at]) => `${framing}=${at === null ? 'none' : at}`);
+
+    return `framing=${reading.ambiguous ? 'ambiguous' : 'unambiguous'} ${parts.join(' ')}`
+        + ` trailingReadings=${reading.trailing.length === 0 ? 'none' : reading.trailing.join(',')}`;
 }
 
 async function main() {
@@ -277,41 +291,46 @@ async function main() {
     const target = targetOf(argv[originAt + 1]);
     const cases = argv.includes('--cases');
     let failures = 0;
-    let ambiguityCases = 0;
-    let canaryReachable = false;
 
-    for (const { name, payload } of CORPUS) {
+    // The canary probe runs first, before any case is judged: the
+    // execution check is only meaningful once the canary is known to
+    // answer its mark, and knowing that from the start lets every case
+    // fail on an execution rather than reporting one after the fact.
+    const control = await send(target, Buffer.from(`GET ${CANARY_PATH} HTTP/1.1\r\nHost: x\r\n\r\n`, 'latin1'));
+    const canaryReachable = control.data.includes(CANARY_MARK);
+    if (!canaryReachable) {
+        failures += 1;
+        process.stderr.write(
+            `FAIL canary-control the canary path never answered its mark (${control.error ?? 'answered without the mark'});`
+            + ' an executed smuggle would be invisible, so no case can be judged\n',
+        );
+    } else if (cases) {
+        process.stdout.write('CASE canary-control the canary path answers its mark on a fresh connection\n');
+    }
+
+    for (const { name, payload, expectSmuggle } of CORPUS) {
         const reading = dualRead(payload);
-        const ambiguity = reading.byLength?.ambiguity === true || reading.byEncoding?.ambiguity === true;
-        if (ambiguity) {
-            ambiguityCases += 1;
-        }
-        if (name === 'canary-control') {
-            const control = await send(target, payload);
-            canaryReachable = control.data.includes(CANARY_MARK);
-            if (!canaryReachable) {
-                failures += 1;
-                process.stderr.write(`FAIL canary-control the canary path never answered its mark (${control.error ?? 'no mark'})\n`);
-            } else if (cases) {
-                process.stdout.write(`CASE canary-control the canary path answers its mark on a fresh connection\n`);
-            }
+        // The corpus check: a case that claims to smuggle must really be
+        // able to, or it tests nothing. This is what the dual read is
+        // for, and it is asserted rather than printed.
+        if (expectSmuggle && !reading.smuggles) {
+            failures += 1;
+            process.stderr.write(
+                `FAIL ${name} the corpus case cannot carry its smuggled request under any framing [${describe(reading)}]\n`,
+            );
+
             continue;
         }
         const { data, error } = await send(target, payload);
-        const responses = responsesIn(data);
-        // The smuggled request targets the canary, so an execution is
-        // the canary's own mark arriving here. This connection asked
-        // for /verify only.
-        const executed = data.includes(CANARY_MARK);
-        const status = /^HTTP\/1\.[01] (\d{3})/m.exec(data)?.[1] ?? 'none';
-        // The determinism check: the same bytes twice. A silent close
-        // with no response is this origin's refusal of a malformed
-        // frame, which is fail closed and legitimate; what must not
-        // vary is the outcome. A stream the origin answers one way and
-        // then another is the desync this leg exists to catch.
         const replay = await send(target, payload);
+        const responses = responsesIn(data);
         const replayResponses = responsesIn(replay.data);
-        const replayStatus = /^HTTP\/1\.[01] (\d{3})/m.exec(replay.data)?.[1] ?? 'none';
+        const status = firstStatus(data);
+        const replayStatus = firstStatus(replay.data);
+        // The smuggled request targets the canary, so an execution is
+        // the canary's own mark arriving here, on either attempt. This
+        // connection asked for the ordinary path only.
+        const executed = data.includes(CANARY_MARK) || replay.data.includes(CANARY_MARK);
         const problems = [];
         if (error !== null && error !== 'reset') {
             problems.push(`the connection failed (${error})`);
@@ -319,15 +338,19 @@ async function main() {
         if (executed && canaryReachable) {
             problems.push('an interpretation executed the smuggled canary request');
         }
-        if (responses > 1) {
-            problems.push(`the origin answered ${responses} times on one connection`);
+        if (responses > 1 || replayResponses > 1) {
+            problems.push(`the origin answered ${Math.max(responses, replayResponses)} times on one connection`);
         }
+        // The determinism check: the same bytes twice. A silent close
+        // with no response is this origin's refusal of a malformed
+        // frame, which is fail closed and legitimate; what must not vary
+        // is the outcome. A stream the origin answers one way and then
+        // another is the desync this leg exists to catch.
         if (responses !== replayResponses || status !== replayStatus) {
             problems.push(`the same bytes answered ${status}/${responses} then ${replayStatus}/${replayResponses}`);
         }
-        const detail = `framing=${ambiguity ? 'ambiguous' : 'unambiguous'} lengthReads=${reading.byLength?.bodyEnd ?? 'none'}`
-            + ` encodingReads=${reading.byEncoding?.bodyEnd ?? 'none'} responses=${responses} status=${status}`
-            + ` canary=${executed ? 'executed' : 'clean'} replayed=${replayStatus}`;
+        const detail = `${describe(reading)} responses=${responses} status=${status}`
+            + ` canary=${executed ? 'executed' : 'clean'} replayed=${replayStatus}/${replayResponses}`;
         if (problems.length > 0) {
             failures += 1;
             process.stderr.write(`FAIL ${name} ${problems.join('; ')} [${detail}]\n`);
@@ -337,7 +360,7 @@ async function main() {
     }
 
     process.stderr.write(
-        `dual-read-proxy: ${CORPUS.length - 1} cases, ${ambiguityCases} ambiguous streams read under both framings,`
+        `dual-read-proxy: ${CORPUS.length} cases, ${CORPUS.filter((c) => c.expectSmuggle).length} carrying a smuggled request,`
         + ` canary ${canaryReachable ? 'reachable' : 'unreachable'}, ${failures} differential(s)\n`,
     );
 

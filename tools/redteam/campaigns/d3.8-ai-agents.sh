@@ -30,7 +30,13 @@
 # mechanism is the real one), the verified agent runs the full gate 8
 # times against a per-minute quota of 5 (the exact integer boundary).
 #
-# Ports: 6470 the wire instance, 6477 this campaign's redis.
+# Ports: 6470 the wire instance (the profile's own stock wire when the
+# profile carries no redis), 6477 this campaign's redis.
+#
+# A storage profile carries no redis url, so the scripted agent walks
+# the profile's stock wire instead of a campaign instance; the risk
+# engine and the verified-agent stores keep the campaign's own redis,
+# which is the store their shipped design uses.
 #
 # Economic metric: the unauthenticated agent pays the browser price per
 # solve and receives its rungs; the verified agent trades a key for
@@ -50,26 +56,42 @@ AGENT_REDIS_PORT=6477
 N=${KIWI_RT_D38_N:-10}
 
 # ---------- the wire instance (stock deployment) ----------
-sh "$REDETEAM_DIR/target.sh" down d38wire >/dev/null 2>&1 || true
-WIRE_LOG="$RT_DIR/runs/env/d38-wire.log"
-env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \
-    KC_REDIS_URL="${REDIS_URL:-redis://127.0.0.1:1}" \
-    KIWI_SECRET_KEY='d38s3cr3td38s3cr3td38s3cr3td38s3cr3t' \
-    KIWI_SHA_TARGET_BITS=16 KIWI_MIN_DURATION_MS=0 KIWI_TTL_SECS=120 \
-    php -S "127.0.0.1:$WIRE_PORT" -t "$REPO_ROOT/deploy/app" \
-        "$REPO_ROOT/deploy/app/router.php" >"$WIRE_LOG" 2>&1 &
-WIRE_PID=$!
-# The widget page server in front of it.
+# On a redis profile the campaign boots a stock instance of its own so
+# the run stays self-contained; the risk leg reads that profile's
+# redis. A storage profile carries no redis url and its own wire is
+# already the stock deployment, so the agent walks the profile wire
+# and the risk leg reads the campaign's own redis below.
+WIRE_BASE="http://127.0.0.1:$WIRE_PORT"
+RISK_REDIS_URL="$REDIS_URL"
+WIRE_PID=''
+if [ -n "$REDIS_URL" ]; then
+    sh "$REDETEAM_DIR/target.sh" down d38wire >/dev/null 2>&1 || true
+    WIRE_LOG="$RT_DIR/runs/env/d38-wire.log"
+    env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \
+        KC_REDIS_URL="$REDIS_URL" \
+        KIWI_SECRET_KEY='d38s3cr3td38s3cr3td38s3cr3td38s3cr3t' \
+        KIWI_SHA_TARGET_BITS=16 KIWI_MIN_DURATION_MS=0 KIWI_TTL_SECS=120 \
+        php -S "127.0.0.1:$WIRE_PORT" -t "$REPO_ROOT/deploy/app" \
+            "$REPO_ROOT/deploy/app/router.php" >"$WIRE_LOG" 2>&1 &
+    WIRE_PID=$!
+else
+    WIRE_BASE="$PROFILE_BASE"
+fi
+# The widget page server in front of the wire.
 node "$RT_DIR/campaigns/lib/rt-page-server.mjs" --port 6471 \
-    --wire "http://127.0.0.1:$WIRE_PORT" >/dev/null 2>&1 &
+    --wire "$WIRE_BASE" >/dev/null 2>&1 &
 PAGE_PID=$!
-# This campaign's own redis for the verified-agent stores.
+# This campaign's own redis for the verified-agent stores, and for the
+# risk leg when the profile carries no redis of its own.
 redis-cli -p "$AGENT_REDIS_PORT" shutdown nosave >/dev/null 2>&1
 sleep 0.3
 mkdir -p "$RT_DIR/runs/env/d38"
 redis-server --port "$AGENT_REDIS_PORT" --bind 127.0.0.1 --save '' --appendonly no \
     --daemonize no --dir "$RT_DIR/runs/env/d38" >"$RT_DIR/runs/env/d38-redis.log" 2>&1 &
 REDIS_PID=$!
+if [ -z "$RISK_REDIS_URL" ]; then
+    RISK_REDIS_URL="redis://127.0.0.1:$AGENT_REDIS_PORT"
+fi
 cleanup() {
     kill "$WIRE_PID" "$PAGE_PID" "$REDIS_PID" 2>/dev/null
     pkill -f "php -S 127.0.0.1:$WIRE_PORT " 2>/dev/null
@@ -80,7 +102,10 @@ trap cleanup EXIT
 
 ready=0
 for i in $(seq 1 60); do
-    if nc -z 127.0.0.1 "$WIRE_PORT" 2>/dev/null && nc -z 127.0.0.1 6471 2>/dev/null && redis-cli -p "$AGENT_REDIS_PORT" ping >/dev/null 2>&1; then
+    wire_ready=1
+    [ -z "$WIRE_PID" ] || nc -z 127.0.0.1 "$WIRE_PORT" 2>/dev/null || wire_ready=0
+    if [ "$wire_ready" = 1 ] && nc -z 127.0.0.1 6471 2>/dev/null \
+        && redis-cli -p "$AGENT_REDIS_PORT" ping >/dev/null 2>&1; then
         ready=1
         break
     fi
@@ -115,7 +140,7 @@ print("ASSERT: %s %d/%d scripted solves accepted through the real verifier"
 PYB
 
 RISK_OUT=$(KIWI_RT_RISK_AUTOLOAD="$REPO_ROOT/packages/kiwicaptcha-risk-php/vendor/autoload.php" \
-KIWI_RT_RISK_REDIS_URL="$REDIS_URL" KIWI_RT_SEED="$KIWI_RT_SEED" \
+KIWI_RT_RISK_REDIS_URL="$RISK_REDIS_URL" KIWI_RT_SEED="$KIWI_RT_SEED" \
     php -d memory_limit=512M "$RT_DIR/campaigns/lib/d38.risk.php" "$BROWSER_JSON" 2>"$RT_DIR/runs/env/d38-risk.err")
 RISK_RC=$?
 echo "$RISK_OUT"

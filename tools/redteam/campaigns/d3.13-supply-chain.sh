@@ -37,6 +37,11 @@
 # Ports: 6470 the wire, 6471 the clean page server, 6473 the service
 # worker page, 6474 the pollution page (sequential reuse of the port
 # band; the campaigns never run concurrently).
+#
+# The wire instance exists only when the profile carries a redis for
+# it; a storage profile's own wire is the same stock deployment, and
+# the page servers proxy to it instead. The browser legs, the CSP
+# audit and the honest baseline are unchanged.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -49,25 +54,35 @@ PROFILE_BASE=$(rt_base_url "$RT_PROFILE")
 
 WIRE_PORT=6470
 # ---------- the wire instance and the three page servers ----------
-sh "$REDETEAM_DIR/target.sh" down d13wire >/dev/null 2>&1 || true
-WIRE_LOG="$RT_DIR/runs/env/d313-wire.log"
-env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \
-    KC_REDIS_URL="${REDIS_URL:-redis://127.0.0.1:1}" \
-    KIWI_SECRET_KEY='d313s3cr3td313s3cr3td313s3cr3td313s3c' \
-    KIWI_SHA_TARGET_BITS=16 KIWI_MIN_DURATION_MS=0 KIWI_TTL_SECS=120 \
-    php -S "127.0.0.1:$WIRE_PORT" -t "$REPO_ROOT/deploy/app" \
-        "$REPO_ROOT/deploy/app/router.php" >"$WIRE_LOG" 2>&1 &
-WIRE_PID=$!
+# A redis profile gets a campaign instance so the run stays
+# self-contained; a storage profile carries no redis url, so the page
+# servers walk the profile's own wire, which the supply-chain legs
+# measure exactly as before.
+WIRE_BASE="http://127.0.0.1:$WIRE_PORT"
+WIRE_PID=''
+if [ -n "$REDIS_URL" ]; then
+    sh "$REDETEAM_DIR/target.sh" down d13wire >/dev/null 2>&1 || true
+    WIRE_LOG="$RT_DIR/runs/env/d313-wire.log"
+    env KIWI_RT_DEPLOY_VENDOR="$REPO_ROOT/deploy/app/vendor" \
+        KC_REDIS_URL="$REDIS_URL" \
+        KIWI_SECRET_KEY='d313s3cr3td313s3cr3td313s3cr3td313s3c' \
+        KIWI_SHA_TARGET_BITS=16 KIWI_MIN_DURATION_MS=0 KIWI_TTL_SECS=120 \
+        php -S "127.0.0.1:$WIRE_PORT" -t "$REPO_ROOT/deploy/app" \
+            "$REPO_ROOT/deploy/app/router.php" >"$WIRE_LOG" 2>&1 &
+    WIRE_PID=$!
+else
+    WIRE_BASE="$PROFILE_BASE"
+fi
 node "$RT_DIR/campaigns/lib/rt-page-server.mjs" --port 6471 \
-    --wire "http://127.0.0.1:$WIRE_PORT" >/dev/null 2>&1 &
+    --wire "$WIRE_BASE" >/dev/null 2>&1 &
 CLEAN_PID=$!
 node "$RT_DIR/campaigns/lib/rt-page-server.mjs" --port 6473 \
-    --wire "http://127.0.0.1:$WIRE_PORT" \
+    --wire "$WIRE_BASE" \
     --html "$RT_DIR/campaigns/lib/d313.sw.html" \
     --sw-file "$RT_DIR/campaigns/lib/d313.sw.js" >/dev/null 2>&1 &
 SW_PID=$!
 node "$RT_DIR/campaigns/lib/rt-page-server.mjs" --port 6474 \
-    --wire "http://127.0.0.1:$WIRE_PORT" \
+    --wire "$WIRE_BASE" \
     --html "$RT_DIR/campaigns/lib/d313.pollution.html" >/dev/null 2>&1 &
 POLL_PID=$!
 cleanup() {
@@ -81,14 +96,17 @@ trap cleanup EXIT
 
 ready=0
 for i in $(seq 1 60); do
-    if nc -z 127.0.0.1 "$WIRE_PORT" 2>/dev/null && nc -z 127.0.0.1 6471 2>/dev/null && nc -z 127.0.0.1 6473 2>/dev/null && nc -z 127.0.0.1 6474 2>/dev/null; then
+    wire_ready=1
+    [ -z "$WIRE_PID" ] || nc -z 127.0.0.1 "$WIRE_PORT" 2>/dev/null || wire_ready=0
+    if [ "$wire_ready" = 1 ] && nc -z 127.0.0.1 6471 2>/dev/null \
+        && nc -z 127.0.0.1 6473 2>/dev/null && nc -z 127.0.0.1 6474 2>/dev/null; then
         ready=1
         break
     fi
     sleep 0.25
 done
 [ "$ready" = 1 ] || {
-    rt_report_fail "the d3.13 wire or page servers never opened (see runs/env/d313-wire.log)"
+    rt_report_fail "the d3.13 wire or page servers never opened (see the run logs under runs/env)"
     rt_finish
 }
 
