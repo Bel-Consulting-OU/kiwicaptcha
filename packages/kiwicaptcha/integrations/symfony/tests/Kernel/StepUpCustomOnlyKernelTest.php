@@ -43,12 +43,19 @@ final class StepUpCustomOnlyKernelTest extends TestCase
     public function testACustomOnlyDeploymentWiresNoPhantomFactorResolver(): void
     {
         $kernel = $this->kernel = new class ('test', true) extends TestKernel {
+            private ?string $freshCacheDir = null;
+
             public function getCacheDir(): string
             {
-                // A unique cache directory per run, so a stale compiled
-                // container from an earlier run can never answer the
-                // assertions.
-                return parent::getCacheDir().'-custom-only-'.bin2hex(random_bytes(6));
+                // A unique cache directory per kernel instance, so a stale
+                // compiled container from an earlier run can never answer the
+                // assertions. The value is MEMOIZED: the framework derives both
+                // the build directory and the container cache path from this
+                // call, and a fresh value per call would make the two diverge,
+                // so the container lock would be opened in a directory that was
+                // never created (a PHP warning, and a hard failure under
+                // failOnWarning).
+                return $this->freshCacheDir ??= parent::getCacheDir().'-custom-only-'.bin2hex(random_bytes(6));
             }
 
             public function registerContainerConfiguration(LoaderInterface $loader): void
