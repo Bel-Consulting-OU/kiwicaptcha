@@ -17,6 +17,11 @@
 #   RESULT: PASS|FAIL <campaign> <profile> <summary>  the one final
 #           authoritative record; rt_finish prints exactly one as its
 #           last act and then exits with the verdict it states
+#   RESULT: not-applicable <campaign> <profile> <reason>  the whole
+#           campaign cannot measure this profile; the campaign declares
+#           it with rt_not_applicable and rt_finish prints it with the
+#           missing capability named, so a matrix run never shows a red
+#           or a green that says nothing about the product
 #   METRIC: <campaign> <profile> <key>=<value>
 #   ECONOMIC: <campaign> <profile> cost_per_accepted_abuse=<value> <note>
 
@@ -125,6 +130,7 @@ RT_FAILURES=0
 RT_ASSERTED=0
 RT_CAMPAIGN=unknown
 RT_PROFILE=default
+RT_NOT_APPLICABLE=''
 
 rt_report_pass() {
     RT_ASSERTED=$((RT_ASSERTED + 1))
@@ -167,12 +173,35 @@ rt_assert_contains() {
     return 1
 }
 
+# The one final record for a profile a campaign cannot measure at all:
+# neither PASS nor FAIL, the not-applicable vocabulary the D3.1
+# issuance-cap leg already reports as a metric. The reason names the
+# missing capability in the profile's own terms, never a bare "not
+# supported"; the campaign declares it and closes through rt_finish,
+# which prints the record and exits 0 so a matrix run stays honest.
+# Declaring it after assertions already ran would hide a real
+# measurement, so rt_finish refuses to print the record then.
+rt_not_applicable() {
+    RT_NOT_APPLICABLE=$1
+}
+
 # The single authoritative final record. Every campaign ends here: on
 # any failure the RESULT: FAIL line is the last thing printed before
 # the exit, and on success the RESULT: PASS line (with the zero
 # failure count) is. A campaign that asserted nothing never passes:
-# that is a harness bug and fails in its own right.
+# that is a harness bug and fails in its own right. A campaign that
+# declared itself not applicable closes here too, with the missing
+# capability named in place of a verdict.
 rt_finish() {
+    if [ -n "$RT_NOT_APPLICABLE" ]; then
+        if [ "$RT_ASSERTED" -gt 0 ]; then
+            rt_report_fail "not-applicable declared after $RT_ASSERTED assertions; the classification must precede the run"
+        else
+            printf 'RESULT: not-applicable %s %s %s\n' \
+                "$RT_CAMPAIGN" "$RT_PROFILE" "$RT_NOT_APPLICABLE"
+            exit 0
+        fi
+    fi
     if [ "$RT_FAILURES" -gt 0 ]; then
         printf 'RESULT: FAIL %s %s %d of %d assertions failed\n' \
             "$RT_CAMPAIGN" "$RT_PROFILE" "$RT_FAILURES" "$RT_ASSERTED"

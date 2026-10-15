@@ -22,7 +22,14 @@
 # purpose (sequential time-lock squaring buys no parallel speedup), so
 # the row's evidence is the crate's own RSW suite, re-run here.
 #
-# Ports: none of its own; the end-to-end leg uses the profile target.
+# Ports: none of its own except the campaign-local redis (6478, the
+# risk-gaming port reused sequentially) on profiles that carry no
+# redis url; the end-to-end leg always uses the profile target.
+#
+# A storage profile carries no redis url, so the kernel leg (the
+# shipped posture read through a booted product kernel) runs on the
+# campaign-local redis and the campaign still reports a real verdict
+# instead of a red against a dead store.
 #
 # Economic metric: the table itself; cost per accepted abuse is
 # unbounded (the deployment accepts zero forged solves).
@@ -36,8 +43,44 @@ rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 BASE=$(rt_base_url "$RT_PROFILE")
 # The risk-Redis URL of the booted profile: the escalation demonstration
 # reads its config through the product kernel, and the kernel's runtime
-# proof line needs the same Redis the profile serves.
+# proof line needs a real Redis by design. A storage profile carries
+# none, so the campaign boots its own (the ports are reused
+# sequentially, never concurrently) and the posture reading stays the
+# same product code over a different store.
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
+ESC_REDIS_URL="$REDIS_URL"
+if [ -z "$ESC_REDIS_URL" ]; then
+    ESC_REDIS_PORT=6478
+    redis-cli -p "$ESC_REDIS_PORT" shutdown nosave >/dev/null 2>&1
+    sleep 0.3
+    mkdir -p "$RT_DIR/runs/env/d33"
+    redis-server --port "$ESC_REDIS_PORT" --bind 127.0.0.1 --save '' \
+        --appendonly no --daemonize no --dir "$RT_DIR/runs/env/d33" \
+        >"$RT_DIR/runs/env/d33-redis.log" 2>&1 &
+    ESC_REDIS_PID=$!
+    ESC_REDIS_URL="redis://127.0.0.1:$ESC_REDIS_PORT"
+    cleanup_d33_redis() {
+        kill "$ESC_REDIS_PID" 2>/dev/null
+        redis-cli -p "$ESC_REDIS_PORT" shutdown nosave >/dev/null 2>&1
+    }
+    if [ "${KIWI_RT_KEEP_TARGET:-0}" != "1" ]; then
+        trap 'cleanup_d33_redis; rt_teardown' EXIT
+    else
+        trap cleanup_d33_redis EXIT
+    fi
+    ready=0
+    for i in $(seq 1 40); do
+        if redis-cli -p "$ESC_REDIS_PORT" ping >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        sleep 0.25
+    done
+    [ "$ready" = 1 ] || {
+        rt_report_fail "the d3.3 redis never opened port $ESC_REDIS_PORT"
+        rt_finish
+    }
+fi
 
 if [ ! -x "$REPO_ROOT/target/debug/kiwicaptcha-solver" ]; then
     rt_report_fail "the solver binary is missing; build it (cargo build -p kiwicaptcha-solver)"
@@ -67,7 +110,7 @@ rt_assert_eq "$ACCEPTED" "3" "honest baseline: three honest solves verified end-
 # escalation advice naming the enforcement knob (risk.scopes.<name>
 # .minimum), and the same scope with the step_up minimum set draws the
 # verified pass.
-ESC_JSON=$(REPO_ROOT="$REPO_ROOT" KIWI_RT_RISK_REDIS_URL="$REDIS_URL" php -r '
+ESC_JSON=$(REPO_ROOT="$REPO_ROOT" KIWI_RT_RISK_REDIS_URL="$ESC_REDIS_URL" php -r '
 require getenv("REPO_ROOT")."/tools/redteam/campaigns/lib/rt.kernel.php";
 // The bundle"s own Symfony Config tree, so the shipped defaults are
 // read from the product — never a literal list.

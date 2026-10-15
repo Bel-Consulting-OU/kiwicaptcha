@@ -67,6 +67,10 @@
 #     green. Step-up prevention is asserted separately above; when it
 #     holds and the economics miss, the release rows split honestly
 #     (prevention green, compromise-economics red with the number).
+#
+# A storage profile carries no redis url: the engine plane boots the
+# real kernel over the redis risk store, so the campaign reports
+# not-applicable there instead of a red against a dead store.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -76,6 +80,15 @@ RT_CAMPAIGN=d3.5-credential-stuffing
 rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 PROFILE_BASE=$(rt_base_url "$RT_PROFILE")
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
+
+# The engine plane is this campaign's core: every row drives the real
+# sharded risk store and boots the product kernel over redis. A
+# storage profile carries no redis url, so the honest record is
+# not-applicable with the missing capability named.
+if [ -z "$REDIS_URL" ]; then
+    rt_not_applicable "this profile carries no redis url; the engine plane boots the product kernel over the redis risk store"
+    rt_finish
+fi
 
 WIRE_PORT=6473
 ROWS=${KIWI_RT_D35_ROWS:-$((100000 * KIWI_RT_SCALE / 100))}

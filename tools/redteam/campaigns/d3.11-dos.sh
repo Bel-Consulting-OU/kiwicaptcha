@@ -36,6 +36,11 @@
 #
 # Ports: 6479 the argon instance, 6475 the capped instance.
 #
+# A storage profile carries no redis url, and every instance this
+# battery boots reads the deployment redis store; the campaign reports
+# not-applicable there rather than a red that says nothing about the
+# product.
+#
 # Economic metric: the attacker's marginal cost per refused request is
 # one round trip, and the verifier's marginal cost per garbage verify
 # is the cheap phase (measured p99 stated), so no request exceeds its
@@ -49,6 +54,15 @@ RT_CAMPAIGN=d3.11-dos
 rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
 PROFILE_BASE=$(rt_base_url "$RT_PROFILE")
+
+# Every leg of this battery boots its own instance against the profile
+# redis: the argon instance, the capped instance and the engine legs.
+# With no redis url the fallback store is dead, every issuance answers
+# 503, and the red would describe the harness, never the product.
+if [ -z "$REDIS_URL" ]; then
+    rt_not_applicable "this profile carries no redis url; the argon and capped instances and the risk-engine legs all boot against the deployment redis store"
+    rt_finish
+fi
 
 ARGON_PORT=6479
 CAP_PORT=6475

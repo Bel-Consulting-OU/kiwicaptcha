@@ -37,6 +37,10 @@
 # Ports: 6470 this campaign's wire instance, 6471 the page and asset
 # server. The profile target supplies the Redis the risk plane reads.
 #
+# A storage profile carries no redis url: the armed wire instance and
+# the risk plane both need one, so the campaign reports not-applicable
+# there rather than failing against a dead store.
+#
 # Economic metric: a solve costs the attacker the browser price (the
 # bench sha16 mean on this cpu times the measured count); zero
 # compromise was achieved, so the cost per accepted abuse stays
@@ -50,6 +54,15 @@ RT_CAMPAIGN=d3.2-stealth-headless
 rt_ensure_profile "${KIWI_RT_PROFILE:-redis}"
 PROFILE_BASE=$(rt_base_url "$RT_PROFILE")
 REDIS_URL=$(rt_state_get "$RT_PROFILE" REDIS_URL)
+
+# The armed wire instance stores records in redis by construction, and
+# the risk plane boots the product engine over the redis marks store.
+# A storage profile carries neither, so the honest record there is
+# not-applicable with the missing capability named.
+if [ -z "$REDIS_URL" ]; then
+    rt_not_applicable "this profile carries no redis url; the armed wire instance stores records in redis and the risk plane boots the product engine on the redis marks store"
+    rt_finish
+fi
 
 WIRE_PORT=6470
 PAGE_PORT=6471

@@ -170,6 +170,7 @@
     "protocol/limits.json",
     "protocol/risk-v1/asn-vectors.json",
     "protocol/risk-v1/attacker-denial-vectors.json",
+    "protocol/risk-v1/first-attempt-vectors.json",
     "protocol/risk-v1/fixtures.json",
     "protocol/risk-v1/fuzz-corpus.json",
     "protocol/risk-v1/hysteresis-vectors.json",

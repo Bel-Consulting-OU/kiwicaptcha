@@ -214,9 +214,18 @@ function kiwiMatrixChallenge(): void
         return;
     }
 
-    $storage = kiwiMatrixStorage();
-    $issuer = new Issuer($deployment['config'], $storage);
+    // Opening the store belongs inside the try: these adapters open
+    // eagerly (the sqlite adapter takes its database file, the filesystem
+    // adapter takes and validates its directory), so a store that cannot
+    // be opened throws here rather than at the first write. A store
+    // failure is an availability failure, exactly as it is on the
+    // reference deployment, and it must not answer an unauthenticated
+    // caller with the adapter's own detail: the local path and the driver
+    // text stay in the server log, and the answer is the fixed retryable
+    // document this contract uses for an unavailable store.
     try {
+        $storage = kiwiMatrixStorage();
+        $issuer = new Issuer($deployment['config'], $storage);
         $challenge = $deployment['config']->executionKey !== null
             ? $issuer->issueWithExecutionField($scope, kiwiClientIp(), true, $requestBinding)
             : $issuer->issue($scope, kiwiClientIp(), $requestBinding);
