@@ -2985,6 +2985,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 $disposition->decisionId,
                 $kind,
                 $digest,
+                $request !== null ? \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::lineageHash($request) : null,
             );
         } catch (\Throwable) {
             return null;

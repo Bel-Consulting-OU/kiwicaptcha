@@ -418,7 +418,12 @@ final class StepUpChallenge
      * The strict decode, all-or-nothing: a missing field, a wrong type,
      * a shape violation or an incoherent state throws
      * {@see MalformedStepUpChallengeException}, never a defaulted
-     * record. Fail-closed on every lane.
+     * record. Fail-closed on every lane. The fields that ride as opaque
+     * strings are the target pseudonym, the return path and the stored
+     * code hash. An absent key and an explicit null are one state for
+     * them: the field rides absent, the legitimate pre-field wire shape
+     * of the drain period. Every other raw value is refused, so a value
+     * is never dropped to null behind a type test.
      *
      * @param array<string, mixed> $record
      */
@@ -480,20 +485,51 @@ final class StepUpChallenge
         } elseif ($kind !== StepUpChallengeKind::EmailOwnership) {
             $subjectRaw = \is_string($record['principal'] ?? null) ? $record['principal'] : null;
         }
+        // The three opaque string fields of the record: the target
+        // pseudonym, the return path and the stored code hash. Absent
+        // key and explicit null are one state, the field rides absent
+        // (the legitimate pre-field wire shape of the drain period);
+        // any other raw value refuses the whole record instead of
+        // decoding as a null. A silently dropped code hash would shed
+        // the proof requirement of the challenge, a silently dropped
+        // target would shed the binding to the target its completion
+        // clears, and a silently dropped return path would move the
+        // completion redirect. Each rule below is exactly the rule the
+        // begin path already enforces on the value it mints, so the
+        // decode can never admit a value begin() would refuse.
+        $target = $record['target'] ?? null;
+        if ($target !== null && (!\is_string($target) || preg_match('/^[0-9a-f]{64}$/D', $target) !== 1)) {
+            throw $fail('target must be null or a 64-char lowercase hex target pseudonym');
+        }
+        $returnPath = $record['return_path'] ?? null;
+        if ($returnPath !== null && (!\is_string($returnPath) || !StepUpContext::isSafeReturnPath($returnPath))) {
+            throw $fail('return_path must be null or an absolute same-site path');
+        }
+        // The stored proof material is a keyed digest of the expected
+        // code (or of the webauthn ceremony challenge), never the
+        // secret and never a loosely spelled string: every writer mints
+        // it as a sha-256 hex digest, so a record whose code hash does
+        // not ride that exact shape is malformed. The empty string is
+        // no hash either, and dropping it to null would shed the proof
+        // requirement on the kinds that must carry one.
+        $codeHash = $record['code_hash'] ?? null;
+        if ($codeHash !== null && (!\is_string($codeHash) || preg_match('/^[0-9a-f]{64}$/D', $codeHash) !== 1)) {
+            throw $fail('code_hash must be null or a 64-char lowercase hex digest');
+        }
         try {
             $challenge = self::begin(
                 $record['id'],
                 $kind,
                 $record['principal'],
-                \is_string($record['target'] ?? null) ? $record['target'] : null,
+                $target,
                 $record['scope'],
-                \is_string($record['return_path'] ?? null) ? $record['return_path'] : null,
+                $returnPath,
                 $record['reason'],
                 \is_int($record['created_at'] ?? null) ? $record['created_at'] : 0,
                 (\is_int($record['expires_at'] ?? null) ? $record['expires_at'] : 0)
                     - (\is_int($record['created_at'] ?? null) ? $record['created_at'] : 0),
                 \is_int($record['max_attempts'] ?? null) ? $record['max_attempts'] : 0,
-                \is_string($record['code_hash'] ?? null) && $record['code_hash'] !== '' ? $record['code_hash'] : null,
+                $codeHash,
                 ($record['ceremony'] ?? null) === null ? null : (is_string($record['ceremony']) ? $record['ceremony'] : 'not-a-string'),
                 null,
                 ($record['target_owned'] ?? false) === true,

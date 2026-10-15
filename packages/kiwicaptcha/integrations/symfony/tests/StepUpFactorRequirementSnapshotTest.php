@@ -73,7 +73,7 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
 
         $first = (string) $factor->mintDemand('signup', $sessionHash, null, null);
         $this->complete($factor, $first);
-        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf($sessionHash, 'signup', $this->now), 'the completion records the proven factor for the session');
+        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf($sessionHash, null, 'signup', $this->now), 'the completion records the proven factor for the session');
 
         // The next step-up of the same session under a fresh operation
         // mints its own demand: the completion marker escalates its
@@ -102,7 +102,7 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         $firstDemand = $this->store->readDemand($first);
         self::assertNotNull($firstDemand?->requiredFactor);
         self::assertSame(FactorRequirement::EMAIL_OTP, $firstDemand->requiredFactor->family);
-        self::assertNull($this->store->completedFactorOf($sessionHash, 'signup', $this->now), 'no completion marker exists');
+        self::assertNull($this->store->completedFactorOf($sessionHash, null, 'signup', $this->now), 'no completion marker exists');
 
         $secondId = (string) $factor->mintDemand('signup', $sessionHash, null, null);
         self::assertSame($first, $secondId, 'the repeat mint serves the standing demand, never a child');
@@ -174,8 +174,12 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
             null,
             $demand->id,
         );
-        $this->store->create($challenge, 600);
+        // The demand must stand before the challenge may be admitted:
+        // the admission door judges the demand's liveness and the
+        // challenge's identity, then stamps the newcomer as the
+        // demand's one active challenge.
         $this->store->createDemand($demand, 600);
+        $this->store->createAdmittedChallenge($challenge, 600);
 
         $binding = hash('sha256', $this->sessionValue);
         self::assertNull($this->store->completeFactor($challenge->id, $demand->id, $binding, $this->now, $challenge->sessionHash), 'the weaker factor completes nothing');
@@ -262,8 +266,10 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
             null,
             $demand->id,
         );
-        $this->store->create($challenge, 600);
+        // The demand stands first: the admission door judges it before
+        // the challenge may become its one active challenge.
         $this->store->createDemand($demand, 600);
+        $this->store->createAdmittedChallenge($challenge, 600);
         $other = StepUpDemand::mint(
             \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
             'signup',
@@ -287,7 +293,7 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
         self::assertNotNull($this->store->read($challenge->id), 'the binding refusal consumed nothing');
 
         // The right pair, the right browser: exactly one transition.
-        $right = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash, $challenge->scope);
+        $right = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash, $challenge->scope, hash('sha256', $this->sessionValue));
         self::assertNotNull($right);
         self::assertSame($demand->id, $right->demandId);
         self::assertSame('00112233445566778899aabbccddeeff', $right->verifiedSubjectPseudonym, 'the verified subject derives from the stored challenge');
@@ -450,13 +456,38 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
             $demand->id,
             $custom,
         );
-        $this->store->create($challenge, 600);
+        $this->store->createAdmittedChallenge($challenge, 600);
 
-        $completion = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash, $challenge->scope);
+        $completion = $this->store->completeFactor($challenge->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $challenge->sessionHash, $challenge->scope, hash('sha256', $this->sessionValue));
         self::assertNotNull($completion, 'the custom factor the snapshot names answers the demand naming it');
         self::assertSame(FactorRequirement::TOTP, $completion->completedFactor, 'the completed factor is the family the record proves');
-        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf(hash('sha256', $this->sessionValue), 'signup', $this->now), 'the escalation marker stores the record-derived family');
+        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf(hash('sha256', $this->sessionValue), null, 'signup', $this->now), 'the escalation marker stores the record-derived family');
 
+        // The reference-factor probe needs a live demand of its own:
+        // the custom demand above completed, and the admission door
+        // refuses a newcomer to a settled demand, so the same custom
+        // requirement is minted onto a fresh open demand. The
+        // admission succeeds (it judges the challenge's identity, not
+        // the rung), and the completion still refuses: the reference
+        // factor id answers no demand bound to the custom one, and the
+        // refusal moves nothing.
+        $probe = StepUpDemand::mint(
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
+            'signup',
+            hash('sha256', $this->sessionValue),
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+            '',
+            null,
+            null,
+            false,
+            null,
+            new FactorRequirement(FactorRequirement::TOTP, 'acme_otp', 2),
+        );
+        $this->store->createDemand($probe, 600);
         $reference = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
             \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::mintId(),
             \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind::Totp,
@@ -474,10 +505,12 @@ final class StepUpFactorRequirementSnapshotTest extends TestCase
             false,
             false,
             null,
-            $demand->id,
+            $probe->id,
         );
-        $this->store->create($reference, 600);
-        self::assertNull($this->store->completeFactor($reference->id, $demand->id, hash('sha256', $this->sessionValue), $this->now, $reference->sessionHash), 'the reference factor never answers a demand bound to the custom id');
+        $this->store->createAdmittedChallenge($reference, 600);
+        self::assertNull($this->store->completeFactor($reference->id, $probe->id, hash('sha256', $this->sessionValue), $this->now, $reference->sessionHash), 'the reference factor never answers a demand bound to the custom id');
+        self::assertNotNull($this->store->read($reference->id), 'the foreign-factor refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($probe->id)?->state->isOpen(), 'the foreign-factor refusal completed no demand');
     }
 
     public function testAMintWithAnUnavailableAssuranceStoreRefusesAndAnEmptyHistoryMintsNormally(): void

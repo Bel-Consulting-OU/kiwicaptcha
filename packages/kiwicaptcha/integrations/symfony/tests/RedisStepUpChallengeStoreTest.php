@@ -22,7 +22,7 @@ use PHPUnit\Framework\TestCase;
  * exercised over its two-key script: identity, state, liveness and
  * binding are judged in one step. The winner consumes the challenge
  * and completes the demand together, and the escalation marker lands
- * under the session hash and scope.
+ * under the completed request's lineage, principal and scope.
  */
 final class RedisStepUpChallengeStoreTest extends TestCase
 {
@@ -40,6 +40,11 @@ final class RedisStepUpChallengeStoreTest extends TestCase
     {
         $this->redis = new FakePredisClient();
         $this->store = new RedisStepUpChallengeStore($this->redis, '{kiwi:test-ns}:stepup:');
+        // The shared challenge helper names self::DEMAND_ID, and a
+        // demand-bound challenge now enters through admission, which
+        // proves it belongs to a live open demand. The fixture stands
+        // that demand up once for every test that uses the helper.
+        $this->store->createDemand(StepUpDemand::mint(self::DEMAND_ID, 'login', null, null, null, 1700000000, 300), 300);
     }
 
     public function testThePrefixMustBeAHashTaggedFamily(): void
@@ -51,7 +56,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
     public function testRecordsAreSingleUse(): void
     {
         $challenge = $this->challenge('aaaaaaaaaaaaaaaaaaaaaaa');
-        $this->store->create($challenge, 300);
+        $this->store->createAdmittedChallenge($challenge, 300);
         $key = '{kiwi:test-ns}:stepup:challenge:aaaaaaaaaaaaaaaaaaaaaaa';
         self::assertArrayHasKey($key, $this->redis->strings);
         self::assertStringContainsString('"principal":"'.self::PRINCIPAL.'"', $this->redis->strings[$key]);
@@ -67,7 +72,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
     public function testTheAttemptScriptCountsAndRemovesAtTheCap(): void
     {
         $id = 'bbbbbbbbbbbbbbbbbbbbbbb';
-        $this->store->create($this->challenge($id), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
         self::assertSame(1, $this->store->recordFailure($id, 3));
         self::assertSame(2, $this->store->recordFailure($id, 3));
         self::assertSame(0, $this->store->recordFailure($id, 3), 'the cap removes the record');
@@ -147,8 +152,10 @@ final class RedisStepUpChallengeStoreTest extends TestCase
     public function testTheAtomicFactorCompletionConsumesBothRecordsTogether(): void
     {
         $id = 'ccccccccccccccccccccccc';
-        $this->store->create($this->challenge($id), 300);
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        // The admitted challenge is stamped as the fixture demand's one
+        // active challenge, so the completion has both the active-challenge
+        // authorization and a live open demand to move.
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
         // The emulated challenge helper binds no session; drive the
         // stateless secret hash so the script's binding lane runs.
         $challenge = $this->store->read($id);
@@ -173,8 +180,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
     public function testTheAtomicFactorCompletionRefusesACrossedOrUnboundPair(): void
     {
         $id = 'ddddddddddddddddddddddd';
-        $this->store->create($this->challenge($id), 300);
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
         $challenge = $this->store->read($id);
         self::assertNotNull($challenge);
         $secretHash = (string) $challenge->clientSecretHash;
@@ -199,19 +205,22 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // challenge record's kind proves rank 1). The script reads the
         // requirement off the demand and the factor identity off the
         // stored challenge, never a caller argument, and refuses with
-        // both records untouched.
+        // both records untouched. The demand stands first: a
+        // demand-bound challenge enters through admission, which proves
+        // it answers a live open demand.
         $id = 'fffffffffffffffffffffff';
-        $this->store->create($this->challenge($id), 300);
+        $demandId = 'webauthnrequireddemandid0001';
         $required = new FactorRequirement(FactorRequirement::WEBAUTHN, FactorRequirement::WEBAUTHN, 3);
-        $demand = StepUpDemand::mint(self::DEMAND_ID, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $required);
+        $demand = StepUpDemand::mint($demandId, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $required);
         $this->store->createDemand($demand, 300);
+        $this->store->createAdmittedChallenge($this->challenge($id, $demandId), 300);
         $challenge = $this->store->read($id);
         self::assertNotNull($challenge);
         $secretHash = (string) $challenge->clientSecretHash;
 
-        self::assertNull($this->store->completeFactor($id, self::DEMAND_ID, $secretHash, 1700000000, null), 'the weaker factor completes nothing');
+        self::assertNull($this->store->completeFactor($id, $demandId, $secretHash, 1700000000, null), 'the weaker factor completes nothing');
         self::assertNotNull($this->store->read($id), 'the weaker-factor refusal consumed no challenge');
-        self::assertTrue($this->store->readDemand(self::DEMAND_ID)?->state->isOpen(), 'the weaker-factor refusal completed no demand');
+        self::assertTrue($this->store->readDemand($demandId)?->state->isOpen(), 'the weaker-factor refusal completed no demand');
     }
 
     public function testTheExactFactorIdRuleRefusesAnImposterAtTheRequiredRank(): void
@@ -241,10 +250,12 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             null,
             $demandId,
         );
-        $this->store->create($totpChallenge, 300);
+        // The demand stands before the admission: the challenge enters
+        // through it, which proves it answers a live open demand.
         $customRequired = new FactorRequirement(FactorRequirement::TOTP, 'acme_otp', 2);
         $demand = StepUpDemand::mint($demandId, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $customRequired);
         $this->store->createDemand($demand, 300);
+        $this->store->createAdmittedChallenge($totpChallenge, 300);
         $secretHash = (string) $totpChallenge->clientSecretHash;
 
         self::assertNull($this->store->completeFactor($challengeId, $demandId, $secretHash, 1700000000, null), 'the reference factor never answers a custom factor id at its own rank');
@@ -273,10 +284,10 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             null,
             'exactiddemandid00000000003',
         );
-        $this->store->create($webauthnChallenge, 300);
         $emailRequired = new FactorRequirement(FactorRequirement::EMAIL_OTP, FactorRequirement::EMAIL_OTP, 1);
         $weakerFloor = StepUpDemand::mint('exactiddemandid00000000003', 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $emailRequired);
         $this->store->createDemand($weakerFloor, 300);
+        $this->store->createAdmittedChallenge($webauthnChallenge, 300);
         self::assertNotNull($this->store->completeFactor($strongerChallengeId, 'exactiddemandid00000000003', (string) $webauthnChallenge->clientSecretHash, 1700000000, null), 'the strictly stronger completion satisfies the weaker floor');
 
         // The matching requirement completes: the same kind satisfies
@@ -302,16 +313,21 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             null,
             'exactiddemandid00000000002',
         );
-        $this->store->create($totpChallenge, 300);
         $this->store->createDemand($totpDemand, 300);
+        $this->store->createAdmittedChallenge($totpChallenge, 300);
         self::assertNotNull($this->store->completeFactor('exactidchallllllllllllll2', 'exactiddemandid00000000002', (string) $totpChallenge->clientSecretHash, 1700000000, null), 'the matching requirement completes');
     }
 
-    public function testTheCompletionWritesTheEscalationMarkerForTheSession(): void
+    public function testTheCompletionWritesTheEscalationMarkerForTheLineage(): void
     {
         $id = 'eeeeeeeeeeeeeeeeeeeeeee';
-        // A session-bound challenge writes the marker under its session
-        // hash and scope; the stateless one writes none.
+        $demandId = 'sessionmarkerdemandid000001';
+        // A session-bound challenge writes the marker under the
+        // completed request's lineage hash and scope. The lineage hash
+        // is a distinct value from the session hash the challenge
+        // records, so the session's own hash answers nothing as a
+        // history key.
+        $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
         $sessionChallenge = StepUpChallenge::begin(
             $id,
             StepUpChallengeKind::EmailOtp,
@@ -329,16 +345,16 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             false,
             false,
             null,
-            self::DEMAND_ID,
+            $demandId,
         );
-        $this->store->create($sessionChallenge, 300);
-        $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
-        $this->store->createDemand($this->demand(self::DEMAND_ID, $binding), 300);
-        self::assertNotNull($this->store->completeFactor($id, self::DEMAND_ID, (string) $binding, 1700000000, $sessionChallenge->sessionHash, $sessionChallenge->scope));
-        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf((string) $binding, 'login', 1700000000), 'the marker names the completed factor');
-        self::assertNull($this->store->completedFactorOf((string) $binding, 'signup', 1700000000), 'the marker is scoped');
-        self::assertNull($this->store->completedFactorOf((string) $binding, 'login', 1700003001), 'the marker dies with the demand lifetime');
-        self::assertNull($this->store->completedFactorOf(str_repeat('2', 64), 'login', 1700000000), 'an unmarked session answers nothing');
+        $this->store->createDemand($this->demand($demandId, $binding), 300);
+        $this->store->createAdmittedChallenge($sessionChallenge, 300);
+        self::assertNotNull($this->store->completeFactor($id, $demandId, (string) $binding, 1700000000, $sessionChallenge->sessionHash, $sessionChallenge->scope, hash('sha256', 'lineage-test')));
+        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'login', 1700000000), 'the marker names the completed factor');
+        self::assertNull($this->store->completedFactorOf((string) $binding, null, 'login', 1700000000), 'the marker is filed under the lineage hash, never the session hash');
+        self::assertNull($this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'signup', 1700000000), 'the marker is scoped');
+        self::assertNull($this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'login', 1700003001), 'the marker dies with the demand lifetime');
+        self::assertNull($this->store->completedFactorOf(str_repeat('2', 64), null, 'login', 1700000000), 'an unmarked lineage answers nothing');
     }
 
     public function testTheCompletionAnswersAndRecordsTheFactorTheRecordProves(): void
@@ -350,6 +366,8 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // assurance escalation by claiming a stronger factor than its
         // challenge was begun under.
         $id = 'poisonlabelchallenged000001';
+        $demandId = 'factorproofdemandid000001';
+        $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
         $challenge = StepUpChallenge::begin(
             $id,
             StepUpChallengeKind::EmailOwnership,
@@ -367,17 +385,18 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             false,
             false,
             null,
-            self::DEMAND_ID,
+            $demandId,
         );
-        $this->store->create($challenge, 300);
-        $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
-        $this->store->createDemand($this->demand(self::DEMAND_ID, $binding), 300);
+        // The session-bound demand stands before the admission, which
+        // proves the session-bound challenge belongs to that browser.
+        $this->store->createDemand($this->demand($demandId, $binding), 300);
+        $this->store->createAdmittedChallenge($challenge, 300);
 
-        $completion = $this->store->completeFactor($id, self::DEMAND_ID, (string) $binding, 1700000000, $challenge->sessionHash, $challenge->scope);
+        $completion = $this->store->completeFactor($id, $demandId, (string) $binding, 1700000000, $challenge->sessionHash, $challenge->scope, hash('sha256', 'lineage-test'));
 
         self::assertNotNull($completion);
         self::assertSame(FactorRequirement::EMAIL_OTP, $completion->completedFactor, 'the completion answers the factor the record proves, not the lane identity');
-        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf((string) $binding, 'login', 1700000000), 'the marker stores the record-derived family');
+        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'login', 1700000000), 'the marker stores the record-derived family');
     }
 
     public function testASnapshotDisagreeingWithItsKindIsRemovedFailClosed(): void
@@ -387,8 +406,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // the completion with both records untouched. Even a corrupted
         // writer can never inflate the assurance a completion books.
         $id = 'poisonedsnapshotid00000001';
-        $this->store->create($this->challenge($id), 300);
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
         $key = '{kiwi:test-ns}:stepup:challenge:'.$id;
         $record = json_decode((string) $this->redis->strings[$key], true);
         self::assertIsArray($record);
@@ -437,15 +455,22 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             $demandId,
             $custom,
         );
-        $this->store->create($customChallenge, 300);
+        $this->store->createAdmittedChallenge($customChallenge, 300);
         $completion = $this->store->completeFactor('customfactoridchallenged01', $demandId, (string) $customChallenge->clientSecretHash, 1700000000, null);
         self::assertNotNull($completion, 'the custom factor the snapshot names answers the demand naming it');
         self::assertSame(FactorRequirement::TOTP, $completion->completedFactor);
 
         // The reference factor of the same family stays foreign to a
         // demand bound to the custom id (the exact-id rule of the same
-        // gate), and a demand naming the reference id stays foreign to
-        // the custom factor.
+        // gate). The probe stands on its own demand: the first
+        // completion consumed its pair, and a demand-bound challenge
+        // enters only through admission, which proves it answers a live
+        // open demand.
+        $probeDemandId = 'customfactoriddemand000003';
+        $this->store->createDemand(
+            StepUpDemand::mint($probeDemandId, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, $custom),
+            300,
+        );
         $reference = StepUpChallenge::begin(
             'customfactoridchallenged02',
             StepUpChallengeKind::Totp,
@@ -463,17 +488,24 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             false,
             false,
             null,
-            $demandId,
+            $probeDemandId,
         );
-        $this->store->create($reference, 300);
-        self::assertNull($this->store->completeFactor('customfactoridchallenged02', $demandId, (string) $reference->clientSecretHash, 1700000000, null), 'the reference factor never answers a demand bound to the custom id');
+        $this->store->createAdmittedChallenge($reference, 300);
+        self::assertNull($this->store->completeFactor('customfactoridchallenged02', $probeDemandId, (string) $reference->clientSecretHash, 1700000000, null), 'the reference factor never answers a demand bound to the custom id');
+        self::assertNotNull($this->store->read('customfactoridchallenged02'), 'the foreign-factor refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($probeDemandId)?->state->isOpen(), 'the foreign-factor refusal completed no demand');
 
+        // The completion answers exactly the demand its challenge
+        // names: the reference challenge admitted to the custom-bound
+        // demand can never be redirected to a sibling demand, whatever
+        // that sibling requires.
         $referenceDemandId = 'customfactoriddemand000002';
         $this->store->createDemand(
             StepUpDemand::mint($referenceDemandId, 'login', null, null, null, 1700000000, 300, StepUpOperationBindingKind::None, '', null, null, false, null, new FactorRequirement(FactorRequirement::TOTP, FactorRequirement::TOTP, 2)),
             300,
         );
-        self::assertNull($this->store->completeFactor('customfactoridchallenged01', $referenceDemandId, (string) $customChallenge->clientSecretHash, 1700000000, null), 'the custom factor never answers a demand bound to the reference id');
+        self::assertNull($this->store->completeFactor('customfactoridchallenged02', $referenceDemandId, (string) $reference->clientSecretHash, 1700000000, null), 'the completion answers only the demand the challenge names');
+        self::assertNotNull($this->store->read('customfactoridchallenged02'), 'the crossed refusal consumed no challenge');
     }
 
     public function testASupersededDemandCompletesNoChallenge(): void
@@ -482,8 +514,8 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // parent's child link but left its state open, so the completion
         // script's open-state gate passed and the weak proof landed
         // behind the family's back, past the rung the reassessment had
-        // escalated to.
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        // escalated to. The fixture demand of setUp is the parent: the
+        // challenge is admitted to it, then escalation replaces it.
         $challenge = StepUpChallenge::begin(
             'supersededcompletechallenge001',
             StepUpChallengeKind::EmailOtp,
@@ -503,7 +535,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             null,
             self::DEMAND_ID,
         );
-        $this->store->create($challenge, 300);
+        $this->store->createAdmittedChallenge($challenge, 300);
         $child = $this->store->readDemand(self::DEMAND_ID)->spawnChild('supersededcompletechild0000001', 1700000000, 'decision-2');
         self::assertNotNull($this->store->supersedeDemandWithChild(self::DEMAND_ID, $child), 'the escalation replaces the open parent');
         self::assertNull($this->store->completeFactor('supersededcompletechallenge001', self::DEMAND_ID, (string) $challenge->clientSecretHash, 1700000001, null), 'the superseded parent completes no challenge');
@@ -516,7 +548,6 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // The finding this pins: the supersede script accepted parents
         // in any non-superseded state, handing an already-settled
         // operation a fresh live sibling demand.
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
         self::assertNotNull($this->store->completeDemand(self::DEMAND_ID, 1700000001, 300));
         self::assertNotNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000002, 30));
         self::assertNotNull($this->store->settleDemandFinalization(self::DEMAND_ID, StepUpDemandState::Authorized, 1700000003));
@@ -530,7 +561,6 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // The finding this pins: a stale claimant retaking a finalizing
         // demand that escalation had already superseded could drive it
         // to the authorized terminal past the stronger child.
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
         self::assertNotNull($this->store->completeDemand(self::DEMAND_ID, 1700000001, 300));
         self::assertNotNull($this->store->claimDemandFinalization(self::DEMAND_ID, 1700000002, 30));
         $child = $this->store->readDemand(self::DEMAND_ID)->spawnChild('supersededfinalizingchild0001', 1700000002, 'decision-2');
@@ -541,12 +571,14 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         self::assertNull($this->store->completeDemand(self::DEMAND_ID, 1700000005, 300), 'a superseded demand never completes');
     }
 
-    public function testTheCompletionHistoryIsKeyedPerSessionAndScope(): void
+    public function testTheCompletionHistoryIsKeyedPerLineageAndScope(): void
     {
         // The audited finding: one index slot per session let a
         // completion in one scope overwrite the history another scope
         // of the same session had earned, resetting the progressive
-        // ladder. The index key is now per (session hash, scope) pair.
+        // ladder. The index key is now per (lineage, principal, scope):
+        // the lineage is the stable per-browser history identity, and
+        // both scopes below share one lineage.
         $this->redis->setTimeMs(1700000000 * 1000);
         $binding = StepUpChallenge::sessionHash(self::SESSION_ID);
         $checkoutDemand = 'scopeladderdemchk000000001';
@@ -570,8 +602,6 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             null,
             $checkoutDemand,
         );
-        $this->store->create($totpChallenge, 300);
-        $this->store->createDemand($this->demand($checkoutDemand, $binding, 'checkout'), 300);
         $emailChallenge = StepUpChallenge::begin(
             'scopeladderchemail000001',
             StepUpChallengeKind::EmailOtp,
@@ -591,34 +621,41 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             null,
             $loginDemand,
         );
-        $this->store->create($emailChallenge, 300);
+        // Each session-bound demand stands before its challenge enters
+        // through admission, which proves the challenge's session is the
+        // demand's own browser binding.
+        $this->store->createDemand($this->demand($checkoutDemand, $binding, 'checkout'), 300);
+        $this->store->createAdmittedChallenge($totpChallenge, 300);
         $this->store->createDemand($this->demand($loginDemand, $binding, 'login'), 300);
+        $this->store->createAdmittedChallenge($emailChallenge, 300);
 
         // The checkout scope completes its totp rung: its marker stands,
         // the untouched login scope still reads empty.
-        self::assertNotNull($this->store->completeFactor($totpChallenge->id, $checkoutDemand, (string) $binding, 1700000000, $totpChallenge->sessionHash, 'checkout'));
-        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf((string) $binding, 'checkout', 1700000000), 'the checkout marker names the totp rung');
-        self::assertNull($this->store->completedFactorOf((string) $binding, 'login', 1700000000), 'the login scope has no history yet');
+        self::assertNotNull($this->store->completeFactor($totpChallenge->id, $checkoutDemand, (string) $binding, 1700000000, $totpChallenge->sessionHash, 'checkout', hash('sha256', 'lineage-test')));
+        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'checkout', 1700000000), 'the checkout marker names the totp rung');
+        self::assertNull($this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'login', 1700000000), 'the login scope has no history yet');
 
         // The login scope completes its own (weaker) rung: the checkout
         // history survives untouched, the ladder is not reset.
         $this->redis->setTimeMs(1700000100 * 1000);
-        self::assertNotNull($this->store->completeFactor($emailChallenge->id, $loginDemand, (string) $binding, 1700000100, $emailChallenge->sessionHash, 'login'));
-        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf((string) $binding, 'login', 1700000100), 'the login marker names its own rung');
-        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf((string) $binding, 'checkout', 1700000100), 'the checkout history survives the login completion');
+        self::assertNotNull($this->store->completeFactor($emailChallenge->id, $loginDemand, (string) $binding, 1700000100, $emailChallenge->sessionHash, 'login', hash('sha256', 'lineage-test')));
+        self::assertSame(FactorRequirement::EMAIL_OTP, $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'login', 1700000100), 'the login marker names its own rung');
+        self::assertSame(FactorRequirement::TOTP, $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'checkout', 1700000100), 'the checkout history survives the login completion');
 
-        // The raw key shape: one key per (session hash, scope) pair, the
-        // scope carried as its digest, the value prefixed with the
-        // stored scope.
-        $checkoutKey = '{kiwi:test-ns}:stepup:emdone:'.((string) $binding).':'.hash('sha256', 'checkout');
-        $loginKey = '{kiwi:test-ns}:stepup:emdone:'.((string) $binding).':'.hash('sha256', 'login');
+        // The raw key shape: one key per (lineage, principal, scope)
+        // identity, the value prefixed with the stored scope. The
+        // principal is the demand's own, absent here, so the anonymous
+        // bucket stands; the scope rides as its digest.
+        $anon = str_repeat('0', 64);
+        $checkoutKey = '{kiwi:test-ns}:stepup:emdone:'.hash('sha256', 'lineage-test').':'.$anon.':'.hash('sha256', 'checkout');
+        $loginKey = '{kiwi:test-ns}:stepup:emdone:'.hash('sha256', 'lineage-test').':'.$anon.':'.hash('sha256', 'login');
         self::assertStringStartsWith('checkout|', (string) ($this->redis->strings[$checkoutKey] ?? ''), 'the checkout marker sits under its own key');
         self::assertStringStartsWith('login|', (string) ($this->redis->strings[$loginKey] ?? ''), 'the login marker sits under its own key');
 
         // Each marker dies with its own demand lifetime, per key.
         $this->redis->setTimeMs((1700000000 + 301) * 1000);
-        self::assertNull($this->store->completedFactorOf((string) $binding, 'checkout', 1700000301), 'the checkout marker died with its demand');
-        self::assertNull($this->store->completedFactorOf((string) $binding, 'login', 1700000301), 'the login marker died with its demand');
+        self::assertNull($this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'checkout', 1700000301), 'the checkout marker died with its demand');
+        self::assertNull($this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, 'login', 1700000301), 'the login marker died with its demand');
     }
 
     public function testTheCompletionClockIsTheRedisServerTime(): void
@@ -629,8 +666,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // server TIME: a caller claiming a live demand on a record the
         // server has expired is refused, with both records untouched.
         $id = 'clockskewchallenged000001';
-        $this->store->create($this->challenge($id), 300);
-        $this->store->createDemand($this->demand(self::DEMAND_ID, null), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
         $challenge = $this->store->read($id);
         self::assertNotNull($challenge);
         $secretHash = (string) $challenge->clientSecretHash;
@@ -648,7 +684,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         // (identical here) caller second.
         $this->redis->setTimeMs(1700000100 * 1000);
         $id2 = 'clockskewchallenged000002';
-        $this->store->create($this->challenge($id2), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id2), 300);
         $challenge2 = $this->store->read($id2);
         self::assertNotNull($challenge2);
         $completion = $this->store->completeFactor($id2, self::DEMAND_ID, (string) $challenge2->clientSecretHash, 1700000100, null);
@@ -665,7 +701,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
         return StepUpDemand::mint($id, $scope, $sessionHash, null, null, 1700000000, 300);
     }
 
-    private function challenge(string $id): StepUpChallenge
+    private function challenge(string $id, string $demandId = self::DEMAND_ID): StepUpChallenge
     {
         return StepUpChallenge::begin(
             $id,
@@ -684,7 +720,7 @@ final class RedisStepUpChallengeStoreTest extends TestCase
             false,
             false,
             null,
-            self::DEMAND_ID,
+            $demandId,
         );
     }
 }

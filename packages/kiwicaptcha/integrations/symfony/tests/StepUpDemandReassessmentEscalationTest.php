@@ -20,6 +20,8 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorAssurance;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFinalization;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationDigest;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationMaterial;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpResult;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
@@ -142,8 +144,8 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
             public function createDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createDemand($demand, $ttlSecs); }
             public function consumeDemand(string $demandId): ?StepUpDemand { return $this->real->consumeDemand($demandId); }
             public function completeDemand(string $demandId, int $now, int $ttlSecs): ?StepUpDemand { return $this->real->completeDemand($demandId, $now, $ttlSecs); }
-            public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion { return $this->real->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash, $scope); }
-            public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string { return $this->real->completedFactorOf($sessionHash, $scope, $now); }
+            public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion { return $this->real->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash, $scope); }
+            public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string { return $this->real->completedFactorOf($sessionHash, 'user-42', $scope, $now); }
             public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand { return $this->real->claimDemandFinalization($demandId, $now, $claimSecs); }
             public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand { return $this->real->settleDemandFinalization($demandId, $state, $now, $factor); }
             public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand { return $this->real->recordDemandEffect($demandId, $effect, $now); }
@@ -267,6 +269,168 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
         self::assertSame(1, $child->generation, 'the child is the first escalation generation');
     }
 
+    // ── the finalization result contract ───────────────────────────
+
+    /**
+     * The authorized answer carries the settlement's own record: the
+     * state, the authorized stamp and the completed factor a caller
+     * reads off the finalization are the committed terminal, never the
+     * completed (or claimed) demand the finalizer started from.
+     */
+    public function testTheAuthorizedAnswerCarriesTheSettledTerminalStampAndFactor(): void
+    {
+        $finalizer = $this->finalizer('allow');
+        $demandId = $this->completedEmailOtpDemand($finalizer);
+
+        $finalization = $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+
+        self::assertTrue($finalization->authorized);
+        self::assertSame(StepUpFinalization::AUTHORIZED, $finalization->reason);
+        self::assertNotNull($finalization->demand);
+        self::assertSame($demandId, $finalization->demand->id);
+        self::assertSame(StepUpDemandState::Authorized, $finalization->demand->state, 'the returned demand is the settled terminal, not the completed read');
+        self::assertSame($this->now, $finalization->demand->authorizedAt, 'the authorized settlement stamp rides the returned demand');
+        self::assertSame('email_otp', $finalization->demand->factor, 'the completed factor rides the returned demand');
+        $stored = $this->store->readDemand($demandId);
+        self::assertNotNull($stored);
+        self::assertSame($stored->state, $finalization->demand->state, 'the returned state is the state the store committed');
+        self::assertSame($stored->authorizedAt, $finalization->demand->authorizedAt);
+        self::assertSame($stored->factor, $finalization->demand->factor);
+    }
+
+    /**
+     * The returned demand is the record the store holds, never a stale
+     * pre-settlement copy: every field the wire carries answers
+     * identically to a fresh read of the same id. The completion
+     * effects journal is the one field written after the settlement
+     * itself, and it rides the finalization's own effects surface, so
+     * the comparison excludes exactly that field.
+     */
+    public function testTheAuthorizedAnswerMatchesTheFreshlyReadRecordFieldForField(): void
+    {
+        $finalizer = $this->finalizer('allow');
+        $demandId = $this->completedEmailOtpDemand($finalizer);
+
+        $finalization = $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+
+        $returned = $finalization->demand?->toArray();
+        $stored = $this->store->readDemand($demandId)?->toArray();
+        self::assertIsArray($returned);
+        self::assertIsArray($stored);
+        unset($returned['fx'], $stored['fx']);
+        self::assertSame($stored, $returned, 'every wire field of the answer is the settled record the store wrote');
+    }
+
+    /**
+     * The same contract on the grant lane, where no effect surface
+     * writes after the settlement: the returned demand is field for
+     * field the record a fresh read of the same id answers, the whole
+     * wire shape included.
+     */
+    public function testTheGrantLaneAnswerEqualsTheFreshlyReadRecord(): void
+    {
+        $finalizer = $this->finalizer('allow');
+        $content = ['amount' => '100.00', 'currency' => 'USD', 'recipient' => 'alice'];
+        $demandId = $finalizer->mintFinancialDemand(self::SCOPE, 'tx-001', $content, ttlSecs: 600);
+        self::assertNotNull($demandId);
+        self::assertNotNull($this->store->completeDemand($demandId, $this->now, 600), 'the factor completion landed');
+
+        $finalization = $finalizer->finalizeGrant(
+            $demandId,
+            new StepUpOperationMaterial(formFields: $content),
+            null,
+            'email_otp',
+            'tx-001',
+            StepUpOperationDigest::canonicalOperationContent($content),
+        );
+
+        self::assertTrue($finalization->authorized);
+        self::assertSame(StepUpFinalization::AUTHORIZED, $finalization->reason);
+        self::assertSame(StepUpDemandState::Authorized, $finalization->demand?->state);
+        self::assertSame($this->now, $finalization->demand?->authorizedAt);
+        self::assertSame('email_otp', $finalization->demand?->factor);
+        $stored = $this->store->readDemand($demandId);
+        self::assertNotNull($stored);
+        self::assertSame($stored->toArray(), $finalization->demand?->toArray(), 'the authorized answer is exactly the record the store holds');
+    }
+
+    /**
+     * The replay path is unchanged: a second finalization of an already
+     * authorized demand answers the authorized replay and carries the
+     * durable terminal as the store holds it.
+     */
+    public function testTheAuthorizedReplayAnswersTheDurableTerminalUnchanged(): void
+    {
+        $finalizer = $this->finalizer('allow');
+        $demandId = $this->completedEmailOtpDemand($finalizer);
+        self::assertSame(StepUpFinalization::AUTHORIZED, $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE)->reason);
+
+        $replay = $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+
+        self::assertTrue($replay->authorized);
+        self::assertSame(StepUpFinalization::AUTHORIZED_REPLAY, $replay->reason, 'the second finalization replays the durable terminal');
+        self::assertNotNull($replay->demand);
+        self::assertSame($demandId, $replay->demand->id);
+        self::assertSame(StepUpDemandState::Authorized, $replay->demand->state);
+        self::assertSame($this->now, $replay->demand->authorizedAt);
+        $stored = $this->store->readDemand($demandId);
+        self::assertNotNull($stored);
+        self::assertSame($stored->toArray(), $replay->demand->toArray(), 'the replay answers the store record as it stands');
+    }
+
+    /**
+     * The refused paths are unchanged: a denial attaches no demand at
+     * all (neither the settled terminal nor the pre-settlement read),
+     * the denied terminal stands, and a repeated finalization keeps
+     * answering the denial.
+     */
+    public function testTheRefusedAnswersCarryNoDemand(): void
+    {
+        $finalizer = $this->finalizer('deny');
+        $demandId = $this->completedEmailOtpDemand($finalizer);
+
+        $denied = $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+
+        self::assertFalse($denied->authorized);
+        self::assertSame(StepUpFinalization::REFUSED_DENIED, $denied->reason);
+        self::assertNull($denied->demand, 'a refusal carries no demand');
+        self::assertSame(StepUpDemandState::Denied, $this->store->readDemand($demandId)?->state);
+
+        $repeated = $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+
+        self::assertFalse($repeated->authorized);
+        self::assertSame(StepUpFinalization::REFUSED_DENIED, $repeated->reason);
+        self::assertNull($repeated->demand);
+        self::assertSame(StepUpDemandState::Denied, $this->store->readDemand($demandId)?->state);
+    }
+
+    /**
+     * A settlement the store refuses still surfaces as the thrown
+     * failure, and nothing observable changes: the claimed demand
+     * stays claimed, no credits or enrollment markers book, and no
+     * denied or authorized terminal is invented.
+     */
+    public function testASettlementTheStoreRefusesThrowsAndLeavesNothingObservableBehind(): void
+    {
+        $finalizer = $this->finalizer('allow', $this->settlementRefusingStore());
+        $demandId = $this->completedEmailOtpDemand($finalizer);
+
+        try {
+            $finalizer->finalizeLogin($this->proof($demandId), self::SCOPE);
+            self::fail('a refused settlement must surface, fail closed');
+        } catch (\RuntimeException $e) {
+            self::assertSame('The step-up demand finalization could not settle its terminal state', $e->getMessage());
+        }
+
+        $stored = $this->store->readDemand($demandId);
+        self::assertNotNull($stored);
+        self::assertSame(StepUpDemandState::Finalizing, $stored->state, 'the refused settlement leaves the claimed demand behind, no terminal');
+        self::assertNull($stored->authorizedAt);
+        self::assertNull($stored->factor);
+        self::assertCount(0, $this->reporter->reports, 'a refused settlement books no completion credit');
+        self::assertFalse($this->store->recentStepUpSuccess(self::PRINCIPAL, 900, $this->now), 'a refused settlement books no enrollment marker');
+    }
+
     // ── helpers ─────────────────────────────────────────────────────
 
     /** The login demand of the principal, completed as the email_otp rung proves it. */
@@ -277,6 +441,59 @@ final class StepUpDemandReassessmentEscalationTest extends TestCase
         self::assertNotNull($this->store->completeDemand($demandId, $this->now, 600), 'the factor completion landed');
 
         return $demandId;
+    }
+
+    /**
+     * The store decorator of the refused settlement: every call
+     * delegates to the live array store except the terminal
+     * settlement, which answers nothing and writes nothing, exactly
+     * like a terminal the store's compare-and-set lost.
+     */
+    private function settlementRefusingStore(): StepUpChallengeStore
+    {
+        return new class($this->store) implements StepUpChallengeStore {
+            public function __construct(private readonly StepUpChallengeStore $real)
+            {
+            }
+
+            public function create(StepUpChallenge $challenge, int $ttlSecs): string { return $this->real->create($challenge, $ttlSecs); }
+            public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string { return $this->real->createAdmittedChallenge($challenge, $ttlSecs); }
+            public function read(string $challengeId): ?StepUpChallenge { return $this->real->read($challengeId); }
+            public function consume(string $challengeId): ?StepUpChallenge { return $this->real->consume($challengeId); }
+            public function recordFailure(string $challengeId, int $maxAttempts): int { return $this->real->recordFailure($challengeId, $maxAttempts); }
+            public function countBegin(string $principalPseudonym, int $windowSecs): int { return $this->real->countBegin($principalPseudonym, $windowSecs); }
+            public function createDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createDemand($demand, $ttlSecs); }
+            public function readDemand(string $demandId): ?StepUpDemand { return $this->real->readDemand($demandId); }
+            public function consumeDemand(string $demandId): ?StepUpDemand { return $this->real->consumeDemand($demandId); }
+            public function completeDemand(string $demandId, int $now, int $ttlSecs): ?StepUpDemand { return $this->real->completeDemand($demandId, $now, $ttlSecs); }
+            public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion { return $this->real->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash, $scope, $lineageHash); }
+            public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string { return $this->real->completedFactorOf($lineageHash, $principalPseudonym, $scope, $now); }
+            public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand { return $this->real->claimDemandFinalization($demandId, $now, $claimSecs); }
+
+            /** The refusal under test: the terminal compare-and-set answers nothing. */
+            public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand { return null; }
+
+            public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand { return $this->real->recordDemandEffect($demandId, $effect, $now); }
+            public function demandIdForFamily(string $familyDigest): ?string { return $this->real->demandIdForFamily($familyDigest); }
+            public function createRootDemand(StepUpDemand $demand, int $ttlSecs): string { return $this->real->createRootDemand($demand, $ttlSecs); }
+            public function supersedeDemandWithChild(string $parentDemandId, StepUpDemand $child): ?StepUpDemand { return $this->real->supersedeDemandWithChild($parentDemandId, $child); }
+            public function claimDemandSendLease(string $demandId, int $resendAfterSecs, int $leaseSecs): ?StepUpDemandSendLease { return $this->real->claimDemandSendLease($demandId, $resendAfterSecs, $leaseSecs); }
+            public function settleDemandSendLease(StepUpDemandSendSettlement $settlement): bool { return $this->real->settleDemandSendLease($settlement); }
+            public function reserveMailQuota(string $reservationId, array $budgetKeys, array $limits, int $windowSecs, int $leaseSecs): bool { return $this->real->reserveMailQuota($reservationId, $budgetKeys, $limits, $windowSecs, $leaseSecs); }
+            public function commitMailQuota(string $reservationId): void { $this->real->commitMailQuota($reservationId); }
+            public function releaseMailQuota(string $reservationId): bool { return $this->real->releaseMailQuota($reservationId); }
+            public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void { $this->real->saveTotpSecret($principalPseudonym, $secretRaw); }
+            public function findTotpSecret(string $principalPseudonym): ?string { return $this->real->findTotpSecret($principalPseudonym); }
+            public function markTotpStep(string $principalPseudonym, int $step, int $ttlSecs): bool { return $this->real->markTotpStep($principalPseudonym, $step, $ttlSecs); }
+            public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void { $this->real->markStepUpSuccess($principalPseudonym, $ttlSecs, $now); }
+            public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool { return $this->real->recentStepUpSuccess($principalPseudonym, $withinSecs, $now); }
+            public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void { $this->real->markSessionStepUpSuccess($sessionId, $principalPseudonym, $factor, $ttlSecs, $now); }
+            public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool { return $this->real->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, $withinSecs, $now); }
+            public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int { return $this->real->countLockoutFailure($dimension, $pseudonym, $windowSecs); }
+            public function lockoutUntil(string $dimension, string $pseudonym, int $now): int { return $this->real->lockoutUntil($dimension, $pseudonym, $now); }
+            public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void { $this->real->armLockout($dimension, $pseudonym, $now, $ttlSecs); }
+            public function clearLockout(string $dimension, string $pseudonym): void { $this->real->clearLockout($dimension, $pseudonym); }
+        };
     }
 
     /** The verified proof of the completed rung: FactorVerified, credited by nothing. */

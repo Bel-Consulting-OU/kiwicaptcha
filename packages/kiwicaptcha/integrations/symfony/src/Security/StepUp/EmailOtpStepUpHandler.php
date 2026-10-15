@@ -164,10 +164,12 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         try {
             $this->store->createAdmittedChallenge($challenge, $this->ttlSecs);
         } catch (StepUpDemandAdmissionRefused $e) {
-            // The demand refused the admission (it already holds a live
-            // challenge, or it is spent): nothing was stored, so the
-            // reservation releases and the begin answers the retryable
-            // active-challenge refusal.
+            // The demand can no longer admit a challenge: a fresh begin
+            // replaces any standing challenge in the same atomic move,
+            // so this refusal means the demand was already answered,
+            // superseded, or expired. Nothing was stored, so the
+            // reservation releases and the begin tells the browser to
+            // request a fresh step-up.
             try {
                 $this->store->releaseMailQuota($reservationId);
             } catch (\Throwable) {
@@ -177,7 +179,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
                 $context,
                 Response::HTTP_CONFLICT,
                 'step_up_challenge_active',
-                'A verification challenge is already in progress; complete it or wait for it to expire.',
+                'The step-up demand is no longer open, so no verification challenge can be admitted; request a fresh step-up.',
                 ['Retry-After' => (string) $this->ttlSecs],
             );
         } catch (\Throwable $e) {
@@ -313,7 +315,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             return false;
         }
 
-        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash, $challenge->scope) !== null;
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash, $challenge->scope, StepUpSessionBinding::lineageHash($request) ?? $challenge->sessionHash) !== null;
     }
 
     /**

@@ -200,6 +200,10 @@ final class StepUpDemand
         // unguessable mint in, so every such 403 carries its own
         // demand; the authenticated lanes fold the principal beside
         // the session.
+        if ($operationBindingKind === StepUpOperationBindingKind::Login
+            && ($principalPseudonym === null || $principalPseudonym === '')) {
+            throw new \InvalidArgumentException('A login step-up demand names its principal: the completion subject gate reads it');
+        }
         $cleanPrincipal = $principalPseudonym === null || $principalPseudonym === '' ? null : self::principal($principalPseudonym);
         if ($identityDigest !== null) {
             $familyDigest = hash('sha256', $digest . "\0" . self::scope($scope) . "\0" . ($cleanPrincipal ?? '') . "\0" . (self::sessionHash($sessionHash) ?? ''));
@@ -805,6 +809,13 @@ final class StepUpDemand
         }
         $principalPseudonym = $record['principal_pseudonym'] ?? null;
         if ($principalPseudonym !== null && (!\is_string($principalPseudonym) || $principalPseudonym === '' || strlen($principalPseudonym) > 256)) {
+            return null;
+        }
+        // A login demand names its subject: the login plane resolves
+        // the principal before the mint, and the completion's
+        // subject-equality gate depends on the demand carrying it. A
+        // login record without a principal is not a decodable demand.
+        if ($kind === StepUpOperationBindingKind::Login && $principalPseudonym === null) {
             return null;
         }
         $leaseUntilMs = $record['lease_until'] ?? null;

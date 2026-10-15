@@ -227,24 +227,30 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
     /**
      * Scenario four: the monotonic completion history. A webauthn
      * completion then a weaker email_otp completion of the same
-     * (session, scope) pair must still answer webauthn on both stores.
+     * (lineage, principal, scope) triple must still answer webauthn on
+     * both stores. The history is no longer keyed by the PHP session:
+     * the completion files it under the lineage hash it is handed and
+     * the principal its demand carries. These demands carry no
+     * principal, so the entry sits in the anonymous bucket and the
+     * probes read that bucket; a named principal answers nothing.
      */
     public function testTheFactorHistoryStaysMonotonicOnBothStores(): void
     {
         $this->sync();
         $now = $this->clock->now;
         $session = hash('sha256', 'sess');
+        $lineage = hash('sha256', 'lineage-test');
         $scope = self::SCOPE;
-        $scenario = function (StepUpChallengeStore $store) use ($now, $session, $scope): array {
+        $scenario = function (StepUpChallengeStore $store) use ($now, $session, $lineage, $scope): array {
             $strongDemand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $session, null, null, $now, 600);
             $store->createDemand($strongDemand, 600);
             $strong = StepUpChallenge::begin(
                 StepUpChallenge::mintId(), StepUpChallengeKind::WebAuthn, self::PRINCIPAL_A, null, $scope, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'ceremony'), 'assertion', 'sess', false, false, null, $strongDemand->id,
             );
-            $store->create($strong, 600);
-            $strongDone = $store->completeFactor($strong->id, $strongDemand->id, $session, $now, $session, $scope);
-            $afterStrong = $store->completedFactorOf($session, $scope, $now);
+            $store->createAdmittedChallenge($strong, 600);
+            $strongDone = $store->completeFactor($strong->id, $strongDemand->id, $session, $now, $session, $scope, $lineage);
+            $afterStrong = $store->completedFactorOf($lineage, null, $scope, $now);
 
             $weakDemand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $session, null, null, $now, 600);
             $store->createDemand($weakDemand, 600);
@@ -252,20 +258,21 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
                 StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, $scope, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code'), null, 'sess', false, false, null, $weakDemand->id,
             );
-            $store->create($weak, 600);
-            $weakDone = $store->completeFactor($weak->id, $weakDemand->id, $session, $now, $session, $scope);
+            $store->createAdmittedChallenge($weak, 600);
+            $weakDone = $store->completeFactor($weak->id, $weakDemand->id, $session, $now, $session, $scope, $lineage);
 
             return [
                 'strongCompleted' => $strongDone !== null,
                 'afterStrong' => $afterStrong,
                 'weakCompleted' => $weakDone !== null,
-                'afterWeak' => $store->completedFactorOf($session, $scope, $now),
+                'afterWeak' => $store->completedFactorOf($lineage, null, $scope, $now),
+                'namedPrincipalProbe' => $store->completedFactorOf($lineage, 'user-42', $scope, $now),
             ];
         };
 
         $a = $scenario($this->arrayStore);
         $r = $scenario($this->redisStore);
-        $expected = ['strongCompleted' => true, 'afterStrong' => 'webauthn', 'weakCompleted' => true, 'afterWeak' => 'webauthn'];
+        $expected = ['strongCompleted' => true, 'afterStrong' => 'webauthn', 'weakCompleted' => true, 'afterWeak' => 'webauthn', 'namedPrincipalProbe' => null];
         self::assertSame($expected, $a, 'the array store must keep the monotonic webauthn history');
         self::assertSame($expected, $r, 'the Redis store must keep the monotonic webauthn history');
         self::assertSame($a, $r, 'the two stores disagree on the monotonic factor history');
@@ -276,58 +283,179 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
      * switch (a login demand for one subject completed by a challenge of
      * another). Each crossing must complete nothing on both stores, even
      * though the presented binding reproduces the challenge.
+     *
+     * Admission now judges the newcomer's identity before it replaces
+     * anything, so a crossed challenge is refused at the door and never
+     * reaches a completion. The completion boundary is exercised with a
+     * stored pair the gate has already accepted. A valid challenge is
+     * admitted against a demand of its own identity first, then the
+     * demand record itself is re-saved in the crossed shape through the
+     * public createDemand door. Both boundaries are pinned, the refused
+     * admission and the refused completion, and no crossing may file a
+     * completion marker either.
      */
     public function testCrossedSessionScopeAndAccountCompleteNothingOnBothStores(): void
     {
         $this->sync();
         $now = $this->clock->now;
         $scenario = function (StepUpChallengeStore $store) use ($now): array {
-            // Crossed session: the demand names sess-a, the challenge proves sess-b.
-            $demandA = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess-a'), null, null, $now, 600);
+            $sessionLineage = hash('sha256', 'lineage-crossed-session');
+            $scopeLineage = hash('sha256', 'lineage-crossed-scope');
+            $accountLineage = hash('sha256', 'lineage-crossed-account');
+
+            // Crossed session: the demand names sess-a, the challenge
+            // proves sess-b. The valid challenge is admitted while the
+            // demand still names sess-b, then the demand is re-saved
+            // naming sess-a, so the stored pair ends crossed exactly as
+            // the original scenario drew it.
+            $demandA = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess-b'), null, null, $now, 600);
             $store->createDemand($demandA, 600);
             $chalA = StepUpChallenge::begin(
                 StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-a'), null, 'sess-b', false, false, null, $demandA->id,
             );
-            $store->create($chalA, 600);
-            $crossedSession = $store->completeFactor($chalA->id, $demandA->id, (string) $chalA->sessionHash, $now, (string) $chalA->sessionHash, self::SCOPE);
+            $store->createAdmittedChallenge($chalA, 600);
+            $crossedA = StepUpChallenge::begin(
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
+                $now, 600, 5, hash('sha256', 'code-a-crossed'), null, 'sess-a', false, false, null, $demandA->id,
+            );
+            $sessionAdmissionRefused = $this->admissionRefused($store, $crossedA);
+            $sessionStandingIntact = $store->read($chalA->id) !== null
+                && $store->readDemand($demandA->id)?->activeChallengeId === $chalA->id;
+            $this->replaceDemand(
+                $store,
+                StepUpDemand::mint($demandA->id, self::SCOPE, hash('sha256', 'sess-a'), null, null, $now, 600),
+                $chalA,
+                $now,
+            );
+            $crossedSession = $store->completeFactor($chalA->id, $demandA->id, (string) $chalA->sessionHash, $now, (string) $chalA->sessionHash, (string) $chalA->scope, $sessionLineage);
 
-            // Crossed scope: the demand names checkout, the challenge proves login.
-            $demandB = StepUpDemand::mint(StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess'), null, null, $now, 600);
+            // Crossed scope: the demand names checkout, the challenge
+            // proves login. Same construction: the login challenge is
+            // admitted against a login demand, then the demand itself is
+            // re-saved under the checkout scope.
+            $demandB = StepUpDemand::mint(StepUpChallenge::mintId(), 'login', hash('sha256', 'sess'), null, null, $now, 600);
             $store->createDemand($demandB, 600);
             $chalB = StepUpChallenge::begin(
                 StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, 'login', null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-b'), null, 'sess', false, false, null, $demandB->id,
             );
-            $store->create($chalB, 600);
-            $crossedScope = $store->completeFactor($chalB->id, $demandB->id, (string) $chalB->sessionHash, $now, (string) $chalB->sessionHash, 'login');
+            $store->createAdmittedChallenge($chalB, 600);
+            $crossedB = StepUpChallenge::begin(
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
+                $now, 600, 5, hash('sha256', 'code-b-crossed'), null, 'sess', false, false, null, $demandB->id,
+            );
+            $scopeAdmissionRefused = $this->admissionRefused($store, $crossedB);
+            $scopeStandingIntact = $store->read($chalB->id) !== null
+                && $store->readDemand($demandB->id)?->activeChallengeId === $chalB->id;
+            $this->replaceDemand(
+                $store,
+                StepUpDemand::mint($demandB->id, self::SCOPE, hash('sha256', 'sess'), null, null, $now, 600),
+                $chalB,
+                $now,
+            );
+            $crossedScope = $store->completeFactor($chalB->id, $demandB->id, (string) $chalB->sessionHash, $now, (string) $chalB->sessionHash, (string) $chalB->scope, $scopeLineage);
 
-            // Account switch: a login demand for one principal, a challenge proving the other.
+            // Account switch: a login demand for one principal, a
+            // challenge proving the other. The challenge of the second
+            // principal is admitted against a demand of that principal,
+            // then the demand is re-saved naming the first one.
             $demandC = StepUpDemand::mint(
                 StepUpChallenge::mintId(), self::SCOPE, null, null, null, $now, 600,
-                StepUpOperationBindingKind::Login, hash('sha256', 'op'), null, null, false, null, null, self::PRINCIPAL_A,
+                StepUpOperationBindingKind::Login, hash('sha256', 'op'), null, null, false, null, null, self::PRINCIPAL_B,
             );
             $store->createDemand($demandC, 600);
             $chalC = StepUpChallenge::begin(
                 StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_B, null, self::SCOPE, null, 'step_up',
                 $now, 600, 5, hash('sha256', 'code-c'), null, null, false, false, null, $demandC->id,
             );
-            $store->create($chalC, 600);
-            $accountSwitch = $store->completeFactor($chalC->id, $demandC->id, (string) $chalC->clientSecretHash, $now, null, self::SCOPE);
+            $store->createAdmittedChallenge($chalC, 600);
+            $crossedC = StepUpChallenge::begin(
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
+                $now, 600, 5, hash('sha256', 'code-c-crossed'), null, null, false, false, null, $demandC->id,
+            );
+            $accountAdmissionRefused = $this->admissionRefused($store, $crossedC);
+            $accountStandingIntact = $store->read($chalC->id) !== null
+                && $store->readDemand($demandC->id)?->activeChallengeId === $chalC->id;
+            $this->replaceDemand(
+                $store,
+                StepUpDemand::mint(
+                    $demandC->id, self::SCOPE, null, null, null, $now, 600,
+                    StepUpOperationBindingKind::Login, hash('sha256', 'op'), null, null, false, null, null, self::PRINCIPAL_A,
+                ),
+                $chalC,
+                $now,
+            );
+            $accountSwitch = $store->completeFactor($chalC->id, $demandC->id, (string) $chalC->clientSecretHash, $now, null, (string) $chalC->scope, $accountLineage);
 
             return [
+                'sessionAdmissionRefused' => $sessionAdmissionRefused,
+                'sessionStandingIntact' => $sessionStandingIntact,
                 'crossedSession' => $crossedSession === null,
+                'sessionHistoryEmpty' => $store->completedFactorOf($sessionLineage, null, self::SCOPE, $now) === null,
+                'scopeAdmissionRefused' => $scopeAdmissionRefused,
+                'scopeStandingIntact' => $scopeStandingIntact,
                 'crossedScope' => $crossedScope === null,
+                'scopeHistoryEmpty' => $store->completedFactorOf($scopeLineage, null, 'login', $now) === null,
+                'accountAdmissionRefused' => $accountAdmissionRefused,
+                'accountStandingIntact' => $accountStandingIntact,
                 'accountSwitch' => $accountSwitch === null,
+                'accountHistoryEmpty' => $store->completedFactorOf($accountLineage, self::PRINCIPAL_A, self::SCOPE, $now) === null,
             ];
         };
 
         $a = $scenario($this->arrayStore);
         $r = $scenario($this->redisStore);
-        $expected = ['crossedSession' => true, 'crossedScope' => true, 'accountSwitch' => true];
-        self::assertSame($expected, $a, 'the array store must refuse every crossing');
-        self::assertSame($expected, $r, 'the Redis store must refuse every crossing');
+        $expected = [
+            'sessionAdmissionRefused' => true,
+            'sessionStandingIntact' => true,
+            'crossedSession' => true,
+            'sessionHistoryEmpty' => true,
+            'scopeAdmissionRefused' => true,
+            'scopeStandingIntact' => true,
+            'crossedScope' => true,
+            'scopeHistoryEmpty' => true,
+            'accountAdmissionRefused' => true,
+            'accountStandingIntact' => true,
+            'accountSwitch' => true,
+            'accountHistoryEmpty' => true,
+        ];
+        self::assertSame($expected, $a, 'the array store must refuse every crossing at the door and file no marker');
+        self::assertSame($expected, $r, 'the Redis store must refuse every crossing at the door and file no marker');
         self::assertSame($a, $r, 'the two stores disagree on the crossed session/scope/account completions');
+    }
+
+    /**
+     * Whether an admission attempt answers the typed refusal. A silent
+     * admission answers false, so a gate that stopped refusing fails the
+     * scenario instead of passing unnoticed.
+     */
+    private function admissionRefused(StepUpChallengeStore $store, StepUpChallenge $challenge): bool
+    {
+        try {
+            $store->createAdmittedChallenge($challenge, 600);
+        } catch (StepUpDemandAdmissionRefused) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Re-save a demand under its own id in a crossed identity shape,
+     * with the standing active challenge stamped onto it so the
+     * completion reaches the identity gate rather than the
+     * active-challenge gate. The live record must be consumed first: a
+     * create refuses an id that still holds. The challenge record is
+     * never touched, so the stored pair ends crossed while every record
+     * the admission gate accepted stays exactly as it was.
+     */
+    private function replaceDemand(StepUpChallengeStore $store, StepUpDemand $crossed, StepUpChallenge $standing, int $now): void
+    {
+        $stamped = $crossed->admitFactorChallenge($standing->id, $standing->expiresAt, $now);
+        self::assertNotNull($stamped, 'the crossed demand must accept the standing challenge as its active one');
+        $store->consumeDemand($crossed->id);
+        $store->createDemand($stamped, 600);
     }
 
     /**
@@ -455,6 +583,14 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
      * re-encodes the demand after moving it to completed; the record
      * must stay decodable and every field other than state/stateAt must
      * be byte-for-byte unchanged, with the effects journal intact.
+     *
+     * The comparison baseline is the demand re-read straight after the
+     * admission, never the pristine pre-admission record: admission
+     * stamps the active challenge id and its expiry, so the pristine
+     * record legitimately differs from the post-completion one in
+     * exactly those two fields. Anchoring on the post-admission
+     * snapshot isolates the completion rewrite, which is what this
+     * scenario claims to pin.
      */
     public function testTheCompletionScriptPreservesEveryDemandFieldOnBothStores(): void
     {
@@ -468,10 +604,11 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
 
         $observe = function (StepUpChallengeStore $store) use ($rich, $challenge, $now): array {
             $store->createDemand($rich, 600);
-            $store->create($challenge, 600);
+            $store->createAdmittedChallenge($challenge, 600);
+            $admitted = $store->readDemand($rich->id);
             $done = $store->completeFactor($challenge->id, $rich->id, (string) $challenge->sessionHash, $now, (string) $challenge->sessionHash, self::SCOPE);
             $after = $store->readDemand($rich->id);
-            $expected = $rich->toArray();
+            $expected = $admitted?->toArray() ?? [];
             $observed = $after?->toArray() ?? [];
             foreach (['state', 'state_at'] as $field) {
                 unset($expected[$field], $observed[$field]);
@@ -481,6 +618,7 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
                 'completed' => $done !== null,
                 'decodable' => $after !== null,
                 'stateCompleted' => $after?->state === StepUpDemandState::Completed,
+                'admittedCarriesTheChallenge' => $admitted?->activeChallengeId === $challenge->id,
                 'allOtherFieldsEqual' => $observed === $expected,
                 'observed' => $observed,
                 'expected' => $expected,
@@ -495,6 +633,10 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
         self::assertTrue($a['completed'] && $r['completed'], 'both stores must complete the rich demand');
         self::assertTrue($a['decodable'] && $r['decodable'], 'both stores must keep the demand decodable after the completion rewrite');
         self::assertTrue($a['stateCompleted'] && $r['stateCompleted'], 'both stores must reach the completed terminal');
+        self::assertTrue(
+            $a['admittedCarriesTheChallenge'] && $r['admittedCarriesTheChallenge'],
+            'both stores must stamp the admitted challenge onto the demand before the completion rewrite is judged',
+        );
         self::assertSame($a['expected'], $a['observed'], 'the array store completion rewrite changed a demand field');
         self::assertSame($r['expected'], $r['observed'], 'the Redis completion rewrite changed a demand field');
         self::assertTrue($r['fxSurvived'], 'the Redis completion rewrite dropped or reshaped the effects journal');

@@ -13,7 +13,13 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipCodeSenderInterface;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipDeliveryMetadata;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandSendLease;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandSendSettlement;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorCompletion;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpFactorResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
@@ -462,6 +468,117 @@ final class StepUpEmailOwnershipTest extends TestCase
         self::assertSame('step_up_rate_limited', json_decode((string) $third->getContent(), true)['error'] ?? null);
     }
 
+    // ── the send-lease refusal classified ────────────────────────────────
+
+    public function testAConcurrentBeginHoldingTheSendLeaseAnswersTheRetryableConflict(): void
+    {
+        $clock = fn (): int => $this->clock;
+        $this->clock = 1700000000;
+        $cookie = new ContinuityCookie();
+        $sessionValue = (string) $cookie->mint();
+        $inner = new ArrayStepUpChallengeStore($clock);
+        $store = new SendRaceStepUpChallengeStore($inner);
+        $sender = new CapturingEmailOwnershipSender();
+        $factor = $this->factor($store, $sender, $cookie, now: $clock);
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
+
+        // The competing request (a concurrent begin, or the first half
+        // of a double-submitted one) wins the send slot between this
+        // begin's read of the demand and its own lease claim. The
+        // demand is healthy and the answer must say so: a retryable
+        // conflict, never the 403 that tells the browser no demand
+        // stands.
+        $store->raceOnNextDemandRead = 'lease';
+        $answer = $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand));
+
+        self::assertSame(409, $answer->getStatusCode(), 'a live send lease is a retryable conflict: '.(string) $answer->getContent());
+        self::assertSame('step_up_send_in_progress', json_decode((string) $answer->getContent(), true)['error'] ?? null);
+        self::assertSame('15', $answer->headers->get('Retry-After'), 'the retry hint is the record\'s own lease window');
+        self::assertSame([], $sender->codes, 'the refused begin delivered nothing');
+        self::assertSame([], $this->challengeRecordsOf($inner), 'the refused begin admitted no challenge record');
+    }
+
+    public function testASendCapBurnedByAConcurrentBeginAnswersTheRateLimit(): void
+    {
+        $clock = fn (): int => $this->clock;
+        $this->clock = 1700000000;
+        $cookie = new ContinuityCookie();
+        $sessionValue = (string) $cookie->mint();
+        $inner = new ArrayStepUpChallengeStore($clock);
+        $store = new SendRaceStepUpChallengeStore($inner);
+        $sender = new CapturingEmailOwnershipSender();
+        $factor = $this->factor($store, $sender, $cookie, now: $clock);
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
+
+        // The initial delivery happens, then the resend delay elapses.
+        self::assertSame(200, $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand))->getStatusCode());
+        $this->clock += 61;
+
+        // The competing request burns the demand's last send credit
+        // between this begin's read (which saw one credit left) and its
+        // own claim. The exhausted cap is a rate limit, answered with
+        // the demand's remaining lifetime as the retry hint.
+        $store->raceOnNextDemandRead = 'spend';
+        $answer = $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand));
+
+        self::assertSame(429, $answer->getStatusCode(), 'an exhausted send cap is the demand rate limit: '.(string) $answer->getContent());
+        self::assertSame('step_up_rate_limited', json_decode((string) $answer->getContent(), true)['error'] ?? null);
+        self::assertSame('539', $answer->headers->get('Retry-After'), 'the retry hint is the demand\'s remaining lifetime');
+        self::assertCount(1, $sender->codes, 'only the initial delivery left');
+    }
+
+    public function testADemandConsumedBeforeItsSendLeaseAnswersTheStandingRefusal(): void
+    {
+        $clock = fn (): int => $this->clock;
+        $this->clock = 1700000000;
+        $cookie = new ContinuityCookie();
+        $sessionValue = (string) $cookie->mint();
+        $inner = new ArrayStepUpChallengeStore($clock);
+        $store = new SendRaceStepUpChallengeStore($inner);
+        $sender = new CapturingEmailOwnershipSender();
+        $factor = $this->factor($store, $sender, $cookie, now: $clock);
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
+
+        // The demand is consumed outright between this begin's read and
+        // its lease claim: no demand stands any more, and the standing
+        // 403 is the truthful answer.
+        $store->raceOnNextDemandRead = 'consume';
+        $answer = $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand));
+
+        self::assertSame(403, $answer->getStatusCode(), 'a demand that disappeared answers the standing refusal');
+        self::assertSame('step_up_not_demanded', json_decode((string) $answer->getContent(), true)['error'] ?? null);
+        self::assertSame([], $sender->codes, 'the refused begin delivered nothing');
+    }
+
+    public function testADemandConsumedBeforeAdmissionAnswersTheFreshStepUpConflict(): void
+    {
+        $clock = fn (): int => $this->clock;
+        $this->clock = 1700000000;
+        $cookie = new ContinuityCookie();
+        $sessionValue = (string) $cookie->mint();
+        $inner = new ArrayStepUpChallengeStore($clock);
+        $store = new SendRaceStepUpChallengeStore($inner);
+        $sender = new CapturingEmailOwnershipSender();
+        $factor = $this->factor($store, $sender, $cookie, now: $clock);
+        $demand = (string) $factor->mintDemand('signup', hash('sha256', $sessionValue), null, null);
+
+        // The demand is consumed between the lease claim and the
+        // challenge admission. Under the replace semantics a fresh
+        // begin replaces any standing challenge, so this refusal means
+        // the demand can no longer admit anything: the answer must say
+        // the demand is no longer open and a fresh step-up is needed,
+        // never that a challenge is in progress.
+        $store->consumeDemandBeforeAdmission = true;
+        $answer = $factor->begin($this->emailRequest($cookie, $sessionValue, 'visitor@example.com', $demand));
+
+        self::assertSame(409, $answer->getStatusCode(), (string) $answer->getContent());
+        self::assertSame('step_up_challenge_active', json_decode((string) $answer->getContent(), true)['error'] ?? null, 'the wire code stays stable');
+        self::assertStringContainsString('no longer open', (string) $answer->getContent());
+        self::assertStringContainsString('request a fresh step-up', (string) $answer->getContent());
+        self::assertStringNotContainsString('already in progress', (string) $answer->getContent());
+        self::assertSame([], $sender->codes, 'the refused begin delivered nothing');
+    }
+
     public function testTheBeginBoundsHoldWithoutTheScopeInTheAddressKey(): void
     {
         $cookie = new ContinuityCookie();
@@ -698,7 +815,7 @@ final class StepUpEmailOwnershipTest extends TestCase
      * @param array<string, true> $carriers
      */
     private function factor(
-        ArrayStepUpChallengeStore $store,
+        StepUpChallengeStore $store,
         CapturingEmailOwnershipSender $sender,
         ContinuityCookie $cookie,
         array $carriers = self::CARRIERS,
@@ -799,6 +916,20 @@ final class StepUpEmailOwnershipTest extends TestCase
     }
 
     /**
+     * The raw challenge records the store holds, read through the
+     * private map so a test can assert an admission landed or not.
+     *
+     * @return array<string, mixed>
+     */
+    private function challengeRecordsOf(ArrayStepUpChallengeStore $store): array
+    {
+        $records = (new \ReflectionProperty(ArrayStepUpChallengeStore::class, 'challenges'))->getValue($store);
+        self::assertIsArray($records);
+
+        return $records;
+    }
+
+    /**
      * Validate a value through the full Symfony pipeline with the
      * grant-carrying validator, answering the violations.
      *
@@ -860,5 +991,238 @@ final class StepUpEmailOwnershipTest extends TestCase
         $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => $scope]));
 
         return $engine->validate($dto);
+    }
+}
+
+/**
+ * A store decorator that stages the races one single-threaded store
+ * cannot produce by itself: a competing request acting between one
+ * begin's read of the demand and its own send-lease claim, or between
+ * the lease claim and the challenge admission. Everything delegates to
+ * the live array store; the seams only move the demand's real state,
+ * so the handler still runs against records a real store could hold.
+ */
+final class SendRaceStepUpChallengeStore implements StepUpChallengeStore
+{
+    /**
+     * The competing move the next demand read triggers, once: `lease`
+     * wins the demand's send slot, `spend` burns both send credits,
+     * `consume` removes the demand outright. Null disarms the seam.
+     */
+    public ?string $raceOnNextDemandRead = null;
+
+    /**
+     * The resend policy the staged competing begin applies. The
+     * spend seam needs the handler's own spacing to have elapsed for
+     * the second credit to be claimable.
+     */
+    public int $concurrentResendAfterSecs = 60;
+
+    /** Consume the demand just before the challenge admission (a concurrent completion or supersession). */
+    public bool $consumeDemandBeforeAdmission = false;
+
+    public function __construct(
+        private readonly ArrayStepUpChallengeStore $inner,
+    ) {
+    }
+
+    public function create(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        return $this->inner->create($challenge, $ttlSecs);
+    }
+
+    public function createAdmittedChallenge(StepUpChallenge $challenge, int $ttlSecs): string
+    {
+        if ($this->consumeDemandBeforeAdmission && $challenge->demandId !== null) {
+            $this->consumeDemandBeforeAdmission = false;
+            $this->inner->consumeDemand($challenge->demandId);
+        }
+
+        return $this->inner->createAdmittedChallenge($challenge, $ttlSecs);
+    }
+
+    public function read(string $challengeId): ?StepUpChallenge
+    {
+        return $this->inner->read($challengeId);
+    }
+
+    public function consume(string $challengeId): ?StepUpChallenge
+    {
+        return $this->inner->consume($challengeId);
+    }
+
+    public function recordFailure(string $challengeId, int $maxAttempts): int
+    {
+        return $this->inner->recordFailure($challengeId, $maxAttempts);
+    }
+
+    public function countBegin(string $principalPseudonym, int $windowSecs): int
+    {
+        return $this->inner->countBegin($principalPseudonym, $windowSecs);
+    }
+
+    public function createDemand(StepUpDemand $demand, int $ttlSecs): string
+    {
+        return $this->inner->createDemand($demand, $ttlSecs);
+    }
+
+    public function readDemand(string $demandId): ?StepUpDemand
+    {
+        $before = $this->inner->readDemand($demandId);
+        $race = $this->raceOnNextDemandRead;
+        if ($race !== null && $before !== null) {
+            $this->raceOnNextDemandRead = null;
+            if ($race === 'lease') {
+                // The competing request claims the send slot with the
+                // handler's own lease window.
+                $this->inner->claimDemandSendLease($demandId, $this->concurrentResendAfterSecs, 15);
+            } elseif ($race === 'spend') {
+                // The competing request claims and delivers both sends,
+                // settling each lease, so the cap is exhausted while
+                // this begin's read still saw a credit.
+                for ($i = 0; $i < StepUpDemand::MAX_SENDS; $i++) {
+                    $lease = $this->inner->claimDemandSendLease($demandId, $this->concurrentResendAfterSecs, 15);
+                    if ($lease === null) {
+                        break;
+                    }
+                    $this->inner->settleDemandSendLease(new StepUpDemandSendSettlement($lease->demand->id, $lease->leaseUntilMs, $lease->claimAt, $lease->priorSends, $lease->priorLastSentAt, true));
+                }
+            } else {
+                // The competing request consumes the demand outright.
+                $this->inner->consumeDemand($demandId);
+            }
+        }
+
+        return $before;
+    }
+
+    public function consumeDemand(string $demandId): ?StepUpDemand
+    {
+        return $this->inner->consumeDemand($demandId);
+    }
+
+    public function completeDemand(string $demandId, int $now, int $ttlSecs): ?StepUpDemand
+    {
+        return $this->inner->completeDemand($demandId, $now, $ttlSecs);
+    }
+
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion
+    {
+        return $this->inner->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash, $scope, $lineageHash);
+    }
+
+    public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string
+    {
+        return $this->inner->completedFactorOf($lineageHash, $principalPseudonym, $scope, $now);
+    }
+
+    public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand
+    {
+        return $this->inner->claimDemandFinalization($demandId, $now, $claimSecs);
+    }
+
+    public function settleDemandFinalization(string $demandId, StepUpDemandState $state, int $now, ?string $factor = null): ?StepUpDemand
+    {
+        return $this->inner->settleDemandFinalization($demandId, $state, $now, $factor);
+    }
+
+    public function recordDemandEffect(string $demandId, string $effect, int $now): ?StepUpDemand
+    {
+        return $this->inner->recordDemandEffect($demandId, $effect, $now);
+    }
+
+    public function demandIdForFamily(string $familyDigest): ?string
+    {
+        return $this->inner->demandIdForFamily($familyDigest);
+    }
+
+    public function createRootDemand(StepUpDemand $demand, int $ttlSecs): string
+    {
+        return $this->inner->createRootDemand($demand, $ttlSecs);
+    }
+
+    public function supersedeDemandWithChild(string $parentDemandId, StepUpDemand $child): ?StepUpDemand
+    {
+        return $this->inner->supersedeDemandWithChild($parentDemandId, $child);
+    }
+
+    public function claimDemandSendLease(string $demandId, int $resendAfterSecs, int $leaseSecs): ?StepUpDemandSendLease
+    {
+        return $this->inner->claimDemandSendLease($demandId, $resendAfterSecs, $leaseSecs);
+    }
+
+    public function settleDemandSendLease(StepUpDemandSendSettlement $settlement): bool
+    {
+        return $this->inner->settleDemandSendLease($settlement);
+    }
+
+    public function reserveMailQuota(string $reservationId, array $budgetKeys, array $limits, int $windowSecs, int $leaseSecs): bool
+    {
+        return $this->inner->reserveMailQuota($reservationId, $budgetKeys, $limits, $windowSecs, $leaseSecs);
+    }
+
+    public function commitMailQuota(string $reservationId): void
+    {
+        $this->inner->commitMailQuota($reservationId);
+    }
+
+    public function releaseMailQuota(string $reservationId): bool
+    {
+        return $this->inner->releaseMailQuota($reservationId);
+    }
+
+    public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void
+    {
+        $this->inner->saveTotpSecret($principalPseudonym, $secretRaw);
+    }
+
+    public function findTotpSecret(string $principalPseudonym): ?string
+    {
+        return $this->inner->findTotpSecret($principalPseudonym);
+    }
+
+    public function markTotpStep(string $principalPseudonym, int $step, int $ttlSecs): bool
+    {
+        return $this->inner->markTotpStep($principalPseudonym, $step, $ttlSecs);
+    }
+
+    public function markStepUpSuccess(string $principalPseudonym, int $ttlSecs, int $now): void
+    {
+        $this->inner->markStepUpSuccess($principalPseudonym, $ttlSecs, $now);
+    }
+
+    public function recentStepUpSuccess(string $principalPseudonym, int $withinSecs, int $now): bool
+    {
+        return $this->inner->recentStepUpSuccess($principalPseudonym, $withinSecs, $now);
+    }
+
+    public function markSessionStepUpSuccess(string $sessionId, string $principalPseudonym, string $factor, int $ttlSecs, int $now): void
+    {
+        $this->inner->markSessionStepUpSuccess($sessionId, $principalPseudonym, $factor, $ttlSecs, $now);
+    }
+
+    public function recentSessionStepUpSuccess(string $sessionId, string $principalPseudonym, ?string $minFactor, int $withinSecs, int $now): bool
+    {
+        return $this->inner->recentSessionStepUpSuccess($sessionId, $principalPseudonym, $minFactor, $withinSecs, $now);
+    }
+
+    public function countLockoutFailure(string $dimension, string $pseudonym, int $windowSecs): int
+    {
+        return $this->inner->countLockoutFailure($dimension, $pseudonym, $windowSecs);
+    }
+
+    public function lockoutUntil(string $dimension, string $pseudonym, int $now): int
+    {
+        return $this->inner->lockoutUntil($dimension, $pseudonym, $now);
+    }
+
+    public function armLockout(string $dimension, string $pseudonym, int $now, int $ttlSecs): void
+    {
+        $this->inner->armLockout($dimension, $pseudonym, $now, $ttlSecs);
+    }
+
+    public function clearLockout(string $dimension, string $pseudonym): void
+    {
+        $this->inner->clearLockout($dimension, $pseudonym);
     }
 }

@@ -32,7 +32,7 @@ use PHPUnit\Framework\TestCase;
  *  3. one finalization owner: eight processes claim the finalization
  *     of one completed demand; exactly one wins.
  *  4. monotonic under race: a webauthn completion races an email_otp
- *     completion for the same (session, scope); the completed-factor
+ *     completion for the same lineage and scope; the completed-factor
  *     history must never end as the weaker family once the stronger
  *     has landed.
  *
@@ -178,7 +178,7 @@ final class StepUpStoreConcurrencyRealRedisTest extends TestCase
         $demandId = StepUpChallenge::mintId();
         $challengeId = StepUpChallenge::mintId();
         $this->store->createDemand(StepUpDemand::mint($demandId, 'login', $this->sessionHash(), null, null, $this->now, 600), 600);
-        $this->store->create(
+        $this->store->createAdmittedChallenge(
             StepUpChallenge::begin(
                 $challengeId,
                 StepUpChallengeKind::EmailOtp,
@@ -352,7 +352,7 @@ final class StepUpStoreConcurrencyRealRedisTest extends TestCase
 
         $strongId = StepUpChallenge::mintId();
         $weakId = StepUpChallenge::mintId();
-        $this->store->create(
+        $this->store->createAdmittedChallenge(
             StepUpChallenge::begin(
                 $strongId,
                 StepUpChallengeKind::WebAuthn,
@@ -374,7 +374,7 @@ final class StepUpStoreConcurrencyRealRedisTest extends TestCase
             ),
             600,
         );
-        $this->store->create(
+        $this->store->createAdmittedChallenge(
             StepUpChallenge::begin(
                 $weakId,
                 StepUpChallengeKind::EmailOtp,
@@ -423,7 +423,7 @@ final class StepUpStoreConcurrencyRealRedisTest extends TestCase
             'the webauthn completion must land; otherwise the monotonic invariant is untested',
         );
 
-        $family = $this->store->completedFactorOf($sessionHash, $scope, time());
+        $family = $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, $scope, time());
         self::assertSame(
             'webauthn',
             $family,
@@ -554,7 +554,8 @@ try {
             time(),
             isset($a['sessionHash']) ? (string) $a['sessionHash'] : null,
             isset($a['scope']) ? (string) $a['scope'] : null,
-        );
+            hash('sha256', 'lineage-test')
+    );
         $out['won'] = $result !== null;
         $out['challengeId'] = (string) $a['challengeId'];
     } elseif ($job['op'] === 'admit') {

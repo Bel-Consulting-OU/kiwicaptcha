@@ -282,7 +282,7 @@ final class ChainV2SchemaParityTest extends TestCase
     {
         $chainId = 'parity-chain-'.$this->corpusIndex;
         try {
-            $this->store->create($chainId, self::VALID_NONCE, 'login', 300, self::VALID_BINDING, 'sha20', 1);
+            $this->store->createAdmittedChallenge($chainId, self::VALID_NONCE, 'login', 300, self::VALID_BINDING, 'sha20', 1);
         } catch (\Throwable) {
             // ignore: the seed write only needs the key namespace warm.
         }

@@ -95,7 +95,7 @@ final class StepUpClientSecretBindingTest extends TestCase
             $this->now,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             null,
             null,
         );
@@ -148,14 +148,23 @@ final class StepUpClientSecretBindingTest extends TestCase
         self::assertSame(StepUpResultStatus::Succeeded, $ok->status, 'the right secret completes the stateless challenge');
 
         // Exactly one binding per challenge: a record carrying both a
-        // session hash and a secret hash is refused at decode.
-        $dual = $this->sessionBoundChallenge('session-alpha')->toArray();
+        // session hash and a secret hash is refused at decode. The
+        // unmutated record decodes cleanly first, so the refusal below
+        // can only be the dual-binding fault and never a malformed
+        // fixture that the catch would swallow.
+        $single = $this->sessionBoundChallenge('session-alpha')->toArray();
+        self::assertSame(StepUpChallenge::fromArray($single)->sessionHash, $single['session_hash']);
+        $dual = $single;
         $dual['client_secret_hash'] = hash('sha256', 'irrelevant');
         try {
             StepUpChallenge::fromArray($dual);
             self::fail('HOLE: a dual-binding challenge record was accepted');
-        } catch (\BelConsulting\KiwiCaptchaBundle\Security\StepUp\MalformedStepUpChallengeException) {
-            // fail closed
+        } catch (\BelConsulting\KiwiCaptchaBundle\Security\StepUp\MalformedStepUpChallengeException $e) {
+            self::assertStringContainsString(
+                'exactly one of session_hash / client_secret_hash',
+                $e->getMessage(),
+                'the refusal must name the binding fault',
+            );
         }
     }
 
@@ -172,7 +181,7 @@ final class StepUpClientSecretBindingTest extends TestCase
             $this->now,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             null,
             $sessionId,
         );

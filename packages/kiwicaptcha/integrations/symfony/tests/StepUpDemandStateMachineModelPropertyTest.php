@@ -14,6 +14,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeStore;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandAdmissionRefused;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandFinalizer;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemandState;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpEffectsJournal;
@@ -55,7 +56,12 @@ use PHPUnit\Framework\TestCase;
  *  - Guards: the demand id identity of every transition, the single-use
  *    challenge consumption, the presented binding hash, the stored
  *    required factor rank, the supersede marker, the claim window, the
- *    operation-family index and the child's inherited expiry.
+ *    operation-family index and the child's inherited expiry. Two more
+ *    guards apply to the demand-bound challenge. A live demand admits a
+ *    newcomer only through createAdmittedChallenge, which judges the
+ *    demand's liveness and the challenge's identity before it replaces
+ *    the standing active challenge. The active-challenge authority lets
+ *    only the challenge the demand's own stamp names complete it.
  *
  * The invariants asserted after every action of every walk:
  *
@@ -146,6 +152,12 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
     {
         $this->onBothLanes(function (StepUpDemandWalkHarness $h): void {
             $id = $this->mintRootOn($h, $h->array, 'denied');
+            // The challenge is admitted while the demand is still open:
+            // the admission is the only door into a live demand, so the
+            // probe below runs on the demand's genuine active challenge
+            // and the refusal is attributable to the denied terminal.
+            $challenge = $this->mintChallengeOn($h, $id, 'denied', StepUpChallengeKind::EmailOtp);
+            $secret = (string) $h->array->read($challenge)?->clientSecretHash;
             foreach (['array' => $h->array, 'redis' => $h->redis] as $store) {
                 self::assertNotNull($store->completeDemand($id, $h->now, self::TTL));
                 self::assertNotNull($store->claimDemandFinalization($id, $h->now, 30));
@@ -160,10 +172,8 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 self::assertNull($store->claimDemandFinalization($id, $h->now, 30), 'a denied demand is never claimed');
                 self::assertNull($store->completeDemand($id, $h->now, self::TTL), 'a denied demand never completes');
 
-                // A fresh challenge bound to the denied demand completes
-                // nothing, and the refusal consumes nothing.
-                $challenge = $this->mintChallengeOn($h, $id, 'denied', StepUpChallengeKind::EmailOtp);
-                $secret = (string) $store->read($challenge)?->clientSecretHash;
+                // The admitted challenge completes nothing past the
+                // denied terminal, and the refusal consumes nothing.
                 self::assertNull($store->completeFactor($challenge, $id, $secret, $h->now), 'a denied demand completes no factor');
                 self::assertNotNull($store->read($challenge), 'the refusal consumed no challenge');
                 self::assertTrue($store->readDemand($id)->state === StepUpDemandState::Denied, 'the denied terminal is durable');
@@ -201,8 +211,14 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         $this->onBothLanes(function (StepUpDemandWalkHarness $h): void {
             // An open parent superseded in place: the marker rides the
             // record, the escalation child stands. Each lane drives its
-            // own copy of the same root.
+            // own copy of the same root. The challenge is admitted
+            // before the supersede, while the parent is still open: the
+            // admission is the only door into a live demand, and the
+            // refusal below must be attributable to the supersede
+            // marker rather than to a missing active challenge.
             $parent = $this->mintRootOn($h, $h->array, 'supopen');
+            $challenge = $this->mintChallengeOn($h, $parent, 'supopen', StepUpChallengeKind::EmailOtp);
+            $secret = (string) $h->array->read($challenge)?->clientSecretHash;
             foreach (['array' => $h->array, 'redis' => $h->redis] as $store) {
                 $child = $store->readDemand($parent)->spawnChild($parent.'cccccccccccccc', $h->now, 'decision-sup');
                 self::assertNotNull($store->supersedeDemandWithChild($parent, $child), 'the escalation replaces the open parent');
@@ -212,8 +228,6 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 self::assertNull($store->settleDemandFinalization($parent, StepUpDemandState::Superseded, $h->now), 'superseded from open, no terminal settle lands (the state gate)');
                 self::assertNull($store->claimDemandFinalization($parent, $h->now + 31, 30), 'a superseded demand is never claimed');
                 self::assertNull($store->completeDemand($parent, $h->now, self::TTL), 'a superseded demand never completes');
-                $challenge = $this->mintChallengeOn($h, $parent, 'supopen', StepUpChallengeKind::EmailOtp);
-                $secret = (string) $store->read($challenge)?->clientSecretHash;
                 self::assertNull($store->completeFactor($challenge, $parent, $secret, $h->now), 'a superseded demand completes no factor');
                 self::assertNotNull($store->read($challenge), 'the refusal consumed no challenge');
                 $second = $store->readDemand($parent.'cccccccccccccc')->spawnChild($parent.'dddddddddddddd', $h->now, 'decision-sup');
@@ -279,6 +293,12 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
     {
         $this->onBothLanes(function (StepUpDemandWalkHarness $h): void {
             $id = $this->mintRootOn($h, $h->array, 'consume');
+            // The challenge is admitted while the demand still stands:
+            // once the demand is consumed the record names a demand
+            // that no longer exists, and no door admits a newcomer to an
+            // absent demand.
+            $challenge = $this->mintChallengeOn($h, $id, 'consume', StepUpChallengeKind::EmailOtp);
+            $secret = (string) $h->array->read($challenge)?->clientSecretHash;
             foreach (['array' => $h->array, 'redis' => $h->redis] as $store) {
 
                 // The demand consumption is the destructive send-credit
@@ -294,8 +314,6 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 // A challenge naming the missing demand completes
                 // nothing and stays: nothing settles behind a consumed
                 // demand.
-                $challenge = $this->mintChallengeOn($h, $id, 'consume', StepUpChallengeKind::EmailOtp);
-                $secret = (string) $store->read($challenge)?->clientSecretHash;
                 self::assertNull($store->completeFactor($challenge, $id, $secret, $h->now), 'a demandless challenge completes nothing');
                 self::assertNotNull($store->read($challenge), 'the demandless refusal consumed no challenge');
 
@@ -314,19 +332,32 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
     {
         $this->onBothLanes(function (StepUpDemandWalkHarness $h): void {
             $id = $this->mintRootOn($h, $h->array, 'once');
+            // One live challenge per demand: the admission stamps the
+            // record as the demand's active challenge, and only that
+            // record may complete it.
+            $first = $this->mintChallengeOn($h, $id, 'once', StepUpChallengeKind::EmailOtp);
+            $firstSecret = (string) $h->array->read($first)?->clientSecretHash;
             foreach (['array' => $h->array, 'redis' => $h->redis] as $store) {
-                $first = $this->mintChallengeOn($h, $id, 'once', StepUpChallengeKind::EmailOtp);
-                $second = $this->mintChallengeOn($h, $id, 'once', StepUpChallengeKind::EmailOtp);
-                $firstSecret = (string) $store->read($first)?->clientSecretHash;
-                $secondSecret = (string) $store->read($second)?->clientSecretHash;
-
                 self::assertNotNull($store->completeFactor($first, $id, $firstSecret, $h->now), 'the first completion lands');
                 self::assertNull($store->completeFactor($first, $id, $firstSecret, $h->now), 'the consumed challenge completes nothing twice');
-                self::assertNull($store->completeFactor($second, $id, $secondSecret, $h->now), 'a completed demand answers no second completion');
-                self::assertNotNull($store->read($second), 'the refusal consumed no challenge');
                 self::assertNull($store->completeDemand($id, $h->now, self::TTL), 'the completed demand completes once');
                 self::assertTrue($store->readDemand($id)->state === StepUpDemandState::Completed);
                 self::assertNull($store->recordDemandEffect($id, StepUpEffectsJournal::SETTLED, $h->now), 'a completed demand journals nothing');
+            }
+
+            // A second challenge bound to the settled demand enters
+            // through the plain create door alone: the admission refuses
+            // a demand that is no longer open, and this is the one
+            // demand-bound shape the plain door still allows (exactly
+            // the email-ownership-grant shape). It can never become the
+            // demand's active challenge, so the completed demand answers
+            // no second completion, and the refusal consumes nothing.
+            $second = $this->mintSettledChallengeOn($h, $id, 'once', StepUpChallengeKind::EmailOtp);
+            $secondSecret = (string) $h->array->read($second)?->clientSecretHash;
+            foreach (['array' => $h->array, 'redis' => $h->redis] as $store) {
+                self::assertNull($store->completeFactor($second, $id, $secondSecret, $h->now), 'a completed demand answers no second completion');
+                self::assertNotNull($store->read($second), 'the refusal consumed no challenge');
+                self::assertTrue($store->readDemand($id)->state === StepUpDemandState::Completed, 'the terminal stays put');
             }
         });
     }
@@ -379,11 +410,21 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
     public function testAnAuthorizedDemandKeepsItsBindingThroughEveryPublicMethod(): void
     {
         $this->onBothLanes(function (StepUpDemandWalkHarness $h): void {
-            $session = str_repeat('7', 64);
+            // The session hash derives from a real session id: a
+            // challenge's session hash is the hash of the session id it
+            // was begun under, so a challenge consistent with this
+            // demand must be begun under the same id.
+            $sessionId = 'binding-session';
+            $session = hash('sha256', $sessionId);
             $digest = StepUpOperationDigest::none('binding');
             $demand = StepUpDemand::mint('bindingdemandid0000000000001', 'binding', $session, null, 'decision-bind', $h->now, self::TTL, StepUpOperationBindingKind::None, $digest);
             self::assertSame('bindingdemandid0000000000001', $h->array->createRootDemand($demand, self::TTL));
             self::assertSame('bindingdemandid0000000000001', $h->redis->createRootDemand($demand, self::TTL));
+
+            // The probe challenge is admitted while the demand is still
+            // open: it is the demand's genuine active challenge, so only
+            // the authorized terminal can refuse its completion below.
+            $challenge = $this->mintChallengeOn($h, 'bindingdemandid0000000000001', 'binding', StepUpChallengeKind::EmailOtp, $sessionId);
 
             foreach (['array' => $h->array, 'redis' => $h->redis] as $store) {
                 $before = $store->readDemand('bindingdemandid0000000000001');
@@ -395,10 +436,11 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
 
                 // Hammer every public method; nothing may move the
                 // principal binding, the operation binding or the
-                // family shape of the terminal.
-                $challenge = $this->mintChallengeOn($h, 'bindingdemandid0000000000001', 'binding', StepUpChallengeKind::EmailOtp);
-                $secret = (string) $store->read($challenge)?->clientSecretHash;
-                self::assertNull($store->completeFactor($challenge, 'bindingdemandid0000000000001', $secret, $h->now));
+                // family shape of the terminal. The presented binding
+                // reproduces the challenge's own session, so the
+                // completion refusal below is the terminal state.
+                self::assertNull($store->completeFactor($challenge, 'bindingdemandid0000000000001', $session, $h->now));
+                self::assertNotNull($store->read($challenge), 'the terminal refusal consumed no challenge');
                 self::assertNull($store->completeDemand('bindingdemandid0000000000001', $h->now, self::TTL));
                 self::assertNull($store->claimDemandFinalization('bindingdemandid0000000000001', $h->now, 30));
                 self::assertNull($store->settleDemandFinalization('bindingdemandid0000000000001', StepUpDemandState::Denied, $h->now));
@@ -454,7 +496,7 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 self::assertNotNull($store->supersedeDemandWithChild($weakParent, $weakChild), 'the supersede judges shape, not rank');
                 self::assertNull($store->readDemand('weakchilddddddddda1')?->requiredFactor, 'the weak child carries no demanded rank');
 
-                $weakChallenge = $this->mintChallengeOn($h, 'weakchilddddddddda1', 'weaka', StepUpChallengeKind::EmailOtp);
+                $weakChallenge = $this->mintChallengeOn($h, 'weakchilddddddddda1', 'weaka', StepUpChallengeKind::EmailOtp, lane: $store);
                 $weakSecret = (string) $store->read($weakChallenge)?->clientSecretHash;
                 self::assertNotNull($store->completeFactor($weakChallenge, 'weakchilddddddddda1', $weakSecret, $h->now), 'a child with no demanded rank is answered at its face value');
 
@@ -463,13 +505,13 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 // the rank lands.
                 $strongChild = $this->handMintChild($h, $strongParent, 'weakchildddddddddb2', new FactorRequirement(FactorRequirement::TOTP, FactorRequirement::TOTP, 2), 0);
                 self::assertNotNull($store->supersedeDemandWithChild($strongParent, $strongChild));
-                $emailChallenge = $this->mintChallengeOn($h, 'weakchildddddddddb2', 'weakb', StepUpChallengeKind::EmailOtp);
+                $emailChallenge = $this->mintChallengeOn($h, 'weakchildddddddddb2', 'weakb', StepUpChallengeKind::EmailOtp, lane: $store);
                 $emailSecret = (string) $store->read($emailChallenge)?->clientSecretHash;
                 self::assertNull($store->completeFactor($emailChallenge, 'weakchildddddddddb2', $emailSecret, $h->now), 'the weak factor never completes below the demanded rank');
                 self::assertNotNull($store->read($emailChallenge), 'the weaker-factor refusal consumed no challenge');
                 self::assertTrue($store->readDemand('weakchildddddddddb2')->state->isOpen(), 'the refusal moved no demand');
 
-                $totpChallenge = $this->mintChallengeOn($h, 'weakchildddddddddb2', 'weakb', StepUpChallengeKind::Totp);
+                $totpChallenge = $this->mintChallengeOn($h, 'weakchildddddddddb2', 'weakb', StepUpChallengeKind::Totp, lane: $store);
                 $totpSecret = (string) $store->read($totpChallenge)?->clientSecretHash;
                 self::assertNotNull($store->completeFactor($totpChallenge, 'weakchildddddddddb2', $totpSecret, $h->now), 'a completion at the demanded rank lands');
             }
@@ -495,12 +537,12 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
 
             // The enforcement rides the child's own record: the same
             // weak rung the parent completed answers the child never.
-            $weak = $this->mintChallengeOn($h, $child->id, self::SCOPE, StepUpChallengeKind::EmailOtp);
+            $weak = $this->mintChallengeOn($h, $child->id, self::SCOPE, StepUpChallengeKind::EmailOtp, lane: $store);
             $weakSecret = (string) $store->read($weak)?->clientSecretHash;
             self::assertNull($store->completeFactor($weak, $child->id, $weakSecret, $h->now), 'the escalated child refuses the rung it escalated past');
             self::assertNotNull($store->read($weak), 'the refusal consumed no challenge');
 
-            $strong = $this->mintChallengeOn($h, $child->id, self::SCOPE, StepUpChallengeKind::Totp);
+            $strong = $this->mintChallengeOn($h, $child->id, self::SCOPE, StepUpChallengeKind::Totp, lane: $store);
             $strongSecret = (string) $store->read($strong)?->clientSecretHash;
             self::assertNotNull($store->completeFactor($strong, $child->id, $strongSecret, $h->now), 'the demanded rung answers the child');
             self::assertTrue($store->readDemand($child->id)->state === StepUpDemandState::Completed);
@@ -804,6 +846,10 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         $rankOk = $demand === null
             || $demand->requiredFactor === null
             || $challenge->rank >= $demand->requiredFactor->assuranceRank;
+        // The active-challenge authority: the demand's own stamp names
+        // the one challenge that may complete it, so a challenge the
+        // replace semantics already superseded completes nothing even
+        // while its record still stands.
         $ok = !$crossed
             && $challenge->present
             && $demand->present
@@ -811,10 +857,11 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
             && $demand->lanes['array']->state === StepUpDemandState::Open
             && $demand->lanes['redis']->state === StepUpDemandState::Open
             && !$wrongBinding
-            && $rankOk;
+            && $rankOk
+            && $demand->activeChallengeId === $challengeId;
 
-        $arrayAnswer = $h->array->completeFactor($challengeId, $demandId, $presented, $h->now, $hint, $scopeHint);
-        $redisAnswer = $h->redis->completeFactor($challengeId, $demandId, $presented, $h->now, $hint, $scopeHint);
+        $arrayAnswer = $h->array->completeFactor($challengeId, $demandId, $presented, $h->now, $hint, $scopeHint, $hint);
+        $redisAnswer = $h->redis->completeFactor($challengeId, $demandId, $presented, $h->now, $hint, $scopeHint, $hint);
 
         if ($ok) {
             self::assertNotNull($arrayAnswer, $ctx.' completeFactor');
@@ -827,10 +874,23 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 $demand->lanes[$lane]->state = StepUpDemandState::Completed;
                 $demand->lanes[$lane]->stateAt = $h->now;
             }
-            if ($challenge->sessionHash !== null && $hint === $challenge->sessionHash) {
-                // The marker history is keyed per (session, scope) pair,
-                // the same derivation both stores run.
-                $m->completedIndex[$challenge->sessionHash.'|'.$challenge->scope] = ['sessionHash' => $challenge->sessionHash, 'scope' => $challenge->scope, 'family' => $challenge->family, 'expiresAt' => $demand->expiresAt];
+            if ($hint !== null && $hint === $challenge->sessionHash && $challenge->scope === $scopeHint) {
+                // The marker history is keyed per (lineage, principal,
+                // scope) identity, the same derivation both stores run:
+                // the lineage hint is the key material, the principal is
+                // the demand's own (absent here, so the anonymous
+                // bucket), and the scope is the challenge's.
+                $principal = $demand->principal ?? '';
+                $key = $hint.'|'.$principal.'|'.$challenge->scope;
+                $prior = $m->completedIndex[$key] ?? null;
+                $rank = $challenge->rank;
+                $priorRank = $prior['rank'] ?? 0;
+                $window = $prior !== null && $rank === $priorRank && ($prior['expiresAt'] ?? 0) > $demand->expiresAt
+                    ? $prior['expiresAt']
+                    : $demand->expiresAt;
+                if ($rank >= $priorRank) {
+                    $m->completedIndex[$key] = ['lineage' => $hint, 'principal' => $principal, 'scope' => $challenge->scope, 'family' => $challenge->family, 'rank' => $rank, 'expiresAt' => $window];
+                }
             }
         } else {
             self::assertNull($arrayAnswer, $ctx.' completeFactor refusal');
@@ -1003,7 +1063,8 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         if ($demandId === null) {
             return;
         }
-        $scope = $m->demands[$demandId]->scope;
+        $demand = $m->demands[$demandId];
+        $scope = $demand->scope;
         $kind = mt_rand(0, 2) === 0 ? StepUpChallengeKind::Totp : StepUpChallengeKind::EmailOtp;
         $sessionBound = mt_rand(0, 1) === 0;
         $id = $m->nextChallengeId();
@@ -1026,8 +1087,43 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
             null,
             $demandId,
         );
-        $h->array->create($challenge, self::TTL);
-        $h->redis->create($challenge, self::TTL);
+        // The admission door: a demand-bound challenge enters through
+        // it alone, and it judges the demand's liveness and the
+        // newcomer's identity before it replaces the standing active
+        // challenge. A refusal stores nothing on that lane and is a
+        // legitimate walk outcome; both lanes must judge it alike, and
+        // the model must have predicted the answer.
+        $predicted = $demand->present
+            && $demand->supersededBy === null
+            && $demand->lanes['array']->state === StepUpDemandState::Open
+            && $demand->lanes['redis']->state === StepUpDemandState::Open;
+        $admitted = [];
+        foreach (['array' => $h->array, 'redis' => $h->redis] as $lane => $store) {
+            try {
+                $store->createAdmittedChallenge($challenge, self::TTL);
+                $admitted[$lane] = true;
+            } catch (StepUpDemandAdmissionRefused) {
+                $admitted[$lane] = false;
+            }
+        }
+        self::assertSame($admitted['array'], $admitted['redis'], $ctx.' both lanes judge the admission alike');
+        self::assertSame($predicted, $admitted['array'], $ctx.' the admission outcome the model predicts');
+        if (!$admitted['array']) {
+            self::assertNull($h->array->read($id), $ctx.' a refused admission stored no challenge (array)');
+            self::assertNull($h->redis->read($id), $ctx.' a refused admission stored no challenge (redis)');
+
+            return;
+        }
+        // The replace: the demand's standing active challenge is
+        // consumed in the same move that stamps the newcomer, so at
+        // most one live challenge per demand holds.
+        $prior = $demand->activeChallengeId;
+        if ($prior !== null && isset($m->challenges[$prior]) && $m->challenges[$prior]->present) {
+            self::assertNull($h->array->read($prior), $ctx.' the replaced challenge is consumed (array)');
+            self::assertNull($h->redis->read($prior), $ctx.' the replaced challenge is consumed (redis)');
+            $m->challenges[$prior]->present = false;
+        }
+        $demand->activeChallengeId = $id;
         $stored = $h->array->read($id);
         self::assertNotNull($stored, $ctx.' the challenge record stands');
         $m->challenges[$id] = new ModelChallenge(
@@ -1086,6 +1182,7 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
                 self::assertNotNull($record, $ctx.' the live demand '.$id.' stands ('.$lane.')');
                 self::assertTrue($record->state === $demand->lanes[$lane]->state, $ctx.' state of '.$id.' ('.$lane.'): '.$record->state->value.' vs '.$demand->lanes[$lane]->state->value);
                 self::assertSame($demand->lanes[$lane]->stateAt, $record->stateAt, $ctx.' stateAt of '.$id.' ('.$lane.')');
+                self::assertSame($demand->activeChallengeId, $record->activeChallengeId, $ctx.' the active challenge of '.$id.' ('.$lane.')');
                 self::assertSame($demand->supersededBy, $record->supersededByDemandId, $ctx.' marker of '.$id);
                 self::assertSame($demand->parentDemandId, $record->parentDemandId, $ctx.' parent of '.$id);
                 self::assertSame($demand->generation, $record->generation, $ctx.' generation of '.$id);
@@ -1140,8 +1237,9 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         }
         foreach ($m->completedIndex as $entry) {
             $expected = $h->now < $entry['expiresAt'] ? $entry['family'] : null;
-            self::assertSame($expected, $h->array->completedFactorOf($entry['sessionHash'], $entry['scope'], $h->now), $ctx.' escalation marker (array)');
-            self::assertSame($expected, $h->redis->completedFactorOf($entry['sessionHash'], $entry['scope'], $h->now), $ctx.' escalation marker (redis)');
+            $principal = $entry['principal'] === '' ? null : $entry['principal'];
+            self::assertSame($expected, $h->array->completedFactorOf($entry['lineage'], $principal, $entry['scope'], $h->now), $ctx.' escalation marker (array)');
+            self::assertSame($expected, $h->redis->completedFactorOf($entry['lineage'], $principal, $entry['scope'], $h->now), $ctx.' escalation marker (redis)');
         }
     }
 
@@ -1248,11 +1346,47 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
         return $id;
     }
 
-    /** A challenge of one kind bound to one demand, on both stores. */
-    private function mintChallengeOn(StepUpDemandWalkHarness $h, string $demandId, string $scope, StepUpChallengeKind $kind): string
+    /**
+     * A challenge of one kind bound to one demand. A live demand-bound
+     * challenge enters through the admission door alone: it judges the
+     * demand's liveness and the newcomer's identity, then stamps the
+     * record as the demand's one active challenge. A null lane admits
+     * on both stores (the shared scenarios); a named store admits on
+     * that lane alone (the per-lane scenarios, whose demand family
+     * exists on one store only).
+     */
+    private function mintChallengeOn(StepUpDemandWalkHarness $h, string $demandId, string $scope, StepUpChallengeKind $kind, ?string $sessionId = null, ?StepUpChallengeStore $lane = null): string
     {
         $id = 'chal'.str_pad((string) ++self::$seq, 16, '0', STR_PAD_LEFT).'aaaaaaaaaa';
-        $challenge = StepUpChallenge::begin(
+        $challenge = $this->challengeOf($h, $id, $demandId, $scope, $kind, $sessionId);
+        foreach ($lane === null ? [$h->array, $h->redis] : [$lane] as $store) {
+            self::assertSame($id, $store->createAdmittedChallenge($challenge, self::TTL), 'the admission lands');
+        }
+
+        return $id;
+    }
+
+    /**
+     * A challenge bound to an already-settled demand, stored through
+     * the plain create door: the one demand-bound shape that door still
+     * allows (a demand no longer open, the same shape the email
+     * ownership grant takes). It can never become the demand's active
+     * challenge, so it can never complete anything.
+     */
+    private function mintSettledChallengeOn(StepUpDemandWalkHarness $h, string $demandId, string $scope, StepUpChallengeKind $kind): string
+    {
+        $id = 'chal'.str_pad((string) ++self::$seq, 16, '0', STR_PAD_LEFT).'aaaaaaaaaa';
+        $challenge = $this->challengeOf($h, $id, $demandId, $scope, $kind);
+        $h->array->create($challenge, self::TTL);
+        $h->redis->create($challenge, self::TTL);
+
+        return $id;
+    }
+
+    /** The wire record of one challenge of one kind bound to one demand. */
+    private function challengeOf(StepUpDemandWalkHarness $h, string $id, string $demandId, string $scope, StepUpChallengeKind $kind, ?string $sessionId = null): StepUpChallenge
+    {
+        return StepUpChallenge::begin(
             $id,
             $kind,
             self::PRINCIPAL,
@@ -1265,16 +1399,12 @@ final class StepUpDemandStateMachineModelPropertyTest extends TestCase
             5,
             $kind === StepUpChallengeKind::Totp ? null : str_repeat('a', 64),
             null,
-            null,
+            $sessionId,
             false,
             false,
             null,
             $demandId,
         );
-        $h->array->create($challenge, self::TTL);
-        $h->redis->create($challenge, self::TTL);
-
-        return $id;
     }
 
     /** A hand-minted escalation child with an explicit requirement. */
@@ -1460,11 +1590,12 @@ final class StepUpDemandWalkHarness
 
 /**
  * The clean-room reference model of the demand state machine. It holds
- * the lifecycle state per lane, the supersede marker, the family tips,
- * the escalation markers and every immutable binding field the stores
- * must never move. The lane split models the documented asymmetry: the
- * Redis supersede leaves the parent state field behind the marker, the
- * array store writes the superseded terminal.
+ * the lifecycle state per lane, the supersede marker, the active
+ * challenge stamp, the family tips, the escalation markers and every
+ * immutable binding field the stores must never move. The lane split
+ * models the documented asymmetry: the Redis supersede leaves the
+ * parent state field behind the marker, the array store writes the
+ * superseded terminal.
  */
 final class StepUpDemandWalkModel
 {
@@ -1557,8 +1688,11 @@ final class ModelDemand
         public readonly ?string $parentDemandId,
         public readonly int $generation,
         public readonly ?FactorRequirement $requiredFactor,
+        public ?string $principal = null,
         public bool $present = true,
         public ?string $supersededBy = null,
+        /** The demand's one active challenge: the admission stamps it, only it may complete. */
+        public ?string $activeChallengeId = null,
         public ?string $factor = null,
         public ?int $authorizedAt = null,
         public array $effects = [],

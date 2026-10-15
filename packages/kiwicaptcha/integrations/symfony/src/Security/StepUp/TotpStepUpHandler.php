@@ -229,14 +229,16 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         try {
             $this->store->createAdmittedChallenge($challenge, $this->challengeTtlSecs);
         } catch (StepUpDemandAdmissionRefused) {
-            // The demand already holds a live challenge (or is spent):
-            // nothing was stored, the begin answers the retryable
-            // active-challenge refusal.
+            // The demand can no longer admit a challenge: a fresh begin
+            // replaces any standing challenge in the same atomic move,
+            // so this refusal means the demand was already answered,
+            // superseded, or expired. Nothing was stored, and the begin
+            // tells the browser to request a fresh step-up.
             return $this->refusal(
                 $context,
                 Response::HTTP_CONFLICT,
                 'step_up_challenge_active',
-                'A verification challenge is already in progress; complete it or wait for it to expire.',
+                'The step-up demand is no longer open, so no verification challenge can be admitted; request a fresh step-up.',
                 ['Retry-After' => (string) $this->challengeTtlSecs],
             );
         }
@@ -333,7 +335,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
             return false;
         }
 
-        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash, $challenge->scope) !== null;
+        return $this->store->completeFactor($challenge->id, $challenge->demandId, $binding, $now, $challenge->sessionHash, $challenge->scope, StepUpSessionBinding::lineageHash($request) ?? $challenge->sessionHash) !== null;
     }
 
     /**

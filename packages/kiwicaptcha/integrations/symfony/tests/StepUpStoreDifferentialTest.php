@@ -166,8 +166,13 @@ final class StepUpStoreDifferentialTest extends TestCase
                 null,
                 $checkoutDemand,
             );
-            $store->create($totp, 600);
+            // The demand stands before its challenge: admission is the
+            // only door into the store for a demand-bound challenge, and
+            // it refuses a demand that is not there yet. Each challenge
+            // answers its own demand, the session, scope and principal
+            // identity the admission and the completion both judge.
             $store->createDemand(StepUpDemand::mint($checkoutDemand, 'checkout', $binding, null, null, self::BASE_NOW, 600), 600);
+            $store->createAdmittedChallenge($totp, 600);
             $email = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
                 $store instanceof ArrayStepUpChallengeStore ? 'paritychalemlarray0001' : 'paritychalemlredis0001',
                 \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind::EmailOtp,
@@ -187,27 +192,27 @@ final class StepUpStoreDifferentialTest extends TestCase
                 null,
                 $loginDemand,
             );
-            $store->create($email, 600);
             $store->createDemand(StepUpDemand::mint($loginDemand, 'login', $binding, null, null, self::BASE_NOW, 600), 600);
+            $store->createAdmittedChallenge($email, 600);
 
             $answers = [];
             $answers['before'] = [
-                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW),
-                $store->completedFactorOf($binding, 'login', self::BASE_NOW),
+                $store->completedFactorOf($binding, null, 'checkout', self::BASE_NOW),
+                $store->completedFactorOf($binding, null, 'login', self::BASE_NOW),
             ];
-            $totpDone = $store->completeFactor($totp->id, $checkoutDemand, $binding, self::BASE_NOW, $totp->sessionHash, 'checkout');
+            $totpDone = $store->completeFactor($totp->id, $checkoutDemand, $binding, self::BASE_NOW, $totp->sessionHash, 'checkout', $binding);
             $answers['afterTotp'] = [
                 $totpDone !== null,
-                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW),
-                $store->completedFactorOf($binding, 'login', self::BASE_NOW),
+                $store->completedFactorOf($binding, null, 'checkout', self::BASE_NOW),
+                $store->completedFactorOf($binding, null, 'login', self::BASE_NOW),
             ];
-            $emailDone = $store->completeFactor($email->id, $loginDemand, $binding, self::BASE_NOW + 10, $email->sessionHash, 'login');
+            $emailDone = $store->completeFactor($email->id, $loginDemand, $binding, self::BASE_NOW + 10, $email->sessionHash, 'login', $binding);
             $answers['afterEmail'] = [
                 $emailDone !== null,
-                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW + 10),
-                $store->completedFactorOf($binding, 'login', self::BASE_NOW + 10),
-                $store->completedFactorOf($binding, 'checkout', self::BASE_NOW + 601),
-                $store->completedFactorOf($binding, 'login', self::BASE_NOW + 601),
+                $store->completedFactorOf($binding, null, 'checkout', self::BASE_NOW + 10),
+                $store->completedFactorOf($binding, null, 'login', self::BASE_NOW + 10),
+                $store->completedFactorOf($binding, null, 'checkout', self::BASE_NOW + 601),
+                $store->completedFactorOf($binding, null, 'login', self::BASE_NOW + 601),
             ];
 
             return $answers;
@@ -227,12 +232,19 @@ final class StepUpStoreDifferentialTest extends TestCase
 
         // The raw Redis shape: one key per (session hash, scope) pair,
         // the scope carried as its digest, each value prefixed with the
-        // stored scope.
-        foreach (['checkout' => 'totp', 'login' => 'email_otp'] as $scope => $family) {
-            $raw = $fake->strings['{kiwi:diff}:stepup:emdone:'.$binding.':'.hash('sha256', $scope)] ?? null;
-            // The rank rides the value: the monotonic marker carries the
-            // completing proof's own ladder rank beside its expiry.
-            self::assertSame($scope.'|'.$family.'|'.\BelConsulting\KiwiCaptchaBundle\Security\StepUp\FactorRequirement::rankOf($family).'|'.(self::BASE_NOW + 600), $raw, 'the '.$scope.' marker sits under its pair key with the stored value');
+        // stored scope. The key carries the whole history identity:
+        // lineage, the principal digest (the anonymous bucket here, since
+        // these demands name no principal) and the scope digest. The
+        // value carries the scope, the family, the rank, the
+        // authorization window and the completion stamp.
+        $anon = str_repeat('0', 64);
+        // The completion stamp is the Redis server clock the script reads,
+        // never the caller's argument: the fake's server clock stands at
+        // self::BASE_NOW for both completions, which is exactly the
+        // divergence this differential exists to pin.
+        foreach (['checkout' => ['totp', self::BASE_NOW], 'login' => ['email_otp', self::BASE_NOW]] as $scope => [$family, $stamp]) {
+            $raw = $fake->strings['{kiwi:diff}:stepup:emdone:'.$binding.':'.$anon.':'.hash('sha256', $scope)] ?? null;
+            self::assertSame($scope.'|'.$family.'|'.\BelConsulting\KiwiCaptchaBundle\Security\StepUp\FactorRequirement::rankOf($family).'|'.(self::BASE_NOW + 600).'|'.$stamp, $raw, 'the '.$scope.' marker sits under its pair key with the stored value');
         }
     }
 

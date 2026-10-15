@@ -996,21 +996,26 @@ final class RedisStorageTest extends TestCase
             }
 
             // The no-barrier configuration on the same server round-trips.
+            // Every operation addresses the record by the nonce the wire
+            // actually carries, never by the logical value the fixture
+            // wrapped: the stored key is derived from the record's own
+            // nonce, so a lookup by the raw input misses the record and
+            // reads as an absent challenge.
             $plain = new RedisStorage($client, ttlMarginSecs: 5);
             $plain->store($record);
-            $stored = $plain->find($nonce);
+            $stored = $plain->find($record->nonce);
             self::assertNotNull($stored);
-            self::assertSame($nonce, $stored->nonce);
+            self::assertSame($record->nonce, $stored->nonce);
 
-            $consumed = $plain->consume($nonce);
+            $consumed = $plain->consume($record->nonce);
             self::assertNotNull($consumed);
-            self::assertSame($nonce, $consumed->record->nonce);
+            self::assertSame($record->nonce, $consumed->record->nonce);
             self::assertTrue($consumed->consumedNow);
-            $retry = $plain->consume($nonce);
+            $retry = $plain->consume($record->nonce);
             self::assertNotNull($retry, 'the transition keeps the record — replay protection is the consumed marker');
             self::assertTrue($retry->consumedBefore, 'the atomic transition must make exactly one caller the winner');
         } finally {
-            $client->del('kiwicaptcha:'.$nonce);
+            $client->del('kiwicaptcha:'.$record->nonce);
         }
     }
 
@@ -1916,20 +1921,20 @@ final class RedisStorageTest extends TestCase
             // clean up (the forced interleaving; the deleteIfPending
             // call below is the "resumed" cleanup).
             $identity = 'op-race-'.$i;
-            $consumed = $storage->consumeWithOperationIdentity($nonce, $identity);
+            $consumed = $storage->consumeWithOperationIdentity($record->nonce, $identity);
             self::assertTrue($consumed?->consumedNow, 'B wins the transition');
-            self::assertTrue($storage->commitResult($nonce, true, 'txn'));
+            self::assertTrue($storage->commitResult($record->nonce, true, 'txn'));
 
             // A resumes: the atomic script observes the consumed state
             // and refuses the delete; the evidence is intact.
-            $result = $storage->deleteIfPending($nonce);
+            $result = $storage->deleteIfPending($record->nonce);
             self::assertSame('consumed', $result->state, "iteration $i: the committed evidence is never erased");
             self::assertNotNull($result->consumed?->consumedResult, "iteration $i: the committed result rides back");
             self::assertTrue($result->consumed->consumedResult?->valid ?? false);
             self::assertSame($identity, $result->consumed->operationIdentity, "iteration $i: the recorded identity is intact");
-            self::assertNotNull($storage->find($nonce), "iteration $i: the record still exists");
+            self::assertNotNull($storage->find($record->nonce), "iteration $i: the record still exists");
 
-            $storage->delete($nonce);
+            $storage->delete($record->nonce);
         }
     }
 }
