@@ -49,8 +49,10 @@ WORKDIR /srv/kiwicaptcha/deploy/app
 RUN composer validate --strict \
  && composer install --no-interaction --no-progress --prefer-dist --no-dev --optimize-autoloader
 # The app files land after the install (the working directory), so
-# vendor/ is never overwritten by a later copy.
-COPY deploy/app/bootstrap.php deploy/app/health.php deploy/app/router.php deploy/app/solve.php ./
+# vendor/ is never overwritten by a later copy. Every PHP file the
+# router includes is listed here: the image ships exactly the surface
+# it serves, and nothing else.
+COPY deploy/app/bootstrap.php deploy/app/health.php deploy/app/framing.php deploy/app/router.php deploy/app/solve.php ./
 
 # The serving runtime is unprivileged: the app writes nothing under
 # /srv, so it runs as a dedicated non-root user owning the tree.

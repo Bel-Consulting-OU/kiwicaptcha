@@ -6,7 +6,10 @@ declare(strict_types=1);
  * The /healthz handler logic of the reference deployment.
  *
  * The probe is a real round trip through the configured store, never a
- * process-local check. The default full mode runs the storage round
+ * process-local check. Its parameter is the store contract itself, the
+ * write/read/delete-if-pending pair every atomic adapter implements, so
+ * the same probe covers the reference deployment's Redis store and the
+ * storage matrix's SQLite and filesystem stores. The default full mode runs the storage round
  * trip: the storage interface exposes no ping, so the probe stores a
  * synthetic pending record with a fresh random nonce, reads it back,
  * and atomically deletes it while pending (the delete-if-pending
@@ -25,9 +28,10 @@ declare(strict_types=1);
  * driver text ever reaches the body.
  */
 
+use KiwiCaptcha\AtomicDeleteIfPendingInterface;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\PoWAlgorithm;
-use KiwiCaptcha\Storage\RedisStorage;
+use KiwiCaptcha\StorageInterface;
 
 /**
  * Run one storage round trip and report the outcome.
@@ -35,7 +39,7 @@ use KiwiCaptcha\Storage\RedisStorage;
  * @return array{ok: bool, detail: string} the probe verdict and a
  *                                         one-line server-side detail
  */
-function kiwiHealthProbe(RedisStorage $storage): array
+function kiwiHealthProbe(StorageInterface&AtomicDeleteIfPendingInterface $storage): array
 {
     $now = time();
     $salt = base64_encode(random_bytes(16));
