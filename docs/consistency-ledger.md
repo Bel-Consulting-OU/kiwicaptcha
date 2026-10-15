@@ -74,8 +74,8 @@ so drift fails before a reader can be misled.
 | change.md claim | Where it is enforced | Keeping check |
 | --- | --- | --- |
 | Byte-identical cross-language cores on a shared corpus (Part 2) | The canonical framing: `packages/kiwicaptcha-php/src/Issuer.php:14-21` (the `v4|...` canonical string, the MAC tail); the same framing re-derived by every SDK | Fixture-hash pair (rust example vs php tool, compared in CI); D3.12: all seven conformance runners green on `protocol/` corpora plus the node and python direct adversarial drives |
-| Strict framing at the deployment edge (Part 3 enforcement plane) | `deploy/app/router.php:96-130` (the rejection order: query, canonical length, encoding, type, bounded read, duplicate keys, depth) | D3.12 parser legs assert each rejection code through the real endpoint; the proxy-chain and dual-read legs prove no desync introduces a second interpretation |
-| Issuance budgets hold | The per-IP fixed-window limiter with the atomic INCR plus EXPIRE script and the epoch union (`deploy/app/router.php:493-545`, fail-closed on limiter loss) | D3.1 cap leg: budget 30, burst 40, exactly 30 issued and 10 refused with 429 |
+| Strict framing at the deployment edge (Part 3 enforcement plane) | `deploy/app/framing.php:63-204` (the rejection order: query, canonical length, encoding, type, bounded read, duplicate keys, depth; the one implementation the reference router and the red-team storage matrix both serve) | D3.12 parser legs assert each rejection code through the real endpoint; the proxy-chain and dual-read legs prove no desync introduces a second interpretation |
+| Issuance budgets hold | The per-IP fixed-window limiter with the atomic INCR plus EXPIRE script and the epoch union (`deploy/app/router.php:77-159`, fail-closed on limiter loss) | D3.1 cap leg: budget 30, burst 40, exactly 30 issued and 10 refused with 429 |
 
 ## 8. The red-team program itself
 
