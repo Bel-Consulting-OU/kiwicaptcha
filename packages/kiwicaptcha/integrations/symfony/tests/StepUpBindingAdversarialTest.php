@@ -179,8 +179,8 @@ final class StepUpBindingAdversarialTest extends TestCase
 
     /**
      * An account switch inside one session never completes a login demand:
-     * the demand was minted for principal PRINCIPAL_A, and a challenge of principal
-     * PRINCIPAL_B in the same session answers another account.
+     * the demand was minted for the first principal, and a challenge of the
+     * second principal in the same session answers another account.
      */
     public function testAnAccountSwitchInsideOneSessionCompletesNothing(): void
     {
