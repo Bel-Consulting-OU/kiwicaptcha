@@ -244,11 +244,11 @@ final class StepUpOperationResolverTest extends TestCase
 
             public function getCacheDir(): string
             {
-                // The value is MEMOIZED: the framework derives both the build
-                // directory and the container cache path from this call, so a
-                // fresh value per call would make the two diverge and the
-                // container lock would be opened in a directory that was never
-                // created.
+                // The value is memoized, because the framework derives both
+                // the build directory and the container cache path from this
+                // one call. A fresh value per call would make the two
+                // diverge, and the container lock would then be opened in a
+                // directory that was never created.
                 return $this->freshCacheDir ??= parent::getCacheDir().'-'.bin2hex(random_bytes(6));
             }
 

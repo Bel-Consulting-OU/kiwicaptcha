@@ -49,12 +49,12 @@ final class StepUpCustomOnlyKernelTest extends TestCase
             {
                 // A unique cache directory per kernel instance, so a stale
                 // compiled container from an earlier run can never answer the
-                // assertions. The value is MEMOIZED: the framework derives both
-                // the build directory and the container cache path from this
-                // call, and a fresh value per call would make the two diverge,
-                // so the container lock would be opened in a directory that was
-                // never created (a PHP warning, and a hard failure under
-                // failOnWarning).
+                // assertions. The value is memoized, because the framework
+                // derives both the build directory and the container cache
+                // path from this one call. A fresh value per call would make
+                // the two diverge, and the container lock would then be
+                // opened in a directory that was never created. That is a PHP
+                // warning, and the suite turns warnings into a hard failure.
                 return $this->freshCacheDir ??= parent::getCacheDir().'-custom-only-'.bin2hex(random_bytes(6));
             }
 
