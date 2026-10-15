@@ -38,6 +38,18 @@ interface StepUpChallengeStore
      * Persist a fresh challenge record under its own unguessable id
      * (the challenge id the signed ticket names) and answer that id.
      * The record expires after the given TTL.
+     *
+     * A challenge bound to a live (open) demand is refused here: it can
+     * only enter through {@see self::createAdmittedChallenge()}, which
+     * proves it belongs to the demand and makes it the demand's one
+     * active challenge. The one demand-bound record that is not
+     * admitted is the email ownership grant. It names a demand whose
+     * factor already completed and whose consumption record was minted
+     * after the completion compare-and-set. That shape stays allowed,
+     * because a completed demand admits nothing and the grant
+     * authorizes nothing on its own.
+     *
+     * @throws \RuntimeException when the challenge is bound to a live demand
      */
     public function create(StepUpChallenge $challenge, int $ttlSecs): string;
 
@@ -51,6 +63,14 @@ interface StepUpChallengeStore
      * demandless challenge (the enrollment ceremonies) stores like
      * {@see self::create()}. Refusals throw
      * {@see StepUpDemandAdmissionRefused} with nothing stored.
+     *
+     * Admission also judges the newcomer's identity before it replaces
+     * anything: the challenge must answer the demand's own scope and
+     * carry the demand's session binding when the demand is
+     * session-bound. It must name the demand's principal when the
+     * demand is a login demand, and carry a coherent factor snapshot.
+     * An invalid newcomer leaves the standing active challenge
+     * untouched.
      *
      * @throws StepUpDemandAdmissionRefused when the demand refuses the admission
      */
@@ -159,7 +179,7 @@ interface StepUpChallengeStore
      * on the Redis server time; the reference backend honors $now as
      * its own store clock.
      */
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion;
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion;
 
     /**
      * The factor family the live completion marker records for a
@@ -170,7 +190,7 @@ interface StepUpChallengeStore
      * keyed per (session hash, scope) pair, so the answer names only
      * the completions of exactly this scope.
      */
-    public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string;
+    public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string;
 
     /**
      * The finalizer's acquisition: an atomic compare-and-set of the

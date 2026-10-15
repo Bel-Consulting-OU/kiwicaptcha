@@ -211,13 +211,17 @@ final class EmailOwnershipStepUp
         ?string $decisionId,
         StepUpOperationBindingKind $operationBindingKind = StepUpOperationBindingKind::None,
         string $operationDigest = '',
+        ?string $lineageHash = null,
     ): ?string {
         if (!isset($this->emailCarrierScopes[$scope])) {
             return null;
         }
         $now = $this->now();
         try {
-            $requirement = $this->requiredFactorOf($scope, $sessionHash);
+            // The lineage degrades to the session binding where no started
+            // session exists; the history principal is the demand's own,
+            // absent on this lane, so the anonymous bucket.
+            $requirement = $this->requiredFactorOf($scope, $lineageHash ?? $sessionHash, null);
         } catch (StepUpAssuranceUnavailable $e) {
             // An unavailable assurance state is no basis for a demand:
             // the 403 then carries no demand, and begin() refuses every
@@ -264,15 +268,17 @@ final class EmailOwnershipStepUp
      *
      * @throws StepUpAssuranceUnavailable when the store or the resolver fails
      */
-    private function requiredFactorOf(string $scope, ?string $sessionHash): ?FactorRequirement
+    private function requiredFactorOf(string $scope, ?string $lineageHash, ?string $principalPseudonym): ?FactorRequirement
     {
         if ($this->factorResolver === null) {
             return null;
         }
         $completed = null;
-        if ($sessionHash !== null && $sessionHash !== '') {
+        // A null principal is the anonymous bucket, a legitimate history
+        // identity for the lanes whose demand carries no principal.
+        if ($lineageHash !== null && $lineageHash !== '') {
             try {
-                $completed = $this->store->completedFactorOf($sessionHash, $scope, $this->now());
+                $completed = $this->store->completedFactorOf($lineageHash, $principalPseudonym, $scope, $this->now());
             } catch (\Throwable $e) {
                 // An unavailable completion history is not a session
                 // without a prior factor: the mint cannot know what to
@@ -399,9 +405,10 @@ final class EmailOwnershipStepUp
         }
 
         // The send lease: the store's clock owns the send cap, the
-        // resend spacing and the lease liveness. Null means a concurrent
-        // begin holds the slot (or the demand died): a pre-handoff
-        // refusal, so both the reservation and the credit return.
+        // resend spacing and the lease liveness. A null claim is a
+        // pre-handoff refusal, so both the reservation and the credit
+        // return; the four causes the store folds into that null are
+        // told apart below for the refusal copy.
         $lease = null;
         try {
             $lease = $this->store->claimDemandSendLease($demand->id, $this->resendAfterSecs, self::SEND_LEASE_SECS);
@@ -414,7 +421,7 @@ final class EmailOwnershipStepUp
                 return self::json(['error' => 'step_up_resend_wait', 'message' => 'The resend opens shortly; wait for the stated interval.'], Response::HTTP_TOO_MANY_REQUESTS, ['Retry-After' => (string) max(1, $this->resendAfterSecs)]);
             }
 
-            return self::json(['error' => 'step_up_not_demanded', 'message' => 'No step-up demand stands for this browser; solve the challenge that was refused.'], Response::HTTP_FORBIDDEN);
+            return $this->sendLeaseRefusal($demand, $now);
         }
         $claimed = $lease->demand;
 
@@ -442,14 +449,16 @@ final class EmailOwnershipStepUp
         try {
             $this->store->createAdmittedChallenge($challenge, $this->ttlSecs);
         } catch (StepUpDemandAdmissionRefused) {
-            // The demand already holds a live challenge (or is spent):
-            // nothing was stored, the reservation and the send credit
-            // both return, and the begin answers the retryable
-            // active-challenge refusal.
+            // The demand can no longer admit a challenge: a fresh begin
+            // replaces any standing challenge in the same atomic move,
+            // so this refusal means the demand was already answered,
+            // superseded, or expired. Nothing was stored, the
+            // reservation and the send credit both return, and the
+            // begin tells the browser to request a fresh step-up.
             $this->releaseQuota($delivery->reservationId());
             $this->settleLease(new StepUpDemandSendSettlement($claimed->id, $lease->leaseUntilMs, $lease->claimAt, $lease->priorSends, $lease->priorLastSentAt, false));
 
-            return self::json(['error' => 'step_up_challenge_active', 'message' => 'A verification challenge is already in progress; complete it or wait for it to expire.'], Response::HTTP_CONFLICT);
+            return self::json(['error' => 'step_up_challenge_active', 'message' => 'The step-up demand is no longer open, so no verification challenge can be admitted; request a fresh step-up.'], Response::HTTP_CONFLICT);
         } catch (\Throwable) {
             // Pre-handoff refusal: the reservation and the send credit
             // both return, fail closed on the record.
@@ -493,6 +502,59 @@ final class EmailOwnershipStepUp
             'demand' => $claimed->id,
             'client_secret' => $challenge->issuedClientSecret(),
         ], static fn ($v): bool => $v !== null), Response::HTTP_OK);
+    }
+
+    /**
+     * The answer for a send-lease claim the store refused, truthful to
+     * the cause the browser can act on. The refusal itself already
+     * stands — nothing was delivered — and the read taken here only
+     * picks the refusal copy and its retry hint, never a security
+     * decision: the request is refused whichever way the read turns
+     * out. The store folds four causes into the one null. A demand
+     * that is absent, expired, no longer open or superseded answers
+     * the standing 403. A lease another request still holds answers
+     * the retryable conflict: the demand is healthy, and the answer
+     * says another request is already sending its code rather than
+     * telling the browser no demand stands. An exhausted send cap is
+     * the demand's own rate limit, answered exactly like the pre-claim
+     * cap check with the demand's remaining lifetime. A resend still
+     * inside its spacing (another worker delivered just as this
+     * request read the record) answers the resend wait. A failed read,
+     * or a record this read cannot positively place, falls through to
+     * the standing 403: the copy fails closed, never claiming a
+     * healthy demand on a read that proves nothing.
+     */
+    private function sendLeaseRefusal(StepUpDemand $demand, int $now): Response
+    {
+        try {
+            $live = $this->store->readDemand($demand->id);
+        } catch (\Throwable) {
+            $live = null;
+        }
+        if ($live !== null && !$live->expired($now) && $live->state->isOpen() && !$live->superseded()) {
+            $nowMs = $now * 1000;
+            $leaseUntilMs = $live->leaseUntilMs ?? 0;
+            if ($leaseUntilMs > $nowMs) {
+                // Another request holds the send slot right now (a
+                // concurrent begin, or a double-submitted one): the
+                // demand is perfectly healthy, and the honest answer is
+                // the retryable conflict, with the record's own lease
+                // deadline as the retry hint.
+                return self::json(
+                    ['error' => 'step_up_send_in_progress', 'message' => 'Another request is already sending a code for this step-up demand; retry in a moment.'],
+                    Response::HTTP_CONFLICT,
+                    ['Retry-After' => (string) max(1, (int) ceil(($leaseUntilMs - $nowMs) / 1000))],
+                );
+            }
+            if (!$live->canSend()) {
+                return self::json(['error' => 'step_up_rate_limited', 'message' => 'This demand was fully used; request a fresh challenge.'], Response::HTTP_TOO_MANY_REQUESTS, ['Retry-After' => (string) max(1, $live->expiresAt - $now)]);
+            }
+            if ($live->nextSendIsResend() && $live->lastSentAt !== null && ($now - $live->lastSentAt) < $this->resendAfterSecs) {
+                return self::json(['error' => 'step_up_resend_wait', 'message' => 'The resend opens shortly; wait for the stated interval.'], Response::HTTP_TOO_MANY_REQUESTS, ['Retry-After' => (string) max(1, $this->resendAfterSecs - ($now - $live->lastSentAt))]);
+            }
+        }
+
+        return self::json(['error' => 'step_up_not_demanded', 'message' => 'No step-up demand stands for this browser; solve the challenge that was refused.'], Response::HTTP_FORBIDDEN);
     }
 
     /**
@@ -566,6 +628,7 @@ final class EmailOwnershipStepUp
             $now,
             $challenge->sessionHash,
             $challenge->scope,
+            $request !== null ? (StepUpSessionBinding::lineageHash($request) ?? $challenge->sessionHash) : null,
         );
         if ($completion === null) {
             return self::json(['status' => 'failed', 'failure_code' => StepUpResult::FAIL_UNKNOWN_CHALLENGE], Response::HTTP_UNPROCESSABLE_ENTITY);

@@ -46,6 +46,31 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
 
     public function create(StepUpChallenge $challenge, int $ttlSecs): string
     {
+        // A demand-bound challenge may only enter the store through
+        // admission, which proves it belongs to the demand and makes it
+        // the demand's one active challenge. A plain create of a
+        // challenge bound to an open demand would bypass that proof: it
+        // could never become the active challenge, and a custom handler
+        // reaching for it would strand the flow. The single legitimate
+        // demand-bound record that is not admitted is the email
+        // ownership grant, which names an already-settled demand; that
+        // shape stays allowed.
+        if ($challenge->demandId !== null) {
+            $boundDemand = $this->liveDemand($challenge->demandId);
+            if ($boundDemand === null || $boundDemand->state->isOpen()) {
+                throw new \RuntimeException('A demand-bound challenge enters the store through createAdmittedChallenge, never a plain create');
+            }
+        }
+        return $this->storeRecord($challenge, $ttlSecs);
+    }
+
+    /**
+     * The raw record write, shared by the two doors: `create()` after
+     * its gate, `createAdmittedChallenge()` after admission proved the
+     * challenge belongs to its demand. Nothing else writes a challenge.
+     */
+    private function storeRecord(StepUpChallenge $challenge, int $ttlSecs): string
+    {
         $this->challenges[$challenge->id] = [
             'record' => StepUpChallenge::fromJson((string) json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES)),
             'expiresAt' => ($this->now()) + max(1, $ttlSecs),
@@ -70,6 +95,41 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if ($demand->expired($now)) {
             throw new StepUpDemandAdmissionRefused('the demand has expired');
         }
+        // The admission identity gate, and it runs ahead of the replace
+        // below touches anything: a newcomer that does not belong to
+        // this demand must leave the standing active challenge exactly
+        // as it found it. Admission used to judge only the demand's
+        // liveness, so a crossed or buggy challenge could evict a
+        // perfectly good active challenge and be refused only at
+        // completion, stranding the browser. These are the same identity
+        // rules the completion enforces, applied at the door: the
+        // challenge answers this demand's scope, a session-bound demand
+        // admits only a challenge of that same session, a login demand
+        // admits only a challenge of the principal the demand was minted
+        // for, and the factor snapshot the completion judges must be
+        // present and coherent. The demand id itself needs no check
+        // here: the record above was read by it.
+        $snapshot = $challenge->factor;
+        if ($challenge->scope !== $demand->scope
+            || ($demand->sessionHash !== null && $demand->sessionHash !== ''
+                && $challenge->sessionHash !== $demand->sessionHash)
+            || ($demand->operationBindingKind === StepUpOperationBindingKind::Login
+                && $demand->principalPseudonym !== null && $demand->principalPseudonym !== ''
+                && $challenge->principalSubject() !== $demand->principalPseudonym)
+            || $snapshot === null || $snapshot->family === '' || $snapshot->factorId === '') {
+            throw new StepUpDemandAdmissionRefused('the challenge does not belong to the demand it claims');
+        }
+        // A newcomer that is already dead must not take the slot either.
+        // Admission that judged only the demand's liveness would admit a
+        // record whose own window has closed (a skewed or replayed begin
+        // mints one), evict the standing challenge for it, and hand the
+        // demand an active challenge nothing can ever complete: the
+        // browser would be stranded with a valid code and no door. The
+        // record is refused the way the store refuses an expired demand,
+        // and the standing challenge stays exactly where it was.
+        if ($challenge->expiresAt <= $now) {
+            throw new StepUpDemandAdmissionRefused('the challenge arrived with its own window already closed');
+        }
         // The admitted challenge never outlives its demand, and the
         // clamp stays in the mint-lane clock domain (the challenge's own
         // created_at plus its TTL, against the demand's authorization
@@ -92,7 +152,7 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if ($replaced !== null) {
             unset($this->challenges[$activeId]);
         }
-        $id = $this->create($challenge, max(1, $challengeExpiresAt - $now));
+        $id = $this->storeRecord($challenge, max(1, $challengeExpiresAt - $now));
         $admitted = $demand->admitFactorChallenge($id, $challengeExpiresAt, $now);
         if ($admitted === null) {
             unset($this->challenges[$id]);
@@ -197,7 +257,7 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         return $completed;
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion
     {
         // The same gate order the Redis script runs: presence, decode
         // (the records round-trip through the strict wire decode at
@@ -249,6 +309,14 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         if (!$bound) {
             return null;
         }
+        // The active-challenge authority, the same gate the Redis script
+        // runs: the demand's own `active_challenge_id` names the one
+        // challenge that may complete it. A demand-bound challenge that
+        // never became the demand's active challenge, or one the
+        // replace semantics already superseded, completes nothing.
+        if ($demand->activeChallengeId === null || $demand->activeChallengeId !== $challengeId) {
+            return null;
+        }
         // The factor requirement gate, the script's own rule: the
         // demand's stored requirement is judged against the factor
         // identity the stored challenge record carries (its server-held
@@ -292,33 +360,45 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
                 StepUpChallengeKind::Totp => 'totp',
                 StepUpChallengeKind::WebAuthn => 'webauthn',
             };
-        if ($sessionHash !== null && $challenge->sessionHash !== null && $challenge->sessionHash === $sessionHash
+        // The history write. Its identity is (lineage, principal, scope),
+        // never the bare PHP session: the lineage survives the session-id
+        // rotation a successful login performs, so the factor a browser
+        // already proved is still visible to its next demand, and folding
+        // the principal in stops one account's completion from becoming
+        // another account's history when a session switches identity.
+        // Every hint is checked against the stored record, so a caller
+        // can never file a completion under another subject's key.
+        if ($lineageHash !== null && preg_match('/^[0-9a-f]{64}$/D', $lineageHash) === 1
             && $scope !== null && $challenge->scope === $scope
             && \is_string($family) && $family !== '') {
-            // The monotonic-rank write: a completion never moves the
-            // (session, scope) history backwards. The entry carries the
-            // completing proof's own ladder rank and its own demand's
-            // expiry, and a weaker (or equally ranked stale) completion
-            // never overwrites a stronger one — the weaker demand's TTL
-            // can never extend the stronger proof's lifetime, and the
-            // history can never regress from webauthn to email_otp
-            // however the completions interleave.
             $rank = FactorRequirement::rankOf($family);
-            $key = $this->completedIndexKey($sessionHash, $scope);
+            $key = $this->completedIndexKey($lineageHash, $demand->principalPseudonym, $scope);
             $prior = $this->completedIndex[$key] ?? null;
+            $priorRank = 0;
+            $priorExpiry = 0;
             if ($prior !== null) {
                 $priorParts = explode('|', (string) $prior['value']);
-                // A legacy three-part entry (before the rank rode the
-                // value) reads as rank 0: any ladder completion moves it
-                // forward, never backward.
-                $priorRank = \count($priorParts) === 4 ? (int) $priorParts[2] : 0;
-                if ($rank < $priorRank) {
-                    return StepUpFactorCompletion::fromRecords($challenge, $completed);
-                }
+                // A legacy entry (before the rank and the completion
+                // stamp rode the value) reads as rank 0 with no recorded
+                // expiry: any ladder completion moves it forward.
+                $priorRank = \count($priorParts) >= 4 ? (int) $priorParts[2] : 0;
+                $priorExpiry = \count($priorParts) >= 4 ? (int) $priorParts[3] : 0;
+            }
+            // The monotonic rule, stated once: a strictly stronger
+            // completion replaces the entry. An equal-rank completion
+            // keeps the later authorization window, so a same-rank
+            // demand completing late can never shorten the history it
+            // shares. A weaker completion writes nothing at all.
+            if ($rank > $priorRank) {
+                $window = $demand->expiresAt;
+            } elseif ($rank === $priorRank && $priorRank > 0) {
+                $window = max($priorExpiry, $demand->expiresAt);
+            } else {
+                return StepUpFactorCompletion::fromRecords($challenge, $completed);
             }
             $this->completedIndex[$key] = [
-                'value' => $challenge->scope.'|'.$family.'|'.$rank.'|'.$demand->expiresAt,
-                'expiresAt' => $demand->expiresAt,
+                'value' => $challenge->scope.'|'.$family.'|'.$rank.'|'.$window.'|'.$now,
+                'expiresAt' => $window,
             ];
         }
 
@@ -328,27 +408,30 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
     /** @var array<string, array{value: string, expiresAt: int}> (session hash, scope) key -> escalation marker */
     private array $completedIndex = [];
 
-    public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
+    public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string
     {
-        if (preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
+        if (preg_match('/^[0-9a-f]{64}$/D', $lineageHash) !== 1) {
             return null;
         }
-        $entry = $this->completedIndex[$this->completedIndexKey($sessionHash, $scope)] ?? null;
+        $key = $this->completedIndexKey($lineageHash, $principalPseudonym, $scope);
+        $entry = $this->completedIndex[$key] ?? null;
         if ($entry === null || $now >= $entry['expiresAt']) {
-            unset($this->completedIndex[$this->completedIndexKey($sessionHash, $scope)]);
+            unset($this->completedIndex[$key]);
 
             return null;
         }
         $parts = explode('|', $entry['value']);
-        // The rank rides the value (scope|family|rank|expires); a legacy
-        // three-part entry predating it stays readable for its own TTL.
-        if (\count($parts) !== 4 && \count($parts) !== 3) {
+        // The rank and the completion stamp ride the value
+        // (scope|family|rank|window|completed); a legacy three- or
+        // four-part entry predating the stamp stays readable for its
+        // own TTL.
+        if (\count($parts) !== 5 && \count($parts) !== 4 && \count($parts) !== 3) {
             return null;
         }
         if ($parts[0] !== $scope || !\is_string($parts[1])) {
             return null;
         }
-        if (\count($parts) === 4 && preg_match('/^[0-9]+$/', $parts[2]) !== 1) {
+        if (\count($parts) >= 4 && preg_match('/^[0-9]+$/', $parts[2]) !== 1) {
             return null;
         }
 
@@ -356,19 +439,21 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
     }
 
     /**
-     * The escalation marker key of one (session hash, scope) pair: the
-     * same derivation the Redis store applies to its own key family.
-     * The scope rides as its SHA-256 digest instead of its raw
-     * spelling, so the key stays bounded whatever the scope contains,
-     * and the session hash keeps its own 64-hex validation. An absent
-     * or malformed scope derives the all-zero placeholder, which the
-     * write gate never produces.
+     * The escalation marker key of one (lineage, principal, scope)
+     * identity: the same derivation the Redis store applies to its own
+     * key family. The principal and the scope ride as SHA-256 digests
+     * instead of their raw spellings, so the key stays bounded whatever
+     * they contain, and the lineage keeps its own 64-hex validation. An
+     * absent or malformed scope or principal derives the all-zero
+     * placeholder, which the write gate never produces.
      */
-    private function completedIndexKey(string $sessionHash, ?string $scope): string
+    private function completedIndexKey(string $lineageHash, ?string $principalPseudonym, ?string $scope): string
     {
-        $valid = $scope !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) === 1;
+        $validScope = $scope !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) === 1;
+        $validPrincipal = $principalPseudonym !== null && $principalPseudonym !== '';
 
-        return $sessionHash.':'.($valid ? hash('sha256', $scope) : str_repeat('0', 64));
+        return $lineageHash.':'.($validPrincipal ? hash('sha256', $principalPseudonym) : str_repeat('0', 64))
+            .':'.($validScope ? hash('sha256', $scope) : str_repeat('0', 64));
     }
 
     public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand

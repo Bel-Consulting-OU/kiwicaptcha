@@ -34,9 +34,11 @@ use PHPUnit\Framework\TestCase;
  *
  * (A) Valid records round-trip byte-identically. (B) No mutation of a
  * valid record ever throws an uncaught error, and none is silently
- * accepted into an incoherent record. (C) The length-prefixed
- * canonicalization is injective, so no two distinct field maps can
- * forge the same digest.
+ * accepted into an incoherent record. The opaque string fields of a
+ * challenge (the target pseudonym, the return path and the code hash)
+ * refuse every wrong raw value outright: a field dropped to null would
+ * shed its binding. (C) The length-prefixed canonicalization is
+ * injective, so no two distinct field maps can forge the same digest.
  */
 final class StepUpWireFuzzTest extends TestCase
 {
@@ -377,6 +379,233 @@ final class StepUpWireFuzzTest extends TestCase
         return $out;
     }
 
+    /**
+     * The raw values that are never a field's own type: an object, an
+     * array, a boolean, a float, an integer, the empty string, a
+     * stringly-typed number and explicit null. The generic mutation
+     * battery replaces each field with each of these in turn, and the
+     * strict-field battery reuses the same table so the two can never
+     * drift apart.
+     *
+     * @return array<string, mixed>
+     */
+    private function wrongTypedValues(): array
+    {
+        return [
+            'str' => '0',
+            'empty' => '',
+            'int' => 0,
+            'null' => null,
+            'array' => [],
+            'bool' => true,
+            'float' => 1.5,
+            'object' => new \stdClass(),
+        ];
+    }
+
+    // ------------------------------------------------------------------
+    // B5. The opaque challenge fields: every wrong raw type answers the
+    //     typed refusal, never a silently dropped binding.
+    // ------------------------------------------------------------------
+
+    /**
+     * The three fields the record carries as opaque strings are the
+     * target pseudonym, the return path and the stored code hash. They
+     * decode strictly: absent and explicit null are one state, the
+     * field rides absent. Every other raw value refuses the whole
+     * record. A value dropped to null would shed the proof requirement
+     * (code hash), the binding to the target its completion clears
+     * (target pseudonym) or the completion redirect (return path).
+     *
+     * The wrong-typed probes are the mutation battery's own table, and
+     * each field also gets strings that carry the right type but the
+     * wrong shape, so a shape regression is caught alongside a type
+     * regression.
+     */
+    public function testTheOpaqueChallengeFieldsRefuseEveryWrongRawValue(): void
+    {
+        $base = $this->challengeWireCarryingTheOpaqueFields();
+        $shapeProbes = [
+            'target' => [
+                'short-hex' => str_repeat('a', 63),
+                'long-hex' => str_repeat('a', 65),
+                'principal-shape' => str_repeat('b', 32),
+                'uppercase-hex' => str_repeat('A', 64),
+                'raw-identifier' => 'user@example.com',
+            ],
+            'return_path' => [
+                'foreign-origin' => 'https://evil.example/steal',
+                'protocol-relative' => '//evil.example/steal',
+                'dot-segment' => '/a/../b',
+                'query' => '/a?x=1',
+                'too-long' => '/'.str_repeat('a', 512),
+            ],
+            'code_hash' => [
+                'short-hex' => str_repeat('a', 63),
+                'long-hex' => str_repeat('a', 65),
+                'uppercase-hex' => str_repeat('A', 64),
+                'short-digits' => str_repeat('1', 16),
+            ],
+        ];
+
+        foreach (['target', 'return_path', 'code_hash'] as $field) {
+            foreach ($this->wrongTypedValues() as $name => $value) {
+                if ($name === 'null') {
+                    continue; // the legitimate absent state, asserted on its own below
+                }
+                $mutated = $base;
+                $mutated[$field] = $value;
+                $this->assertChallengeFieldRefused($mutated, $field, 'type:'.$field.'='.$name, $value);
+            }
+            foreach ($shapeProbes[$field] as $name => $value) {
+                $mutated = $base;
+                $mutated[$field] = $value;
+                $this->assertChallengeFieldRefused($mutated, $field, 'shape:'.$field.'='.$name, $value);
+            }
+        }
+    }
+
+    /**
+     * The two legitimate states of an opaque field are one. A key that
+     * rides absent and a key that rides as explicit null both decode,
+     * with the field absent from the decoded record. That is the
+     * pre-field wire shape of the drain period. The canonical
+     * re-encoding then carries the key with an explicit null, which
+     * decodes again.
+     */
+    public function testTheOpaqueChallengeFieldsRideAbsentWhenUnsetOrNull(): void
+    {
+        $base = $this->totpChallengeWire();
+        $accessors = [
+            'target' => static fn (StepUpChallenge $challenge): ?string => $challenge->targetPseudonym,
+            'return_path' => static fn (StepUpChallenge $challenge): ?string => $challenge->returnPath,
+            'code_hash' => static fn (StepUpChallenge $challenge): ?string => $challenge->codeHash,
+        ];
+
+        foreach ($accessors as $field => $read) {
+            $absent = $base;
+            unset($absent[$field]);
+            $explicitNull = $base;
+            $explicitNull[$field] = null;
+
+            foreach (['absent' => $absent, 'null' => $explicitNull] as $state => $wire) {
+                try {
+                    $decoded = StepUpChallenge::fromArray($wire);
+                } catch (\Throwable $e) {
+                    self::fail(sprintf(
+                        'a %s `%s` must decode (the legitimate pre-field wire shape), got %s: %s',
+                        $state,
+                        $field,
+                        $e::class,
+                        $e->getMessage(),
+                    ));
+                }
+                self::assertNull(
+                    $read($decoded),
+                    sprintf('a %s `%s` must decode as the field riding absent', $state, $field),
+                );
+                $reencoded = $decoded->toArray();
+                self::assertArrayHasKey($field, $reencoded, sprintf('the canonical wire form must carry a %s key', $field));
+                self::assertNull($reencoded[$field], sprintf('the canonical wire form must spell the absent %s as null', $field));
+                self::assertNull(
+                    $read(StepUpChallenge::fromArray($reencoded)),
+                    sprintf('the canonical re-encoding of an absent %s must decode again', $field),
+                );
+            }
+        }
+    }
+
+    /**
+     * One mutation of the challenge wire that must answer the typed
+     * refusal. A silently accepted value would drop the field's
+     * binding, so the failure names the field and the offending value.
+     *
+     * @param array<string, mixed> $mutated
+     */
+    private function assertChallengeFieldRefused(array $mutated, string $field, string $label, mixed $value): void
+    {
+        $decoded = null;
+        try {
+            $decoded = StepUpChallenge::fromArray($mutated);
+        } catch (MalformedStepUpChallengeException $e) {
+            self::assertStringContainsString(
+                $field,
+                $e->getMessage(),
+                sprintf('the refusal of mutation [%s] must name the field %s', $label, $field),
+            );
+
+            return;
+        } catch (\Throwable $e) {
+            self::fail(sprintf(
+                'the mutation [%s] must answer MalformedStepUpChallengeException, got %s: %s :: input=%s',
+                $label,
+                $e::class,
+                $e->getMessage(),
+                var_export($mutated, true),
+            ));
+        }
+        self::fail(sprintf(
+            'the challenge field `%s` silently accepted the raw value %s (%s) for mutation [%s]: the decoded field reads %s :: input=%s',
+            $field,
+            var_export($value, true),
+            get_debug_type($value),
+            $label,
+            var_export($decoded === null ? null : ($decoded->toArray()[$field] ?? null), true),
+            var_export($mutated, true),
+        ));
+    }
+
+    /**
+     * A deterministic EmailOtp wire record that carries all three
+     * opaque fields: a target pseudonym, an absolute same-site return
+     * path and a code hash.
+     *
+     * @return array<string, mixed>
+     */
+    private function challengeWireCarryingTheOpaqueFields(): array
+    {
+        return StepUpChallenge::begin(
+            'AABBCCDDEEFFGGHH0011',
+            StepUpChallengeKind::EmailOtp,
+            str_repeat('a', 32),
+            str_repeat('b', 64),
+            'login',
+            '/dashboard',
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            str_repeat('c', 64),
+            null,
+            'session-opaque-0000000000000000001',
+        )->toArray();
+    }
+
+    /**
+     * A deterministic totp wire record: the kind that carries no code
+     * hash at all, so all three opaque fields ride absent.
+     *
+     * @return array<string, mixed>
+     */
+    private function totpChallengeWire(): array
+    {
+        return StepUpChallenge::begin(
+            'AABBCCDDEEFFGGHH0022',
+            StepUpChallengeKind::Totp,
+            str_repeat('a', 32),
+            null,
+            'login',
+            null,
+            'post_solve_step_up_required',
+            1700000000,
+            300,
+            5,
+            null,
+            null,
+            'session-opaque-0000000000000000002',
+        )->toArray();
+    }
+
     private function assertDemandSchemaStable(StepUpDemand $record, string $label, array $mutated): void
     {
         $wire = $record->toArray();
@@ -440,16 +669,8 @@ final class StepUpWireFuzzTest extends TestCase
         }
 
         // Replace each value with a wrong type.
-        $wrongTypes = [
-            'str' => '0',
-            'int' => 0,
-            'null' => null,
-            'array' => [],
-            'bool' => true,
-            'float' => 1.5,
-        ];
         foreach (array_keys($base) as $key) {
-            foreach ($wrongTypes as $name => $value) {
+            foreach ($this->wrongTypedValues() as $name => $value) {
                 $m = $base;
                 $m[$key] = $value;
                 $out['type:'.$key.'='.$name] = $m;
@@ -654,8 +875,10 @@ final class StepUpWireFuzzTest extends TestCase
             null,
             random_int(0, 1) === 1,
             null,
-            random_int(0, 1) === 1 ? $this->randomFactor() : null,
-            random_int(0, 1) === 1 ? $this->randomPseudonym() : null,
+            null,
+            $kind === StepUpOperationBindingKind::Login
+                ? 'user-42'
+                : (random_int(0, 1) === 1 ? $this->randomPseudonym() : null),
         );
     }
 

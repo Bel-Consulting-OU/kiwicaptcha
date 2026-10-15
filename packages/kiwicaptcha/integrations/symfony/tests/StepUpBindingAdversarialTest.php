@@ -71,8 +71,19 @@ final class StepUpBindingAdversarialTest extends TestCase
     /**
      * A challenge of another session never completes a session-bound
      * demand, even when the presented binding reproduces the challenge
-     * itself: the proof earned in session B belongs to another browser
-     * than the demand names.
+     * itself: the proof earned in one browser belongs to another
+     * browser than the demand names.
+     *
+     * The crossed state can no longer be built by admitting a crossed
+     * challenge: the admission gate now judges the newcomer's identity
+     * before it replaces anything, so a session-B challenge never
+     * enters a session-A demand. The honest construction runs the
+     * other way round: a genuine session-A challenge is admitted while
+     * the demand still names session A. The demand record is then
+     * re-saved in the crossed shape through the public createDemand
+     * door (its id freed by the demand consumption), with the admitted
+     * challenge stamped as the active one. The completion must still
+     * answer nothing.
      */
     public function testAChallengeOfAnotherSessionCompletesNothing(): void
     {
@@ -103,31 +114,60 @@ final class StepUpBindingAdversarialTest extends TestCase
             5,
             hash('sha256', 'code'),
             null,
-            'sess-b',
+            'sess-a',
             false,
             false,
             null,
             $demand->id,
         );
-        $this->store->create($challenge, 600);
+        $this->store->createAdmittedChallenge($challenge, 600);
 
-        // The presented binding matches the challenge (session B), yet
-        // the demand belongs to session A: the completion refuses.
+        // The demand record is re-saved naming session B. The standing
+        // challenge is a genuine session-A proof, and the crossed pair
+        // is exactly the shape the completion gate must refuse. The
+        // active-challenge stamp rides the re-saved record, so the
+        // session crossing is the only gate left that can refuse the
+        // completion below.
+        self::assertNotNull($this->store->consumeDemand($demand->id), 'the demand id is freed for the crossed re-save');
+        $crossed = StepUpDemand::mint(
+            $demand->id,
+            self::SCOPE,
+            $sessionB,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+        )->admitFactorChallenge($challenge->id, $challenge->expiresAt, $this->now);
+        self::assertNotNull($crossed, 'the crossed demand record is constructible');
+        $this->store->createDemand($crossed, 600);
+
+        // The presented binding matches the challenge (session A), yet
+        // the demand names session B: the completion refuses.
         $completed = $this->store->completeFactor(
             $challenge->id,
             $demand->id,
-            $sessionB,
+            $sessionA,
             $this->now,
-            $sessionB,
+            $sessionA,
             self::SCOPE,
-        );
+            hash('sha256', 'lineage-test')
+    );
 
         self::assertNull($completed, 'a crossed session must complete nothing');
+        self::assertNotNull($this->store->read($challenge->id), 'the crossed-session refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($demand->id)?->state->isOpen(), 'the crossed demand stays open');
     }
 
     /**
-     * A challenge of another scope never completes a demand, even in the
-     * same session: the scope is part of the demand identity.
+     * A challenge of another scope never completes a demand, even in
+     * the same session: the scope is part of the demand identity.
+     *
+     * The crossed pair is built the same way as the crossed session
+     * above: the admission gate refuses a crossed newcomer outright,
+     * so a genuine challenge of the demand's own scope is admitted
+     * first. The demand record is then re-saved under the other scope
+     * through the public createDemand door.
      */
     public function testAChallengeOfAnotherScopeCompletesNothing(): void
     {
@@ -149,7 +189,7 @@ final class StepUpBindingAdversarialTest extends TestCase
             StepUpChallengeKind::EmailOtp,
             self::PRINCIPAL_A,
             null,
-            'checkout',
+            'login',
             null,
             'step_up',
             $this->now,
@@ -163,7 +203,24 @@ final class StepUpBindingAdversarialTest extends TestCase
             null,
             $demand->id,
         );
-        $this->store->create($challenge, 600);
+        $this->store->createAdmittedChallenge($challenge, 600);
+
+        // The demand record is re-saved under the checkout scope: the
+        // standing challenge is a genuine login-scope proof, and the
+        // active-challenge stamp rides the re-saved record.
+        self::assertNotNull($this->store->consumeDemand($demand->id), 'the demand id is freed for the crossed re-save');
+        $crossed = StepUpDemand::mint(
+            $demand->id,
+            'checkout',
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+        )->admitFactorChallenge($challenge->id, $challenge->expiresAt, $this->now);
+        self::assertNotNull($crossed, 'the crossed demand record is constructible');
+        $this->store->createDemand($crossed, 600);
 
         $completed = $this->store->completeFactor(
             $challenge->id,
@@ -171,16 +228,25 @@ final class StepUpBindingAdversarialTest extends TestCase
             $session,
             $this->now,
             $session,
-            'checkout',
-        );
+            'login',
+            hash('sha256', 'lineage-test')
+    );
 
         self::assertNull($completed, 'a crossed scope must complete nothing');
+        self::assertNotNull($this->store->read($challenge->id), 'the crossed-scope refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($demand->id)?->state->isOpen(), 'the crossed demand stays open');
     }
 
     /**
      * An account switch inside one session never completes a login demand:
      * the demand was minted for the first principal, and a challenge of the
      * second principal in the same session answers another account.
+     *
+     * The admission gate now refuses the crossed subject outright, so
+     * the crossed pair is built from the honest side: a challenge of
+     * the demand's own principal is admitted first. The demand record
+     * is then re-saved for the second principal through the public
+     * createDemand door, and the completion must still answer nothing.
      */
     public function testAnAccountSwitchInsideOneSessionCompletesNothing(): void
     {
@@ -207,7 +273,7 @@ final class StepUpBindingAdversarialTest extends TestCase
         $challenge = StepUpChallenge::begin(
             StepUpChallenge::mintId(),
             StepUpChallengeKind::EmailOtp,
-            self::PRINCIPAL_B,
+            self::PRINCIPAL_A,
             null,
             'login',
             null,
@@ -223,7 +289,33 @@ final class StepUpBindingAdversarialTest extends TestCase
             null,
             $demand->id,
         );
-        $this->store->create($challenge, 600);
+        $this->store->createAdmittedChallenge($challenge, 600);
+
+        // The demand record is re-saved naming the second principal (a
+        // login record carries its principal by construction). The
+        // standing challenge is a genuine first-principal proof, and
+        // the active-challenge stamp rides the re-saved record, so the
+        // subject crossing is the only gate left to refuse on.
+        self::assertNotNull($this->store->consumeDemand($demand->id), 'the demand id is freed for the crossed re-save');
+        $crossed = StepUpDemand::mint(
+            $demand->id,
+            'login',
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::Login,
+            StepUpOperationDigest::login('login', self::PRINCIPAL_B),
+            null,
+            null,
+            false,
+            null,
+            null,
+            self::PRINCIPAL_B,
+        )->admitFactorChallenge($challenge->id, $challenge->expiresAt, $this->now);
+        self::assertNotNull($crossed, 'the crossed demand record is constructible');
+        $this->store->createDemand($crossed, 600);
 
         $completed = $this->store->completeFactor(
             $challenge->id,
@@ -232,9 +324,12 @@ final class StepUpBindingAdversarialTest extends TestCase
             $this->now,
             $session,
             'login',
-        );
+            hash('sha256', 'lineage-test')
+    );
 
         self::assertNull($completed, 'a crossed subject must complete nothing');
+        self::assertNotNull($this->store->read($challenge->id), 'the crossed-subject refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($demand->id)?->state->isOpen(), 'the crossed demand stays open');
     }
 
     /**
@@ -277,7 +372,7 @@ final class StepUpBindingAdversarialTest extends TestCase
             null,
             $webauthnDemand->id,
         );
-        $this->store->create($webauthn, 600);
+        $this->store->createAdmittedChallenge($webauthn, 600);
         $strong = $this->store->completeFactor(
             $webauthn->id,
             $webauthnDemand->id,
@@ -285,9 +380,10 @@ final class StepUpBindingAdversarialTest extends TestCase
             $this->now,
             $session,
             self::SCOPE,
-        );
+            hash('sha256', 'lineage-test')
+    );
         self::assertNotNull($strong, 'the webauthn completion must land');
-        self::assertSame('webauthn', $this->store->completedFactorOf($session, self::SCOPE, $this->now));
+        self::assertSame('webauthn', $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, self::SCOPE, $this->now));
 
         $emailDemand = StepUpDemand::mint(
             StepUpChallenge::mintId(),
@@ -319,7 +415,7 @@ final class StepUpBindingAdversarialTest extends TestCase
             null,
             $emailDemand->id,
         );
-        $this->store->create($email, 600);
+        $this->store->createAdmittedChallenge($email, 600);
         $weak = $this->store->completeFactor(
             $email->id,
             $emailDemand->id,
@@ -327,12 +423,13 @@ final class StepUpBindingAdversarialTest extends TestCase
             $this->now,
             $session,
             self::SCOPE,
-        );
+            hash('sha256', 'lineage-test')
+    );
         self::assertNotNull($weak, 'the email_otp completion must land');
 
         self::assertSame(
             'webauthn',
-            $this->store->completedFactorOf($session, self::SCOPE, $this->now),
+            $this->store->completedFactorOf(hash('sha256', 'lineage-test'), null, self::SCOPE, $this->now),
             'the weaker completion must never regress the history',
         );
     }

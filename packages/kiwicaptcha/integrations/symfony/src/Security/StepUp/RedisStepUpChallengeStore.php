@@ -289,6 +289,12 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         local bound = (type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[3])
           or (type(ch['client_secret_hash']) == 'string' and ch['client_secret_hash'] == ARGV[3])
         if not bound then return {'binding'} end
+        -- The admitted active challenge is the only one that may
+        -- complete: a demand-bound challenge that never became the
+        -- demand's active challenge completes nothing.
+        if type(de['active_challenge_id']) ~= 'string' or de['active_challenge_id'] ~= ch['id'] then
+          return {'spent'}
+        end
         -- The factor identity gate. The judged identity is the stored
         -- challenge's own server-held snapshot, the factor the record
         -- was begun under, never a caller argument. The snapshot must
@@ -341,43 +347,61 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- itself carries, never a caller argument: a completion cannot
         -- poison the future assurance escalation by claiming a stronger
         -- factor than its challenge proves. The index is keyed per
-        -- (session, scope) pair: the key was derived from the hinted
-        -- session hash and scope, and the write lands only when both
-        -- hints equal the stored record's own fields, so one scope's
-        -- history can never overwrite another's.
+        -- (lineage, principal, scope) identity: the key was derived
+        -- from the hinted lineage, the demand's own principal and the
+        -- hinted scope, and the write lands only when the principal
+        -- and scope hints equal the stored record's own fields, so one
+        -- subject's history can never be filed under another's key and
+        -- one scope's history can never overwrite another's.
         --
-        -- The write is monotonic in the ladder rank: the entry carries
-        -- the completing proof's own rank, and a weaker completion never
-        -- overwrites a stronger one — the history can never regress
-        -- from webauthn to email_otp however the completions interleave,
-        -- and a weaker demand's TTL can never extend a stronger proof's
-        -- lifetime (the weaker completion writes nothing at all). A
-        -- legacy three-part entry (before the rank rode the value) reads
-        -- as rank 0: any ladder completion moves it forward.
-        if ARGV[4] ~= '' and ARGV[5] ~= '' and type(ch['session_hash']) == 'string' and ch['session_hash'] == ARGV[4]
+        -- The write is monotonic in the ladder rank: a strictly
+        -- stronger completion replaces the entry; an equal-rank
+        -- completion keeps the LATER authorization window, so a
+        -- same-rank demand completing late can never shorten the
+        -- history it shares; a weaker completion writes nothing at
+        -- all. The entry also carries the completion stamp. A legacy
+        -- three- or four-part entry (before the stamp rode the value)
+        -- reads as rank 0 with no recorded window: any ladder
+        -- completion moves it forward.
+        local demandPrincipal = ''
+        if type(de['principal_pseudonym']) == 'string' then
+          demandPrincipal = de['principal_pseudonym']
+        end
+        if ARGV[4] ~= '' and ARGV[5] ~= '' and ARGV[6] == demandPrincipal
           and type(ch['scope']) == 'string' and ch['scope'] == ARGV[5]
           and type(de['expires_at']) == 'number'
           and type(family) == 'string' and family ~= '' then
           local prior = redis.call('GET', KEYS[3])
           local priorRank = 0
+          local priorWindow = 0
           if type(prior) == 'string' then
             -- The fields are never empty, so the non-empty split yields
-            -- exactly one token per field: four means the ranked shape
-            -- (scope|family|rank|expiry) and the third token is the
-            -- rank; three is the legacy unranked shape and reads as 0.
+            -- exactly one token per field: five means the stamped shape
+            -- (scope|family|rank|window|completed) and the third token
+            -- is the rank with the fourth the window; a shorter legacy
+            -- shape reads as rank 0 with no recorded window.
             local count = 0
             local third = nil
+            local fourth = nil
             for token in string.gmatch(prior, '([^|]+)') do
               count = count + 1
               if count == 3 then third = token end
+              if count == 4 then fourth = token end
             end
-            if count == 4 and third ~= nil and tonumber(third) ~= nil then
+            if count >= 4 and third ~= nil and tonumber(third) ~= nil then
               priorRank = tonumber(third)
+            end
+            if count >= 4 and fourth ~= nil and tonumber(fourth) ~= nil then
+              priorWindow = tonumber(fourth)
             end
           end
           local completedRank = tonumber(rank) or 0
+          local window = math.floor(de['expires_at'])
+          if completedRank == priorRank and priorRank > 0 and priorWindow > window then
+            window = priorWindow
+          end
           if completedRank >= priorRank then
-            redis.call('SET', KEYS[3], ch['scope']..'|'..family..'|'..tostring(completedRank)..'|'..tostring(math.floor(de['expires_at'])), 'EX', ttl)
+            redis.call('SET', KEYS[3], ch['scope']..'|'..family..'|'..tostring(completedRank)..'|'..tostring(window)..'|'..tostring(now), 'EX', math.max(1, window - now))
           end
         end
         return {'ok', craw, cjson.encode(de)}
@@ -415,6 +439,34 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         if type(de['expires_at']) ~= 'number' or de['expires_at'] <= now then return nil end
         local cok, ch = pcall(cjson.decode, ARGV[1])
         if not cok or type(ch) ~= 'table' then return nil end
+        -- The newcomer must belong to this demand BEFORE anything is
+        -- destroyed: admission used to check only the demand's liveness,
+        -- so a crossed or buggy challenge could evict a perfectly good
+        -- active challenge and be refused only at completion. The same
+        -- identity rules the completion enforces are applied here, and
+        -- an invalid newcomer leaves the standing challenge untouched.
+        if type(ch['demand_id']) ~= 'string' or ch['demand_id'] ~= de['id'] then return nil end
+        if type(ch['scope']) ~= 'string' or ch['scope'] ~= de['scope'] then return nil end
+        if type(de['session_hash']) == 'string' and de['session_hash'] ~= ''
+          and (type(ch['session_hash']) ~= 'string' or ch['session_hash'] ~= de['session_hash']) then
+          return nil
+        end
+        if type(de['op_kind']) == 'string' and de['op_kind'] == 'login'
+          and type(de['principal_pseudonym']) == 'string' and de['principal_pseudonym'] ~= ''
+          and (type(ch['subject']) ~= 'string' or ch['subject'] ~= de['principal_pseudonym']) then
+          return nil
+        end
+        if type(ch['factor_family']) ~= 'string' or ch['factor_family'] == ''
+          or type(ch['factor_id']) ~= 'string' or ch['factor_id'] == ''
+          or type(ch['factor_rank']) ~= 'number' then
+          return nil
+        end
+        -- A newcomer that is already dead must not take the slot either.
+        -- A record whose own window has closed (a skewed or replayed
+        -- begin mints one) would otherwise evict the standing challenge
+        -- and hand the demand an active challenge nothing can complete,
+        -- stranding the browser with a valid code and no door.
+        if type(ch['expires_at']) ~= 'number' or ch['expires_at'] <= now then return nil end
         -- The admitted challenge never outlives its demand: a TTL that
         -- would is clamped to the demand's remaining authorization
         -- window (a resend late in the window issues a shorter-lived
@@ -725,6 +777,21 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
 
     public function create(StepUpChallenge $challenge, int $ttlSecs): string
     {
+        // A demand-bound challenge may only enter the store through
+        // admission, which proves it belongs to the demand and makes it
+        // the demand's one active challenge. A plain create of a
+        // challenge bound to a live demand would bypass that proof: it
+        // could never become the active challenge, and a custom handler
+        // reaching for it would strand the flow. The single legitimate
+        // demand-bound record that is not admitted is the email
+        // ownership grant, which names an already-settled demand; that
+        // shape stays allowed.
+        if ($challenge->demandId !== null) {
+            $boundDemand = $this->liveDemand($challenge->demandId);
+            if ($boundDemand === null || $boundDemand->state->isOpen()) {
+                throw new \RuntimeException('A demand-bound challenge enters the store through createAdmittedChallenge, never a plain create');
+            }
+        }
         $key = $this->prefix.'challenge:'.$challenge->id;
         $json = (string) json_encode($challenge->toArray(), JSON_UNESCAPED_SLASHES);
         // NX: a minted id colliding with a live record refuses rather
@@ -852,17 +919,33 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return $this->demandTransition($demandId, 'complete', (string) $now, (string) max(1, $ttlSecs));
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion
     {
         // The index key rides as a declared key even when the hints are
         // absent: the script skips the write, and a declared-but-unused
         // key keeps the eval cluster-safe. The completion clock work
         // runs on the Redis server time inside the script; the $now
         // argument names the calling lane's clock and is not read by
-        // this backend.
-        $indexKey = $sessionHash !== null && preg_match('/^[0-9a-f]{64}$/D', $sessionHash) === 1
-            ? $this->completedIndexKey($sessionHash, $scope)
-            : $this->completedIndexKey(str_repeat('0', 64), null);
+        // this backend. The history identity is the (lineage,
+        // principal, scope) triple, never the bare PHP session: the
+        // lineage survives the session-id rotation a successful login
+        // performs, and folding the principal in stops one account's
+        // completion from becoming another account's history.
+        //
+        // The principal is read from the demand record, never from a
+        // caller: it is the same server-held source the single-process
+        // store derives its own key from, so the two backends file one
+        // completion under one key. Reading it here costs one lookup of
+        // a record this call is about to mutate anyway, and the script
+        // still re-checks the value against the record's own field
+        // before it writes, so a stale read can never misfile.
+        $validLineage = $lineageHash !== null && preg_match('/^[0-9a-f]{64}$/D', $lineageHash) === 1;
+        $principal = $this->liveDemand($demandId)?->principalPseudonym;
+        $indexKey = $this->completedIndexKey(
+            $validLineage ? $lineageHash : str_repeat('0', 64),
+            $principal,
+            $scope,
+        );
         $answer = $this->redis->eval(
             self::COMPLETE_FACTOR_SCRIPT,
             3,
@@ -872,8 +955,9 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             $demandId,
             (string) $now,
             $presentedBindingHash,
-            $sessionHash ?? '',
+            $validLineage ? $lineageHash : '',
             $scope ?? '',
+            $principal ?? '',
         );
         if (!\is_array($answer) || ($answer[0] ?? null) !== 'ok' || \count($answer) !== 3) {
             return null;
@@ -895,31 +979,33 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         return StepUpFactorCompletion::fromRecords($challenge, $demand);
     }
 
-    public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
+    public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string
     {
-        if (preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
+        if (preg_match('/^[0-9a-f]{64}$/D', $lineageHash) !== 1) {
             return null;
         }
-        $value = $this->redis->get($this->completedIndexKey($sessionHash, $scope));
+        $value = $this->redis->get($this->completedIndexKey($lineageHash, $principalPseudonym, $scope));
         if (!\is_string($value) || $value === '') {
             return null;
         }
         $parts = explode('|', $value);
-        // The rank rides the value (scope|family|rank|expires); a legacy
-        // three-part entry predating it stays readable for its own TTL.
-        // The embedded expiry is re-checked on every read: a key whose
-        // TTL outlives its entry's authorization window answers nothing.
-        if (\count($parts) !== 4 && \count($parts) !== 3) {
+        // The rank and the completion stamp ride the value
+        // (scope|family|rank|window|completed); a legacy three- or
+        // four-part entry predating the stamp stays readable for its
+        // own TTL. The embedded window is re-checked on every read: a
+        // key whose TTL outlives its entry's authorization window
+        // answers nothing.
+        if (\count($parts) !== 5 && \count($parts) !== 4 && \count($parts) !== 3) {
             return null;
         }
         if ($parts[0] !== $scope || !\is_string($parts[1])) {
             return null;
         }
-        $expiry = (int) $parts[\count($parts) - 1];
+        $expiry = (int) $parts[\count($parts) - 2];
         if ($expiry <= $now) {
             return null;
         }
-        if (\count($parts) === 4 && preg_match('/^[0-9]+$/', $parts[2]) !== 1) {
+        if (\count($parts) >= 4 && preg_match('/^[0-9]+$/', $parts[2]) !== 1) {
             return null;
         }
 
@@ -936,11 +1022,14 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      * 64-hex validation. An absent or malformed scope derives the
      * all-zero placeholder, which the script's hint gate never writes.
      */
-    private function completedIndexKey(string $sessionHash, ?string $scope): string
+    private function completedIndexKey(string $lineageHash, ?string $principalPseudonym, ?string $scope): string
     {
-        $valid = $scope !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) === 1;
+        $validScope = $scope !== null && preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $scope) === 1;
+        $validPrincipal = $principalPseudonym !== null && $principalPseudonym !== '';
 
-        return $this->prefix.'emdone:'.$sessionHash.':'.($valid ? hash('sha256', $scope) : str_repeat('0', 64));
+        return $this->prefix.'emdone:'.$lineageHash
+            .':'.($validPrincipal ? hash('sha256', $principalPseudonym) : str_repeat('0', 64))
+            .':'.($validScope ? hash('sha256', $scope) : str_repeat('0', 64));
     }
 
     public function claimDemandFinalization(string $demandId, int $now, int $claimSecs): ?StepUpDemand
@@ -1184,6 +1273,16 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         // A record the strict decode refuses reads as an absent demand,
         // fail-closed: corrupt state never funds a code delivery.
         return StepUpDemand::fromJson($raw);
+    }
+
+    /**
+     * The live demand record of an id, or null when absent or expired.
+     * The key's own TTL is the liveness (Redis expires the record and
+     * its index together), so no clock is consulted here.
+     */
+    private function liveDemand(string $demandId): ?StepUpDemand
+    {
+        return $this->decodeDemand($this->redis->get($this->demandKey($demandId)));
     }
 
     public function saveTotpSecret(string $principalPseudonym, string $secretRaw): void

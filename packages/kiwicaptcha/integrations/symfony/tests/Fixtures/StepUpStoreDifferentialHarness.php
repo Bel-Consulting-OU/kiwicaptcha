@@ -22,9 +22,20 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind;
  * action the engine asserts the full observable projection of the two
  * stores agrees. The projection covers: record presence, lifecycle
  * state, supersession links, generation, send counters, lease
- * presence, the inherited authorization deadline, operation family
- * tips, completion markers, the raw quota counters, and the
- * replay-guard, begin-window, marker and enrollment answers.
+ * presence, the one active challenge and its window, the inherited
+ * authorization deadline, operation family tips, completion markers,
+ * and the raw quota counters. It also covers the replay-guard,
+ * begin-window, marker and enrollment answers.
+ *
+ * The challenge plane the engine drives: a demand-bound challenge
+ * enters the store through createAdmittedChallenge and may be refused
+ * there, so the entry is an observation, never an assumption. Only the
+ * demand's own active challenge ever completes it, and the engine
+ * models that one pointer per demand. A fresh admission replaces the
+ * standing challenge, and a crossed re-save moves a demand out from
+ * under the challenge it admitted. Refusals are compared by their
+ * class, never by their wording: the two backends spell one refusal
+ * differently and must still mean the same refusal.
  *
  * The clock asymmetry the engine is built around: the array store
  * judges its internal expiries on the injected clock this harness
@@ -121,7 +132,7 @@ final class StepUpStoreDifferentialHarness
     /** The shared clock box: a \stdClass with one public int $now. */
     private readonly \stdClass $clock;
 
-    /** @var array<string, array{state: StepUpDemandState, supersededBy: ?string, generation: int, live: bool, lease: ?array{leaseA: StepUpDemandSendLease, leaseR: StepUpDemandSendLease}}> */
+    /** @var array<string, array{state: StepUpDemandState, supersededBy: ?string, generation: int, live: bool, lease: ?array{leaseA: StepUpDemandSendLease, leaseR: StepUpDemandSendLease}, active: ?string}> */
     private array $demands = [];
 
     /** @var array<string, array{record: StepUpChallenge, demandId: ?string, live: bool, binding: string}> */
@@ -259,6 +270,9 @@ final class StepUpStoreDifferentialHarness
             $candidates[] = ['label' => 'settleDemandSendLease', 'run' => $this->actionSettleSendLease()];
         }
         $candidates[] = ['label' => 'createChallenge', 'run' => $this->actionCreateChallenge()];
+        if ($this->standingChallengeDemandIds() !== []) {
+            $candidates[] = ['label' => 'crossDemandUnderChallenge', 'run' => $this->actionCrossDemandUnderChallenge()];
+        }
         if ($this->challengeOrder !== []) {
             $candidates[] = ['label' => 'readChallenge', 'run' => $this->actionReadChallenge()];
         }
@@ -350,14 +364,23 @@ final class StepUpStoreDifferentialHarness
     private function actionConsumeDemand(bool $expiry): \Closure
     {
         return function (string $ctx) use ($expiry): void {
-            $id = $this->liveDemandIds()[array_rand($this->liveDemandIds())];
-            $a = $this->arrayStore->consumeDemand($id);
-            $r = $this->redisStore->consumeDemand($id);
-            ($this->assert)($this->demandProjection($a) === $this->demandProjection($r), $ctx.'('.$id.'): the consume answers diverge');
-            ($this->assert)($a !== null && $r !== null, $ctx.'('.$id.'): a live demand must consume to a record on both stores');
-            $this->demands[$id]['live'] = false;
-            $this->demands[$id]['lease'] = null;
+            $this->consumeDemandOnBoth($this->liveDemandIds()[array_rand($this->liveDemandIds())], $ctx);
         };
+    }
+
+    /**
+     * Consume one live demand on both stores, keeping the model in
+     * step. The consumed record is gone from both stores, so no later
+     * action may read it back.
+     */
+    private function consumeDemandOnBoth(string $id, string $ctx): void
+    {
+        $a = $this->arrayStore->consumeDemand($id);
+        $r = $this->redisStore->consumeDemand($id);
+        ($this->assert)($this->demandProjection($a) === $this->demandProjection($r), $ctx.'('.$id.'): the consume answers diverge');
+        ($this->assert)($a !== null && $r !== null, $ctx.'('.$id.'): a live demand must consume to a record on both stores');
+        $this->demands[$id]['live'] = false;
+        $this->demands[$id]['lease'] = null;
     }
 
     private function actionCompleteDemand(): \Closure
@@ -505,15 +528,28 @@ final class StepUpStoreDifferentialHarness
             $sessionBound = mt_rand(0, 1) === 1;
             $sessionId = $sessionBound ? 'diff-session-'.$this->challengeSeq : null;
             $boundDemand = null;
+            $boundRecord = null;
             if ($this->liveDemandIds() !== [] && mt_rand(0, 2) !== 0) {
                 $boundDemand = $this->liveDemandIds()[array_rand($this->liveDemandIds())];
+                $boundRecord = $this->arrayStore->readDemand($boundDemand);
             }
+            // A challenge bound to a demand is built to answer that very
+            // demand: its scope and its principal (the identity every
+            // store judges before it admits the newcomer and again before
+            // it completes the pair), and the factor snapshot begin
+            // derives from the kind, which the admission's coherence gate
+            // and the completion's factor gate both read off the record.
+            // The demands this engine mints carry no session binding, so
+            // a session-bound challenge is always admissible; were a
+            // demand ever session-bound, only a challenge of that same
+            // session could be built here, and this engine owns no door
+            // to that hash.
             $challenge = StepUpChallenge::begin(
                 $id,
                 StepUpChallengeKind::EmailOtp,
-                self::PRINCIPAL,
+                $boundRecord?->principalPseudonym ?? self::PRINCIPAL,
                 null,
-                'login',
+                $boundRecord?->scope ?? 'login',
                 null,
                 'post_solve_step_up_required',
                 $this->clock->now,
@@ -527,16 +563,101 @@ final class StepUpStoreDifferentialHarness
                 null,
                 $boundDemand,
             );
-            $a = $this->arrayStore->create($challenge, self::RECORD_TTL);
-            $r = $this->redisStore->create($challenge, self::RECORD_TTL);
-            ($this->assert)($a === $r && $a === $id, $ctx.': the challenge create answers diverge ('.$a.' vs '.$r.')');
+            // The store's own door rules: a demand-bound record enters
+            // through the admission, which judges the demand's liveness
+            // and may legitimately refuse; a demandless record through
+            // the plain create. Both stores are driven down the same
+            // door, and the observation is the answer or the refusal
+            // class, so the two backends can never drift on wording.
+            $a = $this->challengeEntry($this->arrayStore, $challenge, $boundDemand);
+            $r = $this->challengeEntry($this->redisStore, $challenge, $boundDemand);
+            ($this->assert)($a === $r, $ctx.': the challenge entry observations diverge ('.$a.' vs '.$r.')');
+            $stored = str_starts_with($a, 'stored:');
             $this->challenges[$id] = [
                 'record' => $challenge,
                 'demandId' => $boundDemand,
-                'live' => true,
+                'live' => $stored,
                 'binding' => $sessionBound ? (string) $challenge->sessionHash : (string) $challenge->clientSecretHash,
             ];
+            if (!$stored) {
+                // A refused admission stored nothing, and the pair it
+                // refused to disturb still stands: the newcomer's id
+                // reads absent on both stores, and the challenge the
+                // demand already admitted is still readable on both.
+                ($this->assert)($this->arrayStore->read($id) === null && $this->redisStore->read($id) === null, $ctx.'('.$id.'): a refused challenge entry wrote the record anyway');
+                $standing = $boundDemand !== null ? $this->demands[$boundDemand]['active'] : null;
+                if ($standing !== null) {
+                    $this->assertChallengeStanding($standing, $ctx);
+                }
+            } elseif ($boundDemand !== null) {
+                // The admission made this challenge the demand's one
+                // active challenge, and the replace deleted the record
+                // it replaced in the same move that stamped this one.
+                $replaced = $this->demands[$boundDemand]['active'];
+                if ($replaced !== null) {
+                    $this->retireChallenge($replaced);
+                }
+                $this->demands[$boundDemand]['active'] = $id;
+            }
             $this->challengeOrder[] = $id;
+        };
+    }
+
+    /**
+     * One challenge-entry observation: the stored id, or the class name
+     * of the refusal. The class is the observation, never the message:
+     * the two backends spell one refusal in their own words, and a
+     * message comparison would pin prose instead of the contract.
+     */
+    private function challengeEntry(StepUpChallengeStore $store, StepUpChallenge $challenge, ?string $boundDemand): string
+    {
+        try {
+            return 'stored:'.($boundDemand !== null
+                ? $store->createAdmittedChallenge($challenge, self::RECORD_TTL)
+                : $store->create($challenge, self::RECORD_TTL));
+        } catch (\Throwable $e) {
+            return 'refused:'.$e::class;
+        }
+    }
+
+    /**
+     * The crossed re-save: a demand holding a live active challenge is
+     * consumed and re-saved under the same id in another scope, so the
+     * challenge it admitted no longer answers it. A crossed challenge
+     * can no longer be built at all (admission refuses one that does
+     * not belong to the demand it names). Moving the demand under
+     * the standing challenge is therefore the one remaining door to a
+     * crossed pair, and the honest one: it models the demand changing
+     * after the challenge was admitted. Nothing may then complete the
+     * standing challenge, and nothing may be spent by the refusal.
+     */
+    private function actionCrossDemandUnderChallenge(): \Closure
+    {
+        return function (string $ctx): void {
+            $id = $this->standingChallengeDemandIds()[array_rand($this->standingChallengeDemandIds())];
+            $standingId = $this->demands[$id]['active'];
+            $challenge = $this->challenges[$standingId];
+            $this->consumeDemandOnBoth($id, $ctx);
+            // The same id, another scope: the store refuses a re-save
+            // over a live id, so the consumed record is the room the
+            // crossed one takes.
+            $scopes = array_values(array_filter(
+                self::SCOPES,
+                fn (string $scope): bool => $scope !== $challenge['record']->scope,
+            ));
+            $crossed = $this->mintDemand($id, $scopes[mt_rand(0, \count($scopes) - 1)]);
+            $a = $this->arrayStore->createDemand($crossed, self::RECORD_TTL);
+            $r = $this->redisStore->createDemand($crossed, self::RECORD_TTL);
+            ($this->assert)($a === $r && $a === $id, $ctx.'('.$id.'): the crossed re-save answers diverge ('.$a.' vs '.$r.')');
+            $this->registerDemand($id, $crossed);
+            $hint = $this->hintFor($challenge);
+            $scopeHint = $hint !== null ? $challenge['record']->scope : null;
+            $b = $this->arrayStore->completeFactor($standingId, $id, $challenge['binding'], $this->clock->now, $hint, $scopeHint);
+            $c = $this->redisStore->completeFactor($standingId, $id, $challenge['binding'], $this->clock->now, $hint, $scopeHint);
+            ($this->assert)($b === null && $c === null, $ctx.'('.$standingId.' -> '.$id.'): a demand re-saved in the crossed shape completed a challenge on a store');
+            // The crossed refusal spent nothing: the record still
+            // stands on both stores.
+            $this->assertChallengeStanding($standingId, $ctx);
         };
     }
 
@@ -558,7 +679,7 @@ final class StepUpStoreDifferentialHarness
             $r = $this->redisStore->consume($id);
             ($this->assert)($this->challengeProjection($a) === $this->challengeProjection($r), $ctx.'('.$id.'): the challenge consumes diverge');
             ($this->assert)($a !== null && $r !== null, $ctx.'('.$id.'): a live challenge must consume to a record on both stores');
-            $this->challenges[$id]['live'] = false;
+            $this->retireChallenge($id);
         };
     }
 
@@ -570,7 +691,7 @@ final class StepUpStoreDifferentialHarness
             $r = $this->redisStore->recordFailure($id, 3);
             ($this->assert)($a === $r, $ctx.'('.$id.'): the attempt accounting diverged ('.$a.' vs '.$r.')');
             if ($a <= 0) {
-                $this->challenges[$id]['live'] = false;
+                $this->retireChallenge($id);
             }
         };
     }
@@ -599,16 +720,29 @@ final class StepUpStoreDifferentialHarness
                 $a = $this->arrayStore->completeFactor($id, $demandId, $binding, $this->clock->now, $hint, $scopeHint);
                 $r = $this->redisStore->completeFactor($id, $demandId, $binding, $this->clock->now, $hint, $scopeHint);
                 ($this->assert)(($a === null) === ($r === null), $ctx.'('.$id.' -> '.$demandId.',roll='.$roll.'): one store completed a pair the other refused');
+                // The authority gate of the completion: only the
+                // demand's own active challenge completes it. A
+                // standing challenge the demand never admitted, or one
+                // a later move replaced under it, completes nothing and
+                // spends nothing on either store.
+                if ($this->demands[$demandId]['active'] !== $id) {
+                    ($this->assert)($a === null && $r === null, $ctx.'('.$id.' -> '.$demandId.'): a challenge that is not the demand\'s active challenge completed the pair');
+                    $this->assertChallengeStanding($id, $ctx);
+
+                    return;
+                }
                 if ($a !== null && $r !== null) {
                     ($this->assert)($a->challengeId === $r->challengeId && $a->demandId === $r->demandId, $ctx.': the completion identities diverge');
                     ($this->assert)($a->kind === $r->kind && $a->completedFactor === $r->completedFactor, $ctx.': the completed factors diverge');
                     ($this->assert)($a->verifiedSubjectPseudonym === $r->verifiedSubjectPseudonym, $ctx.': the verified subjects diverge');
-                    $this->challenges[$id]['live'] = false;
                     $this->demands[$demandId]['state'] = StepUpDemandState::Completed;
                     $sessionHash = $challenge['record']->sessionHash;
                     if (\is_string($sessionHash) && $sessionHash !== '' && $hint !== null) {
                         $this->sessionMarks[] = [$sessionHash, $challenge['record']->scope];
                     }
+                    $this->retireChallenge($id);
+                } else {
+                    $this->assertChallengeStanding($id, $ctx);
                 }
 
                 return;
@@ -642,8 +776,12 @@ final class StepUpStoreDifferentialHarness
         return function (string $ctx): void {
             $mark = $this->sessionMarks[array_rand($this->sessionMarks)];
             $scope = mt_rand(0, 1) === 0 ? $mark[1] : 'login';
-            $a = $this->arrayStore->completedFactorOf($mark[0], $scope, $this->clock->now);
-            $r = $this->redisStore->completedFactorOf($mark[0], $scope, $this->clock->now);
+            // The demands this engine mints name no principal, so every
+            // marker they earn sits in the anonymous bucket: the read
+            // passes the same null the stores' own key derivation folded
+            // in when they filed it.
+            $a = $this->arrayStore->completedFactorOf($mark[0], null, $scope, $this->clock->now);
+            $r = $this->redisStore->completedFactorOf($mark[0], null, $scope, $this->clock->now);
             ($this->assert)($a === $r, $ctx.'('.$scope.'): the completion markers diverge ('.$a.' vs '.$r.')');
         };
     }
@@ -847,7 +985,52 @@ final class StepUpStoreDifferentialHarness
             'generation' => $demand->generation,
             'live' => true,
             'lease' => null,
+            'active' => $demand->activeChallengeId,
         ];
+    }
+
+    /**
+     * Retire a challenge record in the model: the store deleted it
+     * (a consume, an attempt cap, a completion, or the replace of a
+     * fresh admission). The demand that named it as its active
+     * challenge names none afterwards, so the model's one pointer
+     * per demand only ever names a live record.
+     */
+    private function retireChallenge(string $id): void
+    {
+        $this->challenges[$id]['live'] = false;
+        $demandId = $this->challenges[$id]['demandId'];
+        if ($demandId !== null
+            && isset($this->demands[$demandId])
+            && $this->demands[$demandId]['active'] === $id) {
+            $this->demands[$demandId]['active'] = null;
+        }
+    }
+
+    /**
+     * The live demands holding a live active challenge: the standing
+     * pairs the crossed re-save can move a demand under.
+     *
+     * @return list<string>
+     */
+    private function standingChallengeDemandIds(): array
+    {
+        return array_values(array_filter(
+            $this->liveDemandIds(),
+            fn (string $id): bool => $this->demands[$id]['active'] !== null
+                && $this->challenges[$this->demands[$id]['active']]['live'],
+        ));
+    }
+
+    /**
+     * The refusal of a completion or an admission spends nothing: the
+     * standing challenge record still reads on both stores.
+     */
+    private function assertChallengeStanding(string $id, string $ctx): void
+    {
+        $a = $this->challengeProjection($this->arrayStore->read($id));
+        $r = $this->challengeProjection($this->redisStore->read($id));
+        ($this->assert)($a !== null && $a === $r, $ctx.'('.$id.'): a refusal must leave the standing challenge readable on both stores');
     }
 
     /** @return list<string> */
@@ -991,8 +1174,8 @@ final class StepUpStoreDifferentialHarness
             ($this->assert)($a === $r, $ctx.': family tip of '.$label.' diverges: '.$a.' vs '.$r);
         }
         foreach ($this->sessionMarks as $mark) {
-            $a = $this->arrayStore->completedFactorOf($mark[0], $mark[1], $this->clock->now);
-            $r = $this->redisStore->completedFactorOf($mark[0], $mark[1], $this->clock->now);
+            $a = $this->arrayStore->completedFactorOf($mark[0], null, $mark[1], $this->clock->now);
+            $r = $this->redisStore->completedFactorOf($mark[0], null, $mark[1], $this->clock->now);
             ($this->assert)($a === $r, $ctx.': completion marker of '.$mark[1].' diverges: '.$a.' vs '.$r);
         }
         $a = $this->arrayStore->findTotpSecret(self::PRINCIPAL);
@@ -1037,6 +1220,8 @@ final class StepUpStoreDifferentialHarness
             'leaseSet' => $d->leaseUntilMs !== null,
             'createdAt' => $d->createdAt,
             'expiresAt' => $d->expiresAt,
+            'activeChallenge' => $d->activeChallengeId,
+            'activeChallengeExpiresAt' => $d->activeChallengeExpiresAt,
             'scope' => $d->scope,
             'decisionId' => $d->decisionId,
             'raisedBy' => $d->raisedByDecisionId,

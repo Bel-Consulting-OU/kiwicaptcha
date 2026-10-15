@@ -1211,7 +1211,8 @@ final class FakePredisClient extends \Predis\Client
             // caller's clock (never read: the real script reads the
             // server TIME), argv[3] the presented binding hash, argv[4]
             // the session hash hint, argv[5] the scope hint ('' skips
-            // the index write). One atomic challenge+demand transition:
+            // the index write), argv[6] the principal the index key was
+            // derived from. One atomic challenge+demand transition:
             // the checks run in the script's order, and the winner
             // consumes the challenge and completes the demand in one
             // step. The judged factor identity is the stored challenge's
@@ -1224,8 +1225,9 @@ final class FakePredisClient extends \Predis\Client
             $demandId = (string) $rest[0];
             $now = (int) floor($this->timeMs() / 1000);
             $binding = (string) $rest[2];
-            $hint = (string) $rest[3];
+            $lineageHint = (string) $rest[3];
             $scopeHint = (string) $rest[4];
+            $principalHint = (string) ($rest[5] ?? '');
             $craw = $this->strings[$challengeKey] ?? null;
             if ($craw === null) {
                 return ['missing_challenge'];
@@ -1248,6 +1250,11 @@ final class FakePredisClient extends \Predis\Client
             }
             if (($ch['demand_id'] ?? null) !== $demandId || ($de['id'] ?? null) !== $demandId) {
                 return ['crossed'];
+            }
+            // The admitted active challenge is the only one that may
+            // complete (the script's own rule).
+            if (($de['active_challenge_id'] ?? null) !== ($ch['id'] ?? null)) {
+                return ['spent'];
             }
             // The demand/challenge identity binding, the script's own
             // rule: scope equality always, session equality for a
@@ -1333,25 +1340,37 @@ final class FakePredisClient extends \Predis\Client
             // itself carries, never a caller argument: a completion
             // cannot poison the future assurance escalation by claiming
             // a stronger factor than its challenge proves. The write
-            // requires both hints to equal the stored record's own
+            // requires every hint to equal the stored record's own
             // fields, the same gate the script runs.
-            if ($hint !== '' && $scopeHint !== '' && ($ch['session_hash'] ?? null) === $hint
+            // The history identity is (lineage, principal, scope), and the
+            // principal follows the demand's own subject field: the login
+            // lane's history is account-scoped, the anonymous email lane's
+            // is the lineage bucket. The monotonic rule is the script's:
+            // higher rank replaces, equal rank keeps the later window,
+            // lower writes nothing.
+            $demandPrincipal = \is_string($de['principal_pseudonym'] ?? null) ? $de['principal_pseudonym'] : '';
+            if ($lineageHint !== '' && $scopeHint !== '' && $principalHint === $demandPrincipal
                 && ($ch['scope'] ?? null) === $scopeHint
                 && \is_string($family) && $family !== '') {
-                // The monotonic-rank write: a weaker completion never
-                // overwrites a stronger entry (a legacy three-part entry
-                // reads as rank 0), the same rule the script runs.
                 $prior = $this->strings[$indexKey] ?? null;
                 $priorRank = 0;
+                $priorWindow = 0;
                 if (\is_string($prior)) {
                     $priorParts = explode('|', $prior);
-                    if (\count($priorParts) === 4 && is_numeric($priorParts[2])) {
+                    if (\count($priorParts) >= 4 && is_numeric($priorParts[2])) {
                         $priorRank = (int) $priorParts[2];
                     }
+                    if (\count($priorParts) >= 4 && is_numeric($priorParts[3])) {
+                        $priorWindow = (int) $priorParts[3];
+                    }
+                }
+                $window = (int) $de['expires_at'];
+                if ((int) $rank === $priorRank && $priorRank > 0 && $priorWindow > $window) {
+                    $window = $priorWindow;
                 }
                 if ((int) $rank >= $priorRank) {
-                    $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$rank.'|'.$de['expires_at'];
-                    $this->fakePexpire([$indexKey, $ttl * 1000]);
+                    $this->strings[$indexKey] = ((string) $ch['scope']).'|'.$family.'|'.$rank.'|'.$window.'|'.$now;
+                    $this->fakePexpire([$indexKey, max(1, $window - $now) * 1000]);
                 }
             }
 
@@ -1386,6 +1405,12 @@ final class FakePredisClient extends \Predis\Client
             if (!empty($de['superseded_by']) || ($de['state'] ?? null) !== 'open') {
                 return null;
             }
+            // Admission proves the newcomer belongs to the demand before
+            // anything is destroyed (the script's own rule).
+            $pttlProbe = $this->expirations[$demandKey] ?? null;
+            if ($pttlProbe === null || $pttlProbe <= 0) {
+                return null;
+            }
             $now = (int) floor($this->timeMs() / 1000);
             if (!is_numeric($de['expires_at'] ?? null) || (int) $de['expires_at'] <= $now) {
                 return null;
@@ -1396,6 +1421,23 @@ final class FakePredisClient extends \Predis\Client
             // server clock, so the clamp stays sound under clock skew —
             // the same rule the script runs.
             $ch = json_decode((string) $record, true);
+            if (($ch['demand_id'] ?? null) !== ($de['id'] ?? null)) { return null; }
+            if (($ch['scope'] ?? null) !== ($de['scope'] ?? null)) { return null; }
+            if (is_string($de['session_hash'] ?? null) && $de['session_hash'] !== ''
+                && ($ch['session_hash'] ?? null) !== $de['session_hash']) { return null; }
+            if (($de['op_kind'] ?? null) === 'login'
+                && is_string($de['principal_pseudonym'] ?? null) && $de['principal_pseudonym'] !== ''
+                && ($ch['subject'] ?? null) !== $de['principal_pseudonym']) { return null; }
+            if (!is_string($ch['factor_family'] ?? null) || $ch['factor_family'] === ''
+                || !is_string($ch['factor_id'] ?? null) || $ch['factor_id'] === ''
+                || !is_int($ch['factor_rank'] ?? null)) { return null; }
+            // A newcomer whose own window has closed is refused (the
+            // script's own rule): admitting one would evict the standing
+            // challenge for a record nothing can ever complete.
+            if (!is_numeric($ch['expires_at'] ?? null) || (int) $ch['expires_at'] <= $now) { return null; }
+            // The script's expiry gate, mirrored: the challenge's own
+            // creation stamp plus its TTL against the demand's window.
+
             if (!\is_array($ch) || !is_numeric($ch['created_at'] ?? null)) {
                 return null;
             }

@@ -129,7 +129,7 @@ final class StepUpDemandFinalizer
             return null;
         }
         try {
-            $required = $this->requiredFactorOf($scope, $sessionHash);
+            $required = $this->requiredFactorOf($scope, $principalPseudonym, $sessionHash);
         } catch (StepUpAssuranceUnavailable $e) {
             // An unavailable assurance state is no basis for a demand:
             // the mint refuses (no demand id, nothing stored) instead of
@@ -153,6 +153,7 @@ final class StepUpDemandFinalizer
             false,
             null,
             $required,
+            $principalPseudonym === '' ? null : $principalPseudonym,
         );
         try {
             $this->store->createDemand($demand, $ttlSecs);
@@ -209,15 +210,23 @@ final class StepUpDemandFinalizer
      *
      * @throws StepUpAssuranceUnavailable when the store or the resolver fails
      */
-    private function requiredFactorOf(string $scope, ?string $sessionHash): ?FactorRequirement
+    private function requiredFactorOf(string $scope, ?string $principalPseudonym, ?string $sessionHash = null): ?FactorRequirement
     {
         if ($this->factorResolver === null) {
             return null;
         }
         $completed = null;
-        if ($sessionHash !== null && $sessionHash !== '') {
+        $request = $this->requestStack?->getCurrentRequest();
+        // The history identity is the stable lineage when a session
+        // exists; it degrades to the presented session binding on the
+        // cookie lane, where no login rotation can orphan it.
+        $lineageHash = $request !== null ? StepUpSessionBinding::lineageHash($request) : null;
+        $lineageHash = $lineageHash ?? $sessionHash;
+        // A null principal is the anonymous bucket, a legitimate history
+        // identity for the lanes whose demand carries no principal.
+        if ($lineageHash !== null && $lineageHash !== '') {
             try {
-                $completed = $this->store->completedFactorOf($sessionHash, $scope, $this->now());
+                $completed = $this->store->completedFactorOf($lineageHash, $principalPseudonym, $scope, $this->now());
             } catch (\Throwable $e) {
                 // An unavailable completion history is not a session
                 // without a prior factor: the mint cannot know what to
@@ -353,7 +362,7 @@ final class StepUpDemandFinalizer
             $canonicalContent,
         );
         try {
-            $required = $this->requiredFactorOf($scope, $sessionHash);
+            $required = $this->requiredFactorOf($scope, $principalPseudonym, $sessionHash);
         } catch (StepUpAssuranceUnavailable $e) {
             // An unavailable assurance state is no basis for a demand:
             // the mint refuses (no demand id, nothing stored) instead of
@@ -549,7 +558,11 @@ final class StepUpDemandFinalizer
         }
         $finalized = $this->finalize($demand, $material, $factor, $request);
 
-        return $this->bookAuthorizedEffects($finalized, $demand, $factor, $material->principalPseudonym, $request);
+        // The effects book against the record the finalization carries,
+        // never the pre-settlement read: the journal must ride the
+        // settled terminal so a caller can never observe an effect
+        // journal attached to a stale state.
+        return $this->bookAuthorizedEffects($finalized, $factor, $material->principalPseudonym, $request);
     }
 
     /**
@@ -677,9 +690,14 @@ final class StepUpDemandFinalizer
         if ($decision !== null && $decision->action === \KiwiCaptcha\Risk\RiskAction::StepUp) {
             return $this->escalate($demand, $factor, $decision->decisionId);
         }
-        $this->settleAuthorized($demand->id, $factor);
+        // The authorized answer carries the settlement's own record, the
+        // one the store wrote: the state, the authorized stamp and the
+        // completed factor a caller reads off the finalization are the
+        // committed terminal, never the pre-settlement read that still
+        // shows the completed (or claimed) shape.
+        $settled = $this->settleAuthorized($demand->id, $factor);
 
-        return StepUpFinalization::authorized($demand);
+        return StepUpFinalization::authorized($settled);
     }
 
     /**
@@ -698,9 +716,14 @@ final class StepUpDemandFinalizer
     private function escalate(StepUpDemand $demand, string $completedFactor, ?string $raisedByDecisionId): StepUpFinalization
     {
         $requirement = $this->strongerRequirement($demand->scope, $completedFactor);
-        // The parent sits in its completed (here: claimed) state, past
-        // the factor proof: the family cap and the supersede link are
-        // the escalation's own bounds, never the open-state rule of a
+        // The parent in hand is deliberately the pre-claim read, the
+        // record the winning claim was accepted for: every field the
+        // escalation reads off it (the scope, the generation, the
+        // family and the supersede link) is immutable across the claim,
+        // and the store's supersede transaction re-verifies the live
+        // parent atomically, so a re-read after the claim would add
+        // nothing. The family cap and the supersede link are the
+        // escalation's own bounds, never the open-state rule of a
         // mint-time child.
         $capped = $demand->superseded() || $demand->generation >= StepUpDemand::MAX_GENERATION;
         if ($requirement === null || $capped) {
@@ -785,11 +808,13 @@ final class StepUpDemandFinalizer
      * generic enrollment bootstrap marker, each journaled on the demand
      * as it lands. Invoked only after {@see self::finalize()} answered
      * authorized, and re-invoked idempotently for an authorized replay:
-     * journal effects skip, missing effects run once.
+     * journal effects skip, missing effects run once. The effects hang
+     * off the record the finalization carries (the freshly settled
+     * terminal, or the store's own re-read on a replay), so the journal
+     * a caller observes always belongs to the committed authorization.
      */
     private function bookAuthorizedEffects(
         StepUpFinalization $finalization,
-        StepUpDemand $demand,
         string $factor,
         ?string $principalPseudonym,
         ?Request $request,
@@ -800,9 +825,16 @@ final class StepUpDemandFinalizer
         if ($principalPseudonym === null || $principalPseudonym === '') {
             return $finalization;
         }
+        // An authorized finalization always carries its demand; without
+        // one there is no record to journal against, so the answer stays
+        // as it is rather than booking against a stale read.
+        $demand = $finalization->demand;
+        if ($demand === null) {
+            return $finalization;
+        }
 
         return $finalization->withEffects(
-            $this->runEffects($finalization->demand?->id ?? $demand->id, $demand->id, $principalPseudonym, null, false, $factor, $request),
+            $this->runEffects($demand->id, $demand->id, $principalPseudonym, null, false, $factor, $request),
         );
     }
 
@@ -1071,19 +1103,34 @@ final class StepUpDemandFinalizer
         }
     }
 
-    /** The terminal settlement; a store failure surfaces to the caller, fail closed. */
-    private function settle(string $demandId, StepUpDemandState $state, ?string $factor = null): void
+    /**
+     * The terminal settlement; a store failure surfaces to the caller,
+     * fail closed. Answers the record the store actually wrote. After
+     * the compare-and-set that record is the authoritative demand, and
+     * every observable answer built from here on reads it: a returned
+     * finalization, an effects booking, a logged field. The
+     * pre-settlement object whose lifecycle state the settlement just
+     * replaced is never handed out.
+     */
+    private function settle(string $demandId, StepUpDemandState $state, ?string $factor = null): StepUpDemand
     {
         $settled = $this->store->settleDemandFinalization($demandId, $state, $this->now(), $factor);
         if ($settled === null) {
             throw new \RuntimeException('The step-up demand finalization could not settle its terminal state');
         }
+
+        return $settled;
     }
 
-    /** The authorized terminal settlement, retaining the completed factor. */
-    private function settleAuthorized(string $demandId, string $factor): void
+    /**
+     * The authorized terminal settlement, retaining the completed
+     * factor. Answers the settled record: the authorized state, the
+     * authorized stamp and the factor a caller observes are the
+     * store's, not the pre-settlement object's.
+     */
+    private function settleAuthorized(string $demandId, string $factor): StepUpDemand
     {
-        $this->settle($demandId, StepUpDemandState::Authorized, $factor);
+        return $this->settle($demandId, StepUpDemandState::Authorized, $factor);
     }
 
     /** The live demand of an id: present and unexpired, else null. */

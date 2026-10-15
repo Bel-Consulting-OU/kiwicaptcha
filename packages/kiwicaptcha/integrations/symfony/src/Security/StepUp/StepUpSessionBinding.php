@@ -26,8 +26,55 @@ final class StepUpSessionBinding
     /** The POST field a stateless client carries the per-challenge secret in. */
     public const CLIENT_SECRET_FIELD = 'kiwi_step_up_client_secret';
 
+    /** The session-data key holding the stable step-up lineage id. */
+    public const LINEAGE_KEY = '_kiwi_step_up_lineage';
+
     private function __construct()
     {
+    }
+
+    /**
+     * The stable step-up lineage of this browser session: a random id
+     * minted on first use and stored in the session bag.
+     *
+     * The lineage is deliberately NOT the PHP session id. A successful
+     * login rotates the session id, because the restorer calls
+     * Session::migrate() on the privilege upgrade. Session data survives
+     * that rotation while the id does not, so keying the assurance
+     * history by the lineage keeps a factor completed before the upgrade
+     * visible to the next demand. The session id keeps its own job:
+     * binding a challenge to the browser that began it, so a captured
+     * ticket cannot be completed elsewhere.
+     *
+     * Empty when no session is started: the stateless lanes keep no
+     * history, exactly as before.
+     */
+    public static function lineage(Request $request): string
+    {
+        $session = $request->hasSession() ? $request->getSession() : null;
+        if ($session === null || !$session->isStarted()) {
+            return '';
+        }
+        $existing = $session->get(self::LINEAGE_KEY);
+        if (\is_string($existing) && $existing !== '') {
+            return $existing;
+        }
+        $minted = bin2hex(random_bytes(16));
+        $session->set(self::LINEAGE_KEY, $minted);
+
+        return $minted;
+    }
+
+    /**
+     * The history key material of this request: the SHA-256 of the
+     * lineage, never the raw value. Null when there is no started
+     * session, so a caller with no lineage records and reads no history.
+     */
+    public static function lineageHash(Request $request): ?string
+    {
+        $lineage = self::lineage($request);
+
+        return $lineage === '' ? null : hash('sha256', $lineage);
     }
 
     /**

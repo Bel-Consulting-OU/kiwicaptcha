@@ -83,12 +83,12 @@ final class FailingDemandEffectStepUpChallengeStore implements StepUpChallengeSt
         return $this->inner->completeDemand($demandId, $now, $ttlSecs);
     }
 
-    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null): ?StepUpFactorCompletion
+    public function completeFactor(string $challengeId, string $demandId, string $presentedBindingHash, int $now, ?string $sessionHash = null, ?string $scope = null, ?string $lineageHash = null): ?StepUpFactorCompletion
     {
         return $this->inner->completeFactor($challengeId, $demandId, $presentedBindingHash, $now, $sessionHash, $scope);
     }
 
-    public function completedFactorOf(string $sessionHash, string $scope, int $now): ?string
+    public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string
     {
         return $this->inner->completedFactorOf($sessionHash, $scope, $now);
     }

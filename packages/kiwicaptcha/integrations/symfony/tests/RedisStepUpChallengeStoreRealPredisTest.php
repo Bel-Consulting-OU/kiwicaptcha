@@ -167,9 +167,9 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
     public function testACollidingMintedIdStillRefusesAndThrows(): void
     {
         $id = 'ccccccccccccccccccccccc';
-        $this->store->create($this->challenge($id), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
         $this->expectException(\RuntimeException::class);
-        $this->store->create($this->challenge($id), 300);
+        $this->store->createAdmittedChallenge($this->challenge($id), 300);
     }
 
     public function testASupersededDemandCompletesNoChallengeOnTheRealClient(): void
@@ -207,12 +207,21 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             null,
             $demandId,
         );
-        $this->store->create($challenge, 300);
+        $this->store->createAdmittedChallenge($challenge, 300);
         $child = $this->store->readDemand($demandId)->spawnChild('realsupersededchild0000001', $now, 'decision-2');
         self::assertNotNull($this->store->supersedeDemandWithChild($demandId, $child), 'the escalation replaces the open parent');
+        // The lineage hint is handed in so the completion's marker side
+        // is observable too: the demand names no principal, so the probe
+        // reads the anonymous bucket, and a landed completion would have
+        // filed exactly there.
+        $lineage = hash('sha256', 'lineage-test');
         self::assertNull(
-            $this->store->completeFactor('realsupersededchallenge00001', $demandId, (string) $challenge->clientSecretHash, $now + 1, null),
+            $this->store->completeFactor('realsupersededchallenge00001', $demandId, (string) $challenge->clientSecretHash, $now + 1, null, 'login', $lineage),
             'the superseded parent completes no challenge on the real server',
+        );
+        self::assertNull(
+            $this->store->completedFactorOf($lineage, null, 'login', $now + 2),
+            'the superseded parent files no escalation marker on the real server',
         );
         self::assertNull($this->store->claimDemandFinalization($demandId, $now + 2, 30), 'the superseded parent is never claimed for finalization');
     }
@@ -239,12 +248,18 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
     {
         // The monotonic prior-rank parse, on the real server: the ranked
         // index entry the webauthn completion wrote must survive the
-        // later email_otp completion of the same (session, scope) pair.
-        // The bug this pins: the prior-rank parse double-counted the
-        // ranked shape to eight tokens, so the monotonic gate never read
-        // the stored rank and the weaker completion overwrote the
-        // stronger one, regressing the history to email_otp.
+        // later email_otp completion of the same (lineage, principal,
+        // scope) triple. The bug this pins: the prior-rank parse
+        // double-counted the ranked shape to eight tokens, so the
+        // monotonic gate never read the stored rank and the weaker
+        // completion overwrote the stronger one, regressing the history
+        // to email_otp. The completion files the history under the
+        // lineage hash it is handed and the principal its demand
+        // carries; these demands carry no principal, so the entry lands
+        // in the anonymous bucket and the probe reads it back with a
+        // null principal, the exact key the two stores derive.
         $session = hash('sha256', 'sess');
+        $lineage = hash('sha256', 'lineage-test');
         $scope = 'checkout';
 
         $strongDemand = StepUpDemand::mint(
@@ -276,12 +291,12 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             null,
             $strongDemand->id,
         );
-        $this->store->create($strong, 600);
+        $this->store->createAdmittedChallenge($strong, 600);
         self::assertNotNull(
-            $this->store->completeFactor($strong->id, $strongDemand->id, $session, $this->now, $session, $scope),
+            $this->store->completeFactor($strong->id, $strongDemand->id, $session, $this->now, $session, $scope, $lineage),
             'the webauthn completion must land on the real server',
         );
-        self::assertSame('webauthn', $this->store->completedFactorOf($session, $scope, $this->now));
+        self::assertSame('webauthn', $this->store->completedFactorOf($lineage, null, $scope, $this->now));
 
         $weakDemand = StepUpDemand::mint(
             StepUpChallenge::mintId(),
@@ -312,14 +327,14 @@ final class RedisStepUpChallengeStoreRealPredisTest extends TestCase
             null,
             $weakDemand->id,
         );
-        $this->store->create($weak, 600);
+        $this->store->createAdmittedChallenge($weak, 600);
         self::assertNotNull(
-            $this->store->completeFactor($weak->id, $weakDemand->id, $session, $this->now, $session, $scope),
+            $this->store->completeFactor($weak->id, $weakDemand->id, $session, $this->now, $session, $scope, $lineage),
             'the weaker email_otp completion still lands on the real server',
         );
         self::assertSame(
             'webauthn',
-            $this->store->completedFactorOf($session, $scope, $this->now),
+            $this->store->completedFactorOf($lineage, null, $scope, $this->now),
             'the weaker completion never regresses the monotonic factor history on the real server',
         );
     }

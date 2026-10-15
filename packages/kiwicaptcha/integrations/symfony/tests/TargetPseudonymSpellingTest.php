@@ -72,7 +72,7 @@ final class TargetPseudonymSpellingTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
         );
         self::assertSame($target, $challenge->targetPseudonym);
 
@@ -92,7 +92,7 @@ final class TargetPseudonymSpellingTest extends TestCase
                     1700000000,
                     300,
                     5,
-                    'hash',
+                    str_repeat('a', 64),
                 ),
             ] as $mustRefuse
         ) {
@@ -158,7 +158,7 @@ final class TargetPseudonymSpellingTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             targetOwned: true,
         );
         $credit->report($challenge->id, $challenge->principalPseudonym, $challenge->targetPseudonym, $challenge->targetOwned);

@@ -61,6 +61,12 @@ final class StepUpFinalization
         return $this->effects === null || $this->effects->complete();
     }
 
+    /**
+     * The completed demand settled authorized. The carried demand is
+     * the record the store wrote for the terminal: its state, its
+     * authorized stamp and its completed factor are the committed
+     * authorization itself. It is never the pre-settlement read.
+     */
     public static function authorized(StepUpDemand $demand): self
     {
         return new self(true, self::AUTHORIZED, $demand);

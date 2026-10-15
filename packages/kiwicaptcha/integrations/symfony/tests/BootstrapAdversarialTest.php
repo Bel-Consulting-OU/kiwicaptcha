@@ -68,7 +68,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             StepUpSessionBinding::sessionId($request),
             false,
@@ -103,7 +103,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             'sess-00000000000000000000000001',
         );
@@ -146,7 +146,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             'sess-00000000000000000000000001',
         );
@@ -171,7 +171,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             null,
         );
@@ -196,7 +196,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             null,
             'sess-original-000000000000000001',
         );
@@ -229,7 +229,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             null,
             null,
         );
@@ -289,7 +289,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             'sess-00000000000000000000000001',
             false,
@@ -325,7 +325,7 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             'sess-00000000000000000000000001',
         );
@@ -366,14 +366,18 @@ final class BootstrapAdversarialTest extends TestCase
             1700000000,
             300,
             5,
-            'hash',
+            str_repeat('a', 64),
             'creation',
             'sess-00000000000000000000000001',
             false,
             true,
         )->toArray();
+        // The well-shaped fixture decodes cleanly with its proof digest
+        // intact, so every refusal below can only be the bootstrap fault.
+        $decoded = StepUpChallenge::fromArray($base);
+        self::assertSame(str_repeat('a', 64), $decoded->codeHash);
         // The integer 1 is accepted.
-        self::assertTrue(StepUpChallenge::fromArray($base)->bootstrapAuthorized);
+        self::assertTrue($decoded->bootstrapAuthorized);
         // The integer 0 is accepted and false.
         $off = $base;
         $off['bootstrap'] = 0;
