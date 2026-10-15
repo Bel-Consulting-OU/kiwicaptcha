@@ -2,6 +2,12 @@ target/
 pkg/
 vendor/
 composer.lock
+# The release-battery harnesses under tools/redteam/target/ are source,
+# not build output: the D3.12 dual-read harness and the storage-matrix
+# front controller ship with the gate, and a clean checkout must contain
+# them, so the build-output rule above never swallows them.
+!tools/redteam/target/
+!tools/redteam/target/**
 # The deploy lock ships in the reference image (deploy/Dockerfile COPYs
 # it and installs vendor exactly from it), so unlike development
 # checkouts it is a tracked artifact, like the Cargo.lock files.
