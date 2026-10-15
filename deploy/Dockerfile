@@ -17,7 +17,7 @@
 # tag stays alongside the digest for readability; bump BOTH deliberately
 # in lockstep (tools/ci/deploy-image-pin-check.sh rejects any unpinned
 # FROM/image: in deploy/).
-FROM php:8.4-cli-alpine@sha256:37c8c64177612b72e7f9d2c00481739c166a3708bea27c1cfd27fea1291d82d1
+FROM php:8.5-cli-alpine@sha256:93684051146ec037620855feb77f278090bde45ddc030801cd3f2a7685bc4deb
 
 # The sha384 of https://getcomposer.org/installer, pinned in the build
 # argument and verified before the installer runs; bump the value in
