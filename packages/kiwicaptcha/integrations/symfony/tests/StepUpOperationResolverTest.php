@@ -240,9 +240,16 @@ final class StepUpOperationResolverTest extends TestCase
             // this file (md5 of the mangled class name), so a compiled
             // container from an earlier shape would silently answer the
             // wiring checks: this run compiles fresh.
+            private ?string $freshCacheDir = null;
+
             public function getCacheDir(): string
             {
-                return parent::getCacheDir().'-'.bin2hex(random_bytes(6));
+                // The value is MEMOIZED: the framework derives both the build
+                // directory and the container cache path from this call, so a
+                // fresh value per call would make the two diverge and the
+                // container lock would be opened in a directory that was never
+                // created.
+                return $this->freshCacheDir ??= parent::getCacheDir().'-'.bin2hex(random_bytes(6));
             }
 
             protected function build(ContainerBuilder $container): void
