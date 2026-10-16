@@ -130,15 +130,31 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
     // the measurement, so a leg that cannot reach it fails rather than
     // silently measuring the wrong thing.
     let controlled = false;
-    try {
-        await page.waitForFunction(async () => {
-            const reg = await navigator.serviceWorker.getRegistration();
-            return Boolean(reg && reg.active);
-        }, null, { timeout: 15000 });
-        await page.reload({ waitUntil: "domcontentloaded" });
-        await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, { timeout: 15000 });
-        controlled = true;
-    } catch {}
+    for (let round = 0; round < 4 && !controlled; round++) {
+        // The page's own registration signal, then activation, then a
+        // reload so the active worker intercepts. Each round re-checks
+        // from scratch: activation is asynchronous and a loaded machine
+        // can take several rounds, but a leg that never gets control must
+        // still end up reported rather than passing quietly.
+        try {
+            await page.waitForFunction(
+                async () => {
+                    if (document.title.startsWith("sw-")) {
+                        return true;
+                    }
+                    const reg = await navigator.serviceWorker.getRegistration();
+                    return Boolean(reg && reg.active);
+                },
+                null,
+                { timeout: 10000 },
+            );
+        } catch {}
+        try {
+            await page.reload({ waitUntil: "domcontentloaded" });
+            await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, { timeout: 10000 });
+            controlled = true;
+        } catch {}
+    }
     if (!controlled) {
         // No tampered byte ever reached the page, so the leg proved
         // nothing. It reports that as its own outcome rather than a
