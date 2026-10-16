@@ -227,8 +227,9 @@ print(",".join("%s:%d" % (name, doc["types"][name]) for name in sorted(doc["type
         rt_report_fail "$label redis keyspace is empty; a sweep of nothing is not evidence"
         return 1
     fi
+    vanished=$(printf '%s' "$json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("vanished", [])))')
     rt_report_pass "$label redis sweep complete ($covered keys, every type serialized in full)"
-    rt_metric "sweep=$label keys=$keys covered=$covered uncovered=0 truncated=0 types=$types"
+    rt_metric "sweep=$label keys=$keys covered=$covered uncovered=0 expired=$vanished truncated=0 types=$types"
     SWEEP_METRICS="$SWEEP_METRICS $label=$keys"
     return 0
 }

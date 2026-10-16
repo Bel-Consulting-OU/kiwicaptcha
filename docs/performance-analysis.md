@@ -197,10 +197,10 @@ The serial benchmarks (p50/p95 in milliseconds, from the `bench` and
 
 | path | issuance p50 | issuance p95 | verification p50 | verification p95 |
 |---|---|---|---|---|
-| SHA-256 array storage | 0.010 | 0.023 | 0.012 | 0.042 |
-| SHA-256 Redis storage | 0.094 | 0.143 | 0.334 | 0.488 |
-| Argon2id admission | 0.028 | 0.033 | 66.121 | 86.366 |
-| risk-enabled controller issuance (in-memory) | 0.048 | 0.053 | n/a | n/a |
+| SHA-256 array storage | 0.011 | 0.029 | 0.013 | 0.042 |
+| SHA-256 Redis storage | 0.090 | 0.232 | 0.333 | 0.868 |
+| Argon2id admission | 0.032 | 0.034 | 71.229 | 95.588 |
+| risk-enabled controller issuance (in-memory) | 0.052 | 0.078 | n/a | n/a |
 
 The concurrent load benchmark (8 workers x 100, p50/p95 in
 milliseconds, throughput in operations per second over the concurrent
@@ -209,10 +209,10 @@ runs):
 
 | phase | p50 | p95 | throughput |
 |---|---|---|---|
-| concurrent issuance | 0.133 | 0.298 | 9854 |
-| concurrent verification | 0.757 | 1.168 | 5443 |
-| mixed-pipeline issuance | 0.194 | 0.460 | 3961 combined |
-| mixed-pipeline verification | 0.666 | 1.121 | 3961 combined |
+| concurrent issuance | 0.132 | 0.194 | 10651 |
+| concurrent verification | 0.790 | 1.115 | 5635 |
+| mixed-pipeline issuance | 0.207 | 0.340 | 4158 combined |
+| mixed-pipeline verification | 0.663 | 0.921 | 4158 combined |
 
 The risk-enabled real-Redis concurrent path (8 workers x 100 through
 the DSN-built client, from `bench_risk.redis_concurrent`, the
@@ -220,7 +220,7 @@ conservative of two consecutive runs):
 
 | mode | p50 | p95 | throughput |
 |---|---|---|---|
-| risk-enabled concurrent issuance | 1.290 | 1.916 | 3538 req/s |
+| risk-enabled concurrent issuance | 1.051 | 1.364 | 4202 req/s |
 
 The verified-WAIT single-authority fixture (perf-wait.php, 100
 iterations per phase, from the `wait` section): pre-issue reference p50
@@ -473,7 +473,7 @@ between the plain array issuance (0.010 ms) and the Redis issuance
 (0.094 ms), because the risk store is in-memory in that bench. The
 real-Redis concurrent mode measures the full production shape: 8
 workers through the DSN-built Predis client, risk state and challenge
-storage both on Redis, p50 1.290 ms p95 1.916 ms at about 3,500
+storage both on Redis, p50 1.051 ms p95 1.364 ms at about 4,200
 requests per second, in the same band as the plain concurrent issuance
 plus the risk engine's own Redis round trips. The engine's own
 signal-vector and scoring work is the cheap part; the expensive risk
