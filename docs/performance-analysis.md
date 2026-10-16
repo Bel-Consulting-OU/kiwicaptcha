@@ -167,7 +167,7 @@ line without failing on it, and release mode (`--release`) refuses to
 certify unless `qualification.status` is `"physical"`.
 
 The current qualification status is `physical`: the committed baseline
-(`tools/client-perf/results/baseline.json`, generated 2026-09-29) was
+(`tools/client-perf/results/baseline.json`, generated 2026-10-16) was
 recorded on the physical mainstream-desktop device described in
 `qualification.devices` (Apple MacBook Pro, Apple M5 Pro, macOS, the
 machine browser), so the desktop tier's budgets are
