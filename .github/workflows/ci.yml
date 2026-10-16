@@ -1947,15 +1947,21 @@ jobs:
         run: php packages/kiwicaptcha/tools/perf-wait.php
       - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory)
         # perf-wait-replica.php boots its own local master + replica on
-        # free ports, so it needs redis-server/redis-cli on the runner;
-        # when they are missing (or the gate Redis is unreachable) the
-        # script prints a loud note and exits 0. Advisory like every
-        # other timing step: the fixture has no ratchet.
+        # free ports, so it needs redis-server/redis-cli on the runner.
+        # The hosted image does not carry them, and without them the
+        # script prints a note and exits 0, which left this step green
+        # while measuring nothing: the install below is what makes the
+        # fixture run. A runner where the install fails still skips with
+        # the loud note, and the step stays advisory like every other
+        # timing step: the fixture has no ratchet.
         if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
-        run: php packages/kiwicaptcha/tools/perf-wait-replica.php
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server
+          php packages/kiwicaptcha/tools/perf-wait-replica.php
       - name: fail the job when the release-baseline gates recorded a failure
         # The gate steps record a rejected evidence file in markers
         # instead of failing, so the diagnostics above still run. This
