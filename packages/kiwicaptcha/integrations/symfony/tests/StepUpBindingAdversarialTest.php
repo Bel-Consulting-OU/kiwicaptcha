@@ -617,6 +617,458 @@ final class StepUpBindingAdversarialTest extends TestCase
     }
 
     /**
+     * The factor class rule, stated once on the kind: email_otp, totp
+     * and webauthn verify material the account holds, while
+     * email_ownership verifies a visitor-supplied mailbox only. The
+     * demand-side predicate reads the rule off the stored records: a
+     * demand that names a principal answers only to a
+     * principal-authenticating factor whose verified subject reproduces
+     * it, and a demand that names none keeps its behaviour.
+     */
+    public function testTheFactorClassRuleIsDerivedFromTheKind(): void
+    {
+        self::assertTrue(StepUpChallengeKind::EmailOtp->provesPrincipal(), 'a mailbox code sent to the account proves the account');
+        self::assertTrue(StepUpChallengeKind::Totp->provesPrincipal(), 'a totp code from the account secret proves the account');
+        self::assertTrue(StepUpChallengeKind::WebAuthn->provesPrincipal(), 'a credential assertion proves the account');
+        self::assertFalse(StepUpChallengeKind::EmailOwnership->provesPrincipal(), 'an address-ownership proof is not the account proof');
+
+        $bound = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            self::SCOPE,
+            hash('sha256', 'sess'),
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::FormFields,
+            str_repeat('a', 64),
+            str_repeat('a', 64),
+            str_repeat('b', 64),
+            false,
+            null,
+            null,
+            self::PRINCIPAL_A,
+            hash('sha256', 'lineage'),
+        );
+        self::assertTrue($bound->admitsFactor(StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A), 'the own principal factor answers the demand');
+        self::assertFalse($bound->admitsFactor(StepUpChallengeKind::EmailOtp, self::PRINCIPAL_B), 'another account factor never answers it');
+        self::assertFalse($bound->admitsFactor(StepUpChallengeKind::EmailOwnership, null), 'an address-ownership factor never stands for the account');
+        self::assertFalse($bound->admitsFactor(StepUpChallengeKind::WebAuthn, null), 'a subject-less principal factor never answers it');
+
+        $free = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            self::SCOPE,
+            hash('sha256', 'sess'),
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+            '',
+            null,
+            null,
+            false,
+            null,
+            null,
+            null,
+            hash('sha256', 'lineage'),
+        );
+        self::assertTrue($free->admitsFactor(StepUpChallengeKind::EmailOwnership, null), 'a demand that names no principal keeps its behaviour');
+        self::assertTrue($free->admitsFactor(StepUpChallengeKind::EmailOtp, self::PRINCIPAL_B), 'a principal-free demand answers any principal, as before');
+    }
+
+    /**
+     * The address-ownership factor never answers a principal-bound
+     * demand: the mailbox proof is not the account's proof. The
+     * admission refuses the EmailOwnership challenge before it replaces
+     * the standing one, the completion refuses a pair built out of
+     * band, and no principal-scoped history is ever published by it.
+     * The control completes the same demand with the demand's own
+     * principal factor.
+     */
+    public function testAnAddressOwnershipFactorNeverAnswersAPrincipalBoundDemand(): void
+    {
+        $session = hash('sha256', 'sess');
+        $lineage = hash('sha256', 'lineage-address-ownership');
+        $demand = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            self::SCOPE,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::FormFields,
+            str_repeat('a', 64),
+            str_repeat('a', 64),
+            str_repeat('b', 64),
+            false,
+            null,
+            null,
+            self::PRINCIPAL_A,
+            $lineage,
+        );
+        $this->store->createDemand($demand, 600);
+
+        // The standing challenge is the demand's own principal factor.
+        $standing = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL_A,
+            null,
+            self::SCOPE,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'code'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        $this->store->createAdmittedChallenge($standing, 600);
+
+        // The address-ownership newcomer is refused at the door: the
+        // standing challenge stays exactly where it was.
+        $addressOwnership = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOwnership,
+            str_repeat('e', 32),
+            null,
+            self::SCOPE,
+            null,
+            'email_ownership',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'mail-code'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        try {
+            $this->store->createAdmittedChallenge($addressOwnership, 600);
+            self::fail('an address-ownership challenge must never be admitted against a principal-bound demand');
+        } catch (StepUpDemandAdmissionRefused) {
+        }
+        self::assertNull($this->store->read($addressOwnership->id), 'the refused newcomer left no record');
+        self::assertNotNull($this->store->read($standing->id), 'the standing challenge is untouched');
+        self::assertSame($standing->id, $this->store->readDemand($demand->id)?->activeChallengeId, 'the demand still names its own challenge');
+
+        // The completion boundary, on a pair built out of band. The
+        // address-ownership record enters through the plain create door
+        // while the demand is out of the open state (the grant shape),
+        // then the demand id is freed and the demand is re-created open
+        // with the record stamped as its active challenge: a shape no
+        // reachable caller can build any more now that admission refuses
+        // the address-ownership factor outright. The completion must
+        // still refuse and publish no principal history.
+        self::assertNotNull($this->store->completeDemand($demand->id, $this->now, 600), 'the demand leaves the open state for the grant-shaped create');
+        $this->store->create($addressOwnership, 600);
+        self::assertNotNull($this->store->read($addressOwnership->id), 'the grant-shaped address-ownership record stores');
+        self::assertNotNull($this->store->consumeDemand($demand->id), 'the demand id is freed for the crossed re-save');
+        $crossed = StepUpDemand::mint(
+            $demand->id,
+            self::SCOPE,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::FormFields,
+            str_repeat('a', 64),
+            str_repeat('a', 64),
+            str_repeat('b', 64),
+            false,
+            null,
+            null,
+            self::PRINCIPAL_A,
+            $lineage,
+        )->admitFactorChallenge($addressOwnership->id, $addressOwnership->expiresAt, $this->now);
+        self::assertNotNull($crossed, 'the crossed demand record is constructible');
+        $this->store->createDemand($crossed, 600);
+
+        $completed = $this->store->completeFactor(
+            $addressOwnership->id,
+            $demand->id,
+            (string) $addressOwnership->sessionHash,
+            $this->now,
+            $addressOwnership->sessionHash,
+            self::SCOPE,
+            $lineage,
+        );
+        self::assertNull($completed, 'the address-ownership factor completes nothing');
+        self::assertNotNull($this->store->read($addressOwnership->id), 'the refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($demand->id)?->state->isOpen(), 'the demand stays open');
+        self::assertNull($this->store->completedFactorOf($lineage, self::PRINCIPAL_A, self::SCOPE, $this->now), 'no principal-scoped history was published');
+
+        // The control: the demand's own principal factor completes it
+        // and files its history under the principal's bucket.
+        $control = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL_A,
+            null,
+            self::SCOPE,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'code-2'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        $this->store->createAdmittedChallenge($control, 600);
+        $controlDone = $this->store->completeFactor(
+            $control->id,
+            $demand->id,
+            (string) $control->sessionHash,
+            $this->now,
+            $control->sessionHash,
+            self::SCOPE,
+            $lineage,
+        );
+        self::assertNotNull($controlDone, 'the principal factor completes the demand');
+        self::assertSame('email_otp', $this->store->completedFactorOf($lineage, self::PRINCIPAL_A, self::SCOPE, $this->now));
+        self::assertNull($this->store->completedFactorOf($lineage, null, self::SCOPE, $this->now), 'the principal history never lands in the anonymous bucket');
+    }
+
+    /**
+     * The principal rule holds on every binding kind, not only login: a
+     * financial operation minted for one account is answered by that
+     * account's factor alone. The crossed challenge is refused at the
+     * door, and the crossed pair built out of band is refused at the
+     * completion.
+     */
+    public function testANonLoginPrincipalBoundDemandRefusesAnotherPrincipalsFactor(): void
+    {
+        $session = hash('sha256', 'sess');
+        $lineage = hash('sha256', 'lineage-subject');
+        $demand = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            self::SCOPE,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::RequestBinding,
+            str_repeat('c', 64),
+            null,
+            null,
+            false,
+            null,
+            null,
+            self::PRINCIPAL_A,
+            $lineage,
+        );
+        $this->store->createDemand($demand, 600);
+
+        $own = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL_A,
+            null,
+            self::SCOPE,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'code'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        $this->store->createAdmittedChallenge($own, 600);
+
+        $foreign = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL_B,
+            null,
+            self::SCOPE,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'code-b'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        try {
+            $this->store->createAdmittedChallenge($foreign, 600);
+            self::fail('another account factor must never be admitted against a principal-bound demand');
+        } catch (StepUpDemandAdmissionRefused) {
+        }
+        self::assertNull($this->store->read($foreign->id), 'the refused newcomer left no record');
+        self::assertSame($own->id, $this->store->readDemand($demand->id)?->activeChallengeId, 'the demand still names its own challenge');
+
+        // The completion boundary on the crossed pair built out of band:
+        // the second account's challenge is admitted against a demand of
+        // its own principal first, then this demand is re-saved with that
+        // record stamped as its active challenge. The completion must
+        // refuse and file no history.
+        $otherDemand = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            self::SCOPE,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::RequestBinding,
+            str_repeat('c', 64),
+            null,
+            null,
+            false,
+            null,
+            null,
+            self::PRINCIPAL_B,
+            $lineage,
+        );
+        $this->store->createDemand($otherDemand, 600);
+        $foreignStored = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOtp,
+            self::PRINCIPAL_B,
+            null,
+            self::SCOPE,
+            null,
+            'step_up',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'code-b2'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $otherDemand->id,
+        );
+        $this->store->createAdmittedChallenge($foreignStored, 600);
+        self::assertNotNull($this->store->read($foreignStored->id), 'the second account challenge is admitted against its own demand');
+
+        self::assertNotNull($this->store->consumeDemand($demand->id), 'the demand id is freed for the crossed re-save');
+        $crossed = StepUpDemand::mint(
+            $demand->id,
+            self::SCOPE,
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::RequestBinding,
+            str_repeat('c', 64),
+            null,
+            null,
+            false,
+            null,
+            null,
+            self::PRINCIPAL_A,
+            $lineage,
+        )->admitFactorChallenge($foreignStored->id, $foreignStored->expiresAt, $this->now);
+        self::assertNotNull($crossed, 'the crossed demand record is constructible');
+        $this->store->createDemand($crossed, 600);
+
+        $completed = $this->store->completeFactor(
+            $foreignStored->id,
+            $demand->id,
+            $session,
+            $this->now,
+            $session,
+            self::SCOPE,
+            $lineage,
+        );
+        self::assertNull($completed, 'the second account factor completes nothing for the first account demand');
+        self::assertNotNull($this->store->read($foreignStored->id), 'the refusal consumed no challenge');
+        self::assertTrue($this->store->readDemand($demand->id)?->state->isOpen(), 'the demand stays open');
+        self::assertNull($this->store->completedFactorOf($lineage, self::PRINCIPAL_A, self::SCOPE, $this->now), 'the crossed refusal filed no history');
+        self::assertNull($this->store->completedFactorOf($lineage, self::PRINCIPAL_B, self::SCOPE, $this->now), 'the crossed refusal filed nothing for the other account either');
+    }
+
+    /**
+     * A demand that names no principal keeps its current behaviour: an
+     * address-ownership factor answers it, the anonymous grant lane.
+     */
+    public function testAPrincipalFreeDemandKeepsItsCurrentFactorBehaviour(): void
+    {
+        $session = hash('sha256', 'sess');
+        $lineage = hash('sha256', 'lineage-anonymous');
+        $demand = StepUpDemand::mint(
+            StepUpChallenge::mintId(),
+            'signup',
+            $session,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+            StepUpOperationDigest::none('signup'),
+            null,
+            null,
+            false,
+            null,
+            null,
+            null,
+            $lineage,
+        );
+        $this->store->createDemand($demand, 600);
+        $challenge = StepUpChallenge::begin(
+            StepUpChallenge::mintId(),
+            StepUpChallengeKind::EmailOwnership,
+            str_repeat('d', 32),
+            null,
+            'signup',
+            null,
+            'email_ownership',
+            $this->now,
+            600,
+            5,
+            hash('sha256', 'mail-code'),
+            null,
+            'sess',
+            false,
+            false,
+            null,
+            $demand->id,
+        );
+        $this->store->createAdmittedChallenge($challenge, 600);
+        $completed = $this->store->completeFactor(
+            $challenge->id,
+            $demand->id,
+            (string) $challenge->sessionHash,
+            $this->now,
+            $challenge->sessionHash,
+            'signup',
+            $lineage,
+        );
+        self::assertNotNull($completed, 'the anonymous carrier demand admits and completes the address-ownership factor');
+        self::assertSame('email_otp', $this->store->completedFactorOf($lineage, null, 'signup', $this->now), 'the anonymous bucket keeps the ladder');
+    }
+
+    /**
      * The finalization reproduces the demand subject: a financial demand
      * minted for a principal refuses an anonymous presentation and
      * authorizes only when the presenting material names the same

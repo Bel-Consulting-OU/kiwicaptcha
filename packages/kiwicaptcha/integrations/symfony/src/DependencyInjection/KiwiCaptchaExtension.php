@@ -2171,6 +2171,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     ->setArgument('$continuity', new Reference(ContinuityCookie::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$device', new Reference(TrustedDeviceCookie::class, ContainerInterface::NULL_ON_INVALID_REFERENCE))
                     ->setArgument('$metrics', new Reference('kiwi_captcha.risk.metrics', ContainerInterface::NULL_ON_INVALID_REFERENCE))
+                    // The engine's network-tag derivation: the restore
+                    // records the same stable pseudonym the novel-network
+                    // gate probes, so both writers key one value and no
+                    // path stores a reversible address spelling.
+                    ->setArgument('$engine', new Reference('kiwi_captcha.risk.engine'))
                     ->setPublic(true));
                 $container->setDefinition(StepUpPendingTokenVoter::class, (new Definition(StepUpPendingTokenVoter::class))
                     ->addTag('security.voter')

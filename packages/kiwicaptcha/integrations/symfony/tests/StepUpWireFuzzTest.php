@@ -37,8 +37,11 @@ use PHPUnit\Framework\TestCase;
  * accepted into an incoherent record. The opaque string fields of a
  * challenge (the target pseudonym, the return path and the code hash)
  * refuse every wrong raw value outright: a field dropped to null would
- * shed its binding. (C) The length-prefixed canonicalization is
- * injective, so no two distinct field maps can forge the same digest.
+ * shed its binding. The schema-invalid table pins that same contract
+ * for every scalar field of the challenge wire: each raw value there
+ * answers the typed refusal alone, and a decode is the defect. (C) The
+ * length-prefixed canonicalization is injective, so no two distinct
+ * field maps can forge the same digest.
  */
 final class StepUpWireFuzzTest extends TestCase
 {
@@ -380,12 +383,12 @@ final class StepUpWireFuzzTest extends TestCase
     }
 
     /**
-     * The raw values that are never a field's own type: an object, an
-     * array, a boolean, a float, an integer, the empty string, a
-     * stringly-typed number and explicit null. The generic mutation
-     * battery replaces each field with each of these in turn, and the
-     * strict-field battery reuses the same table so the two can never
-     * drift apart.
+     * The raw values that are never a field's own type: an object, a
+     * list, an empty array, a boolean, a float, an integer, the empty
+     * string, a stringly-typed number, a negative number and a value
+     * near the integer edge. The generic mutation battery replaces each
+     * field with each of these in turn, and the strict-field batteries
+     * reuse the same table so the three can never drift apart.
      *
      * @return array<string, mixed>
      */
@@ -397,9 +400,12 @@ final class StepUpWireFuzzTest extends TestCase
             'int' => 0,
             'null' => null,
             'array' => [],
+            'list' => [1, 2, 3],
             'bool' => true,
             'float' => 1.5,
             'object' => new \stdClass(),
+            'negative' => -7,
+            'huge' => PHP_INT_MAX,
         ];
     }
 
@@ -515,6 +521,434 @@ final class StepUpWireFuzzTest extends TestCase
         }
     }
 
+    // ------------------------------------------------------------------
+    // B6. The schema-invalid table: every scalar field of the challenge
+    //     wire, and for each field the raw values whose only acceptable
+    //     outcome is the typed refusal. A decode here is the defect the
+    //     battery exists to catch: a wrong raw value must never ride a
+    //     lossy default into a weaker record. The canonical-stability
+    //     battery above keeps covering the values that stay valid.
+    // ------------------------------------------------------------------
+
+    public function testEveryScalarChallengeFieldRefusesASchemaInvalidValue(): void
+    {
+        $rows = $this->schemaInvalidChallengeMutations();
+        $total = 0;
+        foreach ($rows as $field => $probes) {
+            foreach ($probes as $probe => $row) {
+                [$wire, $token, $value] = $row;
+                ++$total;
+                $this->assertChallengeFieldRefused($wire, $token, $field.':'.$probe, $value);
+            }
+        }
+        self::assertGreaterThan(200, $total, 'the schema-invalid table must cover the whole scalar surface');
+
+        $canonical = array_keys($this->challengeWireCarryingTheOpaqueFields());
+        $missing = array_values(array_diff($canonical, array_keys($rows)));
+        self::assertSame(
+            [],
+            $missing,
+            'every scalar field of the canonical challenge wire needs a schema-invalid row',
+        );
+    }
+
+    /**
+     * The canonical bases the schema-invalid table mutates. Each one is
+     * the exact wire a writer produces, with every scalar key spelled,
+     * so a refusal can only come from the mutation itself.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function canonicalChallengeBases(): array
+    {
+        return [
+            // EmailOtp, session-bound, target-owned, bootstrap-authorized:
+            // the maximal shape, carrying every scalar key.
+            'email_otp_maximal' => StepUpChallenge::begin(
+                'AABBCCDDEEFFGGHH0033',
+                StepUpChallengeKind::EmailOtp,
+                str_repeat('a', 32),
+                str_repeat('b', 64),
+                'login',
+                '/dashboard',
+                'post_solve_step_up_required',
+                1700000000,
+                300,
+                5,
+                str_repeat('c', 64),
+                null,
+                'session-invalid-000000000000000001',
+                true,
+                true,
+            )->toArray(),
+            // EmailOtp, session-bound, bound to a live demand id.
+            'email_otp_demand_bound' => StepUpChallenge::begin(
+                'AABBCCDDEEFFGGHH0044',
+                StepUpChallengeKind::EmailOtp,
+                str_repeat('a', 32),
+                null,
+                'transfer',
+                null,
+                'post_solve_step_up_required',
+                1700000000,
+                300,
+                5,
+                str_repeat('d', 64),
+                null,
+                'session-invalid-000000000000000002',
+                false,
+                false,
+                null,
+                'demandid0000000000000000002',
+            )->toArray(),
+            // WebAuthn assertion, stateless: secret-bound, ceremony present.
+            'webauthn_assertion' => StepUpChallenge::begin(
+                'AABBCCDDEEFFGGHH0055',
+                StepUpChallengeKind::WebAuthn,
+                str_repeat('a', 32),
+                null,
+                'login',
+                null,
+                'post_solve_step_up_required',
+                1700000000,
+                300,
+                5,
+                str_repeat('e', 64),
+                'assertion',
+                null,
+            )->toArray(),
+            // WebAuthn creation, stateless: explicitly non-authorizing.
+            'webauthn_creation' => StepUpChallenge::begin(
+                'AABBCCDDEEFFGGHH0066',
+                StepUpChallengeKind::WebAuthn,
+                str_repeat('a', 32),
+                null,
+                'enroll',
+                null,
+                'post_solve_step_up_required',
+                1700000000,
+                300,
+                5,
+                str_repeat('f', 64),
+                'creation',
+                null,
+            )->toArray(),
+            // Totp, session-bound: carries no code hash and no ceremony.
+            'totp_session' => StepUpChallenge::begin(
+                'AABBCCDDEEFFGGHH0077',
+                StepUpChallengeKind::Totp,
+                str_repeat('a', 32),
+                null,
+                'login',
+                null,
+                'post_solve_step_up_required',
+                1700000000,
+                300,
+                5,
+                null,
+                null,
+                'session-invalid-000000000000000003',
+            )->toArray(),
+            // Email ownership, stateless: its subject is an email, so the
+            // subject key rides null.
+            'email_ownership' => StepUpChallenge::begin(
+                'AABBCCDDEEFFGGHH0088',
+                StepUpChallengeKind::EmailOwnership,
+                str_repeat('a', 32),
+                null,
+                'signup',
+                null,
+                'post_solve_step_up_required',
+                1700000000,
+                300,
+                5,
+                str_repeat('1', 64),
+                null,
+                null,
+            )->toArray(),
+        ];
+    }
+
+    /**
+     * Every scalar field of the challenge wire against the raw values
+     * the contract refuses outright, drawn from the shared probe table
+     * so the generic battery and this one can never drift apart.
+     *
+     * The fields with a legitimate unset state keep their null probes:
+     * target, return_path, demand_id, subject and the factor triple
+     * carry absent shapes the decode derives, and target_owned plus
+     * bootstrap spell their unset state as false and the integer 0. The
+     * key-missing rows cover the fields the schema requires, including
+     * the ones a kind requires on an otherwise nullable key.
+     *
+     * @return array<string, array<string, array{0: array<string, mixed>, 1: string, 2: mixed}>>
+     */
+    private function schemaInvalidChallengeMutations(): array
+    {
+        $bases = $this->canonicalChallengeBases();
+        $maximal = $bases['email_otp_maximal'];
+        $bound = $bases['email_otp_demand_bound'];
+        $webauthn = $bases['webauthn_assertion'];
+        $creation = $bases['webauthn_creation'];
+        $totp = $bases['totp_session'];
+        $ownership = $bases['email_ownership'];
+        $probes = $this->wrongTypedValues();
+
+        $rows = [];
+        $mut = static function (array $wire, string $field, mixed $value): array {
+            $wire[$field] = $value;
+
+            return $wire;
+        };
+        $gone = static function (array $wire, string $field): array {
+            unset($wire[$field]);
+
+            return $wire;
+        };
+        $row = static function (string $field, string $probe, array $wire, mixed $value, ?string $token = null) use (&$rows): void {
+            $rows[$field][$probe] = [$wire, $token ?? $field, $value];
+        };
+
+        // The schema version gate: the integer 2, nothing else.
+        foreach ($probes as $kind => $value) {
+            $row('v', 'wrong-type:'.$kind, $mut($maximal, 'v', $value), $value);
+        }
+        $row('v', 'missing', $gone($maximal, 'v'), null);
+        $row('v', 'earlier-schema', $mut($maximal, 'v', 1), 1);
+        $row('v', 'later-schema', $mut($maximal, 'v', 3), 3);
+
+        // The base64url challenge id.
+        foreach ($probes as $kind => $value) {
+            $row('id', 'wrong-type:'.$kind, $mut($maximal, 'id', $value), $value);
+        }
+        $row('id', 'missing', $gone($maximal, 'id'), null);
+        $row('id', 'too-short', $mut($maximal, 'id', str_repeat('a', 15)), str_repeat('a', 15));
+        $row('id', 'too-long', $mut($maximal, 'id', str_repeat('a', 44)), str_repeat('a', 44));
+        $row('id', 'padded', $mut($maximal, 'id', str_repeat('a', 15).'='), str_repeat('a', 15).'=');
+
+        // The handler family enum.
+        foreach ($probes as $kind => $value) {
+            $row('kind', 'wrong-type:'.$kind, $mut($maximal, 'kind', $value), $value);
+        }
+        $row('kind', 'missing', $gone($maximal, 'kind'), null);
+        $row('kind', 'unknown-family', $mut($maximal, 'kind', 'sms'), 'sms');
+        $row('kind', 'uppercase', $mut($maximal, 'kind', 'EMAIL'), 'EMAIL');
+
+        // The 32-hex principal pseudonym.
+        foreach ($probes as $kind => $value) {
+            $row('principal', 'wrong-type:'.$kind, $mut($maximal, 'principal', $value), $value);
+        }
+        $row('principal', 'missing', $gone($maximal, 'principal'), null);
+        $row('principal', 'short-hex', $mut($maximal, 'principal', str_repeat('a', 31)), str_repeat('a', 31));
+        $row('principal', 'raw-identifier', $mut($maximal, 'principal', 'user@example.com'), 'user@example.com');
+
+        // The 64-hex target pseudonym. Its null probes stay out: an
+        // absent target is the legitimate shape of a targetless record,
+        // and the coherence of the pair with target_owned is its own row.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('target', 'wrong-type:'.$kind, $mut($maximal, 'target', $value), $value);
+        }
+        $row('target', 'wrong-type:bool-false', $mut($maximal, 'target', false), false);
+        $row('target', 'short-hex', $mut($maximal, 'target', str_repeat('b', 63)), str_repeat('b', 63));
+        $row('target', 'principal-shape', $mut($maximal, 'target', str_repeat('b', 32)), str_repeat('b', 32));
+        $row('target', 'uppercase-hex', $mut($maximal, 'target', str_repeat('B', 64)), str_repeat('B', 64));
+        $row('target', 'raw-identifier', $mut($maximal, 'target', 'user@example.com'), 'user@example.com');
+        $row('target', 'cleared-under-an-owned-flag', $mut($maximal, 'target', null), null);
+
+        // The bounded scope and reason tokens. Their alphabet admits a
+        // digit run, so their numeric-string probe is an over-long one.
+        foreach (['scope', 'reason'] as $field) {
+            foreach ($probes as $kind => $value) {
+                if ($kind === 'str') {
+                    continue;
+                }
+                $row($field, 'wrong-type:'.$kind, $mut($maximal, $field, $value), $value);
+            }
+            $row($field, 'missing', $gone($maximal, $field), null);
+            $row($field, 'numeric-string-too-long', $mut($maximal, $field, str_repeat('9', 129)), str_repeat('9', 129));
+            $row($field, 'spaced', $mut($maximal, $field, 'two words'), 'two words');
+        }
+
+        // The absolute same-site return path; its absent shape is legal.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('return_path', 'wrong-type:'.$kind, $mut($maximal, 'return_path', $value), $value);
+        }
+        $row('return_path', 'relative', $mut($maximal, 'return_path', 'dashboard'), 'dashboard');
+        $row('return_path', 'foreign-origin', $mut($maximal, 'return_path', 'https://evil.example/steal'), 'https://evil.example/steal');
+        $row('return_path', 'protocol-relative', $mut($maximal, 'return_path', '//evil.example/steal'), '//evil.example/steal');
+        $row('return_path', 'dot-segment', $mut($maximal, 'return_path', '/a/../b'), '/a/../b');
+
+        // The epoch-second stamps: exact integers inside the window, and
+        // the expiry always after the creation stamp.
+        foreach (['created_at', 'expires_at'] as $field) {
+            foreach ($probes as $kind => $value) {
+                $row($field, 'wrong-type:'.$kind, $mut($maximal, $field, $value), $value);
+            }
+            $row($field, 'missing', $gone($maximal, $field), null);
+            $row($field, 'zero', $mut($maximal, $field, 0), 0);
+            $row($field, 'before-the-epoch', $mut($maximal, $field, -1), -1);
+            $row($field, 'past-the-window', $mut($maximal, $field, 4_102_444_801), 4_102_444_801);
+        }
+        $row('created_at', 'after-the-expiry', $mut($maximal, 'created_at', 1_700_000_301), 1_700_000_301);
+        $row('expires_at', 'before-the-creation', $mut($maximal, 'expires_at', 1_699_999_999), 1_699_999_999);
+        $row('expires_at', 'equal-to-the-creation', $mut($maximal, 'expires_at', 1_700_000_000), 1_700_000_000);
+
+        // The attempt count and its cap. Zero is a legitimate count and
+        // a refused cap, so only the cap takes the integer-zero probe.
+        foreach (['attempts', 'max_attempts'] as $field) {
+            foreach ($probes as $kind => $value) {
+                if ($kind === 'int' && $field === 'attempts') {
+                    continue;
+                }
+                $row($field, 'wrong-type:'.$kind, $mut($maximal, $field, $value), $value);
+            }
+            $row($field, 'missing', $gone($maximal, $field), null);
+        }
+        $row('max_attempts', 'zero-cap', $mut($maximal, 'max_attempts', 0), 0);
+        $row('max_attempts', 'past-the-ceiling', $mut($maximal, 'max_attempts', 1_000_001), 1_000_001);
+        $row('attempts', 'beyond-the-cap', $mut($maximal, 'attempts', 6), 6);
+        $row('max_attempts', 'beneath-the-count', $mut($mut($maximal, 'attempts', 3), 'max_attempts', 2), 2);
+
+        // The target-owned assertion: an exact JSON boolean, with the
+        // absent spelling covered as its false state.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'bool' || $kind === 'null') {
+                continue;
+            }
+            $row('target_owned', 'wrong-type:'.$kind, $mut($maximal, 'target_owned', $value), $value);
+        }
+        $row('target_owned', 'stringly-true', $mut($maximal, 'target_owned', 'true'), 'true');
+        $row('target_owned', 'integer-one', $mut($maximal, 'target_owned', 1), 1);
+        $row('target_owned', 'empty-map', $mut($maximal, 'target_owned', []), []);
+        $row('target_owned', 'owned-without-a-target', $mut($mut($maximal, 'target', null), 'target_owned', true), true);
+
+        // The bootstrap flag: the integer 0 or 1, with its absent
+        // spelling the pre-flag shape.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'int') {
+                $row('bootstrap', 'wrong-type:int-two', $mut($maximal, 'bootstrap', 2), 2);
+
+                continue;
+            }
+            $row('bootstrap', 'wrong-type:'.$kind, $mut($maximal, 'bootstrap', $value), $value);
+        }
+        $row('bootstrap', 'negative', $mut($maximal, 'bootstrap', -1), -1);
+
+        // The stored proof digest of the kinds that must carry one.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('code_hash', 'wrong-type:'.$kind, $mut($maximal, 'code_hash', $value), $value);
+        }
+        $row('code_hash', 'missing', $gone($maximal, 'code_hash'), null);
+        $row('code_hash', 'null', $mut($maximal, 'code_hash', null), null);
+        $row('code_hash', 'short-digest', $mut($maximal, 'code_hash', str_repeat('c', 63)), str_repeat('c', 63));
+        $row('code_hash', 'present-on-totp', $mut($totp, 'code_hash', str_repeat('c', 64)), str_repeat('c', 64));
+
+        // The webauthn ceremony kind.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('ceremony', 'wrong-type:'.$kind, $mut($webauthn, 'ceremony', $value), $value);
+        }
+        $row('ceremony', 'missing', $gone($webauthn, 'ceremony'), null);
+        $row('ceremony', 'null', $mut($webauthn, 'ceremony', null), null);
+        $row('ceremony', 'unknown-ceremony', $mut($webauthn, 'ceremony', 'attestation'), 'attestation');
+        $row('ceremony', 'present-on-email-otp', $mut($maximal, 'ceremony', 'assertion'), 'assertion');
+
+        // The session binding hash, and the one-binding rule of the pair.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('session_hash', 'wrong-type:'.$kind, $mut($maximal, 'session_hash', $value), $value);
+        }
+        $row('session_hash', 'missing', $gone($maximal, 'session_hash'), null);
+        $row('session_hash', 'null', $mut($maximal, 'session_hash', null), null);
+        $row('session_hash', 'second-binding', $mut($webauthn, 'session_hash', str_repeat('d', 64)), str_repeat('d', 64));
+
+        // The stateless client-secret binding hash.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('client_secret_hash', 'wrong-type:'.$kind, $mut($webauthn, 'client_secret_hash', $value), $value);
+        }
+        $row('client_secret_hash', 'missing', $gone($webauthn, 'client_secret_hash'), null);
+        $row('client_secret_hash', 'null', $mut($webauthn, 'client_secret_hash', null), null);
+        $row('client_secret_hash', 'second-binding', $mut($maximal, 'client_secret_hash', str_repeat('d', 64)), str_repeat('d', 64));
+
+        // The subject pseudonym: derived when absent on a principal-keyed
+        // record, and never present on an email-ownership record.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('subject', 'wrong-type:'.$kind, $mut($maximal, 'subject', $value), $value);
+        }
+        $row('subject', 'short-hex', $mut($maximal, 'subject', str_repeat('a', 31)), str_repeat('a', 31));
+        $row('subject', 'on-email-ownership', $mut($ownership, 'subject', str_repeat('a', 32)), str_repeat('a', 32));
+
+        // The demand binding: present only in its base64url shape, and
+        // only on a record that can authorize. Its absent spelling is the
+        // pre-demand drain shape, so it has no key-missing row.
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'null') {
+                continue;
+            }
+            $row('demand_id', 'wrong-type:'.$kind, $mut($bound, 'demand_id', $value), $value);
+        }
+        $row('demand_id', 'empty', $mut($bound, 'demand_id', ''), '');
+        $row('demand_id', 'too-short', $mut($bound, 'demand_id', str_repeat('a', 15)), str_repeat('a', 15));
+        $row('demand_id', 'too-long', $mut($bound, 'demand_id', str_repeat('a', 44)), str_repeat('a', 44));
+        $row('demand_id', 'padded', $mut($bound, 'demand_id', str_repeat('a', 15).'='), str_repeat('a', 15).'=');
+        $row('demand_id', 'bound-to-creation', $mut($creation, 'demand_id', 'demandid0000000000000000003'), 'demandid0000000000000000003');
+
+        // The factor snapshot: one coherent family, id and rank triple,
+        // serving the family the kind proves.
+        foreach ($probes as $kind => $value) {
+            $row('factor_family', 'wrong-type:'.$kind, $mut($maximal, 'factor_family', $value), $value);
+        }
+        $row('factor_family', 'missing', $gone($maximal, 'factor_family'), null);
+        $row('factor_family', 'unknown-family', $mut($maximal, 'factor_family', 'sms_otp'), 'sms_otp');
+        $row(
+            'factor_family',
+            'alien-family',
+            $mut($mut($mut($maximal, 'factor_family', FactorRequirement::WEBAUTHN), 'factor_id', FactorRequirement::WEBAUTHN), 'factor_rank', 3),
+            3,
+            'factor',
+        );
+
+        foreach ($probes as $kind => $value) {
+            if ($kind === 'str') {
+                // A digit run is a legitimate custom handler identity.
+                continue;
+            }
+            $row('factor_id', 'wrong-type:'.$kind, $mut($maximal, 'factor_id', $value), $value);
+        }
+        $row('factor_id', 'missing', $gone($maximal, 'factor_id'), null);
+        $row('factor_id', 'numeric-string-too-long', $mut($maximal, 'factor_id', str_repeat('9', 65)), str_repeat('9', 65));
+        $row('factor_id', 'uppercase', $mut($maximal, 'factor_id', 'TOTP'), 'TOTP');
+        $row('factor_id', 'hyphenated', $mut($maximal, 'factor_id', 'custom-handler'), 'custom-handler');
+
+        foreach ($probes as $kind => $value) {
+            $row('factor_rank', 'wrong-type:'.$kind, $mut($maximal, 'factor_rank', $value), $value);
+        }
+        $row('factor_rank', 'missing', $gone($maximal, 'factor_rank'), null);
+        $row('factor_rank', 'other-rung', $mut($maximal, 'factor_rank', 2), 2);
+        $row('factor_rank', 'zero', $mut($maximal, 'factor_rank', 0), 0);
+
+        return $rows;
+    }
+
     /**
      * One mutation of the challenge wire that must answer the typed
      * refusal. A silently accepted value would drop the field's
@@ -533,6 +967,7 @@ final class StepUpWireFuzzTest extends TestCase
                 $e->getMessage(),
                 sprintf('the refusal of mutation [%s] must name the field %s', $label, $field),
             );
+            $this->assertPersistedJsonFormRefused($mutated, $label);
 
             return;
         } catch (\Throwable $e) {
@@ -545,13 +980,36 @@ final class StepUpWireFuzzTest extends TestCase
             ));
         }
         self::fail(sprintf(
-            'the challenge field `%s` silently accepted the raw value %s (%s) for mutation [%s]: the decoded field reads %s :: input=%s',
+            'the challenge field `%s` silently accepted the raw value %s (%s) for mutation [%s]: the decoded record normalizes to %s :: input=%s',
             $field,
             var_export($value, true),
             get_debug_type($value),
             $label,
-            var_export($decoded === null ? null : ($decoded->toArray()[$field] ?? null), true),
+            json_encode($decoded->toArray(), JSON_UNESCAPED_SLASHES),
             var_export($mutated, true),
+        ));
+    }
+
+    /**
+     * The same value as it rides the persisted JSON form: fromJson() is
+     * the store's own read path, so a value the array form refuses must
+     * refuse there too.
+     *
+     * @param array<string, mixed> $mutated
+     */
+    private function assertPersistedJsonFormRefused(array $mutated, string $label): void
+    {
+        $json = json_encode($mutated, JSON_THROW_ON_ERROR);
+        try {
+            $decoded = StepUpChallenge::fromJson($json);
+        } catch (MalformedStepUpChallengeException) {
+            return;
+        }
+        self::fail(sprintf(
+            'the persisted JSON form of mutation [%s] decoded instead of refusing: the record normalizes to %s :: json=%s',
+            $label,
+            json_encode($decoded->toArray(), JSON_UNESCAPED_SLASHES),
+            $json,
         ));
     }
 

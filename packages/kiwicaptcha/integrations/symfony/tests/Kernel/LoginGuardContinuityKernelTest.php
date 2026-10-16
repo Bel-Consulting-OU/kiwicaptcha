@@ -143,11 +143,13 @@ final class LoginGuardContinuityKernelTest extends TestCase
         self::assertTrue($deviceCookie->isHttpOnly(), 'the device cookie is HttpOnly');
 
         // The bindings the completion wrote: the device tag is trusted
-        // under the principal, beside the network and the ASN bucket.
+        // under the principal, beside the network tag and the ASN bucket.
         $devicePseudonym = self::identityFactory()->deviceId((string) $deviceValue);
         $tagStore = self::principalNetworks();
         self::assertTrue($tagStore->tagIsTrusted($principal, 'device:'.$devicePseudonym) === true, 'the completed step-up binds the device tag as trusted');
-        self::assertTrue($tagStore->principalNetworkSeen($principal, '040a010203') === true, 'the step-up records the login network');
+        $networkTag = self::engine()->networkTag('10.1.2.3');
+        self::assertTrue($tagStore->principalNetworkSeen($principal, $networkTag) === true, 'the step-up records the login network under the engine tag');
+        self::assertFalse($tagStore->principalNetworkSeen($principal, '040a010203'), 'the raw bucket spelling is never a stored field');
         self::assertTrue($tagStore->principalNetworkSeen($principal, 'asn:64512') === true, 'the step-up records the ASN bucket');
 
         // Logout: the session goes away, the browser keeps its cookies.
@@ -257,6 +259,11 @@ final class LoginGuardContinuityKernelTest extends TestCase
     private static function principalNetworks(): \KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface
     {
         return self::$container->get('kiwi_captcha.risk.principal_networks');
+    }
+
+    private static function engine(): \KiwiCaptcha\Risk\AdaptiveRiskEngine
+    {
+        return self::$container->get('kiwi_captcha.risk.engine');
     }
 
     private function userToken(): UsernamePasswordToken

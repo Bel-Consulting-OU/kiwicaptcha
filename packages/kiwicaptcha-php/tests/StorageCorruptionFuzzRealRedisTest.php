@@ -525,6 +525,243 @@ final class StorageCorruptionFuzzRealRedisTest extends TestCase
         self::assertStringNotContainsString('"state":"pending"', $after);
     }
 
+    public function testEveryMutatingTransitionRefusesAnEscapedKeyAlias(): void
+    {
+        // The semantic-key gate is one shared scanner: every transition
+        // script that classifies or splices an envelope must refuse one
+        // whose runtime field carries an escaped alias (two members for
+        // one semantic field), and every one of them must leave the
+        // ambiguous bytes untouched. This pins the gate on the sibling
+        // scripts (cancel, claim, release) the same way
+        // testEscapedKeyAliasesAreSemanticallyTheSameField pins the
+        // consume, cleanup and commit paths.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+
+        // A consumed record carrying an escaped alias for the field the
+        // commit, claim and release transitions classify or clear.
+        $claimedAmbiguous = function (string $literal, string $escaped) use ($storage, $issuer): string {
+            $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+            $raw = (string) $this->client->get($this->prefix.$nonce);
+            $ambiguous = str_replace($literal, $literal.','.$escaped, $raw);
+            self::assertNotSame($raw, $ambiguous, 'the alias must be inserted');
+            $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+
+            return $nonce;
+        };
+
+        // `consumed_result`: the commit splice target.
+        $nonce = $claimedAmbiguous('"consumed_result":null', '"consumed\\u005fresult":null');
+        $ambiguous = (string) $this->client->get($this->prefix.$nonce);
+        self::assertFalse($storage->commitResult($nonce, true, null), 'the commit refuses an ambiguous consumed_result');
+        self::assertNull($storage->claimResumeDerivation($nonce), 'the claim refuses an ambiguous consumed_result');
+        self::assertFalse($storage->releaseResumeDerivation($nonce, self::FOREIGN_OWNER), 'the release refuses it too');
+        self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'no transition mutates the ambiguous bytes');
+
+        // `resume_until` and `resume_owner`: the claim-clear targets. A
+        // second semantic member for either field is ambiguous
+        // corruption, so the release and the claim-bearing commit refuse
+        // it even though the decoded view still holds a matching owner.
+        foreach ([
+            ['resume_until', '"resume\\u005funtil":null,"resume_until":'],
+            ['resume_owner', '"resume\\u005fowner":null,"resume_owner":'],
+        ] as [$field, $insert]) {
+            $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+            $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+            $owner = $storage->claimResumeDerivation($nonce);
+            self::assertIsString($owner, 'the genuine lease is held');
+            $raw = (string) $this->client->get($this->prefix.$nonce);
+            $ambiguous = str_replace('"'.$field.'":', $insert, $raw);
+            self::assertNotSame($raw, $ambiguous, 'the escaped alias is inserted');
+            self::assertSame($owner, json_decode($ambiguous, true)['resume_owner'] ?? null, 'the decoded view still holds the owner');
+            $this->client->set($this->prefix.$nonce, $ambiguous, 'EX', 300);
+            self::assertFalse($storage->releaseResumeDerivation($nonce, $owner), 'the release refuses a semantically duplicated claim field');
+            self::assertFalse($storage->commitResultResume($nonce, true, null, $owner), 'the claim-bearing commit refuses it');
+            self::assertSame($ambiguous, $this->client->get($this->prefix.$nonce), 'the refused transitions write nothing');
+        }
+
+        // The escaped-only (non-ambiguous) spelling is still resolved
+        // semantically by the sibling scripts: the cancel flip, the
+        // cleanup delete, the release clear and the consume splice all
+        // land on the field the decoder reads, in place.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $escapedOnly = str_replace('"state":"pending"', '"st\\u0061te":"pending"', $raw);
+        self::assertNotSame($raw, $escapedOnly);
+        $this->client->set($this->prefix.$nonce, $escapedOnly, 'EX', 300);
+        self::assertSame('cancelled-now', $storage->cancel($nonce)?->state, 'the cancel resolves the escaped spelling');
+        self::assertStringContainsString('"st\\u0061te":"cancelled"', (string) $this->client->get($this->prefix.$nonce), 'the flip keeps the escaped spelling in place');
+
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $escapedOnly = str_replace('"state":"pending"', '"st\\u0061te":"pending"', (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR));
+        $this->client->set($this->prefix.$nonce, $escapedOnly, 'EX', 300);
+        self::assertSame('deleted-pending', $storage->deleteIfPending($nonce)->state, 'the cleanup deletes a pending record spelled with an escaped state key');
+        self::assertNull($this->client->get($this->prefix.$nonce), 'the escaped-spelled pending record is gone');
+
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $storage->consumeWithOperationIdentity($nonce, self::IDENTITY);
+        $owner = $storage->claimResumeDerivation($nonce);
+        self::assertIsString($owner);
+        $escapedLease = str_replace('"resume_until":', '"resume\\u005funtil":', (string) $this->client->get($this->prefix.$nonce));
+        $this->client->set($this->prefix.$nonce, $escapedLease, 'EX', 300);
+        self::assertTrue($storage->releaseResumeDerivation($nonce, $owner), 'the release clears an escaped-spelled lease field');
+        self::assertStringNotContainsString('resume_until', (string) $this->client->get($this->prefix.$nonce), 'no spelling of the cleared field survives');
+        self::assertStringNotContainsString('resume\\u005funtil', (string) $this->client->get($this->prefix.$nonce));
+    }
+
+    public function testRuntimeFieldOrderNeverRedirectsASplice(): void
+    {
+        // A foreign writer may order the runtime fields any way it likes.
+        // Every splice targets the span of the semantic field, so the
+        // flip lands wherever that field sits and the other bytes of the
+        // envelope survive exactly.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $fields = ['nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at', 'algorithm',
+            'salt', 'prefix', 'challenge', 'issued_at_ns', 'server_mac'];
+
+        // 1. `operation_identity` first: both edits of the consume
+        //    transition land on their own fields.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $reordered = '{"operation_identity":null,'.substr(str_replace(',"operation_identity":null', '', $raw), 1);
+        $this->client->set($this->prefix.$nonce, $reordered, 'EX', 300);
+        $consumed = $storage->consumeWithOperationIdentity($nonce, 'op-reordered');
+        self::assertTrue($consumed?->consumedNow ?? false, 'the reordered envelope consumes');
+        self::assertSame('op-reordered', $consumed->operationIdentity, 'the identity lands in its own field');
+        $after = (string) $this->client->get($this->prefix.$nonce);
+        self::assertStringStartsWith('{"operation_identity":"op-reordered",', $after, 'the identity keeps its position at the front');
+        self::assertStringContainsString('"state":"consumed"', $after);
+        self::assertStringNotContainsString('"state":"pending"', $after);
+        $this->assertRecordFieldsSurvive($reordered, $after, $fields);
+
+        // 2. `consumed_result` first: the commit lands on it and the
+        //    identity keeps the position it was given.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $raw = (string) json_encode($this->envelope($nonce), JSON_THROW_ON_ERROR);
+        $reordered = '{"consumed_result":null,'.substr(str_replace(',"consumed_result":null', '', $raw), 1);
+        $this->client->set($this->prefix.$nonce, $reordered, 'EX', 300);
+        self::assertTrue($storage->consumeWithOperationIdentity($nonce, 'op-reordered')?->consumedNow ?? false);
+        self::assertTrue($storage->commitResult($nonce, true, 'binding-7'), 'the commit lands on the leading consumed_result');
+        $after = (string) $this->client->get($this->prefix.$nonce);
+        self::assertStringStartsWith('{"consumed_result":{"valid":true,"binding":"binding-7"},', $after, 'the result keeps its position at the front');
+        $state = $storage->consumedState($nonce);
+        self::assertNotNull($state, 'the reordered committed envelope reads back');
+        self::assertTrue($state->consumedResult?->valid ?? false, 'the committed verdict reads back');
+        self::assertSame('binding-7', $state->consumedResult?->binding, 'the committed binding reads back');
+        $this->assertRecordFieldsSurvive($reordered, $after, $fields);
+
+        // 3. The claim fields ahead of every record field: the release
+        //    clears exactly them and nothing else.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $storage->consumeWithOperationIdentity($nonce, 'op-reordered');
+        $consumed = (string) $this->client->get($this->prefix.$nonce);
+        $owner = str_repeat('a', 32);
+        $interleaved = str_replace(
+            '{"nonce"',
+            '{"resume_owner":"'.$owner.'","resume_until":'.(string) (time() + 3600).'000000,"nonce"',
+            $consumed,
+        );
+        self::assertNotSame($consumed, $interleaved, 'the interleaved lease is written');
+        $this->client->set($this->prefix.$nonce, $interleaved, 'EX', 300);
+        self::assertNull($storage->claimResumeDerivation($nonce), 'the live interleaved lease fences a second claim');
+        self::assertTrue($storage->releaseResumeDerivation($nonce, $owner), 'the release clears the interleaved lease');
+        $released = (string) $this->client->get($this->prefix.$nonce);
+        self::assertStringNotContainsString('resume_owner', $released);
+        self::assertStringNotContainsString('resume_until', $released);
+        self::assertStringContainsString('"operation_identity":"op-reordered"', $released, 'the neighbouring field survives');
+        $this->assertRecordFieldsSurvive($interleaved, $released, $fields);
+    }
+
+    /** Every canonical record field survives the transition byte for byte. */
+    private function assertRecordFieldsSurvive(string $before, string $after, array $fields): void
+    {
+        $from = json_decode($before, true);
+        $to = json_decode($after, true);
+        self::assertIsArray($from);
+        self::assertIsArray($to);
+        foreach ($fields as $field) {
+            self::assertSame($from[$field] ?? null, $to[$field] ?? null, sprintf('%s survives the splices', $field));
+        }
+    }
+
+    public function testEnvelopesThePreChangeTransitionsWroteStillRun(): void
+    {
+        // Compatibility with the stored bytes older revisions left in
+        // Redis. The shapes below are exactly what the pre-change
+        // transitions wrote: the flip replaces the state value in place,
+        // the identity replaces its null marker in place, a commit
+        // replaces the consumed_result value in place, a claim appends
+        // its two fields before the closing brace and a cancel replaces
+        // the state value. The change kept the splice targets and the
+        // field order, so these bytes stay readable and every transition
+        // still acts on them.
+        $storage = new RedisStorage($this->client, $this->prefix);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+
+        $preChange = function (string $nonce) use ($storage): array {
+            // JSON_UNESCAPED_SLASHES: the exact bytes store() writes.
+            $pending = (string) json_encode($this->envelope($nonce), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+            $consumed = str_replace(
+                ['"state":"pending"', '"operation_identity":null'],
+                ['"state":"consumed"', '"operation_identity":"op-pre-change"'],
+                $pending,
+            );
+            $committed = str_replace('"consumed_result":null', '"consumed_result":{"valid":true,"binding":null}', $consumed);
+            $claimed = str_replace(
+                '"operation_identity":"op-pre-change"',
+                '"operation_identity":"op-pre-change","resume_owner":"'.self::FOREIGN_OWNER.'","resume_until":'.(string) (time() + 3600).'000000',
+                $consumed,
+            );
+
+            return [$pending, $consumed, $committed, $claimed];
+        };
+
+        // A record the pre-change consume transition wrote reads back
+        // with its record and its recorded identity.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        [$pending, $consumed, $committed, $claimed] = $preChange($nonce);
+        $this->client->set($this->prefix.$nonce, $consumed, 'EX', 300);
+        $state = $storage->consumedState($nonce);
+        self::assertNotNull($state, 'the pre-change consumed envelope reads');
+        self::assertSame($nonce, $state->record->nonce, 'the record survives');
+        self::assertSame('op-pre-change', $state->operationIdentity, 'the recorded identity survives');
+
+        // A pre-change commit envelope: the replayed consume returns the
+        // committed result instead of re-consume semantics.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        [$pending, $consumed, $committed, $claimed] = $preChange($nonce);
+        $this->client->set($this->prefix.$nonce, $committed, 'EX', 300);
+        $replay = $storage->consume($nonce);
+        self::assertTrue($replay?->consumedBefore ?? false, 'the pre-change committed envelope is a consumed record');
+        self::assertTrue($replay?->consumedResult?->valid ?? false, 'the committed result rides back');
+
+        // A pre-change claim envelope: the lease releases with its owner.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        [$pending, $consumed, $committed, $claimed] = $preChange($nonce);
+        $this->client->set($this->prefix.$nonce, $claimed, 'EX', 300);
+        self::assertNull($storage->claimResumeDerivation($nonce), 'the live pre-change lease still fences a second claim');
+        self::assertTrue($storage->releaseResumeDerivation($nonce, self::FOREIGN_OWNER), 'the pre-change lease releases');
+
+        // A pre-change cancel envelope: dead, retained, never consumed.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        $pending = (string) json_encode($this->envelope($nonce), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $cancelled = str_replace('"state":"pending"', '"state":"cancelled"', $pending);
+        $this->client->set($this->prefix.$nonce, $cancelled, 'EX', 300);
+        self::assertNull($storage->consume($nonce), 'the pre-change cancelled envelope is never redeemed');
+        self::assertSame('cancelled', $storage->deleteIfPending($nonce)->state, 'the pre-change cancelled envelope is retained');
+        self::assertSame($cancelled, $this->client->get($this->prefix.$nonce), 'and never rewritten');
+
+        // The pending envelope the current writer stores consumes into
+        // exactly the pre-change consumed shape, byte for byte.
+        $nonce = $issuer->issue('login', self::CLIENT_IP)->nonce;
+        [$pending, $consumed, $committed, $claimed] = $preChange($nonce);
+        self::assertSame($pending, (string) $this->client->get($this->prefix.$nonce), 'the writer stores the pending shape');
+        self::assertNotNull($storage->consumeWithOperationIdentity($nonce, 'op-pre-change'));
+        self::assertSame($consumed, (string) $this->client->get($this->prefix.$nonce), 'the current flip writes the pre-change consumed shape byte for byte');
+    }
+
     /** Drive a record to one of the six base states. */
     private function prepareState(RedisStorage $storage, string $nonce, string $state): void
     {

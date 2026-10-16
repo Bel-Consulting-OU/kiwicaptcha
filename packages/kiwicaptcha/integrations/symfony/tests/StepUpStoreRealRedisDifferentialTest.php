@@ -225,6 +225,79 @@ final class StepUpStoreRealRedisDifferentialTest extends TestCase
     }
 
     /**
+     * Scenario nine: the stored lineage on the live script. A demand
+     * minted under one lineage refuses a completion that presents
+     * another (nothing consumed, no marker filed on either store), and
+     * its own lineage completes and files the marker under it. The
+     * anonymous email-ownership factor is likewise refused against a
+     * principal-bound demand on both stores.
+     */
+    public function testTheStoredLineageAndProofClassGatesHoldOnBothStores(): void
+    {
+        $this->sync();
+        $now = $this->clock->now;
+        $lineage = hash('sha256', 'lineage-real-redis');
+        $foreign = hash('sha256', 'lineage-real-redis-foreign');
+        $scenario = function (StepUpChallengeStore $store) use ($now, $lineage, $foreign): array {
+            $demand = StepUpDemand::mint(
+                StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess'), null, null, $now, 600,
+                StepUpOperationBindingKind::FormFields, hash('sha256', 'op'), null, null, false, null, null, self::PRINCIPAL_A, $lineage,
+            );
+            $store->createDemand($demand, 600);
+            $challenge = StepUpChallenge::begin(
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOtp, self::PRINCIPAL_A, null, self::SCOPE, null, 'step_up',
+                $now, 600, 5, hash('sha256', 'code'), null, 'sess', false, false, null, $demand->id,
+            );
+            $store->createAdmittedChallenge($challenge, 600);
+
+            $answers = [
+                'the foreign lineage refuses' => $store->completeFactor($challenge->id, $demand->id, (string) $challenge->sessionHash, $now, (string) $challenge->sessionHash, self::SCOPE, $foreign) === null,
+                'the refusal consumed no challenge' => $store->read($challenge->id) !== null,
+                'the foreign lineage answers nothing' => $store->completedFactorOf($foreign, self::PRINCIPAL_A, self::SCOPE, $now),
+            ];
+            $answers['the stored lineage completes'] = $store->completeFactor($challenge->id, $demand->id, (string) $challenge->sessionHash, $now, (string) $challenge->sessionHash, self::SCOPE, $lineage) !== null;
+            $answers['the marker sits under the stored lineage'] = $store->completedFactorOf($lineage, self::PRINCIPAL_A, self::SCOPE, $now);
+
+            // The proof-class gate: an address-ownership challenge never
+            // answers a demand that names a principal.
+            $bound = StepUpDemand::mint(
+                StepUpChallenge::mintId(), self::SCOPE, hash('sha256', 'sess-2'), null, null, $now, 600,
+                StepUpOperationBindingKind::FormFields, hash('sha256', 'op-2'), null, null, false, null, null, self::PRINCIPAL_A, $lineage,
+            );
+            $store->createDemand($bound, 600);
+            $addressOwnership = StepUpChallenge::begin(
+                StepUpChallenge::mintId(), StepUpChallengeKind::EmailOwnership, str_repeat('e', 32), null, self::SCOPE, null, 'email_ownership',
+                $now, 600, 5, hash('sha256', 'mail-code'), null, 'sess-2', false, false, null, $bound->id,
+            );
+            $refused = false;
+            try {
+                $store->createAdmittedChallenge($addressOwnership, 600);
+            } catch (StepUpDemandAdmissionRefused) {
+                $refused = true;
+            }
+            $answers['the address-ownership admission refused'] = $refused;
+            $answers['the refused record left nothing'] = $store->read($addressOwnership->id) === null;
+
+            return $answers;
+        };
+
+        $a = $scenario($this->arrayStore);
+        $r = $scenario($this->redisStore);
+        $expected = [
+            'the foreign lineage refuses' => true,
+            'the refusal consumed no challenge' => true,
+            'the foreign lineage answers nothing' => null,
+            'the stored lineage completes' => true,
+            'the marker sits under the stored lineage' => 'email_otp',
+            'the address-ownership admission refused' => true,
+            'the refused record left nothing' => true,
+        ];
+        self::assertSame($expected, $a, 'the array store must hold the stored-lineage and proof-class gates');
+        self::assertSame($expected, $r, 'the live Redis script must hold the stored-lineage and proof-class gates');
+        self::assertSame($a, $r, 'the two stores disagree on the stored-lineage or proof-class gate');
+    }
+
+    /**
      * Scenario four: the monotonic completion history. A webauthn
      * completion then a weaker email_otp completion of the same
      * (lineage, principal, scope) triple must still answer webauthn on

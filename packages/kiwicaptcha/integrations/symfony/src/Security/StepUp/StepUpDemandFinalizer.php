@@ -128,8 +128,12 @@ final class StepUpDemandFinalizer
         if ($demandId !== null && preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1) {
             return null;
         }
+        // The history identity the demand is minted under: the same
+        // effective lineage the requirement read, persisted on the
+        // record so the completion's history write can be held to it.
+        $lineageHash = $this->effectiveLineage($sessionHash);
         try {
-            $required = $this->requiredFactorOf($scope, $principalPseudonym, $sessionHash);
+            $required = $this->requiredFactorOf($scope, $principalPseudonym, $lineageHash);
         } catch (StepUpAssuranceUnavailable $e) {
             // An unavailable assurance state is no basis for a demand:
             // the mint refuses (no demand id, nothing stored) instead of
@@ -154,6 +158,7 @@ final class StepUpDemandFinalizer
             null,
             $required,
             $principalPseudonym === '' ? null : $principalPseudonym,
+            $lineageHash,
         );
         try {
             $this->store->createDemand($demand, $ttlSecs);
@@ -195,6 +200,24 @@ final class StepUpDemandFinalizer
     }
 
     /**
+     * The effective assurance-history identity of this request: the
+     * session's stable lineage when a started session exists, the
+     * presented session binding otherwise (the cookie lane, where no
+     * login rotation can orphan it). Null when the request offers
+     * neither, a truly stateless mint that keeps no history. The minted
+     * demand persists exactly this value, so the completion can hold
+     * its presented lineage to the identity the demand was raised
+     * under.
+     */
+    private function effectiveLineage(?string $sessionHash): ?string
+    {
+        $request = $this->requestStack?->getCurrentRequest();
+        $lineageHash = $request !== null ? StepUpSessionBinding::lineageHash($request) : null;
+
+        return $lineageHash ?? $sessionHash;
+    }
+
+    /**
      * The factor requirement the mint snapshots onto its demand: the
      * resolver's answer for the scope, escalated strictly past the
      * factor the family's live completion marker records. A demand
@@ -208,20 +231,18 @@ final class StepUpDemandFinalizer
      * {@see StepUpAssuranceUnavailable}. The mint then refuses instead
      * of silently minting a demand with no assurance snapshot.
      *
+     * The history is read under the demand's own effective lineage,
+     * the same identity the mint stores on the record. The selection
+     * can never be made under one lineage and filed under another.
+     *
      * @throws StepUpAssuranceUnavailable when the store or the resolver fails
      */
-    private function requiredFactorOf(string $scope, ?string $principalPseudonym, ?string $sessionHash = null): ?FactorRequirement
+    private function requiredFactorOf(string $scope, ?string $principalPseudonym, ?string $lineageHash): ?FactorRequirement
     {
         if ($this->factorResolver === null) {
             return null;
         }
         $completed = null;
-        $request = $this->requestStack?->getCurrentRequest();
-        // The history identity is the stable lineage when a session
-        // exists; it degrades to the presented session binding on the
-        // cookie lane, where no login rotation can orphan it.
-        $lineageHash = $request !== null ? StepUpSessionBinding::lineageHash($request) : null;
-        $lineageHash = $lineageHash ?? $sessionHash;
         // A null principal is the anonymous bucket, a legitimate history
         // identity for the lanes whose demand carries no principal.
         if ($lineageHash !== null && $lineageHash !== '') {
@@ -361,8 +382,12 @@ final class StepUpDemandFinalizer
             $serverOwnedOperationId,
             $canonicalContent,
         );
+        // The history identity the demand is minted under: the same
+        // effective lineage the requirement read, persisted on the
+        // record so the completion's history write can be held to it.
+        $lineageHash = $this->effectiveLineage($sessionHash);
         try {
-            $required = $this->requiredFactorOf($scope, $principalPseudonym, $sessionHash);
+            $required = $this->requiredFactorOf($scope, $principalPseudonym, $lineageHash);
         } catch (StepUpAssuranceUnavailable $e) {
             // An unavailable assurance state is no basis for a demand:
             // the mint refuses (no demand id, nothing stored) instead of
@@ -387,6 +412,7 @@ final class StepUpDemandFinalizer
             null,
             $required,
             $principalPseudonym,
+            $lineageHash,
         );
         try {
             return $this->store->createRootDemand($demand, $ttlSecs);

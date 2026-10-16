@@ -217,11 +217,15 @@ final class EmailOwnershipStepUp
             return null;
         }
         $now = $this->now();
+        // The lineage degrades to the session binding where no started
+        // session exists; the history principal is the demand's own,
+        // absent on this lane, so the anonymous bucket. The same
+        // effective lineage is persisted on the record, so the
+        // completion's history write is held to the identity the
+        // requirement was read under.
+        $historyLineage = $lineageHash ?? $sessionHash;
         try {
-            // The lineage degrades to the session binding where no started
-            // session exists; the history principal is the demand's own,
-            // absent on this lane, so the anonymous bucket.
-            $requirement = $this->requiredFactorOf($scope, $lineageHash ?? $sessionHash, null);
+            $requirement = $this->requiredFactorOf($scope, $historyLineage, null);
         } catch (StepUpAssuranceUnavailable $e) {
             // An unavailable assurance state is no basis for a demand:
             // the 403 then carries no demand, and begin() refuses every
@@ -230,7 +234,7 @@ final class EmailOwnershipStepUp
 
             return null;
         }
-        $demand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $sessionHash, $chainId, $decisionId, $now, $this->ttlSecs, $operationBindingKind, $operationDigest, null, null, false, null, $requirement);
+        $demand = StepUpDemand::mint(StepUpChallenge::mintId(), $scope, $sessionHash, $chainId, $decisionId, $now, $this->ttlSecs, $operationBindingKind, $operationDigest, null, null, false, null, $requirement, null, $historyLineage);
         try {
             // The family digest is browser/subject-bound (mint folded
             // the session, or the unguessable mint for a stateless

@@ -1536,9 +1536,12 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         mint_trust,
                     );
                 }
+                // The stored form is the stable network-tag pseudonym
+                // (never the bucket spelling): the field never encodes
+                // the address reversibly.
                 let _ = networks.record_principal_network_tag(
                     &principal_hex,
-                    &network_bucket(ctx.source_ip),
+                    &network_tag(&self.keys, ctx.source_ip),
                     true,
                 );
                 let asn = self.asn_bucket_of(&ctx.source_ip);
@@ -1654,6 +1657,33 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
         }
     }
 
+    /// Whether the principal's network history carries this source
+    /// address. The stable network tag is probed first; on a miss every
+    /// legacy bucket spelling is probed, so a field written under one
+    /// still vouches for the same network. The next post-Allow record
+    /// rewrites that network under the tag. A store error propagates to
+    /// the caller's fail-closed handling, never reading as neutral.
+    /// Mirrors the PHP `AdaptiveRiskEngine::networkSeen()`.
+    fn network_seen(
+        &self,
+        networks: &dyn crate::store::PrincipalNetworkTagStore,
+        principal_hex: &str,
+        ip: std::net::IpAddr,
+    ) -> Result<Option<bool>, crate::store::RiskStoreError> {
+        match networks.principal_network_seen(principal_hex, &network_tag(&self.keys, ip))? {
+            Some(true) => Ok(Some(true)),
+            Some(false) => {
+                for legacy in legacy_network_buckets(ip) {
+                    if networks.principal_network_seen(principal_hex, &legacy)? == Some(true) {
+                        return Ok(Some(true));
+                    }
+                }
+                Ok(Some(false))
+            }
+            None => Ok(None),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn first_attempt_evidence(
         &self,
@@ -1690,7 +1720,6 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                 (&self.principal_networks, &observation.principal_id)
             {
                 let principal_hex = hex::encode(principal);
-                let network = network_bucket(ctx.source_ip);
                 let asn = self.asn_bucket_of(&ctx.source_ip);
                 // Each probe is judged on its own result, and a store
                 // error arms the fail-closed flag instead of reading as
@@ -1708,13 +1737,17 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
                         }
                     }
                 };
-                let net_seen = match networks.principal_network_seen(&principal_hex, &network) {
-                    Ok(seen) => seen,
-                    Err(_) => {
-                        evidence_unavailable = true;
-                        Some(false)
-                    }
-                };
+                // The stored tag first, then the bucket spelling as the
+                // legacy form: history recorded under the legacy form
+                // still vouches for this network.
+                let net_seen =
+                    match self.network_seen(networks.as_ref(), &principal_hex, ctx.source_ip) {
+                        Ok(seen) => seen,
+                        Err(_) => {
+                            evidence_unavailable = true;
+                            Some(false)
+                        }
+                    };
                 let trusted = match networks.principal_has_trusted_network(&principal_hex) {
                     Ok(trusted) => trusted,
                     Err(_) => {
@@ -2544,10 +2577,70 @@ fn drop_quarantine_on_escalation(decision: RiskDecision) -> RiskDecision {
 
 /// The network bucket of a source address for the novel-network gate
 /// (P0-1): the IPv4 address itself, or the IPv6 /64 prefix. Stable,
-/// deployment-neutral spelling (family byte + masked packed bytes, hex)
-/// so both cores key the same bucket for the same address.
+/// deployment-neutral spelling (family byte + masked packed bytes at
+/// their natural width, hex) so both cores key the same bucket for the
+/// same address. [`RiskEngine::network_seen`] reads this spelling on a
+/// tag miss, so history recorded under it keeps vouching.
 fn network_bucket(ip: std::net::IpAddr) -> String {
     hex::encode(crate::identity::masked_network(ip, 32, 64))
+}
+
+/// The bucket spellings the gate reads as the legacy field form: the
+/// canonical spelling, plus the truncated IPv6 /64 spelling the earlier
+/// PHP engine wrote (family byte plus the eight prefix bytes). Both
+/// cores read both spellings, so a deployment that switched cores keeps
+/// its IPv6 history.
+fn legacy_network_buckets(ip: std::net::IpAddr) -> Vec<String> {
+    let canonical = network_bucket(ip);
+    if canonical.len() == 34 {
+        return vec![canonical.clone(), canonical[..18].to_string()];
+    }
+    vec![canonical]
+}
+
+/// Purpose label of the network-tag key derivation: HMAC-ing this label
+/// under the master-derived source key yields the network-tag purpose
+/// key, independent of every identity pseudonym derivation.
+pub(crate) const NETWORK_TAG_KEY_LABEL: &[u8] = b"kiwi-risk-network-tag-key-v1";
+
+/// Purpose label of the network-tag HMAC over the bucket spelling. The
+/// label is domain separation: the same bucket under another purpose
+/// derives a different value.
+pub(crate) const NETWORK_TAG_LABEL: &[u8] = b"kiwi-risk-network-tag-v1";
+
+/// The stable network-tag pseudonym of a source address for the
+/// novel-network gate: a purpose-separated HMAC-SHA256 under a key
+/// derived from the deployment risk master secret, over the bucket
+/// spelling (the full IPv4 address, or the IPv6 /64). This is the field
+/// the writer records and every gate read probes, so the store never
+/// holds the address in a reversible encoding.
+///
+/// The derivation is byte-identical with the PHP
+/// `AdaptiveRiskEngine::networkTag()`. The purpose key is the
+/// HMAC-SHA256 over the label "kiwi-risk-network-tag-key-v1", keyed by
+/// K_source. The tag is the lowercase hex of the HMAC-SHA256 over the
+/// label "kiwi-risk-network-tag-v1", a 0x00 separator and the bucket
+/// spelling, keyed by the purpose key.
+///
+/// K_source is the master-derived source identity key, so the key
+/// material comes from the deployment secret and never from a constant.
+/// The tag is stable across epochs by design: the gate compares one
+/// bucket across time, so the epoch-scoped identity pseudonyms cannot
+/// serve as the stored form.
+pub fn network_tag(keys: &RiskKeys, ip: std::net::IpAddr) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut key_mac =
+        HmacSha256::new_from_slice(&keys.source).expect("HMAC accepts any key length");
+    key_mac.update(NETWORK_TAG_KEY_LABEL);
+    let purpose_key = key_mac.finalize().into_bytes();
+    let mut tag_mac =
+        HmacSha256::new_from_slice(&purpose_key).expect("HMAC accepts any key length");
+    tag_mac.update(NETWORK_TAG_LABEL);
+    tag_mac.update(b"\0");
+    tag_mac.update(network_bucket(ip).as_bytes());
+    hex::encode(tag_mac.finalize().into_bytes())
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -5443,5 +5536,306 @@ mod tests {
         assert_eq!(session_id.len(), 32);
         assert!(session_id.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(session_id, hex::encode(session));
+    }
+
+    /// The in-memory principal-network tag store of the network-tag
+    /// tests: seen-ness and the trust mirrors, with the network-class
+    /// trust probe of the canonical script (a bare-hex field counts,
+    /// like the net and asn classes).
+    #[derive(Default)]
+    struct NetworkTagFake {
+        tags: Mutex<HashMap<String, Vec<String>>>,
+        trusted: Mutex<HashMap<String, Vec<String>>>,
+    }
+
+    impl NetworkTagFake {
+        fn seed(&self, principal: &str, tag: &str, trusted: bool) {
+            self.tags
+                .lock()
+                .unwrap()
+                .entry(principal.to_string())
+                .or_default()
+                .push(tag.to_string());
+            if trusted {
+                self.trusted
+                    .lock()
+                    .unwrap()
+                    .entry(principal.to_string())
+                    .or_default()
+                    .push(tag.to_string());
+            }
+        }
+
+        fn seen(&self, principal: &str, tag: &str) -> bool {
+            self.tags
+                .lock()
+                .unwrap()
+                .get(principal)
+                .is_some_and(|tags| tags.iter().any(|t| t == tag))
+        }
+
+        fn trusted(&self, principal: &str, tag: &str) -> bool {
+            self.trusted
+                .lock()
+                .unwrap()
+                .get(principal)
+                .is_some_and(|tags| tags.iter().any(|t| t == tag))
+        }
+    }
+
+    impl crate::store::PrincipalNetworkTagStore for NetworkTagFake {
+        fn principal_network_seen(
+            &self,
+            principal_id: &str,
+            network: &str,
+        ) -> Result<Option<bool>, RiskStoreError> {
+            Ok(Some(self.seen(principal_id, network)))
+        }
+
+        fn record_principal_network_tag(
+            &self,
+            principal_id: &str,
+            network: &str,
+            trusted: bool,
+        ) -> Result<bool, RiskStoreError> {
+            let is_new = !self.seen(principal_id, network);
+            self.seed(principal_id, network, trusted);
+            Ok(is_new)
+        }
+
+        fn principal_has_trusted_network(
+            &self,
+            principal_id: &str,
+        ) -> Result<Option<bool>, RiskStoreError> {
+            Ok(Some(
+                self.trusted
+                    .lock()
+                    .unwrap()
+                    .get(principal_id)
+                    .is_some_and(|tags| !tags.is_empty()),
+            ))
+        }
+
+        fn tag_is_trusted(
+            &self,
+            principal_id: &str,
+            network: &str,
+        ) -> Result<Option<bool>, RiskStoreError> {
+            Ok(Some(self.trusted(principal_id, network)))
+        }
+    }
+
+    /// The shared derivation vectors, master 0x42 x 32. The PHP suite
+    /// (packages/kiwicaptcha-risk-php/tests/NetworkTagVectorsTest.php)
+    /// pins these identical literals, so one master and one bucket
+    /// derive one tag in both cores.
+    #[test]
+    fn network_tag_matches_the_php_reference_vectors() {
+        let keys = keys();
+        assert_eq!(
+            network_tag(&keys, "198.51.100.42".parse().unwrap()),
+            "0221669a302689e99be2e6f1bf3d478e66282fef0f213da4160c957ff16ccac2",
+            "the IPv4 tag vector",
+        );
+        assert_eq!(
+            network_tag(&keys, "127.0.0.1".parse().unwrap()),
+            "dd9b709dd17f2084613c9883c1a260c5f3d21783d7f1d2c002f9458aae7fca60",
+            "the loopback tag vector",
+        );
+        assert_eq!(
+            network_tag(
+                &keys,
+                "2001:db8:abcd:1234:5678:9abc:def0:1234".parse().unwrap()
+            ),
+            "9b35f176530031416eaafa5cc4231c82022fc33f65e9889191c13a49f10ba927",
+            "the IPv6 /64 tag vector",
+        );
+        assert_eq!(
+            network_tag(&keys, "2001:db8:abcd:1235::1".parse().unwrap()),
+            "3a6252639aa10f440d109fd571d53c348a25c16969fe63d1113bf82a4f577123",
+            "a second /64 derives a second tag",
+        );
+    }
+
+    #[test]
+    fn network_tag_is_stable_purpose_separated_and_not_the_bucket() {
+        let keys = keys();
+        let ip: std::net::IpAddr = "198.51.100.42".parse().unwrap();
+        let tag = network_tag(&keys, ip);
+        assert_eq!(
+            tag.len(),
+            64,
+            "the tag is 32 raw bytes of HMAC-SHA256 as hex"
+        );
+        assert!(tag
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+        assert_eq!(tag, network_tag(&keys, ip), "the derivation is stable");
+        assert_ne!(
+            tag,
+            network_bucket(ip),
+            "the tag is not the bucket spelling"
+        );
+        // Two hosts of one IPv6 /64 share the tag; another /64 differs.
+        let home: std::net::IpAddr = "2001:db8:abcd:1234:5678:9abc:def0:1234".parse().unwrap();
+        let sibling: std::net::IpAddr = "2001:db8:abcd:1234:ffff:ffff:ffff:ffff".parse().unwrap();
+        let other: std::net::IpAddr = "2001:db8:abcd:1235::1".parse().unwrap();
+        assert_eq!(
+            network_tag(&keys, home),
+            network_tag(&keys, sibling),
+            "the /64 granularity is preserved: siblings share the tag",
+        );
+        assert_ne!(network_tag(&keys, home), network_tag(&keys, other));
+        // Another master derives another tag: the key is deployment
+        // key material, never a constant.
+        assert_ne!(tag, network_tag(&RiskKeys::from_master(&[0x11; 32]), ip));
+        // The legacy spellings: the canonical bucket, plus the truncated
+        // IPv6 /64 spelling for an IPv6 address.
+        assert_eq!(legacy_network_buckets(ip), vec!["04c633642a".to_string()]);
+        assert_eq!(
+            legacy_network_buckets(home),
+            vec![
+                "0620010db8abcd12340000000000000000".to_string(),
+                "0620010db8abcd1234".to_string(),
+            ],
+        );
+    }
+
+    fn network_tag_engine(
+        networks: std::sync::Arc<NetworkTagFake>,
+        novelty: NoveltyEnforcement,
+    ) -> (
+        RiskEngine<MockStore, CidrNetworkClassifier>,
+        [u8; 16],
+        String,
+    ) {
+        let principal = [0xf6u8; 16];
+        let principal_hex = hex::encode(RiskIdentityFactory::new(keys()).principal_id(&principal));
+        let engine = RiskEngine::new(
+            MockStore::new(SignalVector::zero(), 0),
+            classifier(),
+            policy(),
+            keys(),
+        )
+        .with_principal_networks(networks)
+        .with_novelty_enforcement(novelty);
+        (engine, principal, principal_hex)
+    }
+
+    fn login_ctx_for(ip: std::net::IpAddr, principal: &[u8; 16]) -> RiskContext<'_> {
+        RiskContext::new(
+            1,
+            ip,
+            None,
+            Some(principal),
+            RiskEventKind::AuthenticationSuccess,
+            NetworkFlags::default(),
+            ResourcePressure::default(),
+        )
+    }
+
+    /// The writer's stored shape: an Allow records the stable tag with
+    /// the trust mirror, and the bucket spelling is never a stored
+    /// field.
+    #[test]
+    fn the_allow_record_stores_the_tag_and_never_the_bucket() {
+        let networks = std::sync::Arc::new(NetworkTagFake::default());
+        let (engine, principal, principal_hex) =
+            network_tag_engine(networks.clone(), NoveltyEnforcement::Learn);
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+
+        let decision = engine
+            .reassess(login_ctx_for(ip, &principal), Some("tag-store".to_string()))
+            .expect("assess succeeds");
+        assert_eq!(
+            decision.action,
+            RiskAction::Allow,
+            "learn mode allows the first login"
+        );
+
+        let tag = network_tag(&keys(), ip);
+        assert_eq!(
+            tag, "dd9b709dd17f2084613c9883c1a260c5f3d21783d7f1d2c002f9458aae7fca60",
+            "the recorded tag is the pinned loopback tag",
+        );
+        assert!(
+            networks.seen(&principal_hex, &tag),
+            "the Allow records the tag"
+        );
+        assert!(
+            networks.trusted(&principal_hex, &tag),
+            "the record mints the trust mirror"
+        );
+        assert!(
+            !networks.seen(&principal_hex, "047f000001"),
+            "the loopback bucket spelling is never a stored field",
+        );
+    }
+
+    /// The upgrade path: a field recorded under the legacy bucket
+    /// spelling still answers seen, and the next Allow rewrites the
+    /// network under the tag.
+    #[test]
+    fn legacy_bucket_history_answers_seen_and_is_rewritten_under_the_tag() {
+        let networks = std::sync::Arc::new(NetworkTagFake::default());
+        let (engine, principal, principal_hex) =
+            network_tag_engine(networks.clone(), NoveltyEnforcement::Enforce);
+        let ip: std::net::IpAddr = "10.1.2.3".parse().unwrap();
+        let legacy = network_bucket(ip);
+        networks.seed(&principal_hex, &legacy, true);
+
+        let decision = engine
+            .reassess(login_ctx_for(ip, &principal), Some("legacy-1".to_string()))
+            .expect("assess succeeds");
+        assert_eq!(
+            decision.action,
+            RiskAction::Allow,
+            "the legacy field still vouches for the login",
+        );
+        assert!(
+            !decision.has_reason(RiskReason::NovelNetwork),
+            "the gate answers seen for the legacy bucket spelling",
+        );
+
+        let tag = network_tag(&keys(), ip);
+        assert!(
+            networks.seen(&principal_hex, &tag),
+            "the Allow rewrites the network under the tag"
+        );
+        assert!(
+            networks.trusted(&principal_hex, &tag),
+            "the rewrite mints the trust mirror"
+        );
+    }
+
+    /// The historical truncated IPv6 /64 spelling, which the earlier PHP
+    /// engine wrote, is read as the legacy form by both cores.
+    #[test]
+    fn the_historical_truncated_ipv6_spelling_answers_seen() {
+        let ip: std::net::IpAddr = "2001:db8:abcd:1234:5678:9abc:def0:1234".parse().unwrap();
+        assert_eq!(
+            network_bucket(ip),
+            "0620010db8abcd12340000000000000000",
+            "the canonical /64 spelling pads the masked bytes to full width",
+        );
+
+        let networks = std::sync::Arc::new(NetworkTagFake::default());
+        let (engine, principal, principal_hex) =
+            network_tag_engine(networks.clone(), NoveltyEnforcement::Enforce);
+        networks.seed(&principal_hex, "0620010db8abcd1234", true);
+
+        let decision = engine
+            .reassess(login_ctx_for(ip, &principal), Some("legacy-v6".to_string()))
+            .expect("assess succeeds");
+        assert_eq!(
+            decision.action,
+            RiskAction::Allow,
+            "the truncated /64 spelling still vouches for the login",
+        );
+        assert!(!decision.has_reason(RiskReason::NovelNetwork));
+        assert!(
+            networks.seen(&principal_hex, &network_tag(&keys(), ip)),
+            "the Allow rewrites the network under the tag",
+        );
     }
 }

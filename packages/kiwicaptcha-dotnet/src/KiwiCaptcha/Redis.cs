@@ -382,21 +382,41 @@ public static class LuaScripts
 -- every splice targets the top-level field span located by the scanner
 -- below, so a nested occurrence can never be rewritten either. The
 -- byte ceiling bounds the JSON parse before it happens.
+--
+-- The classifier and the splice targets come from ONE walk of the
+-- stored bytes: kiwiTopLevelFields() proves the document semantically
+-- unique at every nesting level and returns the span of every
+-- top-level field, and kiwiApplyEdits() lands the transition's edits
+-- on those spans right to left, so no step re-walks the document. The
+-- walk compares bytes (string.byte) and jumps between structural
+-- characters with plain string.find searches; a substring allocation
+-- per byte is what a JSON scanner of this kind cannot afford.
 local KIWI_ENVELOPE_MAX_BYTES = 131072
 local KIWI_ENVELOPE_MAX_DEPTH = 32
+
+local KIWI_B_QUOTE = 34
+local KIWI_B_BACKSLASH = 92
+local KIWI_B_OBRACE = 123
+local KIWI_B_CBRACE = 125
+local KIWI_B_OBRACKET = 91
+local KIWI_B_CBRACKET = 93
+local KIWI_B_COLON = 58
+local KIWI_B_COMMA = 44
+local KIWI_B_SPACE = 32
+local KIWI_B_TAB = 9
+local KIWI_B_LF = 10
+local KIWI_B_CR = 13
+
+local KIWI_VALUE_STOP_PATTERN = '[,}%] \t\r\n]'
 
 local function kiwiNullish(x)
   return x == nil or x == cjson.null
 end
 
-local function kiwiIsSpace(c)
-  return string.find(' \t\r\n', c, 1, true) ~= nil
-end
-
 local function kiwiSkipSpace(v, i, n)
   while i <= n do
-    local c = string.sub(v, i, i)
-    if not kiwiIsSpace(c) then break end
+    local b = string.byte(v, i)
+    if b ~= KIWI_B_SPACE and b ~= KIWI_B_TAB and b ~= KIWI_B_LF and b ~= KIWI_B_CR then break end
     i = i + 1
   end
   return i
@@ -404,77 +424,22 @@ end
 
 local function kiwiSkipSpaceBack(v, j)
   while j >= 1 do
-    local c = string.sub(v, j, j)
-    if not kiwiIsSpace(c) then break end
+    local b = string.byte(v, j)
+    if b ~= nil and b ~= KIWI_B_SPACE and b ~= KIWI_B_TAB and b ~= KIWI_B_LF and b ~= KIWI_B_CR then break end
     j = j - 1
   end
   return j
 end
 
-local function kiwiValueEnd(v, s, n)
-  local c = string.sub(v, s, s)
-  if c == '""' then
-    local i = s + 1
-    local esc = false
-    while i <= n do
-      local ci = string.sub(v, i, i)
-      if esc then esc = false
-      elseif ci == '\\' then esc = true
-      elseif ci == '""' then return i end
-      i = i + 1
-    end
-    return nil
-  elseif c == '{' or c == '[' then
-    local open = c
-    local close = (c == '{') and '}' or ']'
-    local depth = 0
-    local i = s
-    while i <= n do
-      local ci = string.sub(v, i, i)
-      if ci == '""' then
-        i = i + 1
-        local esc = false
-        while i <= n do
-          local cj = string.sub(v, i, i)
-          if esc then esc = false
-          elseif cj == '\\' then esc = true
-          elseif cj == '""' then break end
-          i = i + 1
-        end
-        if i > n then return nil end
-      elseif ci == open then
-        depth = depth + 1
-      elseif ci == close then
-        depth = depth - 1
-        if depth == 0 then return i end
-      end
-      i = i + 1
-    end
-    return nil
-  end
-  local i = s
-  while i <= n do
-    local ci = string.sub(v, i, i)
-    if ci == ',' or ci == '}' or ci == ']' or ci == ' ' or ci == '\t' or ci == '\r' or ci == '\n' then
-      break
-    end
-    i = i + 1
-  end
-  if i == s then return nil end
-  return i - 1
-end
-
 local function kiwiSkipString(v, i, n)
-  i = i + 1
-  while i <= n do
-    local c = string.sub(v, i, i)
-    if c == '\\' then
-      i = i + 2
-    elseif c == '""' then
-      return i + 1
-    else
-      i = i + 1
-    end
+  local j = i + 1
+  while j <= n do
+    local q = string.find(v, '""', j, true)
+    if q == nil or q > n then return nil end
+    local k = q - 1
+    while k >= j and string.byte(v, k) == KIWI_B_BACKSLASH do k = k - 1 end
+    if (q - 1 - k) % 2 == 0 then return q + 1 end
+    j = q + 1
   end
   return nil
 end
@@ -483,54 +448,59 @@ local kiwiUniqueScanValue
 local kiwiUniqueScanObject
 local kiwiUniqueScanArray
 
+local function kiwiKeyName(v, i, keyEnd)
+  local inner = string.sub(v, i + 1, keyEnd - 2)
+  if string.find(inner, '\\', 1, true) == nil and string.find(inner, '\0', 1, true) == nil then
+    return inner
+  end
+  local ok, decoded = pcall(cjson.decode, '""' .. inner .. '""')
+  if not ok or type(decoded) ~= 'string' then return nil end
+  return decoded
+end
+
 kiwiUniqueScanValue = function(v, i, n, depth)
   if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
   if i > n then return nil end
-  local c = string.sub(v, i, i)
-  if c == '{' then
+  local b = string.byte(v, i)
+  if b == KIWI_B_OBRACE then
     return kiwiUniqueScanObject(v, i + 1, n, depth)
   end
-  if c == '[' then
+  if b == KIWI_B_OBRACKET then
     return kiwiUniqueScanArray(v, i + 1, n, depth)
   end
-  if c == '""' then
+  if b == KIWI_B_QUOTE then
     return kiwiSkipString(v, i, n)
   end
-  local start = i
-  while i <= n do
-    local c2 = string.sub(v, i, i)
-    if c2 == ',' or c2 == '}' or c2 == ']' or kiwiIsSpace(c2) then break end
-    i = i + 1
-  end
-  if i == start then return nil end
-  return i
+  local stop = string.find(v, KIWI_VALUE_STOP_PATTERN, i)
+  if stop == nil then stop = n + 1 end
+  if stop == i then return nil end
+  return stop
 end
 
 kiwiUniqueScanObject = function(v, i, n, depth)
   if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
   local seen = {}
   i = kiwiSkipSpace(v, i, n)
-  if i <= n and string.sub(v, i, i) == '}' then return i + 1 end
+  if i <= n and string.byte(v, i) == KIWI_B_CBRACE then return i + 1 end
   while true do
     i = kiwiSkipSpace(v, i, n)
-    if i > n or string.sub(v, i, i) ~= '""' then return nil end
+    if i > n or string.byte(v, i) ~= KIWI_B_QUOTE then return nil end
     local keyEnd = kiwiSkipString(v, i, n)
     if keyEnd == nil then return nil end
-    local token = string.sub(v, i, keyEnd - 1)
-    local ok, key = pcall(cjson.decode, token)
-    if not ok or type(key) ~= 'string' then return nil end
+    local key = kiwiKeyName(v, i, keyEnd)
+    if key == nil then return nil end
     if seen[key] ~= nil then return nil end
     seen[key] = true
     i = kiwiSkipSpace(v, keyEnd, n)
-    if i > n or string.sub(v, i, i) ~= ':' then return nil end
+    if i > n or string.byte(v, i) ~= KIWI_B_COLON then return nil end
     i = kiwiUniqueScanValue(v, kiwiSkipSpace(v, i + 1, n), n, depth + 1)
     if i == nil then return nil end
     i = kiwiSkipSpace(v, i, n)
     if i > n then return nil end
-    local sep = string.sub(v, i, i)
-    if sep == ',' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
       i = i + 1
-    elseif sep == '}' then
+    elseif b == KIWI_B_CBRACE then
       return i + 1
     else
       return nil
@@ -541,16 +511,16 @@ end
 kiwiUniqueScanArray = function(v, i, n, depth)
   if depth > KIWI_ENVELOPE_MAX_DEPTH then return nil end
   i = kiwiSkipSpace(v, i, n)
-  if i <= n and string.sub(v, i, i) == ']' then return i + 1 end
+  if i <= n and string.byte(v, i) == KIWI_B_CBRACKET then return i + 1 end
   while true do
     i = kiwiUniqueScanValue(v, i, n, depth + 1)
     if i == nil then return nil end
     i = kiwiSkipSpace(v, i, n)
     if i > n then return nil end
-    local sep = string.sub(v, i, i)
-    if sep == ',' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
       i = i + 1
-    elseif sep == ']' then
+    elseif b == KIWI_B_CBRACKET then
       return i + 1
     else
       return nil
@@ -558,124 +528,100 @@ kiwiUniqueScanArray = function(v, i, n, depth)
   end
 end
 
-local function kiwiDocumentIsUnique(v)
-  local n = #v
-  if n == 0 or n > KIWI_ENVELOPE_MAX_BYTES then return false end
-  local i = kiwiSkipSpace(v, 1, n)
-  if i > n or string.sub(v, i, i) ~= '{' then return false end
-  local endIndex = kiwiUniqueScanObject(v, i + 1, n, 0)
-  if endIndex == nil then return false end
-  return kiwiSkipSpace(v, endIndex, n) > n
-end
-
 local function kiwiTopLevelFields(v)
   local n = #v
   if n > KIWI_ENVELOPE_MAX_BYTES then return nil end
-  if not kiwiDocumentIsUnique(v) then return nil end
-  local i = 1
-  i = kiwiSkipSpace(v, i, n)
-  if string.sub(v, i, i) ~= '{' then return nil end
-  i = i + 1
+  local i = kiwiSkipSpace(v, 1, n)
+  if i > n or string.byte(v, i) ~= KIWI_B_OBRACE then return nil end
+  i = kiwiSkipSpace(v, i + 1, n)
+  if i > n then return nil end
   local fields = {}
-  while i <= n do
-    local c = string.sub(v, i, i)
-    if string.find(' \t\r\n,', c, 1, true) then
-      i = i + 1
-    elseif c == '}' then
+  if string.byte(v, i) == KIWI_B_CBRACE then
+    if kiwiSkipSpace(v, i + 1, n) <= n then return nil end
+    return fields
+  end
+  while true do
+    if string.byte(v, i) ~= KIWI_B_QUOTE then return nil end
+    local keyStart = i
+    local keyEnd = kiwiSkipString(v, i, n)
+    if keyEnd == nil then return nil end
+    local name = kiwiKeyName(v, i, keyEnd)
+    if name == nil then return nil end
+    if fields[name] ~= nil then return nil end
+    i = kiwiSkipSpace(v, keyEnd, n)
+    if i > n or string.byte(v, i) ~= KIWI_B_COLON then return nil end
+    local valueStart = kiwiSkipSpace(v, i + 1, n)
+    if valueStart > n then return nil end
+    i = kiwiUniqueScanValue(v, valueStart, n, 1)
+    if i == nil then return nil end
+    fields[name] = {keyStart, valueStart, i - 1}
+    i = kiwiSkipSpace(v, i, n)
+    if i > n then return nil end
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
+      i = kiwiSkipSpace(v, i + 1, n)
+      if i > n then return nil end
+    elseif b == KIWI_B_CBRACE then
+      if kiwiSkipSpace(v, i + 1, n) <= n then return nil end
       return fields
-    elseif c == '""' then
-      local j = i + 1
-      local esc = false
-      while j <= n do
-        local cj = string.sub(v, j, j)
-        if esc then esc = false
-        elseif cj == '\\' then esc = true
-        elseif cj == '""' then break end
-        j = j + 1
-      end
-      if j > n then return nil end
-      local name = string.sub(v, i + 1, j - 1)
-      local nameOk, decodedName = pcall(cjson.decode, '""' .. name .. '""')
-      if not nameOk or type(decodedName) ~= 'string' then return nil end
-      if fields[decodedName] ~= nil then return nil end
-      local p = j + 1
-      p = kiwiSkipSpace(v, p, n)
-      if string.sub(v, p, p) ~= ':' then return nil end
-      local s = p + 1
-      s = kiwiSkipSpace(v, s, n)
-      local e = kiwiValueEnd(v, s, n)
-      if e == nil then return nil end
-      fields[decodedName] = {i, s, e}
-      i = e + 1
     else
       return nil
     end
   end
-  return nil
 end
 
-local function kiwiTopLevelField(v, key)
-  local fields = kiwiTopLevelFields(v)
-  if fields == nil then return nil end
-  return fields[key]
-end
-
-local function kiwiReplaceTopLevel(v, key, literal)
-  local span = kiwiTopLevelField(v, key)
-  if span == nil then return nil end
-  local head = string.sub(v, 1, span[2] - 1)
-  local tail = string.sub(v, span[3] + 1)
-  return head .. literal .. tail
-end
-
-local function kiwiRemoveTopLevel(v, key)
-  local span = kiwiTopLevelField(v, key)
-  if span == nil then return nil end
-  local i = span[3] + 1
-  i = kiwiSkipSpace(v, i, #v)
-  if string.sub(v, i, i) == ',' then
-    return string.sub(v, 1, span[1] - 1) .. string.sub(v, i + 1)
+local function kiwiApplyEdits(v, edits)
+  if #edits > 1 then
+    table.sort(edits, function(a, b) return a[1] > b[1] end)
   end
-  local j = span[1] - 1
-  j = kiwiSkipSpaceBack(v, j)
-  if string.sub(v, j, j) == ',' then
-    return string.sub(v, 1, j - 1) .. string.sub(v, span[3] + 1)
+  for k = 1, #edits do
+    local e = edits[k]
+    if e[4] then
+      local n = #v
+      local i = kiwiSkipSpace(v, e[2] + 1, n)
+      if i <= n and string.byte(v, i) == KIWI_B_COMMA then
+        v = string.sub(v, 1, e[1] - 1) .. string.sub(v, i + 1)
+      else
+        local j = kiwiSkipSpaceBack(v, e[1] - 1)
+        if j >= 1 and string.byte(v, j) == KIWI_B_COMMA then
+          v = string.sub(v, 1, j - 1) .. string.sub(v, e[2] + 1)
+        else
+          v = string.sub(v, 1, e[1] - 1) .. string.sub(v, e[2] + 1)
+        end
+      end
+    else
+      v = string.sub(v, 1, e[1] - 1) .. e[3] .. string.sub(v, e[2] + 1)
+    end
   end
-  return string.sub(v, 1, span[1] - 1) .. string.sub(v, span[3] + 1)
+  return v
 end
 
 local function kiwiAppendTopLevel(v, literal)
   local n = #v
-  local i = 1
-  i = kiwiSkipSpace(v, i, n)
-  if string.sub(v, i, i) ~= '{' then return nil end
+  local first = kiwiSkipSpace(v, 1, n)
+  if first > n or string.byte(v, first) ~= KIWI_B_OBRACE then return nil end
   local depth = 0
   local last = nil
-  local first = i
+  local i = first
   while i <= n do
-    local c = string.sub(v, i, i)
-    if c == '""' then
-      i = i + 1
-      local esc = false
-      while i <= n do
-        local ci = string.sub(v, i, i)
-        if esc then esc = false
-        elseif ci == '\\' then esc = true
-        elseif ci == '""' then break end
-        i = i + 1
-      end
-      if i > n then return nil end
-    elseif c == '{' or c == '[' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_QUOTE then
+      local e = kiwiSkipString(v, i, n)
+      if e == nil then return nil end
+      i = e
+    elseif b == KIWI_B_OBRACE or b == KIWI_B_OBRACKET then
       depth = depth + 1
-    elseif c == '}' or c == ']' then
+      i = i + 1
+    elseif b == KIWI_B_CBRACE or b == KIWI_B_CBRACKET then
       depth = depth - 1
       if depth == 0 then last = i break end
+      i = i + 1
+    else
+      i = i + 1
     end
-    i = i + 1
   end
   if last == nil then return nil end
-  local p = last - 1
-  p = kiwiSkipSpaceBack(v, p)
+  local p = kiwiSkipSpaceBack(v, last - 1)
   if p == first then
     return string.sub(v, 1, last - 1) .. literal .. string.sub(v, last)
   end
@@ -696,11 +642,13 @@ local v = redis.call(""GET"", KEYS[1])
 if not v then
   return nil
 end
+local stored = v
 local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return nil
 end
-if kiwiTopLevelFields(v) == nil then
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return nil
 end
 local state = decoded['state']
@@ -721,17 +669,19 @@ elseif state == 'pending' then
     return false
   end
   if pttl < 1000 then pttl = 1000 end
-  local updated = kiwiReplaceTopLevel(v, 'state', '""consumed""')
-  if updated == nil then
+  local stateSpan = fields['state']
+  if stateSpan == nil then
     return nil
   end
+  local edits = {{stateSpan[2], stateSpan[3], '""consumed""'}}
   if ARGV[1] ~= '' then
-    local withIdentity = kiwiReplaceTopLevel(updated, 'operation_identity', ARGV[1])
-    if withIdentity ~= nil then
-      updated = withIdentity
+    local identitySpan = fields['operation_identity']
+    if identitySpan ~= nil then
+      edits[#edits + 1] = {identitySpan[2], identitySpan[3], ARGV[1]}
       identitySpliced = 1
     end
   end
+  local updated = kiwiApplyEdits(v, edits)
   redis.call(""SET"", KEYS[1], updated, ""PX"", pttl)
   consumedNow = 1
   v = updated
@@ -739,9 +689,9 @@ else
   return nil
 end
 local resultJson = 'null'
-local resultSpan = kiwiTopLevelField(v, 'consumed_result')
+local resultSpan = fields['consumed_result']
 if resultSpan ~= nil then
-  local value = string.sub(v, resultSpan[2], resultSpan[3])
+  local value = string.sub(stored, resultSpan[2], resultSpan[3])
   if value ~= 'null' then
     resultJson = value
   end
@@ -786,7 +736,8 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return nil
 end
-if kiwiTopLevelFields(v) == nil then
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return nil
 end
 local state = decoded['state']
@@ -804,10 +755,11 @@ if pttl < 0 then
   return false
 end
 if pttl < 1000 then pttl = 1000 end
-local updated = kiwiReplaceTopLevel(v, 'state', '""cancelled""')
-if updated == nil then
+local stateSpan = fields['state']
+if stateSpan == nil then
   return nil
 end
+local updated = kiwiApplyEdits(v, {{stateSpan[2], stateSpan[3], '""cancelled""'}})
 redis.call(""SET"", KEYS[1], updated, ""PX"", pttl)
 return {'cancelled-now'}
 ";
@@ -822,7 +774,8 @@ local decoded = kiwiDecodeEnvelope(v)
 if decoded == nil then
   return 0
 end
-if kiwiTopLevelFields(v) == nil then
+local fields = kiwiTopLevelFields(v)
+if fields == nil then
   return 0
 end
 if decoded['state'] ~= 'consumed' then
@@ -861,21 +814,21 @@ else
     binding = (ARGV[3] == ""0"") and cjson.null or ARGV[2]
   })
 end
-local updated = kiwiReplaceTopLevel(v, 'consumed_result', encoded)
-if updated == nil then
+local resultSpan = fields['consumed_result']
+if resultSpan == nil then
   return 0
 end
+local edits = {{resultSpan[2], resultSpan[3], encoded}}
 if claim then
-  local cleared = kiwiRemoveTopLevel(updated, 'resume_until')
-  if cleared == nil then
+  local untilSpan = fields['resume_until']
+  local ownerSpan = fields['resume_owner']
+  if untilSpan == nil or ownerSpan == nil then
     return 0
   end
-  cleared = kiwiRemoveTopLevel(cleared, 'resume_owner')
-  if cleared == nil then
-    return 0
-  end
-  updated = cleared
+  edits[#edits + 1] = {untilSpan[1], untilSpan[3], nil, true}
+  edits[#edits + 1] = {ownerSpan[1], ownerSpan[3], nil, true}
 end
+local updated = kiwiApplyEdits(v, edits)
 redis.call(""SET"", KEYS[1], updated, ""PX"", pttl)
 return 1
 ";

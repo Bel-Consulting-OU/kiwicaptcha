@@ -486,6 +486,15 @@ final class StepUpHandlersTest extends TestCase
             null,
             $this->now,
             600,
+            \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::None,
+            '',
+            null,
+            null,
+            false,
+            null,
+            null,
+            null,
+            hash('sha256', self::LINEAGE),
         );
         $this->store->createDemand($demand, 600);
 
@@ -494,12 +503,20 @@ final class StepUpHandlersTest extends TestCase
 
     private const SESSION = 'handlers-test-session-000000000001';
 
+    /**
+     * The stable lineage the mock session carries, the same value a
+     * persistent session store hands the mint and the completion: the
+     * demand is raised under it and the completion is held to it.
+     */
+    private const LINEAGE = '5a17c0de9e2b48f6a1d3c5e7092b4f68';
+
     private function withSession(Request $request, string $sessionId = self::SESSION): Request
     {
         $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
         $storage->setId($sessionId);
         $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
         $session->start();
+        $session->set(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::LINEAGE_KEY, self::LINEAGE);
         $request->setSession($session);
 
         return $request;

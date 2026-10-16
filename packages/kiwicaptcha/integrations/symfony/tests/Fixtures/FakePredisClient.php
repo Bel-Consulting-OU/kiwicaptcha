@@ -552,6 +552,22 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
+     * Whether a stored challenge kind proves a named account
+     * principal, the table the completion and admission scripts carry.
+     * The rule is the same as
+     * {@see StepUpChallengeKind::provesPrincipal()}: the anonymous
+     * email-ownership kind proves a mailbox, never the account, so only
+     * the other three may answer a demand that names a principal.
+     */
+    private static function challengeKindProvesPrincipal(string $kind): bool
+    {
+        return match ($kind) {
+            'totp', 'webauthn', 'email_otp' => true,
+            default => false,
+        };
+    }
+
+    /**
      * TTL emulation for a plain string key: the armed lifetime in
      * whole seconds (the fake stores the pexpire/ex delta), or null
      * when the key carries no TTL.
@@ -1210,8 +1226,9 @@ final class FakePredisClient extends \Predis\Client
             // escalation index; argv[1] the demand id, argv[2] the
             // caller's clock (never read: the real script reads the
             // server TIME), argv[3] the presented binding hash, argv[4]
-            // the session hash hint, argv[5] the scope hint ('' skips
+            // the presented lineage hint, argv[5] the scope hint ('' skips
             // the index write), argv[6] the principal the index key was
+            // derived from, argv[7] the stored lineage the index key was
             // derived from. One atomic challenge+demand transition:
             // the checks run in the script's order, and the winner
             // consumes the challenge and completes the demand in one
@@ -1228,6 +1245,7 @@ final class FakePredisClient extends \Predis\Client
             $lineageHint = (string) $rest[3];
             $scopeHint = (string) $rest[4];
             $principalHint = (string) ($rest[5] ?? '');
+            $keyLineage = (string) ($rest[6] ?? '');
             $craw = $this->strings[$challengeKey] ?? null;
             if ($craw === null) {
                 return ['missing_challenge'];
@@ -1248,6 +1266,19 @@ final class FakePredisClient extends \Predis\Client
 
                 return ['corrupt_demand'];
             }
+            // The stored lineage is load-bearing on the demand wire
+            // shape (the script's own rule): a record without the key is
+            // of an earlier shape, which the strict decode refuses, and
+            // a value that is neither a lineage hash nor the explicit
+            // null is corrupt. Both are removed, fail closed.
+            $lineageRaw = \array_key_exists('lineage_hash', $de) ? $de['lineage_hash'] : false;
+            if ($lineageRaw === false
+                || ($lineageRaw !== null && (!\is_string($lineageRaw) || preg_match('/^[0-9a-f]{64}$/D', $lineageRaw) !== 1))) {
+                unset($this->strings[$demandKey], $this->expirations[$demandKey]);
+
+                return ['corrupt_demand'];
+            }
+            $storedLineage = \is_string($lineageRaw) ? $lineageRaw : '';
             if (($ch['demand_id'] ?? null) !== $demandId || ($de['id'] ?? null) !== $demandId) {
                 return ['crossed'];
             }
@@ -1258,9 +1289,10 @@ final class FakePredisClient extends \Predis\Client
             }
             // The demand/challenge identity binding, the script's own
             // rule: scope equality always, session equality for a
-            // session-bound demand, and the login demand's principal
-            // subject. A crossed session, scope or subject completes
-            // nothing.
+            // session-bound demand, and for a demand that names a
+            // principal a principal-authenticating kind whose proof
+            // subject reproduces that principal. A crossed session,
+            // scope or subject completes nothing.
             if (($ch['scope'] ?? null) !== ($de['scope'] ?? null)) {
                 return ['crossed'];
             }
@@ -1268,9 +1300,25 @@ final class FakePredisClient extends \Predis\Client
                 && ($ch['session_hash'] ?? null) !== $de['session_hash']) {
                 return ['crossed'];
             }
-            if (\is_string($de['op_kind'] ?? null) && $de['op_kind'] === 'login'
-                && \is_string($de['principal_pseudonym'] ?? null) && $de['principal_pseudonym'] !== ''
-                && ($ch['subject'] ?? null) !== $de['principal_pseudonym']) {
+            $demandPrincipal = \is_string($de['principal_pseudonym'] ?? null) ? $de['principal_pseudonym'] : '';
+            if ($demandPrincipal !== '') {
+                if (!self::challengeKindProvesPrincipal((string) ($ch['kind'] ?? ''))) {
+                    return ['crossed'];
+                }
+                if (($ch['subject'] ?? null) !== $demandPrincipal) {
+                    return ['crossed'];
+                }
+            }
+            // The stored lineage, the demand's history identity: the
+            // presented hint and the identity the index key was derived
+            // from must agree with each other and with the stored value
+            // whenever the demand bound one (the script's own rule). A
+            // demand minted with no lineage bound no history identity
+            // and keeps its behaviour. Nothing moves on the refusal.
+            if ($lineageHint !== $keyLineage) {
+                return ['crossed'];
+            }
+            if ($storedLineage !== '' && $lineageHint !== $storedLineage) {
                 return ['crossed'];
             }
             if (!empty($de['superseded_by'])) {
@@ -1336,20 +1384,21 @@ final class FakePredisClient extends \Predis\Client
             $encoded = (string) json_encode($de, JSON_UNESCAPED_SLASHES);
             $this->strings[$demandKey] = $encoded;
             $this->fakePexpire([$demandKey, $ttl * 1000]);
-            // The escalation index stores the factor identity the record
-            // itself carries, never a caller argument: a completion
-            // cannot poison the future assurance escalation by claiming
-            // a stronger factor than its challenge proves. The write
-            // requires every hint to equal the stored record's own
-            // fields, the same gate the script runs.
-            // The history identity is (lineage, principal, scope), and the
-            // principal follows the demand's own subject field: the login
-            // lane's history is account-scoped, the anonymous email lane's
-            // is the lineage bucket. The monotonic rule is the script's:
+            // The history identity is (effective lineage, principal,
+            // scope): the demand's stored lineage when the mint bound
+            // one (the gate above proved the hint and the key material
+            // equal to it), else the presented hint. The principal
+            // follows the demand's own subject
+            // field: the login lane's history is account-scoped, the
+            // anonymous email lane's is the lineage bucket. A
+            // principal-scoped entry is published only by a factor that
+            // proved that principal (a principal-authenticating kind);
+            // an address-ownership completion files nothing but the
+            // anonymous bucket. The monotonic rule is the script's:
             // higher rank replaces, equal rank keeps the later window,
             // lower writes nothing.
-            $demandPrincipal = \is_string($de['principal_pseudonym'] ?? null) ? $de['principal_pseudonym'] : '';
             if ($lineageHint !== '' && $scopeHint !== '' && $principalHint === $demandPrincipal
+                && ($demandPrincipal === '' || self::challengeKindProvesPrincipal((string) ($ch['kind'] ?? '')))
                 && ($ch['scope'] ?? null) === $scopeHint
                 && \is_string($family) && $family !== '') {
                 $prior = $this->strings[$indexKey] ?? null;
@@ -1405,6 +1454,18 @@ final class FakePredisClient extends \Predis\Client
             if (!empty($de['superseded_by']) || ($de['state'] ?? null) !== 'open') {
                 return null;
             }
+            // The stored lineage is load-bearing on the demand wire
+            // shape (the script's own rule): a record without the key is
+            // of an earlier shape, which the strict decode refuses, and
+            // a value that is neither a lineage hash nor the explicit
+            // null is corrupt. Both are removed, fail closed.
+            $lineageRaw = \array_key_exists('lineage_hash', $de) ? $de['lineage_hash'] : false;
+            if ($lineageRaw === false
+                || ($lineageRaw !== null && (!\is_string($lineageRaw) || preg_match('/^[0-9a-f]{64}$/D', $lineageRaw) !== 1))) {
+                unset($this->strings[$demandKey], $this->expirations[$demandKey]);
+
+                return null;
+            }
             // Admission proves the newcomer belongs to the demand before
             // anything is destroyed (the script's own rule).
             $pttlProbe = $this->expirations[$demandKey] ?? null;
@@ -1425,9 +1486,11 @@ final class FakePredisClient extends \Predis\Client
             if (($ch['scope'] ?? null) !== ($de['scope'] ?? null)) { return null; }
             if (is_string($de['session_hash'] ?? null) && $de['session_hash'] !== ''
                 && ($ch['session_hash'] ?? null) !== $de['session_hash']) { return null; }
-            if (($de['op_kind'] ?? null) === 'login'
-                && is_string($de['principal_pseudonym'] ?? null) && $de['principal_pseudonym'] !== ''
-                && ($ch['subject'] ?? null) !== $de['principal_pseudonym']) { return null; }
+            $demandPrincipal = is_string($de['principal_pseudonym'] ?? null) ? $de['principal_pseudonym'] : '';
+            if ($demandPrincipal !== '') {
+                if (!self::challengeKindProvesPrincipal((string) ($ch['kind'] ?? ''))) { return null; }
+                if (($ch['subject'] ?? null) !== $demandPrincipal) { return null; }
+            }
             if (!is_string($ch['factor_family'] ?? null) || $ch['factor_family'] === ''
                 || !is_string($ch['factor_id'] ?? null) || $ch['factor_id'] === ''
                 || !is_int($ch['factor_rank'] ?? null)) { return null; }

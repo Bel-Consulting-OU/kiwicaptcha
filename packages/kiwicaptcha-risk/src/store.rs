@@ -392,6 +392,14 @@ pub trait SessionTlsTagStore {
 /// network and a retried stuffed login stays novel until the victim
 /// really proves themselves.
 ///
+/// The network-class tag is [`crate::network_tag()`], the engine's
+/// stable purpose-separated pseudonym over the bucket spelling. Store
+/// implementations persist whatever tag they receive; the derivation
+/// lives in the engine, which holds the master-derived key. The bucket
+/// spelling is the legacy field form: the engine reads it on a tag
+/// miss, so a deployment upgrading into the pseudonym form keeps its
+/// history.
+///
 /// The full surface mirrors the PHP
 /// `PrincipalNetworkTagStoreInterface` and the canonical
 /// `principal_networks.lua` script: the trust flag (`trusted`) is

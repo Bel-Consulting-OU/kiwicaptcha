@@ -29,6 +29,13 @@ final class StepUpSessionBinding
     /** The session-data key holding the stable step-up lineage id. */
     public const LINEAGE_KEY = '_kiwi_step_up_lineage';
 
+    /**
+     * The lineage shape: 32 lowercase hex characters, the random
+     * token {@see self::lineage()} mints. An existing session value
+     * outside this shape is never adopted.
+     */
+    private const LINEAGE_SHAPE = '/^[0-9a-f]{32}$/D';
+
     private function __construct()
     {
     }
@@ -46,6 +53,13 @@ final class StepUpSessionBinding
      * binding a challenge to the browser that began it, so a captured
      * ticket cannot be completed elsewhere.
      *
+     * The stored value is adopted only when it matches the minted shape
+     * exactly (32 lowercase hex characters). Anything else (a truncated
+     * value, a foreign type, a hostile string planted in the session
+     * bag) is replaced by a fresh mint instead of trusted: the lineage
+     * is server-minted material, never a value the session holder
+     * supplies.
+     *
      * Empty when no session is started: the stateless lanes keep no
      * history, exactly as before.
      */
@@ -56,7 +70,7 @@ final class StepUpSessionBinding
             return '';
         }
         $existing = $session->get(self::LINEAGE_KEY);
-        if (\is_string($existing) && $existing !== '') {
+        if (\is_string($existing) && preg_match(self::LINEAGE_SHAPE, $existing) === 1) {
             return $existing;
         }
         $minted = bin2hex(random_bytes(16));

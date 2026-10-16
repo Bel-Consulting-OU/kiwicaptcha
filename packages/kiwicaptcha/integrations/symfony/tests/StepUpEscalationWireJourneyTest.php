@@ -94,6 +94,14 @@ final class StepUpEscalationWireJourneyTest extends TestCase
     /** The request stack the bootstrap gate reads its granted request from. */
     private RequestStack $enrollStack;
 
+    /**
+     * The request stack the finalizer reads the mint's request from, the
+     * same wiring a real container gives it: the demand mint resolves
+     * the browser's effective lineage from this request, so the minted
+     * demand stores the lineage the completion must present.
+     */
+    private RequestStack $mintStack;
+
     protected function setUp(): void
     {
         $this->store = new ArrayStepUpChallengeStore(fn (): int => $this->now);
@@ -103,6 +111,7 @@ final class StepUpEscalationWireJourneyTest extends TestCase
         $this->identity = new RiskIdentityFactory(RiskKeys::fromMaster(str_repeat("\x11", 32)));
         $this->tokenStorage = new TokenStorage();
         $this->enrollStack = new RequestStack();
+        $this->mintStack = new RequestStack();
         $this->otp = new EmailOtpStepUpHandler(
             $this->store,
             $this->ticket,
@@ -246,7 +255,7 @@ final class StepUpEscalationWireJourneyTest extends TestCase
             $this->gateway($minimum),
             null,
             null,
-            null,
+            $this->mintStack,
             null,
             fn (): int => $this->now,
             self::MASTER,
@@ -398,8 +407,12 @@ final class StepUpEscalationWireJourneyTest extends TestCase
     private function request(string $uri, string $method, array $body = []): Request
     {
         $server = ['REMOTE_ADDR' => '203.0.113.10'];
+        $request = Request::create('https://app.example.com'.$uri, $method, $body, [], [], $server);
+        // A container request stack holds the request being served: the
+        // finalizer's mint reads the browser's lineage from it.
+        $this->mintStack->push($request);
 
-        return Request::create('https://app.example.com'.$uri, $method, $body, [], [], $server);
+        return $request;
     }
 
     /** @return array<string, mixed> */

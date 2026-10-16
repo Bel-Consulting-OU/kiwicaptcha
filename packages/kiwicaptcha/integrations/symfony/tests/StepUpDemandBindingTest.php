@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipDeliveryMetada
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\MailerEmailOwnershipCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallengeKind;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpDemand;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind;
@@ -261,5 +262,88 @@ final class StepUpDemandBindingTest extends TestCase
     {
         $delivery = new EmailOwnershipDeliveryMetadata('demandid0000000000000000001', 0, 2);
         self::assertMatchesRegularExpression('/^[A-Za-z0-9.:-]+$/', $delivery->reservationId(), 'the reservation id is dot-atom safe for the store key family');
+    }
+
+    // ── the demand's stored lineage on the wire ─────────────────────
+
+    public function testTheLineageRidesTheDemandWireAndEarlierShapesFailClosed(): void
+    {
+        $lineage = hash('sha256', 'lineage-wire');
+        $demand = StepUpDemand::mint(
+            'demandid0000000000000000001',
+            'signup',
+            null,
+            null,
+            null,
+            $this->now,
+            600,
+            StepUpOperationBindingKind::None,
+            '',
+            null,
+            null,
+            false,
+            null,
+            null,
+            null,
+            $lineage,
+        );
+        $wire = $demand->toArray();
+        self::assertSame(5, $wire['v'], 'the lineage is part of the v5 wire shape');
+        self::assertSame($lineage, $wire['lineage_hash']);
+        $decoded = StepUpDemand::fromArray($wire);
+        self::assertNotNull($decoded);
+        self::assertSame($lineage, $decoded->lineageHash);
+        self::assertSame($wire, $decoded->toArray(), 'the record round-trips byte-identically');
+
+        // A v4 record (the shape before the lineage) decodes as absent:
+        // the store never funds a demand of the earlier shape.
+        $v4 = $wire;
+        $v4['v'] = 4;
+        self::assertNull(StepUpDemand::fromArray($v4), 'a v4 record must decode as absent');
+
+        // A v5 record without the key is not a decodable demand either:
+        // the lineage is load-bearing, so its absence is corruption.
+        $missing = $wire;
+        unset($missing['lineage_hash']);
+        self::assertNull(StepUpDemand::fromArray($missing), 'a v5 record without its lineage must decode as absent');
+
+        // A lineage that is not the 64-hex hash shape is refused too.
+        $malformed = $wire;
+        $malformed['lineage_hash'] = 'not-a-lineage';
+        self::assertNull(StepUpDemand::fromArray($malformed), 'a malformed lineage must decode as absent');
+
+        // The explicit null is the stateless mint's legitimate shape: a
+        // demand that bound no lineage stays decodable.
+        $stateless = $demand->withLease(null)->toArray();
+        $stateless['lineage_hash'] = null;
+        self::assertNotNull(StepUpDemand::fromArray($stateless), 'a stateless demand carries an explicit null lineage');
+    }
+
+    public function testTheSessionLineageIsShapeValidated(): void
+    {
+        $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
+        $storage->setId('lineage-shape-session-000001');
+        $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
+        $session->start();
+        $request = Request::create('/kiwi/step-up/begin');
+        $request->setSession($session);
+
+        $minted = StepUpSessionBinding::lineage($request);
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $minted, 'the minted lineage is 32 lowercase hex chars');
+        self::assertSame($minted, StepUpSessionBinding::lineage($request), 'the session carries the lineage across calls');
+        self::assertSame(hash('sha256', $minted), StepUpSessionBinding::lineageHash($request), 'the history identity is the lineage hash');
+
+        // A session value outside the minted shape is never adopted: a
+        // hostile or corrupt string is replaced by a fresh mint.
+        $session->set(StepUpSessionBinding::LINEAGE_KEY, 'not-a-lineage');
+        $replaced = StepUpSessionBinding::lineage($request);
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $replaced, 'a malformed session value is replaced by a fresh mint');
+        self::assertNotSame('not-a-lineage', $replaced);
+        self::assertSame($replaced, $session->get(StepUpSessionBinding::LINEAGE_KEY), 'the fresh lineage is stored in the session');
+
+        // No started session: no lineage, no history identity.
+        $sessionless = Request::create('/kiwi/step-up/begin');
+        self::assertSame('', StepUpSessionBinding::lineage($sessionless));
+        self::assertNull(StepUpSessionBinding::lineageHash($sessionless));
     }
 }

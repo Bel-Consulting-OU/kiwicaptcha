@@ -165,8 +165,9 @@ final class StepUpFullJourneyKernelTest extends TestCase
         self::assertSame($passwordToken, $restored);
         self::assertTrue($access->decide($restored, ['IS_AUTHENTICATED_FULLY']), 'the affirmative strategy grants the restored token');
         $principalPseudonym = $container->get('kiwi_captcha.risk.identity_factory')->principalId(self::RAW_USER);
-        $network = bin2hex("\x04".inet_pton('10.1.2.3'));
-        self::assertTrue($riskStore->principalNetworkSeen($principalPseudonym, $network), 'the step-up records the network');
+        $network = $container->get('kiwi_captcha.risk.engine')->networkTag('10.1.2.3');
+        self::assertTrue($riskStore->principalNetworkSeen($principalPseudonym, $network), 'the step-up records the network under the engine tag');
+        self::assertFalse($riskStore->principalNetworkSeen($principalPseudonym, '040a010203'), 'the raw bucket spelling is never a stored field');
         self::assertTrue($riskStore->principalNetworkSeen($principalPseudonym, 'asn:64512'), 'the step-up records the ASN under the engine spelling');
         self::assertNotSame($sessionIdBefore, (string) $session->getId(), 'the session id rotated on the privilege upgrade (finding 3)');
 
