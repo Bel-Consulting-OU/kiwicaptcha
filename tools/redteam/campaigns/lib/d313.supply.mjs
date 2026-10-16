@@ -120,28 +120,57 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
         }
     });
     await page.goto(SW_PAGE, { waitUntil: "domcontentloaded" });
-    // Wait out the SW registration and its activation.
+    // Wait out registration AND activation, then a reload so the active
+    // worker intercepts, then confirm the page is actually controlled
+    // before anything is measured. The first load of a fresh context is
+    // never controlled, and an uncontrolled load fetches the assets
+    // untampered: without this handshake the leg sometimes measured a
+    // clean page and read it as "solved despite the mitm", which fails a
+    // product that behaved correctly. Activation is the precondition of
+    // the measurement, so a leg that cannot reach it fails rather than
+    // silently measuring the wrong thing.
+    let controlled = false;
     try {
-        await page.waitForFunction(() => document.title.startsWith("sw-"), null, { timeout: 10000 });
+        await page.waitForFunction(async () => {
+            const reg = await navigator.serviceWorker.getRegistration();
+            return Boolean(reg && reg.active);
+        }, null, { timeout: 15000 });
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => navigator.serviceWorker.controller !== null, null, { timeout: 15000 });
+        controlled = true;
     } catch {}
-    await page.reload({ waitUntil: "domcontentloaded" });
-    let solved = false;
-    try {
-        await waitForSolve(page, 20000);
-        solved = true;
-    } catch {}
-    const badge = await page.evaluate(() => document.querySelector("[data-kiwi-badge]")?.getAttribute("data-state"));
-    const swState = await page.evaluate(async () => {
-        const reg = await navigator.serviceWorker.getRegistration();
-        return reg ? (reg.active ? "active" : reg.installing ? "installing" : "waiting") : "none";
-    });
-    results.sw_mitm = {
-        service_worker: swState,
-        solved_despite_mitm: solved,
-        widget_state: badge,
-        console_blocked: blocked.slice(0, 4),
-    };
-    await context.close();
+    if (!controlled) {
+        // No tampered byte ever reached the page, so the leg proved
+        // nothing. It reports that as its own outcome rather than a
+        // solve or a refusal, and the driver's verdict treats it as not
+        // satisfied.
+        results.sw_mitm = {
+            service_worker: "not-controlling",
+            solved_despite_mitm: null,
+            widget_state: null,
+            console_blocked: [],
+            inconclusive: "the service worker never controlled the page, so no tampered response was ever served",
+        };
+        await context.close();
+    } else {
+        let solved = false;
+        try {
+            await waitForSolve(page, 20000);
+            solved = true;
+        } catch {}
+        const badge = await page.evaluate(() => document.querySelector("[data-kiwi-badge]")?.getAttribute("data-state"));
+        const swState = await page.evaluate(async () => {
+            const reg = await navigator.serviceWorker.getRegistration();
+            return reg ? (reg.active ? "active" : reg.installing ? "installing" : "waiting") : "none";
+        });
+        results.sw_mitm = {
+            service_worker: swState,
+            solved_despite_mitm: solved,
+            widget_state: badge,
+            console_blocked: blocked.slice(0, 4),
+        };
+        await context.close();
+    }
 }
 
 // ---------- the hostile host page (pollution + clobbering) ----------
