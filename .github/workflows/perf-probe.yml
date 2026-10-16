@@ -64,13 +64,20 @@ jobs:
           for i in 1 2 3 4 5; do
             php packages/kiwicaptcha/tools/perf-bench-risk.php --redis || true
           done
-      - name: lane two on a quiet container of the same size
-        # The same benchmark under the job's own CPU budget with nothing
-        # else running, to separate "the runner is busy" from "the runner
-        # is small".
+      - name: lane two with one worker per core
+        # The ceiling was calibrated with eight workers on an eighteen-core
+        # workstation, where every worker owns a core for the measured
+        # window. On a four-vCPU runner the same eight workers queue, so
+        # the per-operation latency measures the runner's core budget
+        # rather than the code. This runs the same workload with one
+        # worker per available core, which is the topology the per-op
+        # metric is comparable in.
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
         run: |
-          for i in 1 2 3; do
-            taskset -c 0-1 php packages/kiwicaptcha/tools/perf-bench-risk.php --redis || true
+          for w in 2 4; do
+            echo "--- workers=$w (nproc=$(nproc)) ---"
+            for i in 1 2 3; do
+              php packages/kiwicaptcha/tools/perf-bench-risk.php --redis --workers "$w" || true
+            done
           done
