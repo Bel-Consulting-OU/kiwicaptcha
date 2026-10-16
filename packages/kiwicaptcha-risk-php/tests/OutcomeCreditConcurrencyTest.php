@@ -454,6 +454,56 @@ final class OutcomeCreditConcurrencyTest extends TestCase
     // Stores and namespaces
     // ------------------------------------------------------------------
 
+    /**
+     * The dedupe claim is written after the effect it claims.
+     *
+     * A Lua script that aborts does not roll back what it already wrote.
+     * A claim written first would therefore survive an abort and then
+     * suppress every retry of a report that was never booked, losing the
+     * target's failure evidence for the marker's whole TTL with no
+     * signal. The abort is injected the way it happens in practice: a
+     * key of the wrong type where the family hash belongs, from a legacy
+     * writer, a restored backup or an operator mistake. The test asserts
+     * both halves, that the failed call leaves no claim and that the
+     * repaired retry books the failure.
+     */
+    public function testAnAbortedBookingLeavesNoClaimSoTheRetryBooksTheFailure(): void
+    {
+        $namespace = $this->freshNamespace();
+        $store = $this->store($namespace);
+        $target = str_repeat('b', 64);
+        $eventId = 'abort-'.bin2hex(random_bytes(4));
+        $familyKeys = \KiwiCaptcha\Risk\Storage\KeyspaceMode::targetStateKeys($namespace, $target, \KiwiCaptcha\Risk\Storage\KeyspaceMode::Legacy);
+
+        // The collision: the family hash's name holds a string.
+        $this->client->set($familyKeys[0], 'not-a-hash');
+
+        $threw = false;
+        try {
+            $store->registerTargetFailureOnce($target, self::SOURCE, 'as64500', $eventId);
+        } catch (\Throwable) {
+            $threw = true;
+        }
+        self::assertTrue($threw, 'a booking against a colliding key must fail loudly');
+
+        $marker = \KiwiCaptcha\Risk\Storage\KeyspaceMode::targetFailureMarkerKey(
+            $namespace,
+            $target,
+            $eventId,
+            \KiwiCaptcha\Risk\Storage\KeyspaceMode::Legacy,
+        );
+        self::assertSame(0, (int) $this->client->exists($marker), 'an aborted booking must leave no claim behind');
+
+        // The operator repairs the key and the caller retries the report.
+        $this->client->del($familyKeys[0]);
+        $retry = $store->registerTargetFailureOnce($target, self::SOURCE, 'as64500', $eventId);
+
+        self::assertSame(1, $retry['fails'], 'the repaired retry must book the failure the abort lost');
+        self::assertSame(1, (int) $this->client->exists($marker), 'the successful booking claims the report');
+        $again = $store->registerTargetFailureOnce($target, self::SOURCE, 'as64500', $eventId);
+        self::assertSame(1, $again['fails'], 'the claim now suppresses a second booking of the same report');
+    }
+
     private function freshNamespace(): string
     {
         $namespace = 'occredit'.bin2hex(random_bytes(4));

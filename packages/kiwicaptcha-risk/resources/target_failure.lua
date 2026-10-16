@@ -108,12 +108,8 @@ if op == 'fail' then
     -- effect. An empty event id disables the marker: a report that
     -- cannot be retried runs exactly as before.
     local is_duplicate = false
-    if event_id ~= '' then
-        if redis.call('GET', KEYS[4]) then
-            is_duplicate = true
-        else
-            redis.call('SET', KEYS[4], '1', 'EX', dedupe_ttl)
-        end
+    if event_id ~= '' and redis.call('GET', KEYS[4]) then
+        is_duplicate = true
     end
     local fails, ts = read_failures(KEYS[1])
     if not is_duplicate then
@@ -133,6 +129,18 @@ if op == 'fail' then
         if ARGV[3] ~= nil and ARGV[3] ~= '' then
             redis.call('PFADD', KEYS[3], ARGV[3])
             redis.call('PEXPIRE', KEYS[3], ttl * 1000)
+        end
+        -- The claim is written LAST, after the effect it claims. A script
+        -- that aborts does not roll back what it already wrote, so a
+        -- claim set before the booking would survive a mid-script error
+        -- (a key of the wrong type, for instance) and then suppress
+        -- every retry of a report that was never booked: the target
+        -- would silently lose its failure evidence for the marker's
+        -- whole TTL. Written here, the worst an abort can do is let a
+        -- retry book one extra failure, which the marker stops from
+        -- there on, and a booking that failed leaves no claim at all.
+        if event_id ~= '' then
+            redis.call('SET', KEYS[4], '1', 'EX', dedupe_ttl)
         end
     end
     local spread_sources = redis.call('PFCOUNT', KEYS[2])

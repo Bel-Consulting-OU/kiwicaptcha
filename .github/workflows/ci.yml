@@ -1623,6 +1623,19 @@ jobs:
               || { echo "mismatch: $f (protocol vs php)"; exit 1; }
           done
           echo "all 10 canonical Lua copies byte-identical"
+      - name: storage-transition Lua agrees across the runtime mirrors
+        # The risk-plane Lua above is byte-compared; the storage-transition
+        # Lua that every runtime embeds as a string literal had no gate.
+        # The checker extracts each host's copy by that host's own literal
+        # rules, normalizes layout only (comments, blank lines, indentation),
+        # compares every mirror against the PHP reference, and fails on a
+        # declared copy it cannot find. Its self-test proves the verdicts
+        # first: a dropped claim-lease guard leg, a renamed key, a reordered
+        # statement, a changed constant and a missing copy all fail.
+        run: |
+          set -euo pipefail
+          python3 tools/ci/storage-lua-parity-check.py
+          python3 tools/ci/storage-lua-parity-check.py --assert
 
   rust-redis-verify:
     name: Rust core Redis verifier (redis feature)

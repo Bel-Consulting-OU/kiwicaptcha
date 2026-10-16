@@ -141,6 +141,19 @@ steps:
         fi
         echo "doc hygiene OK"
 
+  # ── Storage-transition Lua parity across the runtime mirrors ──────
+  - name: storage-lua-parity
+    image: alpine:3.20
+    commands:
+      # The risk-plane Lua above is byte-compared; the storage-transition
+      # Lua the runtimes embed as literals is compared after layout-only
+      # normalization, with every host encoding decoded by its own rules.
+      # The self-test proves the checker's verdicts first (a dropped
+      # guard leg, a renamed key, a reordered statement, a missing copy).
+      - apk add --no-cache python3
+      - python3 tools/ci/storage-lua-parity-check.py
+      - python3 tools/ci/storage-lua-parity-check.py --assert
+
   - name: lint-workflow
     image: alpine:3.20
     commands:

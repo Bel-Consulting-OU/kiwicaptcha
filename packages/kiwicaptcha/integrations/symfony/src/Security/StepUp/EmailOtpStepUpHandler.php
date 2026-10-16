@@ -187,13 +187,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             } catch (\Throwable) {
             }
 
-            return $this->refusal(
-                $context,
-                Response::HTTP_CONFLICT,
-                'step_up_send_in_progress',
-                'Another request is already sending a code for this step-up demand; retry in a moment.',
-                ['Retry-After' => '1'],
-            );
+            return $this->deliveryLeaseRefusal($context, $context->demandId);
         }
 
         try {
@@ -489,6 +483,65 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             HTML;
 
         return new Response($html, Response::HTTP_OK, ['Content-Type' => 'text/html; charset=utf-8', 'Cache-Control' => 'no-store']);
+    }
+
+    /**
+     * Why a begin that could not claim the delivery window is refused.
+     *
+     * The store folds every cause into one null, so the reason is read
+     * back from the demand and answered honestly. A window another
+     * request holds is a retryable conflict. An exhausted demand budget
+     * is a rate limit that tells the browser to request a fresh
+     * step-up. A demand that can no longer accept a challenge answers
+     * the conflict the admission refusal uses. An unreadable record
+     * keeps the retryable conflict, because this begin cannot prove it
+     * owns the generation. The read shapes the copy and the status only;
+     * the refusal itself already stands.
+     */
+    private function deliveryLeaseRefusal(StepUpContext $context, string $demandId): Response
+    {
+        $live = null;
+        try {
+            $live = $this->store->readDemand($demandId);
+        } catch (\Throwable) {
+        }
+        if ($live === null || !$live->state->isOpen() || $live->superseded() || $live->expired($this->now())) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_CONFLICT,
+                'step_up_challenge_active',
+                'The step-up demand is no longer open, so no verification challenge can be admitted; request a fresh step-up.',
+                ['Retry-After' => (string) max(1, $live?->expiresAt - $this->now() ?? $this->ttlSecs)],
+            );
+        }
+        $nowMs = $this->now() * 1000;
+        $leaseUntilMs = $live->leaseUntilMs ?? 0;
+        if ($leaseUntilMs > $nowMs) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_CONFLICT,
+                'step_up_send_in_progress',
+                'Another request is already sending a code for this step-up demand; retry in a moment.',
+                ['Retry-After' => (string) max(1, (int) ceil(($leaseUntilMs - $nowMs) / 1000))],
+            );
+        }
+        if (!$live->canSend()) {
+            return $this->refusal(
+                $context,
+                Response::HTTP_TOO_MANY_REQUESTS,
+                'step_up_rate_limited',
+                'This demand was fully used; request a fresh step-up.',
+                ['Retry-After' => (string) max(1, $live->expiresAt - $this->now())],
+            );
+        }
+
+        return $this->refusal(
+            $context,
+            Response::HTTP_CONFLICT,
+            'step_up_send_in_progress',
+            'The delivery window for this step-up demand could not be claimed; retry in a moment.',
+            ['Retry-After' => '1'],
+        );
     }
 
     /**
