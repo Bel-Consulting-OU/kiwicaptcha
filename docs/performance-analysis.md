@@ -214,7 +214,7 @@ runs):
 | mixed-pipeline issuance | 0.207 | 0.340 | 4158 combined |
 | mixed-pipeline verification | 0.663 | 0.921 | 4158 combined |
 
-The risk-enabled real-Redis concurrent path (8 workers x 100 through
+The risk-enabled real-Redis concurrent path (one worker per usable core, capped at eight, x 100 through
 the DSN-built client, from `bench_risk.redis_concurrent`, the
 conservative of two consecutive runs):
 

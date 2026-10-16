@@ -1916,35 +1916,38 @@ jobs:
         # diagnostics are still collected on stale evidence. A benchmark
         # failure stays advisory: continue-on-error keeps the later
         # steps running and never blocks the merge lane on runner noise.
+        # Every timing step also passes --json-out, so the run leaves a
+        # provenance record (PHP, Redis, CPU, memory, OS, runner vars,
+        # commit, ratchet verdict) that the artifact step below uploads.
         if: always()
         continue-on-error: true
-        run: php packages/kiwicaptcha/tools/perf-bench.php
+        run: php packages/kiwicaptcha/tools/perf-bench.php --json-out "${RUNNER_TEMP}/perf-bench-array.json"
       - name: real-Redis benchmark (SHA-256 through RedisStorage, p50/p95, non-gating timing)
         if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
-        run: php packages/kiwicaptcha/tools/perf-bench.php --redis
+        run: php packages/kiwicaptcha/tools/perf-bench.php --redis --json-out "${RUNNER_TEMP}/perf-bench-redis.json"
       - name: Argon2id admission benchmark (64 MiB issuance + verification, p50/p95, non-gating timing)
         if: always()
         continue-on-error: true
-        run: php packages/kiwicaptcha/tools/perf-bench.php --argon
+        run: php packages/kiwicaptcha/tools/perf-bench.php --argon --json-out "${RUNNER_TEMP}/perf-bench-argon.json"
       - name: risk-enabled controller benchmark (bundle issuance path, p50/p95, non-gating timing)
         if: always()
         continue-on-error: true
-        run: php packages/kiwicaptcha/tools/perf-bench-risk.php
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --json-out "${RUNNER_TEMP}/perf-bench-risk-inmemory.json"
       - name: real-Redis concurrent risk benchmark (8 forked workers through the DSN-built client, p50/p95, non-gating timing)
         if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
-        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
+        run: php packages/kiwicaptcha/tools/perf-bench-risk.php --redis --json-out "${RUNNER_TEMP}/perf-bench-risk-redis.json"
       - name: verified-WAIT round-trip fixture (waitReplicas 0 vs 1 on the single-node service, advisory timings)
         if: always()
         continue-on-error: true
         env:
           KC_REDIS_URL: redis://127.0.0.1:6399
-        run: php packages/kiwicaptcha/tools/perf-wait.php
+        run: php packages/kiwicaptcha/tools/perf-wait.php --json-out "${RUNNER_TEMP}/perf-wait.json"
       - name: verified-WAIT primary+replica fixture (local master + replica, successful-ack timings and shortfall, advisory)
         # perf-wait-replica.php boots its own local master + replica on
         # free ports, so it needs redis-server/redis-cli on the runner.
@@ -1961,7 +1964,21 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq redis-server
-          php packages/kiwicaptcha/tools/perf-wait-replica.php
+          php packages/kiwicaptcha/tools/perf-wait-replica.php --json-out "${RUNNER_TEMP}/perf-wait-replica.json"
+      - name: retain the timing-run provenance records
+        # Each timing step above writes a --json-out record with the
+        # machine and commit that produced its line, and a failing
+        # ratchet still writes its record. The upload is deliberately
+        # tolerant: these lanes are non-gating, so a missing artifact
+        # must never fail the job.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # v5.0.1 (node24)
+        with:
+          name: perf-timing-records
+          path: ${{ runner.temp }}/perf-*.json
+          if-no-files-found: warn
+          retention-days: 90
       - name: fail the job when the release-baseline gates recorded a failure
         # The gate steps record a rejected evidence file in markers
         # instead of failing, so the diagnostics above still run. This

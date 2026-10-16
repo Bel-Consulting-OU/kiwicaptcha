@@ -426,6 +426,16 @@ final class AdaptiveRiskEngine
         if ($targetId !== null) {
             [$targetSourceElement, $targetAsnElement] = $this->targetSpreadElements($targetId, $c);
         }
+        // The risk-v2 weights the engine actually scores with: a v1
+        // assessment (no v2 context) scores through the plain scorer and
+        // applies no v2 evidence factor. The effective weights therefore
+        // zero out for that call, and the consolidated script computes
+        // the ledger score from the same factors the decision was
+        // judged by. The default weights are wrong here: the script
+        // derives the honeypot factor from the event kind and the two
+        // target factors from the maintained state, so it would book a
+        // score the v1 decision never had.
+        $effectiveV2Weights = $v2 === null ? new RiskV2Weights(0, 0, 0, 0, 0) : ($v2Weights ?? new RiskV2Weights());
         $decisionId = null;
         $registration = null;
         if ($this->calibration === null && $this->store instanceof ConsolidatedAssessmentStoreInterface) {
@@ -437,7 +447,7 @@ final class AdaptiveRiskEngine
                 globalPressureEnabled: $this->enableGlobalPressure,
                 honeypotHit: $v2?->honeypotHit ?? false,
                 weights: $this->policy->weights,
-                v2Weights: $v2Weights ?? new RiskV2Weights(),
+                v2Weights: $effectiveV2Weights,
                 targetId: $targetId,
                 targetSourceElement: $targetSourceElement,
                 targetAsnElement: $targetAsnElement,
@@ -560,7 +570,7 @@ final class AdaptiveRiskEngine
             }
         }
         $score = $v2Signals !== null
-            ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $v2Weights ?? new RiskV2Weights())
+            ? $this->scorer->scoreV2($base, $vector, $this->policy->weights, $v2Signals, $effectiveV2Weights)
             : $this->scorer->score($base, $vector, $this->policy->weights);
         if (!$this->enableGlobalPressure) {
             $globalLevel = 0;

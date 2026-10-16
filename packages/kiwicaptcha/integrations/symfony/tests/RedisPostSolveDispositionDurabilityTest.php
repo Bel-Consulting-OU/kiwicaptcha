@@ -570,7 +570,9 @@ final class DispositionWaitRedisFake extends \Predis\Client
             return 'corrupt';
         }
         if (($rec['state'] ?? null) !== 'pending') {
-            return 'corrupt';
+            // A complete record: the disposition committed, so the claim
+            // is lost, the same answer the in-memory store gives.
+            return 'ownership-lost';
         }
         if (($rec['owner'] ?? null) !== $owner) {
             return 'ownership-lost';

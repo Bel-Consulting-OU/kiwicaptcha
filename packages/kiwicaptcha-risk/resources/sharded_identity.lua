@@ -117,7 +117,10 @@ local function apply_feedback(s, event, scope)
         s.iss = s.iss + 300
     elseif event == 7 then
         s.rep = s.rep + 3000
-    elseif event == 8 then
+    elseif event == 8 or event == 22 then
+        -- ProtectedActionSuccess (8) / StepUpCompleted (22): both are
+        -- server-confirmed trust with the same credit, exactly as the
+        -- aggregate shard table applies them.
         s.trust = s.trust + 800
     elseif event == 9 then
         s.af = s.af + 1200
@@ -213,7 +216,7 @@ end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
-if event ~= math.floor(event) or event < 1 or event > 21 then
+if event ~= math.floor(event) or event < 1 or event > 22 then
     return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
 end
 

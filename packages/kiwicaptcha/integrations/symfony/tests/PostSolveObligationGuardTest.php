@@ -340,6 +340,9 @@ final class PostSolveObligationGuardTest extends TestCase
         self::assertSame('claimed', $store->claim($nonce, 'owner-b', 300)[0]);
         $outcome = $store->finalizeGuarded($nonce, 'owner-b', new PostSolveDisposition(PostSolveDispositionKind::Pass), null, null, null);
         self::assertSame(PostSolveFinalizeOutcome::Finalized, $outcome, 'no chaining, no guard: the acceptance commits');
-        self::assertSame(PostSolveFinalizeOutcome::Corrupt, $store->finalizeGuarded($nonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass), null, null, null), 'a guarded finalize against a complete record is fail-closed corrupt');
+        // The record completed, so the claim was not held. The refusal is
+        // the lost-claim outcome and never the schema-corruption outcome,
+        // the same typed answer the in-memory store gives for this state.
+        self::assertSame(PostSolveFinalizeOutcome::OwnershipLost, $store->finalizeGuarded($nonce, 'owner-x', new PostSolveDisposition(PostSolveDispositionKind::Pass), null, null, null), 'a guarded finalize against a complete record is a lost claim');
     }
 }

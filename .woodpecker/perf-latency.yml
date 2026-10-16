@@ -3,6 +3,13 @@
 # the primary lane: the ratchet is meaningful on a quiet, dedicated
 # host. The fenced Redis service feeds the --redis modes; the preflight
 # proves reachability before the first hard-ratchet gate.
+#
+# Every timing command writes a --json-out provenance record under
+# .ci-run-tmp/kiwi-perf-latency/, the shared-workspace evidence
+# convention of this repository. Woodpecker has no artifact store, so
+# the publish-timing-records step prints each record into the run log,
+# on a failed run as well: a failed hard ratchet is exactly the run
+# whose provenance matters. A missing record never fails the lane.
 labels:
   capability: docker
 when:
@@ -47,10 +54,32 @@ steps:
           $$client->ping();
           echo "manual-benchmark preflight: Redis answers at $$url\n";
         '
-      - php packages/kiwicaptcha/tools/perf-bench.php
-      - php packages/kiwicaptcha/tools/perf-bench.php --redis
-      - php packages/kiwicaptcha/tools/perf-bench.php --argon
-      - php packages/kiwicaptcha/tools/perf-bench-risk.php
-      - php packages/kiwicaptcha/tools/perf-bench-risk.php --redis
-      - php packages/kiwicaptcha/tools/perf-wait.php
-      - php packages/kiwicaptcha/tools/perf-wait-replica.php
+      - mkdir -p "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency"
+      - php packages/kiwicaptcha/tools/perf-bench.php --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-array.json"
+      - php packages/kiwicaptcha/tools/perf-bench.php --redis --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-redis.json"
+      - php packages/kiwicaptcha/tools/perf-bench.php --argon --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-argon.json"
+      - php packages/kiwicaptcha/tools/perf-bench-risk.php --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-risk-inmemory.json"
+      - php packages/kiwicaptcha/tools/perf-bench-risk.php --redis --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-risk-redis.json"
+      - php packages/kiwicaptcha/tools/perf-wait.php --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-wait.json"
+      - php packages/kiwicaptcha/tools/perf-wait-replica.php --json-out "$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-wait-replica.json"
+
+  - name: publish-timing-records
+    # Woodpecker has no artifact store, so the records are published to
+    # the retained run log. The step is tolerant by design: a missing
+    # record prints a note and never fails the lane. Running it on both
+    # statuses keeps the provenance of a failed hard-ratchet run.
+    image: php:8.3-cli
+    when:
+      - status: [success, failure]
+    commands:
+      - |
+        set -u
+        dir="$$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency"
+        found=0
+        for record in "$$dir"/*.json; do
+          [ -f "$$record" ] || continue
+          found=1
+          echo "=== $$record ==="
+          cat "$$record"
+        done
+        [ "$$found" = "1" ] || echo "no timing records were written"

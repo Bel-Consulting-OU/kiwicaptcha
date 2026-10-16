@@ -668,8 +668,24 @@ where
                         let (source, asn) = self
                             .engine
                             .target_spread_elements(&handle.id, context.as_ref());
-                        self.engine
-                            .register_target_failure(&handle.id, &source, &asn)?;
+                        // The failure counter books one failure per
+                        // report event id, the same id the mark and the
+                        // channel dedupe on, so a redelivered report
+                        // never inflates the target's failure pressure.
+                        // A report with no idempotency key derives no id
+                        // and books one failure per call, exactly like
+                        // the mark contract.
+                        let failure_event_id = self.engine.derive_outcome_event_id(
+                            idempotency_key.as_deref(),
+                            context.as_ref().map(|ctx| ctx.scope).unwrap_or(0),
+                            map.channel,
+                        )?;
+                        self.engine.register_target_failure(
+                            &handle.id,
+                            &source,
+                            &asn,
+                            &failure_event_id,
+                        )?;
                     }
                     Outcome::StepUpCompleted
                         if idempotency_key

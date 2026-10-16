@@ -110,7 +110,7 @@ use Predis\Response\ServerException;
  * and are addressed through the same routed dispatch as the assessment
  * batch. The assessment path is where the sharded layout lives.
  */
-final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface
+final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface, IdempotentTargetFailureStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
@@ -576,14 +576,30 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
      * failure hash and its spread HLLs their own family tag, so the
      * canonical script runs on whichever endpoint owns that family.
      */
-    private function runTargetOp(string $op, string $targetId, string $source, string $asn): array
+    private function runTargetOp(string $op, string $targetId, string $source, string $asn, string $eventId = ''): array
     {
         RedisRiskStateStore::assertKeySafeIdentifier('targetId', $targetId);
+        if ($eventId !== '') {
+            RedisRiskStateStore::assertKeySafeIdentifier('eventId', $eventId);
+        }
         $keys = KeyspaceMode::targetStateKeys($this->namespace, $targetId, KeyspaceMode::Sharded);
+        $keys[] = KeyspaceMode::targetFailureMarkerKey(
+            $this->namespace,
+            $targetId,
+            $eventId === '' ? 'unused' : $eventId,
+            KeyspaceMode::Sharded,
+        );
         $script = self::shardedScript('target_failure.lua');
         $replies = $this->dispatch([[
             'endpoint' => $this->endpointForKey($keys[0]),
-            'cmd' => $this->evalshaCmd($script, $keys, [$op, $source, $asn, (string) $this->targetTtlSecs]),
+            'cmd' => $this->evalshaCmd($script, $keys, [
+                $op,
+                $source,
+                $asn,
+                (string) $this->targetTtlSecs,
+                $eventId,
+                (string) $this->dedupeTtlSecs,
+            ]),
             'script' => $script,
         ]]);
         $result = $replies[0] ?? null;
@@ -604,6 +620,12 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     public function registerTargetFailure(string $targetId, string $source, string $asn): array
     {
         return $this->runTargetOp('fail', $targetId, $source, $asn);
+    }
+
+    /** @inheritdoc */
+    public function registerTargetFailureOnce(string $targetId, string $source, string $asn, string $eventId): array
+    {
+        return $this->runTargetOp('fail', $targetId, $source, $asn, $eventId);
     }
 
     /** @inheritdoc */

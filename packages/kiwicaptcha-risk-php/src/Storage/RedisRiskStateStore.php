@@ -35,7 +35,7 @@ use Predis\Response\ServerException;
  * the platform — treat these as best-effort fail-fast values, not hard
  * deadlines.
  */
-final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface
+final class RedisRiskStateStore implements RiskStateStoreInterface, SessionContextTagStoreInterface, SessionTlsTagStoreInterface, ConsolidatedAssessmentStoreInterface, OutcomeMarksStoreInterface, SessionBucketTrustStoreInterface, TargetStateStoreInterface, IdempotentTargetFailureStoreInterface
 {
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
@@ -347,16 +347,28 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
 
     /**
      * One target_failure.lua op, returning
-     * {fails, spread_sources, spread_asns, first_ms, last_ms}.
+     * {fails, spread_sources, spread_asns, first_ms, last_ms}. The
+     * per-report dedupe marker of the fail op rides KEYS[4], on the
+     * target family's own slot; an empty event id leaves the marker
+     * untouched.
      *
      * @return array{fails: int, spread_sources: int, spread_asns: int, first_ms: int, last_ms: int}
      */
-    private function runTargetOp(string $op, string $targetId, string $source, string $asn): array
+    private function runTargetOp(string $op, string $targetId, string $source, string $asn, string $eventId = ''): array
     {
+        if ($eventId !== '') {
+            self::assertKeySafeIdentifier('eventId', $eventId);
+        }
         $keys = $this->targetStateKeys($targetId);
+        $keys[] = KeyspaceMode::targetFailureMarkerKey(
+            $this->namespace,
+            $targetId,
+            $eventId === '' ? 'unused' : $eventId,
+            KeyspaceMode::Legacy,
+        );
         $result = $this->runScript(
             $keys,
-            [$op, $source, $asn, (string) $this->principalTtlSecs],
+            [$op, $source, $asn, (string) $this->principalTtlSecs, $eventId, (string) $this->dedupeTtlSecs],
             self::loadOutcomeScript('target_failure.lua'),
         );
         if (!\is_array($result) || \count($result) < 5) {
@@ -376,6 +388,12 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     public function registerTargetFailure(string $targetId, string $source, string $asn): array
     {
         return $this->runTargetOp('fail', $targetId, $source, $asn);
+    }
+
+    /** @inheritdoc */
+    public function registerTargetFailureOnce(string $targetId, string $source, string $asn, string $eventId): array
+    {
+        return $this->runTargetOp('fail', $targetId, $source, $asn, $eventId);
     }
 
     /** @inheritdoc */

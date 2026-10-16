@@ -339,7 +339,8 @@ LUA;
 -- carry a Redis key lifetime: a PERSISTed key is corrupt state and fails
 -- closed with zero writes. Deny/StepUp/ChainRequired candidates are
 -- terminal or contract responses and finalize on the record checks
--- alone.
+-- alone. A record that already completed answers the lost-claim
+-- refusal: the disposition committed, only one finalize may write it.
 local existing = readLivePersistedKey(KEYS[1])
 if existing == 'corrupt' then
   return 'corrupt'
@@ -354,8 +355,13 @@ end
 if rec['v'] ~= 1 and rec['v'] ~= 2 then
   return 'corrupt'
 end
-if rec['state'] ~= 'pending' then
-  return 'corrupt'
+if rec['state'] == 'complete' then
+  -- The disposition already committed by this owner or a takeover
+  -- winner: the claim is no longer held, the same typed refusal the
+  -- in-memory store answers for a complete record. The strict schema
+  -- predicate above already accepted the record, so this branch is never
+  -- corruption.
+  return 'ownership-lost'
 end
 if rec['owner'] ~= ARGV[1] then
   return 'ownership-lost'

@@ -174,7 +174,7 @@ end
 
 local event = tonumber(ARGV[1])
 local scope = tonumber(ARGV[2])
-if event ~= math.floor(event) or event < 1 or event > 21 then
+if event ~= math.floor(event) or event < 1 or event > 22 then
     return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
 end
 

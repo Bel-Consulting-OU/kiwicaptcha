@@ -1017,13 +1017,17 @@ impl RedisRiskStateStore {
         crate::keyspace::target_state_keys(&self.namespace, target_id, KeyspaceMode::Legacy)
     }
 
-    /// One target_failure.lua op, returning {fails, spread}.
+    /// One target_failure.lua op, returning {fails, spread}. The
+    /// per-report dedupe marker of the fail op rides the fourth key, on
+    /// the target family's own slot; an empty event id leaves the
+    /// marker untouched.
     fn run_target_op(
         &self,
         op: &str,
         target_id: &str,
         source: &str,
         asn: &str,
+        event_id: &str,
     ) -> Result<crate::store::TargetState, RiskStoreError> {
         if !Self::valid_key_component(target_id) {
             return Err(RiskStoreError::InvalidIdentifier(format!(
@@ -1031,7 +1035,18 @@ impl RedisRiskStateStore {
                 hex::encode(target_id)
             )));
         }
-        let keys = self.target_state_keys(target_id);
+        if !event_id.is_empty() && !Self::valid_key_component(event_id) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "event_id is not a safe Redis key component".to_string(),
+            ));
+        }
+        let mut keys = self.target_state_keys(target_id).to_vec();
+        keys.push(crate::keyspace::target_failure_marker_key(
+            &self.namespace,
+            target_id,
+            if event_id.is_empty() { "unused" } else { event_id },
+            crate::keyspace::KeyspaceMode::Legacy,
+        ));
         // The target dimension's window is the principal retention (the
         // 24h default change.md assigns it); a dedicated knob would
         // only duplicate that contract.
@@ -1044,6 +1059,8 @@ impl RedisRiskStateStore {
         invocation.arg(source);
         invocation.arg(asn);
         invocation.arg(ttl);
+        invocation.arg(event_id);
+        invocation.arg(self.dedupe_ttl_secs);
         let reply: Vec<i64> = self
             .pool
             .with_connection(&self.client, |conn| invocation.invoke(conn))?;
@@ -1554,11 +1571,21 @@ impl RiskStateStore for RedisRiskStateStore {
         source: &str,
         asn: &str,
     ) -> Result<crate::store::TargetState, RiskStoreError> {
-        self.run_target_op("fail", target_id, source, asn)
+        self.run_target_op("fail", target_id, source, asn, "")
+    }
+
+    fn register_target_failure_once(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+        event_id: &str,
+    ) -> Result<crate::store::TargetState, RiskStoreError> {
+        self.run_target_op("fail", target_id, source, asn, event_id)
     }
 
     fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
-        self.run_target_op("clear", target_id, "", "")?;
+        self.run_target_op("clear", target_id, "", "", "")?;
         Ok(())
     }
 
@@ -1566,7 +1593,7 @@ impl RiskStateStore for RedisRiskStateStore {
         &self,
         target_id: &str,
     ) -> Result<crate::store::TargetState, RiskStoreError> {
-        self.run_target_op("read", target_id, "", "")
+        self.run_target_op("read", target_id, "", "", "")
     }
 
     fn last_global_level(&self) -> u8 {
