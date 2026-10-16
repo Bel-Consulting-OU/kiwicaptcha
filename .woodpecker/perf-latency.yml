@@ -23,7 +23,10 @@ steps:
       - |
         set -eu
         apt-get update -qq
-        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server
+        # The replica fixture boots its own master and replica, so the
+        # step image needs the server binary: the fenced redis service
+        # feeds the --redis modes, not perf-wait-replica.php.
         docker-php-ext-install -j"$$(nproc)" gmp sodium
         EXPECTED="$$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
         php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
