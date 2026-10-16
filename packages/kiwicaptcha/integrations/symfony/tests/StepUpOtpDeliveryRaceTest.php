@@ -225,6 +225,34 @@ final class StepUpOtpDeliveryRaceTest extends TestCase
         self::assertNull($record->leaseUntilMs);
     }
 
+    /**
+     * The demand's own code budget is enforced, and the refusal says so.
+     *
+     * A step-up demand funds a bounded number of sends, and the delivery
+     * lease is what consults that budget on this flow. Before it, a begin
+     * reached the transport however many times the per-principal window
+     * allowed, so the demand could issue more codes than its own record
+     * permits. The third begin is refused as an exhausted budget, with
+     * the retry hint of the demand's remaining lifetime, never as the
+     * conflict that claims another request is mid-send.
+     */
+    public function testTheDemandCodeBudgetIsEnforcedWithItsOwnRefusal(): void
+    {
+        $demand = $this->mintDemand();
+        $handler = $this->handler(new DeliveryRaceStepUpChallengeStore($this->inner));
+
+        self::assertSame(200, $handler->begin($this->request(), $this->context($demand))->getStatusCode());
+        self::assertSame(200, $handler->begin($this->request(), $this->context($demand))->getStatusCode());
+        self::assertCount(2, $this->sender->deliveries, 'the demand funds two deliveries');
+
+        $third = $handler->begin($this->request(), $this->context($demand));
+
+        self::assertSame(429, $third->getStatusCode(), (string) $third->getContent());
+        self::assertSame('step_up_rate_limited', json_decode((string) $third->getContent(), true)['error'] ?? null);
+        self::assertSame('600', $third->headers->get('Retry-After'), 'the hint is the demand\'s remaining lifetime');
+        self::assertCount(2, $this->sender->deliveries, 'the refused begin delivered nothing');
+    }
+
     private function handler(StepUpChallengeStore $store): EmailOtpStepUpHandler
     {
         return new EmailOtpStepUpHandler(

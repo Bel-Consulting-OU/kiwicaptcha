@@ -50,3 +50,6 @@ tools/redteam/engine/runs/*.log
 # Fuzz build and campaign logs are generated output, never source.
 tools/redteam/fuzz/build.log
 tools/redteam/fuzz/*.log
+# Elixir writes this beside the working directory when a run crashes;
+# it is diagnostic output, never source.
+erl_crash.dump
