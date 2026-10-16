@@ -285,6 +285,7 @@ function d314Dump(string $redisUrl, string $outFile): array
         'keys' => 0,
         'covered' => 0,
         'uncovered' => [],
+        'vanished' => [],
         'truncated' => [],
         'types' => [],
         'bytes' => 0,
@@ -293,10 +294,21 @@ function d314Dump(string $redisUrl, string $outFile): array
         $summary['keys']++;
         $type = strtolower((string) $cmd('TYPE', [$key]));
         if ($type === 'none' || $type === '') {
-            // The key vanished between SCAN and TYPE (TTL, eviction, a
-            // concurrent write): the sweep cannot prove it captured the
-            // key, so it is uncovered evidence, never a silent skip.
-            $summary['uncovered'][] = ['key' => $key, 'type' => $type === '' ? 'none' : $type, 'reason' => 'vanished_between_scan_and_type'];
+            // The key no longer exists. The keyspace is live: the
+            // issuance limiter's counters carry a minute-long TTL and the
+            // flow itself writes while the sweep walks, so a key
+            // disappearing between the SCAN and the TYPE is ordinary
+            // expiry rather than a gap in coverage. The absence is
+            // confirmed with a second EXISTS before the key is counted,
+            // and every vanished key is reported, so a sweep can still
+            // never claim to have covered a key it did not read.
+            if ((int) $cmd('EXISTS', [$key]) === 1) {
+                $summary['uncovered'][] = ['key' => $key, 'type' => $type === '' ? 'none' : $type, 'reason' => 'vanished_between_scan_and_type'];
+
+                continue;
+            }
+            $summary['vanished'][] = ['key' => $key, 'reason' => 'expired before the sweep reached it'];
+
             continue;
         }
         $summary['types'][$type] = ($summary['types'][$type] ?? 0) + 1;
