@@ -1181,7 +1181,20 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
             Some(id) => self.target_spread_elements(id, Some(&ctx)),
             None => (String::new(), String::new()),
         };
-        let effective_v2_weights = v2_weights.unwrap_or_default();
+        // The risk-v2 weights the engine actually scores with: a v1
+        // assessment (no v2 context) scores through the plain scorer and
+        // applies no v2 evidence factor. The effective weights therefore
+        // zero out for that call, and the consolidated script computes
+        // the ledger score from the same factors the decision was judged
+        // by. The default weights are wrong here: the script derives the
+        // honeypot factor from the event kind and the two target factors
+        // from the maintained state, so it would book a score the v1
+        // decision never had.
+        let effective_v2_weights = if v2.is_none() {
+            RiskV2Weights::ZERO
+        } else {
+            v2_weights.unwrap_or_default()
+        };
         let registration = decision_id.as_ref().map(|id| OutcomeRegistration {
             decision_id: id.clone(),
             decision_hour: (now_ms / 3_600_000) as i64,
@@ -2279,16 +2292,19 @@ impl<S: RiskStateStore + SessionContextTagStore + SessionTlsTagStore, N: Network
 
     /// Registers one authentication failure against the target
     /// dimension (the outcome-bridge write path of target-account
-    /// protection). Fails closed: a store error surfaces, never a silent
-    /// drop.
+    /// protection), deduped by the report's event id: a redelivered
+    /// report is a no-op, so the leaky counter can never be inflated by
+    /// a retry. An empty event id books one failure per call. Fails
+    /// closed: a store error surfaces, never a silent drop.
     pub(crate) fn register_target_failure(
         &self,
         target_id: &str,
         source: &str,
         asn: &str,
+        event_id: &str,
     ) -> Result<(), RiskError> {
         self.store
-            .register_target_failure(target_id, source, asn)
+            .register_target_failure_once(target_id, source, asn, event_id)
             .map_err(|e| RiskError::Store(e.to_string()))?;
         Ok(())
     }

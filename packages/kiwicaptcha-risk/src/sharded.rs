@@ -809,7 +809,17 @@ impl ShardedRedisRiskStateStore {
         let target_id = registration.and_then(|reg| reg.target_id.as_deref());
         let target_id = target_id.filter(|id| !id.is_empty());
         if let Some(target) = target_id {
-            let keys = crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded);
+            // The read is keyed exactly like the fail op, so the slot
+            // map never shifts between the assessment's read and the
+            // outcome bridge's write; the marker key rides along
+            // untouched.
+            let mut keys = crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded).to_vec();
+            keys.push(crate::keyspace::target_failure_marker_key(
+                ns,
+                target,
+                "unused",
+                KeyspaceMode::Sharded,
+            ));
             units.push(BatchUnit {
                 endpoint: self.endpoint_for_key(&keys[0]),
                 eval: target_evalsha(
@@ -819,6 +829,8 @@ impl ShardedRedisRiskStateStore {
                     "",
                     "",
                     self.options.target_ttl_secs,
+                    "",
+                    self.options.dedupe_ttl_secs,
                 ),
                 script: Some(TARGET_FAILURE_LUA),
             });
@@ -942,6 +954,7 @@ impl ShardedRedisRiskStateStore {
         target_id: &str,
         source: &str,
         asn: &str,
+        event_id: &str,
     ) -> Result<TargetState, RiskStoreError> {
         if !RedisRiskStateStore::valid_key_component(target_id) {
             return Err(RiskStoreError::InvalidIdentifier(format!(
@@ -949,11 +962,23 @@ impl ShardedRedisRiskStateStore {
                 hex::encode(target_id)
             )));
         }
-        let keys = crate::keyspace::target_state_keys(
+        if !event_id.is_empty() && !RedisRiskStateStore::valid_key_component(event_id) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "event_id is not a safe Redis key component".to_string(),
+            ));
+        }
+        let mut keys = crate::keyspace::target_state_keys(
             &self.encoded_namespace,
             target_id,
             KeyspaceMode::Sharded,
-        );
+        )
+        .to_vec();
+        keys.push(crate::keyspace::target_failure_marker_key(
+            &self.encoded_namespace,
+            target_id,
+            if event_id.is_empty() { "unused" } else { event_id },
+            KeyspaceMode::Sharded,
+        ));
         let replies = self.dispatch(vec![BatchUnit {
             endpoint: self.endpoint_for_key(&keys[0]),
             eval: target_evalsha(
@@ -963,6 +988,8 @@ impl ShardedRedisRiskStateStore {
                 source,
                 asn,
                 self.options.target_ttl_secs,
+                event_id,
+                self.options.dedupe_ttl_secs,
             ),
             script: Some(TARGET_FAILURE_LUA),
         }])?;
@@ -1173,22 +1200,25 @@ struct TargetCounts {
 /// spread elements and the state TTL.
 fn target_evalsha(
     script: &redis_crate::Script,
-    keys: &[String; 3],
+    keys: &[String],
     op: &str,
     source_element: &str,
     asn_element: &str,
     target_ttl_secs: u64,
+    event_id: &str,
+    dedupe_ttl_secs: u64,
 ) -> redis_crate::Cmd {
     let mut eval = redis_crate::cmd("EVALSHA");
-    eval.arg(script.get_hash())
-        .arg(3)
-        .arg(&keys[0])
-        .arg(&keys[1])
-        .arg(&keys[2])
-        .arg(op)
+    eval.arg(script.get_hash()).arg(keys.len());
+    for key in keys {
+        eval.arg(key);
+    }
+    eval.arg(op)
         .arg(source_element)
         .arg(asn_element)
-        .arg(target_ttl_secs);
+        .arg(target_ttl_secs)
+        .arg(event_id)
+        .arg(dedupe_ttl_secs);
     eval
 }
 
@@ -1762,16 +1792,26 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
         source: &str,
         asn: &str,
     ) -> Result<TargetState, RiskStoreError> {
-        self.run_target_op("fail", target_id, source, asn)
+        self.run_target_op("fail", target_id, source, asn, "")
+    }
+
+    fn register_target_failure_once(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+        event_id: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        self.run_target_op("fail", target_id, source, asn, event_id)
     }
 
     fn clear_target_failures(&self, target_id: &str) -> Result<(), RiskStoreError> {
-        self.run_target_op("clear", target_id, "", "")?;
+        self.run_target_op("clear", target_id, "", "", "")?;
         Ok(())
     }
 
     fn read_target_state(&self, target_id: &str) -> Result<TargetState, RiskStoreError> {
-        self.run_target_op("read", target_id, "", "")
+        self.run_target_op("read", target_id, "", "", "")
     }
 }
 

@@ -23,7 +23,10 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * - ChainRequired:        an open nonterminal chain exists and this
  *                         nonce is not its current stage-2 nonce: the
  *                         acceptance must be ChainRequired.
- * - OwnershipLost:        the claim was not held (fresh path).
+ * - OwnershipLost:        the claim was not held: a fresh path, or a
+ *                         record that already completed before the
+ *                         finalize (a same-owner replay or a takeover
+ *                         winner).
  * - Missing:              the record is absent (fresh path).
  * - Corrupt:              the record violates the strict schema.
  */

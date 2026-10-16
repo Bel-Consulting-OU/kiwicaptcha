@@ -14,16 +14,19 @@
 -- step-up-completed clear. One atomic call per op.
 --
 -- SCRIPT BOUNDS — all bounded constants:
---   max keys touched:     3 (target hash + two HLLs; all carry the
---                          {kiwi:<ns>:target:<hex2>} hash tag, one slot)
---   max Redis calls:      7 (1 TIME + 1 HGET + 1 HSET + 1 PEXPIRE +
---                          2 PFADD + 1 PFCOUNT on the fail path; fewer
---                          on clear/read)
+--   max keys touched:     4 (target hash + two HLLs + the per-report
+--                          dedupe marker; all carry the same family hash
+--                          tag, one slot)
+--   max Redis calls:      9 (1 TIME + 1 GET + 1 SET + 1 HGET + 1 HSET +
+--                          1 PEXPIRE + 2 PFADD + 1 PFCOUNT on the fail
+--                          path; fewer on clear/read)
 --   max collection cardinality: 4 flat fields in the target hash
 --
 -- KEYS[1] target state hash {ts, fails, first_ms, last_ms}
 -- KEYS[2] target source-spread HLL
 -- KEYS[3] target asn-spread HLL
+-- KEYS[4] per-report dedupe marker (same slot; touched only by a fail
+--         op that carries an event id)
 -- ARGV[1] op: 'fail' (record one authentication failure), 'clear'
 --         (reset the failure counter — step-up completed: the owner
 --         proved themselves; the spread HLLs keep their history),
@@ -31,6 +34,11 @@
 -- ARGV[2] spread source element ('' = skip the source PFADD)
 -- ARGV[3] spread asn element ('' = skip the asn PFADD)
 -- ARGV[4] target state TTL (seconds; the 24h target-dimension window)
+-- ARGV[5] event id of the report ('' = dedupe disabled: one failure is
+--         booked per call, the contract for a report that cannot be
+--         retried)
+-- ARGV[6] dedupe marker TTL (seconds; required when ARGV[5] is
+--         non-empty)
 --
 -- Returns {target_failures, target_spread_sources, target_spread_asns,
 -- first_ms, last_ms} (the decayed failure count, the distinct-source
@@ -47,6 +55,18 @@ end
 local ttl = tonumber(ARGV[4])
 if ttl == nil or ttl < 1 or ttl > EXPIRY_CEILING_SECS or ttl ~= math.floor(ttl) then
     return redis.error_reply('target_failure: target_ttl_s must be a positive integer no greater than 2147483647')
+end
+local event_id = ARGV[5] or ''
+-- The dedupe TTL is validated before the first write, like every other
+-- TTL: a non-positive value would write a persistent marker (or an
+-- invalid EX), and the failure would then abort mid-script with the
+-- marker already set.
+local dedupe_ttl = nil
+if event_id ~= '' then
+    dedupe_ttl = tonumber(ARGV[6])
+    if dedupe_ttl == nil or dedupe_ttl < 1 or dedupe_ttl > EXPIRY_CEILING_SECS or dedupe_ttl ~= math.floor(dedupe_ttl) then
+        return redis.error_reply('target_failure: dedupe_ttl_s must be a positive integer no greater than 2147483647')
+    end
 end
 
 local time = redis.call('TIME')
@@ -80,28 +100,46 @@ local function read_failures(key)
 end
 
 if op == 'fail' then
+    -- The per-report dedupe: one report, identified by its event id,
+    -- books one failure. The claim and the increment are one atomic
+    -- move inside this script, so a retry (or two concurrent
+    -- deliveries, or a retry after a dropped reply) can never book the
+    -- failure twice, and a crash can never leave the claim without its
+    -- effect. An empty event id disables the marker: a report that
+    -- cannot be retried runs exactly as before.
+    local is_duplicate = false
+    if event_id ~= '' then
+        if redis.call('GET', KEYS[4]) then
+            is_duplicate = true
+        else
+            redis.call('SET', KEYS[4], '1', 'EX', dedupe_ttl)
+        end
+    end
     local fails, ts = read_failures(KEYS[1])
-    fails = fails + 1
-    if ts == 0 then
-        ts = now
-    end
-    redis.call('HSET', KEYS[1],
-        'ts', ts, 'fails', fails,
-        'last_ms', now)
-    redis.call('HSETNX', KEYS[1], 'first_ms', now)
-    redis.call('PEXPIRE', KEYS[1], ttl * 1000)
-    if ARGV[2] ~= nil and ARGV[2] ~= '' then
-        redis.call('PFADD', KEYS[2], ARGV[2])
-        redis.call('PEXPIRE', KEYS[2], ttl * 1000)
-    end
-    if ARGV[3] ~= nil and ARGV[3] ~= '' then
-        redis.call('PFADD', KEYS[3], ARGV[3])
-        redis.call('PEXPIRE', KEYS[3], ttl * 1000)
+    if not is_duplicate then
+        fails = fails + 1
+        if ts == 0 then
+            ts = now
+        end
+        redis.call('HSET', KEYS[1],
+            'ts', ts, 'fails', fails,
+            'last_ms', now)
+        redis.call('HSETNX', KEYS[1], 'first_ms', now)
+        redis.call('PEXPIRE', KEYS[1], ttl * 1000)
+        if ARGV[2] ~= nil and ARGV[2] ~= '' then
+            redis.call('PFADD', KEYS[2], ARGV[2])
+            redis.call('PEXPIRE', KEYS[2], ttl * 1000)
+        end
+        if ARGV[3] ~= nil and ARGV[3] ~= '' then
+            redis.call('PFADD', KEYS[3], ARGV[3])
+            redis.call('PEXPIRE', KEYS[3], ttl * 1000)
+        end
     end
     local spread_sources = redis.call('PFCOUNT', KEYS[2])
     local spread_asns = redis.call('PFCOUNT', KEYS[3])
     local first_ms = tonumber(redis.call('HGET', KEYS[1], 'first_ms')) or 0
-    return {fails, spread_sources, spread_asns, first_ms, now}
+    local last_ms = tonumber(redis.call('HGET', KEYS[1], 'last_ms')) or 0
+    return {fails, spread_sources, spread_asns, first_ms, last_ms}
 end
 
 if op == 'clear' then

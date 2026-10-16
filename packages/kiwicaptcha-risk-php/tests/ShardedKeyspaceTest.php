@@ -77,6 +77,14 @@ final class ShardedKeyspaceTest extends TestCase
         );
         self::assertSame('{kiwi:n1}:risk:hyst', KeyspaceMode::hysteresisKey($ns));
         self::assertSame('{kiwi:n1}:mode', KeyspaceMode::modeMarkerKey($ns));
+        self::assertSame(
+            '{kiwi:n1:target:5e}:risk:tgt:dd:' . str_repeat('ab', 16),
+            KeyspaceMode::targetFailureMarkerKey($ns, '5e2a', str_repeat('ab', 16), KeyspaceMode::Sharded),
+        );
+        self::assertSame(
+            '{kiwi:n1}:risk:tgt:dd:' . str_repeat('ab', 16),
+            KeyspaceMode::targetFailureMarkerKey($ns, '5e2a', str_repeat('ab', 16), KeyspaceMode::Legacy),
+        );
     }
 
     public function testKeyTagCorrectnessEveryShardedTagIsItsFamilyTag(): void

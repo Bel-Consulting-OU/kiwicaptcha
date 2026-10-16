@@ -38,6 +38,14 @@ final class OutcomeRegistration
         public readonly bool $globalPressureEnabled,
         public readonly bool $honeypotHit,
         public readonly RiskWeights $weights,
+        /**
+         * The risk-v2 weights the engine scores this decision with: the
+         * caller's override on a risk-v2 assessment, and all-zero on a
+         * risk-v1 assessment (which applies no v2 evidence factor at
+         * all). The script computes the ledger score from exactly these
+         * weights, so the ledger can never record a score the decision
+         * was not judged by.
+         */
         public readonly RiskV2Weights $v2Weights,
         /** Target pseudonym this assessment protects (null = no target). */
         public readonly ?string $targetId = null,

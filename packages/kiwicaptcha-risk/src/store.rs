@@ -277,6 +277,32 @@ pub trait RiskStateStore {
         Ok(TargetState::default())
     }
 
+    /// Registers one authentication failure against the target
+    /// dimension exactly once per `event_id`: a retried report (a
+    /// redelivered webhook, two workers racing one delivery) is a no-op
+    /// that returns the current state, so the leaky counter and the
+    /// spread can never be inflated by redelivery. The claim and the
+    /// increment are one atomic script on the target family's own slot.
+    /// An empty `event_id` disables the dedupe and books one failure
+    /// per call.
+    ///
+    /// The default implementation ignores the event id and delegates to
+    /// [`RiskStateStore::register_target_failure`], so a third-party
+    /// store keeps compiling unchanged and books one failure per call.
+    ///
+    /// # Errors
+    ///
+    /// - backend errors (`BackendUnavailable`, `ScriptError`, `Timeout`).
+    fn register_target_failure_once(
+        &self,
+        target_id: &str,
+        source: &str,
+        asn: &str,
+        _event_id: &str,
+    ) -> Result<TargetState, RiskStoreError> {
+        self.register_target_failure(target_id, source, asn)
+    }
+
     /// Resets the target's failure counter (step-up completed: the
     /// account owner proved themselves, so a legitimate user is not
     /// stepped up twice). The spread HLLs keep their history.

@@ -143,7 +143,23 @@ final class KiwiOutcomes
             if ($handle->dimension === OutcomeHandleDimension::Target && $this->marks instanceof \KiwiCaptcha\Risk\Storage\TargetStateStoreInterface) {
                 if ($outcome === Outcome::AuthenticationFailure) {
                     [$source, $asn] = $this->engine->targetSpreadElements($handle->id, $context);
-                    $this->marks->registerTargetFailure($handle->id, $source, $asn);
+                    // The failure counter books one failure per report
+                    // event id, the same id the mark and the channel
+                    // dedupe on, so a retried delivery never inflates
+                    // the target's failure pressure. A report with no
+                    // idempotency key derives no id and books one
+                    // failure per call (dedupe disabled), exactly like
+                    // the mark contract.
+                    $failureEventId = $this->engine->deriveOutcomeEventId(
+                        $idempotencyKey,
+                        $context?->scope ?? 0,
+                        $mapping->channel,
+                    );
+                    if ($this->marks instanceof \KiwiCaptcha\Risk\Storage\IdempotentTargetFailureStoreInterface) {
+                        $this->marks->registerTargetFailureOnce($handle->id, $source, $asn, $failureEventId);
+                    } else {
+                        $this->marks->registerTargetFailure($handle->id, $source, $asn);
+                    }
                 } elseif ($outcome === Outcome::StepUpCompleted && $idempotencyKey !== null && $idempotencyKey !== '') {
                     $this->marks->clearTargetFailures($handle->id);
                 }

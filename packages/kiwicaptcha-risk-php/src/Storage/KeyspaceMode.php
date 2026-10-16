@@ -332,14 +332,35 @@ enum KeyspaceMode: string
      */
     public static function targetStateKeys(string $encodedNamespace, string $hexId, self $mode): array
     {
-        $tag = $mode === self::Sharded
-            ? '{kiwi:' . $encodedNamespace . ':target:' . self::idPrefix($hexId) . '}'
-            : '{kiwi:' . $encodedNamespace . '}';
+        $tag = self::targetTag($encodedNamespace, $hexId, $mode);
 
         return [
             $tag . ':risk:tgt:' . $hexId,
             $tag . ':risk:tgt:src:' . $hexId,
             $tag . ':risk:tgt:asn:' . $hexId,
         ];
+    }
+
+    /**
+     * The per-report dedupe marker of one target failure, on the target
+     * family's own slot (the same tag the target state keys carry), so
+     * the claim and the counter increment run as one atomic script on
+     * one cluster slot. One report event id books one failure.
+     */
+    public static function targetFailureMarkerKey(
+        string $encodedNamespace,
+        string $hexId,
+        string $eventId,
+        self $mode,
+    ): string {
+        return self::targetTag($encodedNamespace, $hexId, $mode) . ':risk:tgt:dd:' . $eventId;
+    }
+
+    /** The hash tag of one target pseudonym's state family. */
+    private static function targetTag(string $encodedNamespace, string $hexId, self $mode): string
+    {
+        return $mode === self::Sharded
+            ? '{kiwi:' . $encodedNamespace . ':target:' . self::idPrefix($hexId) . '}'
+            : '{kiwi:' . $encodedNamespace . '}';
     }
 }

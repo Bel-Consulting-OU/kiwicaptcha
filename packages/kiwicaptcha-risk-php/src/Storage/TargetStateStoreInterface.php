@@ -11,6 +11,10 @@ namespace KiwiCaptcha\Risk\Storage;
  * path when a failure is reported against a target; compiled into the
  * marks stage's attacked-target record by MarksView::read. Rust mirror:
  * the RiskStateStore target methods over protocol/risk-v1/target_failure.lua.
+ *
+ * A store that can also dedupe a failure report by its event id
+ * implements {@see IdempotentTargetFailureStoreInterface}; a store
+ * without that capability keeps booking one failure per call.
  */
 interface TargetStateStoreInterface
 {
