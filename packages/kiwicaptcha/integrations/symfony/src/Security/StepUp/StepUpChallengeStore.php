@@ -149,9 +149,14 @@ interface StepUpChallengeStore
     /**
      * The atomic factor completion: the challenge consumption and the
      * demand completion are one script over the two records. The script
-     * loads both records and decodes both. It asserts the identity (the
-     * challenge's demand id equals the demand's id), the state (the
-     * demand is open and both records live) and the binding (the
+     * loads both records and decodes both. It asserts the identity of
+     * the pair: the challenge's demand id equals the demand's id, the
+     * challenge answers the demand's scope, and its proof may stand for
+     * the demand's proof identity. A demand that names a principal
+     * admits only a principal-authenticating factor whose verified
+     * subject reproduces that principal.
+     * It asserts the state (the demand is open and
+     * both records live) and the binding (the
      * presented hash equals the stored session binding or the stateless
      * client secret). The factor requirement is asserted too: the
      * demand's stored requirement is judged against the factor identity
@@ -168,13 +173,20 @@ interface StepUpChallengeStore
      * verified subject and the completed factor are both derived from
      * the stored challenge, never from a caller argument.
      *
-     * $sessionHash and $scope are the completion index hints. When the
-     * session hash names the stored session binding and the scope names
-     * the stored scope, the completion also records the completed factor
-     * under that (session hash, scope) pair, the parent factor a child
-     * demand escalates past. The pair keying keeps the ladder of
-     * one scope intact when another scope of the same session completes
-     * its own factor. Null hints skip the index write. On the Redis
+     * $scope is the completion index hint and $lineageHash the
+     * presented lineage hint. The demand's stored lineage is the
+     * history identity: the completion refuses when the hint does not
+     * reproduce it exactly, and the marker is keyed by the stored
+     * lineage, never the request's current value. When the scope names
+     * the stored scope and the completion proved a principal the
+     * demand names, the completion records the completed factor under
+     * that (lineage, principal, scope) identity, the parent factor a
+     * child demand escalates past. A completion that proved no named
+     * principal writes only the anonymous bucket; an address-ownership
+     * completion never publishes a principal-scoped entry. The pair
+     * keying keeps the ladder of one scope intact when another scope of
+     * the same session completes its own factor. Null hints skip the
+     * index write. On the Redis
      * backend every expiry judgement and stamp of this transition runs
      * on the Redis server time; the reference backend honors $now as
      * its own store clock.
@@ -183,12 +195,12 @@ interface StepUpChallengeStore
 
     /**
      * The factor family the live completion marker records for a
-     * continuity session hash and scope, or null when none stands. The
+     * lineage hash and scope, or null when none stands. The
      * marker is the strongest-factor history the escalation reads: a
      * demand minted after a completed one must require a strictly
      * stronger factor than the family this answers. The history is
-     * keyed per (session hash, scope) pair, so the answer names only
-     * the completions of exactly this scope.
+     * keyed per (lineage, principal, scope) identity, so the answer
+     * names only the completions of exactly this scope and subject.
      */
     public function completedFactorOf(string $lineageHash, ?string $principalPseudonym, string $scope, int $now): ?string;
 

@@ -36,6 +36,25 @@ final class StepUpChallenge
     private const SCHEMA_VERSION = 2;
 
     /**
+     * The epoch-second window a stored record's stamps must fall in. A
+     * challenge is a live ceremony, so its creation and expiry stamps
+     * ride inside 1970-01-01T00:00:01Z .. 2100-01-01T00:00:00Z: the
+     * window covers every writer clock with room to spare and keeps
+     * the record's own expiry arithmetic far from the integer edge.
+     */
+    private const EPOCH_MIN = 1;
+
+    private const EPOCH_MAX = 4_102_444_800;
+
+    /**
+     * The largest attempt cap a stored record may carry. The bundle's
+     * own configuration bounds the cap within 1..10, and the decode
+     * leaves three orders of magnitude of headroom for a custom
+     * handler while refusing an absurd cap.
+     */
+    private const MAX_ATTEMPTS_CEILING = 1_000_000;
+
+    /**
      * The plaintext of the client secret minted for a stateless begin.
      * Runtime-only: it is handed to the begin presentation exactly once
      * and never survives into {@see self::toArray()} (the only storage
@@ -425,6 +444,19 @@ final class StepUpChallenge
      * of the drain period. Every other raw value is refused, so a value
      * is never dropped to null behind a type test.
      *
+     * Every raw field is judged before the record is built, so a
+     * malformed record never yields a half-built one. The stamps ride
+     * as exact integers inside the epoch window, the cap is a positive
+     * integer inside its own window, and the attempt count sits between
+     * zero and the cap. The coherence of each pair belongs to the
+     * contract: the expiry follows the creation stamp, and the attempt
+     * count stays within the cap the record carries. The target-owned
+     * assertion rides as an exact JSON boolean, and an absent key or an
+     * explicit null is the false state, the reading that can never
+     * authorize clearing a target. The ceremony, the demand binding,
+     * the two binding hashes and the bootstrap flag keep their exact
+     * shapes too.
+     *
      * @param array<string, mixed> $record
      */
     public static function fromArray(array $record): self
@@ -458,14 +490,25 @@ final class StepUpChallenge
         $factorId = $record['factor_id'] ?? null;
         $factorRank = $record['factor_rank'] ?? null;
         if ($factorFamily !== null || $factorId !== null || $factorRank !== null) {
-            if (!\is_string($factorFamily) || !\is_string($factorId) || !\is_int($factorRank)) {
-                throw $fail('the factor snapshot must be a coherent family, id and rank triple');
+            if ($factorFamily === null || !\is_string($factorFamily)) {
+                throw $fail('factor_family must be a string when the record carries a factor snapshot');
             }
-            try {
-                $factor = new FactorRequirement($factorFamily, $factorId, $factorRank);
-            } catch (\InvalidArgumentException) {
-                throw $fail('the factor snapshot must be a ladder family, its rank and a well-shaped factor id');
+            if ($factorId === null || !\is_string($factorId)) {
+                throw $fail('factor_id must be a string when the record carries a factor snapshot');
             }
+            if ($factorRank === null || !\is_int($factorRank)) {
+                throw $fail('factor_rank must be an integer when the record carries a factor snapshot');
+            }
+            if (!FactorRequirement::isFamily($factorFamily)) {
+                throw $fail('factor_family must name one of the ladder families');
+            }
+            if (preg_match('/^[a-z0-9_]{1,64}$/D', $factorId) !== 1) {
+                throw $fail('factor_id must be 1-64 chars of [a-z0-9_]');
+            }
+            if ($factorRank !== FactorRequirement::rankOf($factorFamily)) {
+                throw $fail('factor_rank must be the ladder rank of its family');
+            }
+            $factor = new FactorRequirement($factorFamily, $factorId, $factorRank);
             if ($factor->family !== self::factorOfKind($kind)->family) {
                 throw $fail('the factor snapshot must serve the family its kind proves');
             }
@@ -483,7 +526,11 @@ final class StepUpChallenge
                 throw $fail('an email-ownership record carries no principal subject');
             }
         } elseif ($kind !== StepUpChallengeKind::EmailOwnership) {
-            $subjectRaw = \is_string($record['principal'] ?? null) ? $record['principal'] : null;
+            // The pre-subject wire shape writes no subject key: the
+            // decode derives it from the principal pseudonym, which the
+            // required-field loop above already proved a non-empty
+            // string.
+            $subjectRaw = $record['principal'];
         }
         // The three opaque string fields of the record: the target
         // pseudonym, the return path and the stored code hash. Absent
@@ -516,33 +563,98 @@ final class StepUpChallenge
         if ($codeHash !== null && (!\is_string($codeHash) || preg_match('/^[0-9a-f]{64}$/D', $codeHash) !== 1)) {
             throw $fail('code_hash must be null or a 64-char lowercase hex digest');
         }
-        try {
-            $challenge = self::begin(
-                $record['id'],
-                $kind,
-                $record['principal'],
-                $target,
-                $record['scope'],
-                $returnPath,
-                $record['reason'],
-                \is_int($record['created_at'] ?? null) ? $record['created_at'] : 0,
-                (\is_int($record['expires_at'] ?? null) ? $record['expires_at'] : 0)
-                    - (\is_int($record['created_at'] ?? null) ? $record['created_at'] : 0),
-                \is_int($record['max_attempts'] ?? null) ? $record['max_attempts'] : 0,
-                $codeHash,
-                ($record['ceremony'] ?? null) === null ? null : (is_string($record['ceremony']) ? $record['ceremony'] : 'not-a-string'),
-                null,
-                ($record['target_owned'] ?? false) === true,
-                subjectPseudonym: $subjectRaw,
-                demandId: \is_string($record['demand_id'] ?? null) && $record['demand_id'] !== '' ? $record['demand_id'] : null,
-                factor: $factor,
-            );
-        } catch (\InvalidArgumentException $e) {
-            throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
+        // The numeric spine of the record, judged before construction:
+        // the creation stamp, the expiry, the attempt cap and the
+        // attempt count. Each rides as an exact integer, never a
+        // numeric string, a float, a boolean or a null. A coerced
+        // default here would rewrite the record's own expiry arithmetic
+        // or its brute-force budget, so a wrong raw value refuses the
+        // whole record.
+        $createdAt = $record['created_at'] ?? null;
+        if (!\is_int($createdAt) || $createdAt < self::EPOCH_MIN || $createdAt > self::EPOCH_MAX) {
+            throw $fail(sprintf(
+                'created_at must be an integer epoch second within %d..%d',
+                self::EPOCH_MIN,
+                self::EPOCH_MAX,
+            ));
         }
-        // Restore the recorded session binding verbatim (the hash is
-        // opaque; begin() would have re-hashed a raw id). A malformed
-        // hash shape fails closed.
+        $expiresAt = $record['expires_at'] ?? null;
+        if (!\is_int($expiresAt) || $expiresAt < self::EPOCH_MIN || $expiresAt > self::EPOCH_MAX) {
+            throw $fail(sprintf(
+                'expires_at must be an integer epoch second within %d..%d',
+                self::EPOCH_MIN,
+                self::EPOCH_MAX,
+            ));
+        }
+        // The pair is coherent: the expiry follows the creation stamp,
+        // so the record's own window is positive.
+        if ($expiresAt <= $createdAt) {
+            throw $fail('expires_at must be greater than created_at');
+        }
+        $maxAttempts = $record['max_attempts'] ?? null;
+        if (!\is_int($maxAttempts) || $maxAttempts < 1 || $maxAttempts > self::MAX_ATTEMPTS_CEILING) {
+            throw $fail(sprintf(
+                'max_attempts must be an integer within 1..%d',
+                self::MAX_ATTEMPTS_CEILING,
+            ));
+        }
+        // The count sits between zero and its own cap: a record whose
+        // spent attempts exceed the cap it carries is incoherent and
+        // never decodes.
+        $attempts = $record['attempts'] ?? null;
+        if (!\is_int($attempts) || $attempts < 0 || $attempts > $maxAttempts) {
+            throw $fail('attempts must be an integer within 0..max_attempts');
+        }
+        // The target-owned assertion decides whether a completion may
+        // clear target-scoped lockout and failure state, so it rides as
+        // an exact JSON boolean. An absent key and an explicit null are
+        // one state, false: a flag no writer spelled can never
+        // authorize clearing a target, the conservative reading. Every
+        // other raw value refuses the record, so 1, "true" or {} can
+        // never decode as a silent false.
+        $targetOwned = $record['target_owned'] ?? null;
+        if ($targetOwned !== null && !\is_bool($targetOwned)) {
+            throw $fail('target_owned must be a JSON boolean');
+        }
+        $targetOwned = $targetOwned === true;
+        // The assertion is coherent with the target it names: clearing
+        // target-scoped state needs a target, the same invariant
+        // begin() applies to the flag it records.
+        if ($targetOwned && $target === null) {
+            throw $fail('target_owned must be false when the record names no target');
+        }
+        // The ceremony rides as the exact string creation or assertion,
+        // or absent on the handlers that run no webauthn ceremony.
+        $ceremony = $record['ceremony'] ?? null;
+        if ($ceremony !== null && !\in_array($ceremony, ['creation', 'assertion'], true)) {
+            throw $fail('ceremony must be null or the string creation or assertion');
+        }
+        // The demand binding of the v2 wire shape, judged before
+        // construction like every other raw field. A demand id rides
+        // only in its exact base64url shape, and only on a record that
+        // can authorize: an enrollment creation ceremony is explicitly
+        // non-authorizing and never binds one. A record without a
+        // demand id decodes (the pre-demand wire shape of the drain
+        // period), but it authorizes nothing: the demand plane's
+        // completion refuses a demandless proof, so a stored
+        // demandless challenge can never invoke the finalization,
+        // restore a pending login or authorize the original action.
+        $demandId = $record['demand_id'] ?? null;
+        if ($demandId !== null && (!\is_string($demandId) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1)) {
+            // The type guard is load-bearing: a corrupt record whose
+            // demand_id is a JSON number, boolean or array must answer
+            // the typed refusal, never an uncaught TypeError out of
+            // preg_match on a non-string subject.
+            throw $fail('demand_id must be the base64url id shape');
+        }
+        if ($ceremony === 'creation' && $demandId !== null) {
+            throw $fail('a creation ceremony carries no demand_id');
+        }
+        // The session binding of the record, restored verbatim (the
+        // hash is opaque; begin() would have re-hashed a raw id). A
+        // malformed hash shape fails closed, and exactly one binding
+        // per challenge: a record carrying both (or neither) a session
+        // hash and a client-secret hash is incoherent and refused.
         $sessionHash = $record['session_hash'] ?? null;
         if ($sessionHash !== null) {
             if (!\is_string($sessionHash) || preg_match('/^[0-9a-f]{64}$/D', $sessionHash) !== 1) {
@@ -555,9 +667,6 @@ final class StepUpChallenge
                 throw $fail('client_secret_hash must be a 64-char lowercase hex digest');
             }
         }
-        // Exactly one binding per challenge: a record carrying both (or
-        // neither) a session hash and a client-secret hash is incoherent
-        // and refused. Fail closed on every lane.
         if (($sessionHash !== null) === ($clientSecretHash !== null)) {
             throw $fail('exactly one of session_hash / client_secret_hash must be present');
         }
@@ -573,6 +682,29 @@ final class StepUpChallenge
             $bootstrapAuthorized = $bootstrapRaw === 1;
         } else {
             $bootstrapAuthorized = false;
+        }
+        try {
+            $challenge = self::begin(
+                $record['id'],
+                $kind,
+                $record['principal'],
+                $target,
+                $record['scope'],
+                $returnPath,
+                $record['reason'],
+                $createdAt,
+                $expiresAt - $createdAt,
+                $maxAttempts,
+                $codeHash,
+                $ceremony,
+                null,
+                $targetOwned,
+                subjectPseudonym: $subjectRaw,
+                demandId: $demandId,
+                factor: $factor,
+            );
+        } catch (\InvalidArgumentException $e) {
+            throw new MalformedStepUpChallengeException('The step-up challenge record is malformed: '.$e->getMessage(), 0, $e);
         }
         $challenge = new self(
             $challenge->id,
@@ -596,44 +728,19 @@ final class StepUpChallenge
             $challenge->demandId,
             $challenge->factor,
         );
-        $attempts = $record['attempts'] ?? null;
-        if (!\is_int($attempts) || $attempts < 0 || $attempts > $challenge->maxAttempts) {
-            throw $fail('attempts must be an integer within 0..max_attempts');
-        }
         if ($challenge->kind === StepUpChallengeKind::EmailOtp && $challenge->codeHash === null) {
-            throw $fail('an email_otp challenge must carry its code hash');
+            throw $fail('an email_otp challenge must carry its code_hash');
         }
         if ($challenge->kind === StepUpChallengeKind::Totp && $challenge->codeHash !== null) {
-            throw $fail('a totp challenge carries no code hash');
+            throw $fail('a totp challenge carries no code_hash');
         }
         if ($challenge->kind === StepUpChallengeKind::WebAuthn) {
             if ($challenge->codeHash === null || $challenge->ceremony === null) {
-                throw $fail('a webauthn challenge must carry its ceremony challenge hash and its ceremony kind');
+                throw $fail('a webauthn challenge must carry its code_hash and its ceremony');
             }
         }
         if ($challenge->kind !== StepUpChallengeKind::WebAuthn && $challenge->ceremony !== null) {
             throw $fail('only a webauthn challenge carries a ceremony');
-        }
-        // The demand binding of the v2 wire shape. A demand id rides
-        // only in its exact base64url shape, and only on a record that
-        // can authorize: an enrollment creation ceremony is explicitly
-        // non-authorizing and never binds one. A record without a
-        // demand id decodes (the pre-demand wire shape of the drain
-        // period), but it authorizes nothing: the demand plane's
-        // completion refuses a demandless proof, so a stored
-        // demandless challenge can never invoke the finalization,
-        // restore a pending login or authorize the original action.
-        $demandId = $record['demand_id'] ?? null;
-        if ($challenge->ceremony === 'creation') {
-            if ($demandId !== null) {
-                throw $fail('a creation ceremony carries no demand id');
-            }
-        } elseif ($demandId !== null && (!\is_string($demandId) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $demandId) !== 1)) {
-            // The type guard is load-bearing: a corrupt record whose
-            // demand_id is a JSON number, boolean or array must answer
-            // the typed refusal, never an uncaught TypeError out of
-            // preg_match on a non-string subject.
-            throw $fail('demand_id must be the base64url id shape');
         }
 
         return $challenge->withAttempts($attempts);

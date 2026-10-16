@@ -198,17 +198,20 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
     /**
      * The factor completion script: one atomic transition over the two
      * records of a completion. The script loads the challenge and the
-     * demand and decodes both. It then asserts the identity (the
-     * challenge names exactly this demand), the state (the demand is
-     * open), the liveness (both records inside their lifetime) and the
-     * binding (the presented hash equals the stored session binding or
-     * the stateless client secret). On a pass it consumes the challenge
-     * and moves the demand to completed in the same step, the record
-     * kept and re-armed within its remaining lifetime, exactly like the
-     * lifecycle complete op. The escalation index write rides the same
-     * script: the completed factor is recorded under the session hash
-     * and scope pair, but only when the hints match the stored session
-     * binding and the stored scope. Every clock decision (the expiry
+     * demand and decodes both. It then asserts the identity of the
+     * pair: the challenge names exactly this demand, answers its scope,
+     * and carries a proof that may stand for the demand's proof
+     * identity. It asserts the state (the demand is open), the liveness
+     * (both records inside their lifetime) and the binding (the
+     * presented hash equals the
+     * stored session binding or the stateless client secret). On a pass
+     * it consumes the challenge and moves the demand to completed in
+     * the same step, the record kept and re-armed within its remaining
+     * lifetime, exactly like the lifecycle complete op. The escalation
+     * index write rides the same script: the completed factor is
+     * recorded under the demand's stored lineage, principal and scope
+     * identity, and only a factor that proved the principal publishes a
+     * principal-scoped entry. Every clock decision (the expiry
      * comparisons, the state stamp, the remaining TTL) is taken on the
      * Redis server time read inside the script, never on the calling
      * worker's clock. ARGV[2] stays in the argv shape for call-site
@@ -232,12 +235,17 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- grant proves the email_otp rung, the weakest of the ladder.
         -- The tables are also the coherence check of the record's own
         -- factor snapshot and the fallback for the pre-snapshot shape.
+        -- KIND_PROVES_PRINCIPAL is the proof class of the kind: only a
+        -- kind listed there verifies a named account principal, so only
+        -- it may answer a demand that names one. email_ownership proves
+        -- a mailbox the visitor supplied, never the account.
         -- Every clock decision below is taken on the Redis server time
         -- (TIME), never on the calling worker's clock, so a skewed
         -- fleet judges one expiry with one clock. ARGV[2] keeps its
         -- argv slot for call-site compatibility and is never read.
         local KIND_FAMILY = { email_otp = 'email_otp', email_ownership = 'email_otp', totp = 'totp', webauthn = 'webauthn' }
         local KIND_RANK = { email_otp = 1, email_ownership = 1, totp = 2, webauthn = 3 }
+        local KIND_PROVES_PRINCIPAL = { email_otp = 1, totp = 1, webauthn = 1 }
         local t = redis.call('TIME')
         local now = tonumber(t[1])
         local craw = redis.call('GET', KEYS[1])
@@ -254,6 +262,24 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           redis.call('DEL', KEYS[2])
           return {'corrupt_demand'}
         end
+        -- The stored lineage is load-bearing on the demand wire shape:
+        -- a record without the key is of an earlier shape, which the
+        -- strict decode refuses, and a value that is neither a lineage
+        -- hash nor the explicit null is corrupt. Both are removed, fail
+        -- closed: such a record funds no completion.
+        local lineageRaw = de['lineage_hash']
+        if lineageRaw == nil or (type(lineageRaw) ~= 'string' and lineageRaw ~= cjson.null) then
+          redis.call('DEL', KEYS[2])
+          return {'corrupt_demand'}
+        end
+        local demandLineage = ''
+        if type(lineageRaw) == 'string' then
+          if string.len(lineageRaw) ~= 64 or string.match(lineageRaw, '^[0-9a-f]+$') == nil then
+            redis.call('DEL', KEYS[2])
+            return {'corrupt_demand'}
+          end
+          demandLineage = lineageRaw
+        end
         if type(ch['demand_id']) ~= 'string' or ch['demand_id'] ~= ARGV[1]
           or type(de['id']) ~= 'string' or de['id'] ~= ARGV[1] then
           return {'crossed'}
@@ -261,22 +287,38 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- The demand/challenge identity binding, judged on the stored
         -- records alone: a challenge answers exactly its own demand's
         -- scope, a session-bound demand is completed only by a challenge
-        -- of that same session, and a login demand is completed only by
-        -- a challenge of the principal the demand was minted for. A
-        -- crossed session, scope or subject completes nothing — the
-        -- presented binding may match the challenge perfectly and the
-        -- completion still refuses, because the proof earned belongs to
-        -- another browser, scope or account than the demand names.
+        -- of that same session, and a demand that names a principal is
+        -- completed only by a principal-authenticating factor whose
+        -- proof subject reproduces that principal, whatever the binding
+        -- kind. An address-ownership factor proves a mailbox, never the
+        -- account, so it never stands for a named principal. A crossed
+        -- session, scope or subject completes nothing — the presented
+        -- binding may match the challenge perfectly and the completion
+        -- still refuses, because the proof earned belongs to another
+        -- browser, scope or account than the demand names.
         if type(ch['scope']) ~= 'string' or ch['scope'] ~= de['scope'] then return {'crossed'} end
         if type(de['session_hash']) == 'string' and de['session_hash'] ~= ''
           and (type(ch['session_hash']) ~= 'string' or ch['session_hash'] ~= de['session_hash']) then
           return {'crossed'}
         end
-        if type(de['op_kind']) == 'string' and de['op_kind'] == 'login'
-          and type(de['principal_pseudonym']) == 'string' and de['principal_pseudonym'] ~= ''
-          and (type(ch['subject']) ~= 'string' or ch['subject'] ~= de['principal_pseudonym']) then
-          return {'crossed'}
+        local demandPrincipal = ''
+        if type(de['principal_pseudonym']) == 'string' then demandPrincipal = de['principal_pseudonym'] end
+        if demandPrincipal ~= '' then
+          if KIND_PROVES_PRINCIPAL[ch['kind']] ~= 1 then return {'crossed'} end
+          if type(ch['subject']) ~= 'string' or ch['subject'] ~= demandPrincipal then return {'crossed'} end
         end
+        -- The stored lineage, the demand's history identity: the
+        -- presented hint (ARGV[4]) and the identity the index key was
+        -- derived from (ARGV[7]) must agree with each other, and with
+        -- the stored value whenever the demand bound one. A demand
+        -- minted under a lineage is therefore completed only by a
+        -- request that presents that lineage, so a factor selected
+        -- under one lineage can never be filed under another. A demand
+        -- minted with no lineage bound no history identity and read
+        -- none: its completion keeps its behaviour. Nothing moves on
+        -- the refusal: both records stay exactly as they were.
+        if ARGV[4] ~= ARGV[7] then return {'crossed'} end
+        if demandLineage ~= '' and ARGV[4] ~= demandLineage then return {'crossed'} end
         -- A superseded demand completes nothing, whatever its state
         -- field still says: escalation replaced it with a stronger
         -- child, and the weak proof must not land behind the family's
@@ -347,12 +389,21 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- itself carries, never a caller argument: a completion cannot
         -- poison the future assurance escalation by claiming a stronger
         -- factor than its challenge proves. The index is keyed per
-        -- (lineage, principal, scope) identity: the key was derived
-        -- from the hinted lineage, the demand's own principal and the
-        -- hinted scope, and the write lands only when the principal
-        -- and scope hints equal the stored record's own fields, so one
-        -- subject's history can never be filed under another's key and
-        -- one scope's history can never overwrite another's.
+        -- (effective lineage, principal, scope) identity: the key was
+        -- derived from the demand record's own stored lineage when the
+        -- mint bound one (and the gate above proved the hint and the
+        -- key material equal to it), else from the presented hint the
+        -- completion was accepted under. The demand's own principal and
+        -- the hinted scope complete the key, and the write lands only
+        -- when the principal and scope hints equal the stored record's
+        -- own fields, so one subject's history can never be filed under
+        -- another's key and one scope's history can never overwrite
+        -- another's. A principal-scoped
+        -- entry is published only by a factor that
+        -- proved that principal: for a demand that names one, the kind
+        -- must be principal-authenticating. An address-ownership
+        -- completion files nothing but the anonymous bucket, the
+        -- legitimate history of the flows that carry no principal.
         --
         -- The write is monotonic in the ladder rank: a strictly
         -- stronger completion replaces the entry; an equal-rank
@@ -363,11 +414,8 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         -- three- or four-part entry (before the stamp rode the value)
         -- reads as rank 0 with no recorded window: any ladder
         -- completion moves it forward.
-        local demandPrincipal = ''
-        if type(de['principal_pseudonym']) == 'string' then
-          demandPrincipal = de['principal_pseudonym']
-        end
         if ARGV[4] ~= '' and ARGV[5] ~= '' and ARGV[6] == demandPrincipal
+          and (demandPrincipal == '' or KIND_PROVES_PRINCIPAL[ch['kind']] == 1)
           and type(ch['scope']) == 'string' and ch['scope'] == ARGV[5]
           and type(de['expires_at']) == 'number'
           and type(family) == 'string' and family ~= '' then
@@ -425,6 +473,12 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
      */
     private const DEMAND_ADMIT_SCRIPT = <<<'LUA'
         -- Step-up challenge admission: create + admit, one transaction.
+        -- KIND_PROVES_PRINCIPAL is the proof class of the challenge
+        -- kind: only a kind listed there verifies a named account
+        -- principal, so only it may be admitted against a demand that
+        -- names one. email_ownership proves a mailbox the visitor
+        -- supplied, never the account.
+        local KIND_PROVES_PRINCIPAL = { email_otp = 1, totp = 1, webauthn = 1 }
         local draw = redis.call('GET', KEYS[2])
         if not draw then return nil end
         local dok, de = pcall(cjson.decode, draw)
@@ -434,6 +488,21 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         end
         if type(de['superseded_by']) == 'string' and de['superseded_by'] ~= '' then return nil end
         if de['state'] ~= 'open' then return nil end
+        -- The stored lineage is load-bearing on the demand wire shape:
+        -- a record without the key is of an earlier shape, which the
+        -- strict decode refuses, and a value that is neither a lineage
+        -- hash nor the explicit null is corrupt. Both are removed, fail
+        -- closed: such a record funds no challenge.
+        local lineageRaw = de['lineage_hash']
+        if lineageRaw == nil or (type(lineageRaw) ~= 'string' and lineageRaw ~= cjson.null) then
+          redis.call('DEL', KEYS[2])
+          return nil
+        end
+        if type(lineageRaw) == 'string'
+          and (string.len(lineageRaw) ~= 64 or string.match(lineageRaw, '^[0-9a-f]+$') == nil) then
+          redis.call('DEL', KEYS[2])
+          return nil
+        end
         local t = redis.call('TIME')
         local now = tonumber(t[1])
         if type(de['expires_at']) ~= 'number' or de['expires_at'] <= now then return nil end
@@ -451,10 +520,11 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
           and (type(ch['session_hash']) ~= 'string' or ch['session_hash'] ~= de['session_hash']) then
           return nil
         end
-        if type(de['op_kind']) == 'string' and de['op_kind'] == 'login'
-          and type(de['principal_pseudonym']) == 'string' and de['principal_pseudonym'] ~= ''
-          and (type(ch['subject']) ~= 'string' or ch['subject'] ~= de['principal_pseudonym']) then
-          return nil
+        local demandPrincipal = ''
+        if type(de['principal_pseudonym']) == 'string' then demandPrincipal = de['principal_pseudonym'] end
+        if demandPrincipal ~= '' then
+          if KIND_PROVES_PRINCIPAL[ch['kind']] ~= 1 then return nil end
+          if type(ch['subject']) ~= 'string' or ch['subject'] ~= demandPrincipal then return nil end
         end
         if type(ch['factor_family']) ~= 'string' or ch['factor_family'] == ''
           or type(ch['factor_id']) ~= 'string' or ch['factor_id'] == ''
@@ -926,24 +996,34 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
         // key keeps the eval cluster-safe. The completion clock work
         // runs on the Redis server time inside the script; the $now
         // argument names the calling lane's clock and is not read by
-        // this backend. The history identity is the (lineage,
+        // this backend. The history identity is the (stored lineage,
         // principal, scope) triple, never the bare PHP session: the
         // lineage survives the session-id rotation a successful login
         // performs, and folding the principal in stops one account's
         // completion from becoming another account's history.
         //
-        // The principal is read from the demand record, never from a
-        // caller: it is the same server-held source the single-process
-        // store derives its own key from, so the two backends file one
-        // completion under one key. Reading it here costs one lookup of
-        // a record this call is about to mutate anyway, and the script
-        // still re-checks the value against the record's own field
-        // before it writes, so a stale read can never misfile.
-        $validLineage = $lineageHash !== null && preg_match('/^[0-9a-f]{64}$/D', $lineageHash) === 1;
-        $principal = $this->liveDemand($demandId)?->principalPseudonym;
+        // The principal and the lineage are read from the demand record,
+        // never from a caller: they are the same server-held sources the
+        // single-process store derives its own key from, so the two
+        // backends file one completion under one key. The $lineageHash
+        // argument is the request's presented hint; the script refuses
+        // unless it reproduces the stored lineage whenever the mint
+        // bound one, and the key is derived from that stored value
+        // alone, so a completion can never be filed under a lineage the
+        // demand was not minted under. A demand that bound no lineage
+        // keys its history by the presented hint, exactly as before.
+        // Reading the record here costs one lookup of a record this call
+        // is about to mutate anyway, and the script still re-checks the
+        // key material, the hint, the principal and the scope against
+        // the record it holds before it writes, so a stale read can
+        // never misfile.
+        $record = $this->liveDemand($demandId);
+        $storedLineage = $record?->lineageHash;
+        $hintLineage = $lineageHash !== null && preg_match('/^[0-9a-f]{64}$/D', $lineageHash) === 1 ? $lineageHash : null;
+        $keyLineage = $storedLineage ?? $hintLineage;
         $indexKey = $this->completedIndexKey(
-            $validLineage ? $lineageHash : str_repeat('0', 64),
-            $principal,
+            $keyLineage ?? str_repeat('0', 64),
+            $record?->principalPseudonym,
             $scope,
         );
         $answer = $this->redis->eval(
@@ -955,9 +1035,10 @@ final class RedisStepUpChallengeStore implements StepUpChallengeStore
             $demandId,
             (string) $now,
             $presentedBindingHash,
-            $validLineage ? $lineageHash : '',
+            $lineageHash ?? '',
             $scope ?? '',
-            $principal ?? '',
+            $record?->principalPseudonym ?? '',
+            $keyLineage ?? '',
         );
         if (!\is_array($answer) || ($answer[0] ?? null) !== 'ok' || \count($answer) !== 3) {
             return null;

@@ -77,6 +77,20 @@ use KiwiCaptcha\Risk\Storage\TargetStateStoreInterface;
  */
 final class AdaptiveRiskEngine
 {
+    /**
+     * Purpose label of the network-tag key derivation. HMAC-ing this
+     * label under the master-derived source key yields the network-tag
+     * purpose key, independent of every identity pseudonym derivation.
+     */
+    private const NETWORK_TAG_KEY_LABEL = 'kiwi-risk-network-tag-key-v1';
+
+    /**
+     * Purpose label of the network-tag HMAC over the bucket spelling.
+     * The label is domain separation: the same bucket under another
+     * purpose derives a different value.
+     */
+    private const NETWORK_TAG_LABEL = 'kiwi-risk-network-tag-v1';
+
     public const DEFAULT_SATURATIONS = [
         'src_fast' => 8000,
         'src_slow' => 100000,
@@ -90,6 +104,14 @@ final class AdaptiveRiskEngine
         'trust' => 10000,
         'principal' => 10000,
     ];
+
+    /**
+     * Memoized purpose key of the network-tag derivation (see
+     * {@see self::networkTag()}). Derived once per engine from the
+     * master-derived source key; the engine's keys are immutable for the
+     * process, so the memo can never go stale.
+     */
+    private ?string $networkTagKey = null;
 
     /**
      * The immutable policy the engine decides under. Callers that
@@ -725,11 +747,17 @@ final class AdaptiveRiskEngine
                 }
             }
             try {
-                $this->principalNetworks->recordPrincipalNetworkTag(
-                    $observation->principalId,
-                    self::networkBucket($c->sourceIp),
-                    trusted: true,
-                );
+                // The stored form is the stable network-tag pseudonym
+                // (never the bucket spelling): the field never encodes
+                // the address reversibly.
+                $tag = $this->networkTag($c->sourceIp);
+                if ($tag !== '') {
+                    $this->principalNetworks->recordPrincipalNetworkTag(
+                        $observation->principalId,
+                        $tag,
+                        trusted: true,
+                    );
+                }
             } catch (\Throwable) {
                 // Best effort: the binding write never breaks login.
             }
@@ -859,11 +887,10 @@ final class AdaptiveRiskEngine
             } catch (\Throwable) {
                 $deviceContinuity = false;
             }
-            $network = self::networkBucket($c->sourceIp);
             $netSeen = false;
             $asnSeen = false;
             try {
-                $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network) === true;
+                $netSeen = $this->networkSeen($observation->principalId, $c->sourceIp) === true;
                 $asn = $this->asnBucketOf($c->sourceIp);
                 $asnSeen = $asn !== '' && $asn !== '0'
                     && $this->principalNetworks->principalNetworkSeen($observation->principalId, 'asn:'.$asn) === true;
@@ -1006,7 +1033,6 @@ final class AdaptiveRiskEngine
                 // the victim's own ASN on a fresh /64, so the same-ASN
                 // new-/64 shape is a weaker novelty signal that fires
                 // unless device continuity vouches for the browser.
-                $network = self::networkBucket($c->sourceIp);
                 $asn = $this->asnBucketOf($c->sourceIp);
                 // Each probe stands alone in its own try, and every
                 // failure mode fails closed: one failed read must not
@@ -1028,7 +1054,10 @@ final class AdaptiveRiskEngine
                     $trusted = false;
                 }
                 try {
-                    $netSeen = $this->principalNetworks->principalNetworkSeen($observation->principalId, $network);
+                    // The stored tag first, then the bucket spelling as
+                    // the legacy form: history recorded under the legacy
+                    // form still vouches for this network.
+                    $netSeen = $this->networkSeen($observation->principalId, $c->sourceIp);
                 } catch (\Throwable) {
                     $evidenceUnavailable = true;
                     $netSeen = false;
@@ -1113,9 +1142,15 @@ final class AdaptiveRiskEngine
 
     /**
      * The network bucket of a source address for the novel-network gate:
-     * the IPv4 address itself, or the IPv6 /64 prefix. Stable spelling
-     * (family byte + masked packed bytes, hex), byte-identical with the
-     * Rust network_bucket().
+     * the IPv4 address itself, or the IPv6 /64 prefix. The spelling is
+     * the family byte plus the masked packed bytes at their natural
+     * width (5 bytes for IPv4, 17 for IPv6), hex. Byte-identical with
+     * the Rust network_bucket() and with the identity plane's
+     * canonicalSourceFamily().
+     *
+     * The gate reads this spelling as the legacy field form (see
+     * {@see self::networkSeen()}), so an upgraded deployment keeps the
+     * history recorded under it.
      */
     public static function networkBucket(string $ip): string
     {
@@ -1126,7 +1161,108 @@ final class AdaptiveRiskEngine
         if (\strlen($packed) === 4) {
             return bin2hex("\x04".$packed);
         }
-        return bin2hex("\x06".substr($packed, 0, 8));
+        return bin2hex("\x06".substr($packed, 0, 8).str_repeat("\x00", 8));
+    }
+
+    /**
+     * The stored network-tag pseudonym of a source address for the
+     * novel-network gate: a stable, purpose-separated HMAC-SHA256 under
+     * a key derived from the deployment risk master secret, over the
+     * bucket spelling (the full IPv4 address, or the IPv6 /64). This is
+     * the field the writer records and every gate read probes, so the
+     * store never holds the address in a reversible encoding.
+     *
+     * The derivation is byte-identical with the Rust
+     * `RiskEngine::network_tag()`. The purpose key is the HMAC-SHA256
+     * over the label "kiwi-risk-network-tag-key-v1", keyed by
+     * K_source. The tag is the lowercase hex of the HMAC-SHA256 over
+     * the label "kiwi-risk-network-tag-v1", a 0x00 separator and the
+     * bucket spelling, keyed by the purpose key.
+     *
+     * K_source is the master-derived source identity key, so the key
+     * material comes from the deployment secret and never from a
+     * constant. The tag is stable across epochs by design: the
+     * novel-network gate compares one bucket across time, so the
+     * epoch-scoped identity pseudonyms cannot serve as the stored form.
+     * The key is memoized per engine; the tags are not.
+     *
+     * Returns '' for an address inet_pton() refuses, exactly like
+     * {@see self::networkBucket()}.
+     */
+    public function networkTag(string $ip): string
+    {
+        $bucket = self::networkBucket($ip);
+        if ($bucket === '') {
+            return '';
+        }
+
+        return hash_hmac(
+            'sha256',
+            self::NETWORK_TAG_LABEL."\0".$bucket,
+            $this->networkTagKey(),
+        );
+    }
+
+    /**
+     * The memoized purpose key of the network-tag derivation: an HMAC
+     * under the purpose label, keyed by the master-derived source key.
+     * Deriving a dedicated key keeps the network tags independent of the
+     * epoch-scoped source pseudonyms derived from the same base key.
+     */
+    private function networkTagKey(): string
+    {
+        return $this->networkTagKey ??= hash_hmac(
+            'sha256',
+            self::NETWORK_TAG_KEY_LABEL,
+            $this->keys->source,
+            true,
+        );
+    }
+
+    /**
+     * The bucket spellings the gate reads as the legacy field form: the
+     * canonical spelling, plus the truncated IPv6 /64 spelling the
+     * earlier engine and the bundle's step-up restorer wrote (family
+     * byte plus the eight prefix bytes).
+     *
+     * @return list<string>
+     */
+    private static function legacyNetworkBuckets(string $ip): array
+    {
+        $canonical = self::networkBucket($ip);
+        if ($canonical === '') {
+            return [];
+        }
+        if (\strlen($canonical) === 34) {
+            return [$canonical, substr($canonical, 0, 18)];
+        }
+
+        return [$canonical];
+    }
+
+    /**
+     * Whether the principal's network history carries this source
+     * address. The stable network tag is probed first; on a miss every
+     * legacy bucket spelling is probed, so a field written under one
+     * still vouches for the same network. The next post-Allow record
+     * rewrites that network under the tag. A store failure propagates
+     * to the caller's fail-closed handling, never reading as neutral.
+     *
+     * @throws RiskStoreException when the state backend fails
+     */
+    private function networkSeen(string $principalId, string $ip): ?bool
+    {
+        $seen = $this->principalNetworks->principalNetworkSeen($principalId, $this->networkTag($ip));
+        if ($seen !== false) {
+            return $seen;
+        }
+        foreach (self::legacyNetworkBuckets($ip) as $legacy) {
+            if ($this->principalNetworks->principalNetworkSeen($principalId, $legacy) === true) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** The ASN bucket of a source address, '' when no dataset is wired. */

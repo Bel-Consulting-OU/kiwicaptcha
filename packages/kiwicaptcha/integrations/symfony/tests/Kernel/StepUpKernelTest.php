@@ -231,6 +231,9 @@ final class StepUpKernelTest extends TestCase
         // Every request in a kernel flow carries the same started
         // session: the completion is bound to the session that began the
         // challenge, so a sessionless request is refused (fail closed).
+        // The mock carries the stable step-up lineage a persistent
+        // session store keeps under that id, so the demand minted at
+        // begin stores its hash and the completion is held to it.
         return new class ($this->kernel) extends HttpKernelBrowser {
             protected function filterRequest(\Symfony\Component\BrowserKit\Request $request): \Symfony\Component\HttpFoundation\Request
             {
@@ -240,6 +243,10 @@ final class StepUpKernelTest extends TestCase
                 );
                 $session->setId('sess-kernel-http-000000000001');
                 $session->start();
+                $session->set(
+                    \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::LINEAGE_KEY,
+                    '2f6a1c0d4b8e3a97d5c2f0b1e6a49385',
+                );
                 $httpRequest->setSession($session);
 
                 return $httpRequest;

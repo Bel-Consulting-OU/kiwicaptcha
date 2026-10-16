@@ -17,6 +17,14 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * instead of cjson.decode directly. A malformed, oversized, over-deep
  * or semantically duplicated document returns nil, and the caller
  * fails closed exactly like a corrupt record.
+ *
+ * The scanner follows the core envelope scanner in
+ * {@see \KiwiCaptcha\Storage\RedisStorage}: the walk compares bytes
+ * (string.byte) and jumps between structural characters with plain
+ * string.find searches, so no substring is allocated per byte. The
+ * uniqueness proof and the structural walk are one forward traversal of
+ * the document; the decoded table comes from the single cjson.decode
+ * the caller needs anyway.
  */
 final class PersistedJsonLuaPredicate
 {
@@ -28,35 +36,57 @@ final class PersistedJsonLuaPredicate
 
     public const LUA = <<<'LUA'
 -- Shared strict persisted-JSON decoding (the Lua half of the authority).
+--
+-- The walk compares bytes (string.byte) and jumps between structural
+-- characters with plain string.find searches, the shape the core
+-- envelope scanner in RedisStorage.php uses: a substring allocation per
+-- byte is what a JSON scanner of this kind cannot afford. One forward
+-- traversal proves the document semantically unique at every nesting
+-- level, bounds the recursion and finds the end of the top-level
+-- object; the decoded table comes from the single cjson.decode the
+-- caller needs anyway.
 local KIWI_PERSISTED_MAX_BYTES = 131072
 local KIWI_PERSISTED_MAX_DEPTH = 32
 
-local function kiwiPersistedIsSpace(c)
-  return c == ' ' or c == '\t' or c == '\r' or c == '\n'
-end
+local KIWI_B_QUOTE = 34
+local KIWI_B_BACKSLASH = 92
+local KIWI_B_OBRACE = 123
+local KIWI_B_CBRACE = 125
+local KIWI_B_OBRACKET = 91
+local KIWI_B_CBRACKET = 93
+local KIWI_B_COLON = 58
+local KIWI_B_COMMA = 44
+local KIWI_B_SPACE = 32
+local KIWI_B_TAB = 9
+local KIWI_B_LF = 10
+local KIWI_B_CR = 13
+
+-- The byte class that ends a scalar value: any bracket, comma or JSON
+-- whitespace byte. The scans jump to it with one plain search each.
+local KIWI_PERSISTED_VALUE_STOP_PATTERN = '[,}%] \t\r\n]'
 
 local function kiwiPersistedSkipWs(v, i, n)
   while i <= n do
-    local c = string.sub(v, i, i)
-    if not kiwiPersistedIsSpace(c) then break end
+    local b = string.byte(v, i)
+    if b ~= KIWI_B_SPACE and b ~= KIWI_B_TAB and b ~= KIWI_B_LF and b ~= KIWI_B_CR then break end
     i = i + 1
   end
   return i
 end
 
--- i points at the opening quote; returns the index AFTER the closing
--- quote, or nil when the string is unterminated.
+-- i points at the opening quote; returns the index AFTER the matching
+-- closing quote, or nil when the string is unterminated. The scan jumps
+-- quote to quote with one plain search each and only counts the
+-- backslash run in front of a quote to decide whether it is escaped.
 local function kiwiPersistedScanString(v, i, n)
-  i = i + 1
-  while i <= n do
-    local c = string.sub(v, i, i)
-    if c == '\\' then
-      i = i + 2
-    elseif c == '"' then
-      return i + 1
-    else
-      i = i + 1
-    end
+  local j = i + 1
+  while j <= n do
+    local q = string.find(v, '"', j, true)
+    if q == nil or q > n then return nil end
+    local k = q - 1
+    while k >= j and string.byte(v, k) == KIWI_B_BACKSLASH do k = k - 1 end
+    if (q - 1 - k) % 2 == 0 then return q + 1 end
+    j = q + 1
   end
   return nil
 end
@@ -65,57 +95,67 @@ local kiwiPersistedScanValue
 local kiwiPersistedScanObject
 local kiwiPersistedScanArray
 
+-- The DECODED name of the quoted key token spanning [i, keyEnd - 1]. A
+-- token carrying neither a backslash escape nor a raw NUL decodes to
+-- exactly its inner bytes (cjson accepts every other byte verbatim, so
+-- the plain read is exact); every other token is decoded through cjson
+-- and refused when it does not decode.
+local function kiwiPersistedKeyName(v, i, keyEnd)
+  local inner = string.sub(v, i + 1, keyEnd - 2)
+  if string.find(inner, '\\', 1, true) == nil and string.find(inner, '\0', 1, true) == nil then
+    return inner
+  end
+  local ok, decoded = pcall(cjson.decode, '"' .. inner .. '"')
+  if not ok or type(decoded) ~= 'string' then return nil end
+  return decoded
+end
+
 kiwiPersistedScanValue = function(v, i, n, depth)
   if depth > KIWI_PERSISTED_MAX_DEPTH then return nil end
   if i > n then return nil end
-  local c = string.sub(v, i, i)
-  if c == '{' then
+  local b = string.byte(v, i)
+  if b == KIWI_B_OBRACE then
     return kiwiPersistedScanObject(v, i + 1, n, depth)
   end
-  if c == '[' then
+  if b == KIWI_B_OBRACKET then
     return kiwiPersistedScanArray(v, i + 1, n, depth)
   end
-  if c == '"' then
+  if b == KIWI_B_QUOTE then
     return kiwiPersistedScanString(v, i, n)
   end
-  local start = i
-  while i <= n do
-    local c2 = string.sub(v, i, i)
-    if c2 == ',' or c2 == '}' or c2 == ']' or kiwiPersistedIsSpace(c2) then break end
-    i = i + 1
-  end
-  if i == start then return nil end
-  return i
+  local stop = string.find(v, KIWI_PERSISTED_VALUE_STOP_PATTERN, i)
+  if stop == nil then stop = n + 1 end
+  if stop == i then return nil end
+  return stop
 end
 
 kiwiPersistedScanObject = function(v, i, n, depth)
   if depth > KIWI_PERSISTED_MAX_DEPTH then return nil end
   local seen = {}
   i = kiwiPersistedSkipWs(v, i, n)
-  if i <= n and string.sub(v, i, i) == '}' then return i + 1 end
+  if i <= n and string.byte(v, i) == KIWI_B_CBRACE then return i + 1 end
   while true do
     i = kiwiPersistedSkipWs(v, i, n)
-    if i > n or string.sub(v, i, i) ~= '"' then return nil end
+    if i > n or string.byte(v, i) ~= KIWI_B_QUOTE then return nil end
     local keyEnd = kiwiPersistedScanString(v, i, n)
     if keyEnd == nil then return nil end
-    local token = string.sub(v, i, keyEnd - 1)
     -- The key is compared SEMANTICALLY: cjson.decode resolves the
     -- escapes, so an escaped alias is the same field (and a second
     -- occurrence is an ambiguous document).
-    local ok, key = pcall(cjson.decode, token)
-    if not ok or type(key) ~= 'string' then return nil end
+    local key = kiwiPersistedKeyName(v, i, keyEnd)
+    if key == nil then return nil end
     if seen[key] ~= nil then return nil end
     seen[key] = true
     i = kiwiPersistedSkipWs(v, keyEnd, n)
-    if i > n or string.sub(v, i, i) ~= ':' then return nil end
+    if i > n or string.byte(v, i) ~= KIWI_B_COLON then return nil end
     i = kiwiPersistedScanValue(v, kiwiPersistedSkipWs(v, i + 1, n), n, depth + 1)
     if i == nil then return nil end
     i = kiwiPersistedSkipWs(v, i, n)
     if i > n then return nil end
-    local c = string.sub(v, i, i)
-    if c == ',' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
       i = i + 1
-    elseif c == '}' then
+    elseif b == KIWI_B_CBRACE then
       return i + 1
     else
       return nil
@@ -126,16 +166,16 @@ end
 kiwiPersistedScanArray = function(v, i, n, depth)
   if depth > KIWI_PERSISTED_MAX_DEPTH then return nil end
   i = kiwiPersistedSkipWs(v, i, n)
-  if i <= n and string.sub(v, i, i) == ']' then return i + 1 end
+  if i <= n and string.byte(v, i) == KIWI_B_CBRACKET then return i + 1 end
   while true do
     i = kiwiPersistedScanValue(v, i, n, depth + 1)
     if i == nil then return nil end
     i = kiwiPersistedSkipWs(v, i, n)
     if i > n then return nil end
-    local c = string.sub(v, i, i)
-    if c == ',' then
+    local b = string.byte(v, i)
+    if b == KIWI_B_COMMA then
       i = i + 1
-    elseif c == ']' then
+    elseif b == KIWI_B_CBRACKET then
       return i + 1
     else
       return nil
@@ -152,7 +192,7 @@ local function decodeUniqueObject(raw)
   local n = #raw
   if n == 0 or n > KIWI_PERSISTED_MAX_BYTES then return nil end
   local i = kiwiPersistedSkipWs(raw, 1, n)
-  if i > n or string.sub(raw, i, i) ~= '{' then return nil end
+  if i > n or string.byte(raw, i) ~= KIWI_B_OBRACE then return nil end
   local endIndex = kiwiPersistedScanObject(raw, i + 1, n, 0)
   if endIndex == nil then return nil end
   if kiwiPersistedSkipWs(raw, endIndex, n) <= n then return nil end
@@ -163,9 +203,9 @@ end
 
 -- The one present-key lifetime read of persisted security state: the
 -- value, the Lua boolean false when the key is genuinely ABSENT, or the
--- string 'corrupt' when a PRESENT key is damaged — an empty value, or a
--- key without a lifetime (PTTL -1: a stripped TTL, a bad restore, a
--- foreign writer). The PTTL sentinels are exact: a live key with a
+-- string 'corrupt' when a PRESENT key is damaged (an empty value, or a
+-- key without a lifetime: PTTL -1 means a stripped TTL, a bad restore,
+-- or a foreign writer). The PTTL sentinels are exact: a live key with a
 -- sub-second remainder legitimately reports PTTL 0 and is LIVE, never
 -- corrupt. A persistent key must never be treated as live
 -- authorization-bearing state: every caller fails closed with zero

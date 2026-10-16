@@ -49,7 +49,13 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainId;
  */
 final class StepUpDemand
 {
-    private const SCHEMA_VERSION = 4;
+    /**
+     * The wire shape this record is written under. v5 adds the stored
+     * lineage: the demand's assurance-history identity is part of its
+     * proof identity, so a record of the v4 shape decodes as absent,
+     * like every earlier shape, and is re-demanded.
+     */
+    private const SCHEMA_VERSION = 5;
 
     /** The maximum deliveries one demand funds: the initial code plus one resend. */
     public const MAX_SENDS = 2;
@@ -140,6 +146,17 @@ final class StepUpDemand
         public readonly string $familyDigest = '',
         /** The pseudonymous principal of the bound operation, null on the unbound lanes. */
         public readonly ?string $principalPseudonym = null,
+        /**
+         * The assurance-history identity the demand was minted under:
+         * the SHA-256 hex of the browser's stable step-up lineage,
+         * named by {@see StepUpSessionBinding::lineage()}, or of the
+         * session binding where no started session exists. Null on the
+         * truly stateless mints, which keep no history. The completion
+         * compares its presented hint against this stored value and
+         * keys the history by this stored value, so a factor selected
+         * under one lineage can never be filed under another.
+         */
+        public readonly ?string $lineageHash = null,
     ) {
     }
 
@@ -157,6 +174,12 @@ final class StepUpDemand
      * login plane and the non-financial carriers); both set is the
      * financial/action binding. A single non-null digest is refused:
      * the split is not optional half-way.
+     *
+     * The lineage hash arrives as the browser's effective history
+     * identity at mint (the session's stable lineage, or the session
+     * binding where no started session exists, never a raw session
+     * value). It is persisted, so the completion can hold the
+     * presenting request to the identity the demand was minted under.
      */
     public static function mint(
         string $id,
@@ -174,6 +197,7 @@ final class StepUpDemand
         ?string $parentDemandId = null,
         ?FactorRequirement $requiredFactor = null,
         ?string $principalPseudonym = null,
+        ?string $lineageHash = null,
     ): self {
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('A step-up demand TTL must be positive');
@@ -243,6 +267,7 @@ final class StepUpDemand
             null,
             $familyDigest,
             $cleanPrincipal,
+            self::lineageHash($lineageHash),
         );
     }
 
@@ -256,6 +281,39 @@ final class StepUpDemand
     public static function familyKeyForAnonymous(string $operationDigest, ?string $sessionHash): string
     {
         return hash('sha256', self::operationDigest($operationDigest) . "\0" . self::sessionHash($sessionHash));
+    }
+
+    /**
+     * Whether a factor of this kind, having verified this proof
+     * subject, may stand for this demand's proof identity. The stores
+     * run this rule at admission and again at completion, always
+     * against the stored records.
+     *
+     * The demand's principal is load-bearing on every binding kind,
+     * not only login: a financial or admin operation minted for an
+     * authenticated account carries that principal too. A demand that
+     * names one answers only to a principal-authenticating factor
+     * whose verified subject reproduces the demand's principal
+     * exactly. The class rule lives on the kind, see
+     * {@see StepUpChallengeKind::provesPrincipal()}. An
+     * address-ownership factor proves a mailbox, never the account, so
+     * it can never stand in for a named principal.
+     *
+     * A demand that names no principal keeps its current behaviour:
+     * the factor it admits answers it whatever the verified subject,
+     * because there is no account proof for the subject to reproduce.
+     */
+    public function admitsFactor(StepUpChallengeKind $kind, ?string $subjectPseudonym): bool
+    {
+        $principal = $this->principalPseudonym;
+        if ($principal === null || $principal === '') {
+            return true;
+        }
+        if (!$kind->provesPrincipal()) {
+            return false;
+        }
+
+        return $subjectPseudonym !== null && hash_equals($principal, $subjectPseudonym);
     }
 
     /** The demand after one delivery: the send counter advanced by one. */
@@ -291,6 +349,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -327,6 +386,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -367,6 +427,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -409,6 +470,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -445,6 +507,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -481,6 +544,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -505,10 +569,11 @@ final class StepUpDemand
      * the same operation family. The child inherits the parent's
      * remaining authorization lifetime exactly (the stores refuse a
      * child whose expiry differs), together with its scope, its browser
-     * binding, its chain id, its operation binding and its parent
-     * link. It carries the decision id of the raise that minted it.
-     * The required factor rides as the caller resolved it: the child
-     * of a completed weaker factor demands the strictly stronger one.
+     * binding, its stored lineage, its chain id, its operation binding
+     * and its parent link. It carries the decision id of the raise that
+     * minted it. The required factor rides as the caller resolved it:
+     * the child of a completed weaker factor demands the strictly
+     * stronger one.
      */
     public function spawnChild(string $childId, int $now, ?string $raisedByDecisionId, ?FactorRequirement $requiredFactor = null): self
     {
@@ -553,6 +618,7 @@ final class StepUpDemand
             // escalation changes the factor, never the ownership.
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -605,6 +671,7 @@ final class StepUpDemand
             $this->effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -690,6 +757,7 @@ final class StepUpDemand
             'fx' => $this->effects?->toArray(),
             'family_digest' => $this->familyDigest,
             'principal_pseudonym' => $this->principalPseudonym,
+            'lineage_hash' => $this->lineageHash,
         ];
 
         return $record;
@@ -797,18 +865,31 @@ final class StepUpDemand
         if ($supersededBy !== null && (!\is_string($supersededBy) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $supersededBy) !== 1)) {
             return null;
         }
-        // The family digest and the principal are load-bearing on this
-        // wire shape (v4): a v3 record predating them decodes as absent
-        // — the schema boundary change that introduced the family/subject
-        // binding deliberately invalidates the records of the earlier
-        // wire shape instead of preserving transparent compatibility
-        // for their remaining TTL. Fail closed toward re-demand.
+        // The family digest, the principal and the lineage hash are
+        // load-bearing on this wire shape: a record of an earlier shape
+        // (the v4 record predating the lineage) decodes as absent. The
+        // schema boundary change deliberately invalidates the records
+        // of the earlier wire shape instead of preserving transparent
+        // compatibility for their remaining TTL. Fail closed toward
+        // re-demand: such a demand can never fund a delivery or a
+        // finalization.
         $familyDigest = $record['family_digest'] ?? null;
         if (!\is_string($familyDigest) || preg_match('/^[0-9a-f]{64}$/D', $familyDigest) !== 1) {
             return null;
         }
         $principalPseudonym = $record['principal_pseudonym'] ?? null;
         if ($principalPseudonym !== null && (!\is_string($principalPseudonym) || $principalPseudonym === '' || strlen($principalPseudonym) > 256)) {
+            return null;
+        }
+        // The stored lineage is the demand's history identity: a
+        // stateless mint carries an explicit null, a session-bound one
+        // the lineage hash the mint resolved. A record without the key
+        // is of the earlier shape and is not a decodable demand.
+        if (!\array_key_exists('lineage_hash', $record)) {
+            return null;
+        }
+        $lineageHash = $record['lineage_hash'];
+        if ($lineageHash !== null && (!\is_string($lineageHash) || preg_match('/^[0-9a-f]{64}$/D', $lineageHash) !== 1)) {
             return null;
         }
         // A login demand names its subject: the login plane resolves
@@ -897,6 +978,7 @@ final class StepUpDemand
             $effects,
             $familyDigest,
             $principalPseudonym,
+            $lineageHash,
         );
     }
 
@@ -933,6 +1015,7 @@ final class StepUpDemand
             $effects,
             $this->familyDigest,
             $this->principalPseudonym,
+            $this->lineageHash,
         );
     }
 
@@ -1003,6 +1086,18 @@ final class StepUpDemand
         }
         if (preg_match('/^[0-9a-f]{64}$/D', $value) !== 1) {
             throw new \InvalidArgumentException('The session hash of a step-up demand must be a 64-char lowercase hex digest');
+        }
+
+        return $value;
+    }
+
+    private static function lineageHash(?string $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        if (preg_match('/^[0-9a-f]{64}$/D', $value) !== 1) {
+            throw new \InvalidArgumentException('The lineage hash of a step-up demand must be a 64-char lowercase hex digest');
         }
 
         return $value;

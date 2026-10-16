@@ -6,6 +6,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
 use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
 use KiwiCaptcha\Risk\Asn\AsnDataset;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\Storage\PrincipalNetworkTagStoreInterface;
@@ -17,9 +18,12 @@ use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInt
 /**
  * The step-up session restore: after a factor completes, a pending
  * token is unwrapped back into the real authenticated token and the
- * network bucket is recorded so the next login from the same network
- * is no longer novel. Without the restore a legitimate user on a novel
- * network would stay pending forever and be stepped up on every login.
+ * network tag is recorded so the next login from the same network is
+ * no longer novel. The tag is the engine's stable pseudonym, see
+ * {@see AdaptiveRiskEngine::networkTag()}, never a reversible
+ * spelling of the address. Without the restore a legitimate user on a
+ * novel network would stay pending forever and be stepped up on every
+ * login.
  */
 final class SessionRestorer
 {
@@ -50,11 +54,12 @@ final class SessionRestorer
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie $continuity = null,
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\TrustedDeviceCookie $device = null,
         private readonly ?\KiwiCaptcha\Risk\Metrics\RiskMetrics $metrics = null,
+        private readonly ?AdaptiveRiskEngine $engine = null,
     ) {
     }
 
     /**
-     * Restore the wrapped token and record the network bucket. A no-op
+     * Restore the wrapped token and record the network tag. A no-op
      * answer, {@see StepUpSessionRestore::nothingPending()}, when the
      * current token is not pending (a plain step-up inside an
      * already-authenticated session) or when a seam is missing.
@@ -201,13 +206,22 @@ final class SessionRestorer
                 }
             }
             try {
-                $network = self::networkBucket($ip);
-                if ($network !== '') {
+                // The stored form is the engine's stable network tag
+                // (a purpose-separated HMAC under the deployment
+                // secret), never a reversible spelling of the address,
+                // so both writers record the one value the novel-network
+                // gate probes. Without the engine seam the record is
+                // skipped: no fallback derivation exists, and a raw
+                // address never lands in the store.
+                $network = $this->engine?->networkTag($ip);
+                if ($network !== null && $network !== '') {
                     // The completed factor is the trust event: the
                     // restore binds the network with the trust flag
                     // minted, exactly like the engine's post-Allow
                     // learn history, so the next login from this
-                    // network rides the established history.
+                    // network rides the established history. The gate
+                    // still answers seen for history recorded under the
+                    // legacy bucket spelling.
                     $this->principalNetworks->recordPrincipalNetworkTag($principalPseudonym, $network, trusted: true);
                 }
             } catch (\Throwable $e) {
@@ -234,20 +248,6 @@ final class SessionRestorer
 
             return StepUpSessionRestore::failed();
         }
-    }
-
-    /** The same network bucket spelling as the engine. */
-    private static function networkBucket(string $ip): string
-    {
-        $packed = inet_pton($ip);
-        if ($packed === false) {
-            return '';
-        }
-        if (\strlen($packed) === 4) {
-            return bin2hex("\x04".$packed);
-        }
-
-        return bin2hex("\x06".substr($packed, 0, 8));
     }
 
     /**

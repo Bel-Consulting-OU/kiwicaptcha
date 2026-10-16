@@ -166,8 +166,16 @@ func TestEnvelopeDuplicateAndCorruptValuesAreAbsent(t *testing.T) {
 func TestConsumeScriptWiresTheEnvelope(t *testing.T) {
 	// The consume script is the php text: the state splice and the
 	// reply shape it produces must match the adapter's expectations.
-	if !strings.Contains(ConsumeScript, "kiwiReplaceTopLevel(v, 'state', '\"consumed\"')") {
+	// The splice lands on the top-level state span located by the one
+	// scanner walk.
+	if !strings.Contains(ConsumeScript, "local stateSpan = fields['state']") {
+		t.Fatalf("the consume script must locate the top-level state span")
+	}
+	if !strings.Contains(ConsumeScript, "{stateSpan[2], stateSpan[3], '\"consumed\"'}") {
 		t.Fatalf("the consume script must splice the state field")
+	}
+	if !strings.Contains(ConsumeScript, "{identitySpan[2], identitySpan[3], ARGV[1]}") {
+		t.Fatalf("the consume script must splice the identity through its own span")
 	}
 	if !strings.Contains(ConsumeScript, "identitySpliced = 1") {
 		t.Fatalf("the consume script must report the identity splice")

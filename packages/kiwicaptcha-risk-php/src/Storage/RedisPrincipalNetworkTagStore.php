@@ -29,6 +29,14 @@ use Predis\Client;
  * and the unlisted-namespace buckets. Trust is a `t:` prefixed mirror
  * field, minted only on an Allow or a completed step-up.
  *
+ * The bare-hex field class carries the engine's network tags. The
+ * stable network-tag pseudonym is the form the engine's writer records
+ * (a purpose-separated HMAC, so the field is never a reversible
+ * encoding of the address). The bucket spelling is the legacy field
+ * form: the engine's read path probes it on a tag miss, so history
+ * recorded under it still answers "seen", and the next record rewrites
+ * that network under the tag.
+ *
  * Error contract: any Redis failure throws {@see RiskStoreException},
  * so the engine follows its existing fail-closed path. The store never
  * returns "not seen" on error (which would read as "novel" and price
@@ -354,7 +362,10 @@ final class RedisPrincipalNetworkTagStore implements PrincipalNetworkTagStoreInt
         if (preg_match('/^asn:(?:0|[1-9][0-9]{0,9}|u4\/(?:0|[1-9][0-9]{0,4})|u6\/[0-9a-f]{8})$/D', $tag)) {
             return;
         }
-        // Bare hex: the engine's networkBucket() spelling (no prefix).
+        // Bare hex carries the engine's network tags with no prefix:
+        // the stable network-tag pseudonym (64 hex) and the bucket
+        // spelling as the legacy field form (10 hex for IPv4, 18 or 34
+        // hex for the IPv6 /64).
         if (preg_match('/^[0-9a-f]{2,68}$/', $tag)) {
             return;
         }

@@ -170,8 +170,12 @@ final class StepUpStoreDifferentialTest extends TestCase
             // only door into the store for a demand-bound challenge, and
             // it refuses a demand that is not there yet. Each challenge
             // answers its own demand, the session, scope and principal
-            // identity the admission and the completion both judge.
-            $store->createDemand(StepUpDemand::mint($checkoutDemand, 'checkout', $binding, null, null, self::BASE_NOW, 600), 600);
+            // identity the admission and the completion both judge. The
+            // demand is minted under the lineage its completion will
+            // present (the session binding here): the completion is held
+            // to the stored lineage, so the history identity is fixed
+            // when the demand is raised.
+            $store->createDemand(StepUpDemand::mint($checkoutDemand, 'checkout', $binding, null, null, self::BASE_NOW, 600, \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::None, '', null, null, false, null, null, null, $binding), 600);
             $store->createAdmittedChallenge($totp, 600);
             $email = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::begin(
                 $store instanceof ArrayStepUpChallengeStore ? 'paritychalemlarray0001' : 'paritychalemlredis0001',
@@ -192,7 +196,7 @@ final class StepUpStoreDifferentialTest extends TestCase
                 null,
                 $loginDemand,
             );
-            $store->createDemand(StepUpDemand::mint($loginDemand, 'login', $binding, null, null, self::BASE_NOW, 600), 600);
+            $store->createDemand(StepUpDemand::mint($loginDemand, 'login', $binding, null, null, self::BASE_NOW, 600, \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpOperationBindingKind::None, '', null, null, false, null, null, null, $binding), 600);
             $store->createAdmittedChallenge($email, 600);
 
             $answers = [];

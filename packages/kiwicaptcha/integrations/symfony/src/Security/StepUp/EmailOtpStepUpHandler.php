@@ -161,6 +161,41 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             );
         }
 
+        // The delivery-generation lease: the begin holding it is the one
+        // whose code becomes the demand's authoritative factor. It is
+        // claimed ahead of the challenge admission and settled after the
+        // transport handoff, so two concurrent begins of one demand can
+        // never both reach the mailbox. Without it the replace semantics
+        // would let begin A admit its challenge, begin B replace it, and
+        // only then A's transport hand off: both codes arrive, only B's
+        // is valid, and mail ordering is uncontrolled, so the invalid one
+        // can land last and look newest. The loser releases its quota and
+        // answers a retryable conflict, so it never burns a delivery on a
+        // code it did not send.
+        $lease = $context->demandId === null
+            ? null
+            : $this->claimDeliveryLease($context->demandId);
+        if ($context->demandId !== null && $lease === null) {
+            // Another begin of this demand holds the delivery window, or
+            // the claim could not be made at all. Either way this begin
+            // cannot prove it owns the generation, so it sends nothing,
+            // hands its mail capacity back and answers a retryable
+            // conflict instead of replacing a challenge whose code is
+            // already on its way.
+            try {
+                $this->store->releaseMailQuota($reservationId);
+            } catch (\Throwable) {
+            }
+
+            return $this->refusal(
+                $context,
+                Response::HTTP_CONFLICT,
+                'step_up_send_in_progress',
+                'Another request is already sending a code for this step-up demand; retry in a moment.',
+                ['Retry-After' => '1'],
+            );
+        }
+
         try {
             $this->store->createAdmittedChallenge($challenge, $this->ttlSecs);
         } catch (StepUpDemandAdmissionRefused $e) {
@@ -174,6 +209,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
                 $this->store->releaseMailQuota($reservationId);
             } catch (\Throwable) {
             }
+            $this->settleDeliveryLease($context, $lease, false);
 
             return $this->refusal(
                 $context,
@@ -195,6 +231,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
                 $this->store->consume($challenge->id);
             } catch (\Throwable) {
             }
+            $this->settleDeliveryLease($context, $lease, false);
 
             return $this->refusal(
                 $context,
@@ -225,6 +262,11 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             } catch (\Throwable) {
                 // The record expires with its TTL regardless.
             }
+            // Ambiguous at or after the handoff: the delivery is spent,
+            // so the lease promotes as sent, exactly as the send counter
+            // does. A code the transport may have delivered is never
+            // handed back as if it were never sent.
+            $this->settleDeliveryLease($context, $lease, true);
 
             return $this->refusal(
                 $context,
@@ -237,7 +279,9 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         }
 
         // The handoff succeeded: the reservation commits (the delivery
-        // is spent and vouched for).
+        // is spent and vouched for) and the generation promotes, so this
+        // begin's code is the demand's authoritative factor from here on.
+        $this->settleDeliveryLease($context, $lease, true);
         try {
             $this->store->commitMailQuota($reservationId);
         } catch (\Throwable) {
@@ -445,6 +489,48 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
             HTML;
 
         return new Response($html, Response::HTTP_OK, ['Content-Type' => 'text/html; charset=utf-8', 'Cache-Control' => 'no-store']);
+    }
+
+    /**
+     * The delivery-generation claim of one demand: the store's clock owns
+     * the lease's liveness, and a null answer means this begin may not
+     * send. A store failure fails the same way, so an unprovable claim
+     * never becomes a silent send.
+     */
+    private function claimDeliveryLease(string $demandId): ?StepUpDemandSendLease
+    {
+        try {
+            return $this->store->claimDemandSendLease($demandId, 0, self::DELIVERY_LEASE_SECS);
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * Settle the delivery-generation lease once the outcome is known. A
+     * delivered generation promotes: the send budget is spent and the
+     * demand keeps the advanced state. An undelivered one restores the
+     * state the claim recorded, so a refused begin consumes neither a
+     * delivery nor the demand's send budget.
+     */
+    private function settleDeliveryLease(StepUpContext $context, ?StepUpDemandSendLease $lease, bool $delivered): void
+    {
+        if ($lease === null || $context->demandId === null) {
+            return;
+        }
+        try {
+            $this->store->settleDemandSendLease(new StepUpDemandSendSettlement(
+                $context->demandId,
+                $lease->leaseUntilMs,
+                $lease->claimAt,
+                $lease->priorSends,
+                $lease->priorLastSentAt,
+                $delivered,
+            ));
+        } catch (\Throwable) {
+            // The lease expires on its own, so a failed settlement costs
+            // the next begin at most the remaining lease window.
+        }
     }
 
     /**

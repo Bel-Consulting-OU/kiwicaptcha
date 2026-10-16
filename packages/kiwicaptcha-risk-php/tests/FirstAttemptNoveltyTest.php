@@ -323,7 +323,7 @@ final class FirstAttemptNoveltyTest extends TestCase
     public function testLearnModeAccruesTrustedHistoryOnAllow(): void
     {
         $engine = $this->buildEngine([], 'learn');
-        $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
+        $networkTag = $engine->networkTag(self::HOME_IP);
 
         $first = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION));
         self::assertSame(
@@ -332,19 +332,24 @@ final class FirstAttemptNoveltyTest extends TestCase
             'learn mode never escalates a first login',
         );
 
-        // The post-Allow binding recorded the network bucket and the
-        // ASN bucket with the trust flag minted (the session binding
-        // stays alongside them).
+        // The post-Allow binding recorded the stable network tag and
+        // the ASN bucket with the trust flag minted (the session
+        // binding stays alongside them). The bucket spelling is never
+        // a stored field.
         self::assertTrue(
-            $this->networks->principalNetworkSeen($this->principalHex, $networkBucket),
-            'the Allow binding must record the network bucket',
+            $this->networks->principalNetworkSeen($this->principalHex, $networkTag),
+            'the Allow binding must record the network tag',
+        );
+        self::assertFalse(
+            $this->networks->principalNetworkSeen($this->principalHex, AdaptiveRiskEngine::networkBucket(self::HOME_IP)),
+            'the Allow binding never stores the bucket spelling',
         );
         self::assertTrue(
             $this->networks->principalNetworkSeen($this->principalHex, self::HOME_ASN_TAG),
             'the Allow binding must record the ASN bucket',
         );
         self::assertTrue(
-            $this->networks->tagIsTrusted($this->principalHex, $networkBucket),
+            $this->networks->tagIsTrusted($this->principalHex, $networkTag),
             'the recorded network tag must carry trust',
         );
         self::assertTrue(
@@ -372,6 +377,7 @@ final class FirstAttemptNoveltyTest extends TestCase
     public function testRetryFromSameNetworkStaysSteppedUp(): void
     {
         $engine = $this->buildEngine([], 'enforce');
+        $networkTag = $engine->networkTag(self::HOME_IP);
         $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
 
         for ($attempt = 1; $attempt <= 10; $attempt++) {
@@ -384,7 +390,9 @@ final class FirstAttemptNoveltyTest extends TestCase
         }
 
         // Zero network tags written across all ten attempts: neither
-        // the network bucket, nor the ASN bucket, nor the session.
+        // the network tag, nor the bucket spelling, nor the ASN
+        // bucket, nor the session.
+        self::assertFalse($this->networks->principalNetworkSeen($this->principalHex, $networkTag));
         self::assertFalse($this->networks->principalNetworkSeen($this->principalHex, $networkBucket));
         self::assertFalse($this->networks->principalNetworkSeen($this->principalHex, self::HOME_ASN_TAG));
         self::assertFalse($this->networks->principalNetworkSeen(
@@ -472,7 +480,7 @@ final class FirstAttemptNoveltyTest extends TestCase
         $engine = $this->buildEngine([], 'learn');
         $deviceTag = 'device:'.$this->identity->deviceId(self::DEVICE);
         $sessionTag = 'session:'.$this->identity->sessionId(self::SESSION);
-        $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
+        $networkTag = $engine->networkTag(self::HOME_IP);
 
         $first = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION, self::DEVICE));
         self::assertSame(
@@ -493,8 +501,8 @@ final class FirstAttemptNoveltyTest extends TestCase
             'a novel Allow must not mint session trust either (both continuity probes read the trust flag)',
         );
         self::assertTrue(
-            $this->networks->tagIsTrusted($this->principalHex, $networkBucket),
-            'the network bucket keeps the learn-history record with trust',
+            $this->networks->tagIsTrusted($this->principalHex, $networkTag),
+            'the stable network tag keeps the learn-history record with trust',
         );
         self::assertTrue(
             $this->networks->tagIsTrusted($this->principalHex, self::HOME_ASN_TAG),
@@ -621,7 +629,7 @@ final class FirstAttemptNoveltyTest extends TestCase
         $engine = $this->buildEngine([], 'learn', withMarksReader: false);
         $sessionTag = 'session:'.$this->identity->sessionId(self::SESSION);
         $deviceTag = 'device:'.$this->identity->deviceId(self::DEVICE);
-        $networkBucket = AdaptiveRiskEngine::networkBucket(self::HOME_IP);
+        $networkTag = $engine->networkTag(self::HOME_IP);
 
         $decision = $engine->reassess($this->loginContext(self::HOME_IP, self::SESSION, self::DEVICE));
         self::assertSame(
@@ -642,7 +650,7 @@ final class FirstAttemptNoveltyTest extends TestCase
             'a novel Allow with no marks reader mints no session trust either',
         );
         self::assertTrue(
-            $this->networks->tagIsTrusted($this->principalHex, $networkBucket),
+            $this->networks->tagIsTrusted($this->principalHex, $networkTag),
             'the learn history accrues as it does with a reader',
         );
     }

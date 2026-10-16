@@ -513,6 +513,169 @@ final class StepUpAdmissionAuthorityTest extends TestCase
     }
 
     /**
+     * The proof-class dimension. A demand that names a principal is
+     * answered only by a factor that proves that principal. The
+     * anonymous address-ownership factor proves a mailbox, never the
+     * account, so the admission refuses it and the demand's own
+     * principal keeps its active challenge.
+     */
+    public function testTheProofClassGateRefusesAnAddressOwnershipFactorOnBothStores(): void
+    {
+        $answer = $this->bothStores(function (ArrayStepUpChallengeStore|RedisStepUpChallengeStore $store): array {
+            $store->createDemand($this->demand('admitgateclassdemand0001', 'checkout', self::SESSION_ID, StepUpOperationBindingKind::FormFields, self::PRINCIPAL), 900);
+            $standing = $this->challenge('admitgateclasschall00001', 'admitgateclassdemand0001');
+            $store->createAdmittedChallenge($standing, 600);
+            $addressOwnership = $this->challenge(
+                'admitgateclasschall00002',
+                'admitgateclassdemand0001',
+                'checkout',
+                self::SESSION_ID,
+                str_repeat('e', 32),
+                null,
+                StepUpChallengeKind::EmailOwnership,
+            );
+
+            return $this->refusedNewcomer($store, 'admitgateclassdemand0001', $standing, $addressOwnership);
+        });
+
+        self::assertSame(self::REFUSED_NEWCOMER, $answer, 'an address-ownership factor must refuse against a principal-bound demand and leave the standing challenge whole');
+    }
+
+    /**
+     * The subject dimension on a non-login binding kind. The financial
+     * demand names the account it was minted for, so another account's
+     * factor is refused at the door exactly like the login shape.
+     */
+    public function testTheSubjectGateRefusesAnotherPrincipalOnAFinancialDemandOnBothStores(): void
+    {
+        $answer = $this->bothStores(function (ArrayStepUpChallengeStore|RedisStepUpChallengeStore $store): array {
+            $store->createDemand($this->demand('admitgatefindemand000001', 'checkout', self::SESSION_ID, StepUpOperationBindingKind::FormFields, self::PRINCIPAL), 900);
+            $standing = $this->challenge('admitgatefinchall000001', 'admitgatefindemand000001');
+            $store->createAdmittedChallenge($standing, 600);
+            $newcomer = $this->challenge('admitgatefinchall000002', 'admitgatefindemand000001', 'checkout', self::SESSION_ID, self::FOREIGN_PRINCIPAL);
+
+            return $this->refusedNewcomer($store, 'admitgatefindemand000001', $standing, $newcomer);
+        });
+
+        self::assertSame(self::REFUSED_NEWCOMER, $answer, 'another account factor must refuse against a financial demand and leave the standing challenge whole');
+    }
+
+    /**
+     * The lineage dimension. The demand is minted under one assurance
+     * history identity (its stored lineage); a completion presenting
+     * another lineage refuses before anything moves, so a factor
+     * selected under one lineage can never be filed under another. The
+     * demand's own lineage completes and files the marker under it.
+     */
+    public function testTheStoredLineageRefusesAForeignCompletionOnBothStores(): void
+    {
+        $answer = $this->bothStores(function (ArrayStepUpChallengeStore|RedisStepUpChallengeStore $store): array {
+            $store->createDemand($this->demand('admitgatelineagedemand01', 'checkout', self::SESSION_ID, StepUpOperationBindingKind::FormFields, self::PRINCIPAL, self::LINEAGE_HASH), 900);
+            $challenge = $this->challenge('admitgatelineagechall001', 'admitgatelineagedemand01');
+            $store->createAdmittedChallenge($challenge, 600);
+
+            $foreign = $store->completeFactor(
+                $challenge->id,
+                'admitgatelineagedemand01',
+                $this->bindingOf($challenge),
+                self::BASE_NOW,
+                $challenge->sessionHash,
+                'checkout',
+                str_repeat('b', 64),
+            );
+            $answers = [
+                'the foreign-lineage completion refuses' => $foreign === null,
+                'the refusal consumed no challenge' => $store->read($challenge->id) !== null,
+                'the demand stays open' => $store->readDemand('admitgatelineagedemand01')?->state->isOpen(),
+                'the foreign lineage answers nothing' => $store->completedFactorOf(str_repeat('b', 64), self::PRINCIPAL, 'checkout', self::BASE_NOW),
+                'the stored lineage answers nothing yet' => $store->completedFactorOf(self::LINEAGE_HASH, self::PRINCIPAL, 'checkout', self::BASE_NOW),
+            ];
+
+            // A hint outside the lineage hash shape is no identity at
+            // all: both backends refuse it, and the challenge survives.
+            $malformed = $store->completeFactor(
+                $challenge->id,
+                'admitgatelineagedemand01',
+                $this->bindingOf($challenge),
+                self::BASE_NOW,
+                $challenge->sessionHash,
+                'checkout',
+                'not-a-lineage-hash',
+            );
+            $answers['the malformed hint refuses'] = $malformed === null;
+            $answers['the malformed refusal consumed no challenge'] = $store->read($challenge->id) !== null;
+
+            $own = $store->completeFactor(
+                $challenge->id,
+                'admitgatelineagedemand01',
+                $this->bindingOf($challenge),
+                self::BASE_NOW,
+                $challenge->sessionHash,
+                'checkout',
+                self::LINEAGE_HASH,
+            );
+            $answers['the stored-lineage completion lands'] = $own !== null;
+            $answers['the marker sits under the stored lineage'] = $store->completedFactorOf(self::LINEAGE_HASH, self::PRINCIPAL, 'checkout', self::BASE_NOW);
+            $answers['the anonymous bucket answers nothing'] = $store->completedFactorOf(self::LINEAGE_HASH, null, 'checkout', self::BASE_NOW);
+
+            return $answers;
+        });
+
+        self::assertSame(
+            [
+                'the foreign-lineage completion refuses' => true,
+                'the refusal consumed no challenge' => true,
+                'the demand stays open' => true,
+                'the foreign lineage answers nothing' => null,
+                'the stored lineage answers nothing yet' => null,
+                'the malformed hint refuses' => true,
+                'the malformed refusal consumed no challenge' => true,
+                'the stored-lineage completion lands' => true,
+                'the marker sits under the stored lineage' => 'email_otp',
+                'the anonymous bucket answers nothing' => null,
+            ],
+            $answer,
+            'the stored lineage alone must key the completion history',
+        );
+    }
+
+    /**
+     * A demand minted with no lineage bound no history identity and
+     * keeps its behaviour: the completion is accepted and the presented
+     * hint keys its history. That is the shape the anonymous carrier's
+     * first issuance produces, where the browser's continuity cookie
+     * appears only after the demand was minted.
+     */
+    public function testADemandWithNoStoredLineageKeepsItsCompletionBehaviourOnBothStores(): void
+    {
+        $answer = $this->bothStores(function (ArrayStepUpChallengeStore|RedisStepUpChallengeStore $store): array {
+            $store->createDemand($this->demand('admitgatenolinedemand0001', 'checkout', self::SESSION_ID), 900);
+            $challenge = $this->challenge('admitgatenolinechall0001', 'admitgatenolinedemand0001');
+            $store->createAdmittedChallenge($challenge, 600);
+            $completion = $store->completeFactor(
+                $challenge->id,
+                'admitgatenolinedemand0001',
+                $this->bindingOf($challenge),
+                self::BASE_NOW,
+                $challenge->sessionHash,
+                'checkout',
+                self::LINEAGE_HASH,
+            );
+
+            return [
+                'the completion lands' => $completion !== null,
+                'the presented lineage keys the anonymous history' => $store->completedFactorOf(self::LINEAGE_HASH, null, 'checkout', self::BASE_NOW),
+            ];
+        });
+
+        self::assertSame(
+            ['the completion lands' => true, 'the presented lineage keys the anonymous history' => 'email_otp'],
+            $answer,
+            'a demand that bound no lineage keeps its completion behaviour',
+        );
+    }
+
+    /**
      * The history-key parity. A completion on a login demand that
      * carries a principal pseudonym is filed under one key identity on
      * both backends: the (lineage, principal, scope) triple. The array
@@ -570,7 +733,7 @@ final class StepUpAdmissionAuthorityTest extends TestCase
      */
     private function historyScenario(ArrayStepUpChallengeStore|RedisStepUpChallengeStore $store): array
     {
-        $store->createDemand($this->demand('admitgatehistorydemand001', 'checkout', self::SESSION_ID, StepUpOperationBindingKind::Login, self::PRINCIPAL), 900);
+        $store->createDemand($this->demand('admitgatehistorydemand001', 'checkout', self::SESSION_ID, StepUpOperationBindingKind::Login, self::PRINCIPAL, self::LINEAGE_HASH), 900);
         $challenge = $this->challenge('admitgatehistorychall001', 'admitgatehistorydemand001');
         $store->createAdmittedChallenge($challenge, 600);
         $completion = $store->completeFactor(
@@ -673,7 +836,9 @@ final class StepUpAdmissionAuthorityTest extends TestCase
      * the shape carries no session binding), with the login binding and
      * its principal when the kind names one. A bound demand needs the
      * operation digest its recipe mints, so the fixed 64-hex digest
-     * rides the non-empty binding kinds.
+     * rides the non-empty binding kinds. The lineage is the demand's
+     * stored history identity, null unless the scenario completes with
+     * a lineage hint.
      */
     private function demand(
         string $id,
@@ -681,6 +846,7 @@ final class StepUpAdmissionAuthorityTest extends TestCase
         ?string $sessionId = self::SESSION_ID,
         StepUpOperationBindingKind $kind = StepUpOperationBindingKind::None,
         ?string $principal = null,
+        ?string $lineage = null,
     ): StepUpDemand {
         return StepUpDemand::mint(
             $id,
@@ -698,6 +864,7 @@ final class StepUpAdmissionAuthorityTest extends TestCase
             null,
             null,
             $principal,
+            $lineage,
         );
     }
 
@@ -705,7 +872,9 @@ final class StepUpAdmissionAuthorityTest extends TestCase
      * The challenge fixture: an email-otp record (so it carries the
      * code hash its schema demands) bound to the named demand, session
      * and principal, with the factor snapshot its kind derives unless
-     * the caller names a coherent one.
+     * the caller names a coherent one. The kind is a parameter so the
+     * proof-class dimension can be driven with the anonymous
+     * address-ownership family.
      */
     private function challenge(
         string $id,
@@ -714,10 +883,11 @@ final class StepUpAdmissionAuthorityTest extends TestCase
         ?string $sessionId = self::SESSION_ID,
         string $principal = self::PRINCIPAL,
         ?FactorRequirement $factor = null,
+        StepUpChallengeKind $kind = StepUpChallengeKind::EmailOtp,
     ): StepUpChallenge {
         return StepUpChallenge::begin(
             $id,
-            StepUpChallengeKind::EmailOtp,
+            $kind,
             $principal,
             null,
             $scope,

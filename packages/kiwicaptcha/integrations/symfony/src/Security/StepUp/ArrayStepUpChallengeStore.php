@@ -104,18 +104,17 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         // completion, stranding the browser. These are the same identity
         // rules the completion enforces, applied at the door: the
         // challenge answers this demand's scope, a session-bound demand
-        // admits only a challenge of that same session, a login demand
-        // admits only a challenge of the principal the demand was minted
-        // for, and the factor snapshot the completion judges must be
-        // present and coherent. The demand id itself needs no check
-        // here: the record above was read by it.
+        // admits only a challenge of that same session, a demand that
+        // names a principal admits only a principal-authenticating
+        // factor whose proof subject reproduces that principal, and the
+        // factor snapshot the completion judges must be present and
+        // coherent. The demand id itself needs no check here: the record
+        // above was read by it.
         $snapshot = $challenge->factor;
         if ($challenge->scope !== $demand->scope
             || ($demand->sessionHash !== null && $demand->sessionHash !== ''
                 && $challenge->sessionHash !== $demand->sessionHash)
-            || ($demand->operationBindingKind === StepUpOperationBindingKind::Login
-                && $demand->principalPseudonym !== null && $demand->principalPseudonym !== ''
-                && $challenge->principalSubject() !== $demand->principalPseudonym)
+            || !$demand->admitsFactor($challenge->kind, $challenge->principalSubject())
             || $snapshot === null || $snapshot->family === '' || $snapshot->factorId === '') {
             throw new StepUpDemandAdmissionRefused('the challenge does not belong to the demand it claims');
         }
@@ -277,22 +276,36 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         // The demand/challenge identity binding, judged on the stored
         // records alone: a challenge answers exactly its own demand's
         // scope, a session-bound demand is completed only by a challenge
-        // of that same session, and a login demand is completed only by
-        // a challenge of the principal the demand was minted for (the
-        // identity-factory pseudonym both records carry). A crossed
-        // session, scope or subject completes nothing — the presented
-        // binding may match the challenge perfectly and the completion
-        // still refuses, because the proof earned belongs to another
-        // browser, scope or account than the demand names.
+        // of that same session, and a demand that names a principal is
+        // completed only by a principal-authenticating factor whose
+        // proof subject reproduces that principal, whatever the binding
+        // kind. A crossed session, scope or subject completes nothing:
+        // the presented binding may match the challenge perfectly and
+        // the completion still refuses, because the proof earned belongs
+        // to another browser, scope or account than the demand names.
         if ($challenge->scope !== $demand->scope) {
             return null;
         }
         if ($demand->sessionHash !== null && $challenge->sessionHash !== $demand->sessionHash) {
             return null;
         }
-        if ($demand->operationBindingKind === StepUpOperationBindingKind::Login
-            && $demand->principalPseudonym !== null
-            && $challenge->principalSubject() !== $demand->principalPseudonym) {
+        if (!$demand->admitsFactor($challenge->kind, $challenge->principalSubject())) {
+            return null;
+        }
+        // The stored lineage, the demand's history identity. A demand
+        // minted under a lineage is completed only by a request that
+        // presents exactly that lineage: a mismatch refuses here, so a
+        // factor selected under one lineage can never be filed under
+        // another. A demand minted with no lineage bound no history
+        // identity and read none, so its completion keeps its
+        // behaviour: the presented hint keys its history, and a hint
+        // outside the hash shape refuses like every malformed identity.
+        // The key material is exactly this resolved value, so the two
+        // backends file one completion under one key. Nothing moves on
+        // the refusal: both records stay exactly as they were.
+        $keyLineage = $demand->lineageHash
+            ?? ($lineageHash !== null && preg_match('/^[0-9a-f]{64}$/D', $lineageHash) === 1 ? $lineageHash : null);
+        if ($lineageHash !== $keyLineage) {
             return null;
         }
         // A superseded demand completes nothing, whatever its state
@@ -366,13 +379,19 @@ final class ArrayStepUpChallengeStore implements StepUpChallengeStore
         // already proved is still visible to its next demand, and folding
         // the principal in stops one account's completion from becoming
         // another account's history when a session switches identity.
-        // Every hint is checked against the stored record, so a caller
-        // can never file a completion under another subject's key.
-        if ($lineageHash !== null && preg_match('/^[0-9a-f]{64}$/D', $lineageHash) === 1
+        // The key material is the identity gate's own resolved lineage,
+        // so the completion the gate accepted is the identity filed. A
+        // principal-scoped entry is published only by a factor that
+        // proved that principal (a principal-authenticating kind); an
+        // address-ownership completion files nothing but the anonymous
+        // bucket, which is the legitimate history of the flows that
+        // carry no principal.
+        if ($keyLineage !== null
             && $scope !== null && $challenge->scope === $scope
+            && ($demand->principalPseudonym === null || $challenge->kind->provesPrincipal())
             && \is_string($family) && $family !== '') {
             $rank = FactorRequirement::rankOf($family);
-            $key = $this->completedIndexKey($lineageHash, $demand->principalPseudonym, $scope);
+            $key = $this->completedIndexKey($keyLineage, $demand->principalPseudonym, $scope);
             $prior = $this->completedIndex[$key] ?? null;
             $priorRank = 0;
             $priorExpiry = 0;

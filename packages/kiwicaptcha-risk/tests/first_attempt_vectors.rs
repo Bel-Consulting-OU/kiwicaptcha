@@ -93,8 +93,10 @@ fn policy() -> Arc<RiskPolicy> {
     )
 }
 
-/// The network bucket of a source address, byte-identical with the
-/// engine's own spelling (family byte + masked bytes, hex).
+/// The legacy bucket spelling of a source address (family byte plus
+/// the masked bytes, hex). The corpus seeds its history with this
+/// spelling, which the gate reads as the legacy form, so every row
+/// keeps pinning the same verdicts it pinned before the stable tags.
 fn network_bucket(ip: IpAddr) -> String {
     hex::encode(kiwicaptcha_risk::identity::masked_network(ip, 32, 64))
 }
