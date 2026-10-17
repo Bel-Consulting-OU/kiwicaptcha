@@ -288,8 +288,8 @@ execution-interpreter copy (execution-interpreter.js, the lazy
 ExecutionChallengeV1 asset) is 49,426 bytes raw, 14,623 bytes gzip and
 12,521 bytes brotli, against caps of 56,000 / 16,500 / 14,000 bytes; the
 same budgets section also records the measured sizes of the worker
-(158,934 raw / 54,747 gzip / 37,622 brotli), the wasm glue
-runtime (127,009 raw / 45,213 gzip / 36,368 brotli), the widget
+(158,781 raw / 54,657 gzip / 37,552 brotli), the wasm glue
+runtime (126,856 raw / 45,110 gzip / 36,288 brotli), the widget
 stylesheet (11,145 raw) and the webauthn ceremony module
 (2,103 raw), each raw figure byte-identical across the
 copies. Since the r8 glue-embedding change the worker row describes the
@@ -297,7 +297,7 @@ assembled release asset (tools/embed-worker: the `var window = self;`
 prelude plus the full wasm glue text plus the worker solver source —
 155,097 raw), so the files-mode worker boots with wasm in scope and
 the optional rsw sequential solver still lives inside the worker's
-solver source; the runtime (kiwicaptcha-wasm.js at 127,009 raw) row quotes the glue asset alone, whose
+solver source; the runtime (kiwicaptcha-wasm.js at 126,856 raw) row quotes the glue asset alone, whose
 embedded workerSource copy is regenerated from that same solver
 source; the
 decoy-armed challenge-response JSON (the wire shape of the bundle's
@@ -374,8 +374,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone:   124672 bytes
-raw,    36039 gzip and    30247 brotli (the record's
+any memory-hard challenge — is the eager core alone:   126876 bytes
+raw,    36725 gzip and    30887 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits within the 37,000-byte cap after the step-up demand
 dialog and carrier-escalation wave added the interactive step-up
@@ -398,8 +398,8 @@ record's budget rows, equality-gated):
   (construction plus the files-mode versioned
   worker/runtime asset fetches), the ExecutionChallengeV1 runner and
   the decoy/honeypot rendering. The core loads it on a memory-hard
-  challenge, an armed response or a glue-less SHA-256 solve (42,552
-  raw / 12,473 gzip / 10,714
+  challenge, an armed response or a glue-less SHA-256 solve (44,044
+  raw / 12,887 gzip / 11,094
   brotli);
 - `widget-locales.js`, the lazy non-default locale packs (de/fr/es/
   it/nl/pl/pt/ar, RTL included). The eager core keeps English and
