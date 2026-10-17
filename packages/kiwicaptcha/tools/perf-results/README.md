@@ -26,7 +26,7 @@ The schema string is `kiwicaptcha.perf-run/1`. The common envelope:
 - `environment`: `php_version`, `php_sapi`, `os`, `arch`, `cpu_model`,
   `cpu_count`, `memory_total_bytes`, `runner`, `redis`. The
   `runner` block carries the identity variables the environment
-  exposes (`CI`, `GITHUB_*`, `RUNNER_*`, `WOODPECKER_*` and similar)
+  exposes (`CI`, `GITHUB_*`, `RUNNER_*`, `KIWI_*` and similar)
   or null. The `redis` block carries the wire target and the server
   version, or null when no Redis was used. A Redis target never
   carries a credential: the userinfo is replaced with `<redacted>`.

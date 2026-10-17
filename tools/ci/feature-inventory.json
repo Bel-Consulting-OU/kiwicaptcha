@@ -2,48 +2,338 @@
   "schema": "kiwicaptcha.feature-inventory/1",
   "comment": "Every shipped surface and the lane that exercises it. The checker fails when a package, tool, protocol or platform integration exists on disk without an entry here, or when an entry names a lane that no workflow or runner invokes.",
   "packages": [
-    { "path": "packages/kiwicaptcha", "test": "cargo test --workspace", "ci_job": "rust", "markers": ["Cargo.toml", "tests"] },
-    { "path": "packages/kiwicaptcha-risk", "test": "cargo test -p kiwicaptcha-risk", "ci_job": "risk-rust", "markers": ["Cargo.toml", "tests"] },
-    { "path": "packages/kiwicaptcha-php", "test": "vendor/bin/phpunit", "ci_job": "php", "markers": ["composer.json", "tests"] },
-    { "path": "packages/kiwicaptcha-risk-php", "test": "vendor/bin/phpunit", "ci_job": "risk-php", "markers": ["composer.json", "tests"] },
-    { "path": "packages/kiwicaptcha/integrations/symfony", "test": "vendor/bin/phpunit", "ci_job": "symfony", "markers": ["composer.json", "tests"] },
-    { "path": "packages/kiwicaptcha-node", "test": "npm test", "ci_job": "sdk-node", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-go", "test": "go test ./...", "ci_job": "sdk-go", "markers": ["go.mod", "*_test.go"] },
-    { "path": "packages/kiwicaptcha-python-sdk", "test": "python3 -m unittest discover -s tests", "ci_job": "sdk-python", "markers": ["pyproject.toml", "tests"] },
-    { "path": "packages/kiwicaptcha-jvm", "test": "mvn test", "ci_job": "sdk-jvm", "markers": ["pom.xml", "core/src/test"] },
-    { "path": "packages/kiwicaptcha-dotnet", "test": "dotnet test KiwiCaptcha.sln", "ci_job": "sdk-dotnet", "markers": ["KiwiCaptcha.sln", "tests"] },
-    { "path": "packages/kiwicaptcha-ruby", "test": "bundle exec rake test", "ci_job": "sdk-ruby", "markers": ["Gemfile", "test"] },
-    { "path": "packages/kiwicaptcha-elixir", "test": "mix test", "ci_job": "sdk-elixir", "markers": ["mix.exs", "test"] },
-    { "path": "packages/kiwicaptcha-android", "test": "./gradlew testDebugUnitTest", "ci_job": "android", "markers": ["build.gradle.kts", "src/test"] },
-    { "path": "packages/kiwicaptcha-wasm", "test": "cargo test --lib + node --test tests", "ci_job": "wasm-host", "markers": ["Cargo.toml", "tests"] },
-    { "path": "packages/kiwicaptcha-verifier", "test": "cargo test --features redis-store", "ci_job": "verifier-redis", "markers": ["Cargo.toml", "tests"] },
-    { "path": "packages/kiwicaptcha-solver", "test": "cargo test -p kiwicaptcha-solver", "ci_job": "rust", "markers": ["Cargo.toml", "tests"] },
-    { "path": "packages/kiwicaptcha-client-core", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-react", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-vue", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-svelte", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-solid", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-angular", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "src/*.spec.ts"] },
-    { "path": "packages/kiwicaptcha-react-native", "test": "npm test", "ci_job": "web-wrappers", "markers": ["package.json", "test"] },
-    { "path": "packages/kiwicaptcha-ios", "test": "swift test", "ci_job": "ios", "markers": ["Package.swift", "Tests"] },
-    { "path": "packages/kiwicaptcha-flutter", "test": "flutter test", "ci_job": "flutter", "markers": ["pubspec.yaml", "test"] }
+    {
+      "path": "packages/kiwicaptcha",
+      "test": "cargo test --workspace",
+      "ci_job": "rust",
+      "markers": [
+        "Cargo.toml",
+        "tests"
+      ],
+      "kiwi_job": "rust-workspace"
+    },
+    {
+      "path": "packages/kiwicaptcha-risk",
+      "test": "cargo test -p kiwicaptcha-risk",
+      "ci_job": "risk-rust",
+      "markers": [
+        "Cargo.toml",
+        "tests"
+      ],
+      "kiwi_job": "risk-rust"
+    },
+    {
+      "path": "packages/kiwicaptcha-php",
+      "test": "vendor/bin/phpunit",
+      "ci_job": "php",
+      "markers": [
+        "composer.json",
+        "tests"
+      ],
+      "kiwi_job": "php-core-8.3"
+    },
+    {
+      "path": "packages/kiwicaptcha-risk-php",
+      "test": "vendor/bin/phpunit",
+      "ci_job": "risk-php",
+      "markers": [
+        "composer.json",
+        "tests"
+      ],
+      "kiwi_job": "risk-php"
+    },
+    {
+      "path": "packages/kiwicaptcha/integrations/symfony",
+      "test": "vendor/bin/phpunit",
+      "ci_job": "symfony",
+      "markers": [
+        "composer.json",
+        "tests"
+      ],
+      "kiwi_job": "symfony-8x-php8.5"
+    },
+    {
+      "path": "packages/kiwicaptcha-node",
+      "test": "npm test",
+      "ci_job": "sdk-node",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "node"
+    },
+    {
+      "path": "packages/kiwicaptcha-go",
+      "test": "go test ./...",
+      "ci_job": "sdk-go",
+      "markers": [
+        "go.mod",
+        "*_test.go"
+      ],
+      "kiwi_job": "go"
+    },
+    {
+      "path": "packages/kiwicaptcha-python-sdk",
+      "test": "python3 -m unittest discover -s tests",
+      "ci_job": "sdk-python",
+      "markers": [
+        "pyproject.toml",
+        "tests"
+      ],
+      "kiwi_job": "python"
+    },
+    {
+      "path": "packages/kiwicaptcha-jvm",
+      "test": "mvn test",
+      "ci_job": "sdk-jvm",
+      "markers": [
+        "pom.xml",
+        "core/src/test"
+      ],
+      "kiwi_job": "jvm"
+    },
+    {
+      "path": "packages/kiwicaptcha-dotnet",
+      "test": "dotnet test KiwiCaptcha.sln",
+      "ci_job": "sdk-dotnet",
+      "markers": [
+        "KiwiCaptcha.sln",
+        "tests"
+      ],
+      "kiwi_job": "dotnet"
+    },
+    {
+      "path": "packages/kiwicaptcha-ruby",
+      "test": "bundle exec rake test",
+      "ci_job": "sdk-ruby",
+      "markers": [
+        "Gemfile",
+        "test"
+      ],
+      "kiwi_job": "ruby"
+    },
+    {
+      "path": "packages/kiwicaptcha-elixir",
+      "test": "mix test",
+      "ci_job": "sdk-elixir",
+      "markers": [
+        "mix.exs",
+        "test"
+      ],
+      "kiwi_job": "elixir"
+    },
+    {
+      "path": "packages/kiwicaptcha-android",
+      "test": "./gradlew testDebugUnitTest",
+      "ci_job": "android",
+      "markers": [
+        "build.gradle.kts",
+        "src/test"
+      ],
+      "kiwi_job": "android-unit-tests"
+    },
+    {
+      "path": "packages/kiwicaptcha-wasm",
+      "test": "cargo test --lib + node --test tests",
+      "ci_job": "wasm-host",
+      "markers": [
+        "Cargo.toml",
+        "tests"
+      ],
+      "kiwi_job": "wasm-host"
+    },
+    {
+      "path": "packages/kiwicaptcha-verifier",
+      "test": "cargo test --features redis-store",
+      "ci_job": "verifier-redis",
+      "markers": [
+        "Cargo.toml",
+        "tests"
+      ],
+      "kiwi_job": "verifier-redis-and-core-lanes"
+    },
+    {
+      "path": "packages/kiwicaptcha-solver",
+      "test": "cargo test -p kiwicaptcha-solver",
+      "ci_job": "rust",
+      "markers": [
+        "Cargo.toml",
+        "tests"
+      ],
+      "kiwi_job": "rust-workspace"
+    },
+    {
+      "path": "packages/kiwicaptcha-client-core",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-react",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-vue",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-svelte",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-solid",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-angular",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "src/*.spec.ts"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-react-native",
+      "test": "npm test",
+      "ci_job": "web-wrappers",
+      "markers": [
+        "package.json",
+        "test"
+      ],
+      "kiwi_job": "client-core-and-adapters"
+    },
+    {
+      "path": "packages/kiwicaptcha-ios",
+      "test": "swift test",
+      "ci_job": "ios",
+      "markers": [
+        "Package.swift",
+        "Tests"
+      ],
+      "kiwi_job": "ios"
+    },
+    {
+      "path": "packages/kiwicaptcha-flutter",
+      "test": "flutter test",
+      "ci_job": "flutter",
+      "markers": [
+        "pubspec.yaml",
+        "test"
+      ],
+      "kiwi_job": "flutter-test"
+    }
   ],
   "surfaces": [
-    { "path": "integrations-platforms", "lane": "ci", "ci_job": "platform-integrations", "runner": "integrations-platforms/tests/run-all.sh" },
-    { "path": "deploy", "lane": "ci", "ci_job": "docker-reference-deployment", "runner": "deploy/docker-compose.yml" },
-    { "path": "tools/client-perf", "lane": "ci", "ci_job": "perf-budget", "runner": "tools/client-perf/client-perf.mjs" },
-    { "path": "tools/client-ip", "lane": "fixture", "runner": "tools/client-ip/test-vectors.json" },
-    { "path": "tools/ci", "lane": "ci", "ci_job": "repo-sanity", "runner": "tools/ci" },
-    { "path": "tools/dogfood", "lane": "manual", "runner": "tools/dogfood/dogfood.sh", "reason": "needs a running reference deployment and the browser toolchain; documented in its README" },
-    { "path": "tools/failover", "lane": "ci", "ci_job": "verifier-redis", "runner": "tools/failover/runbook-test.sh" },
-    { "path": "tools/redteam", "lane": "release", "runner": "tools/redteam/exit-criteria.sh", "reason": "the release battery is the release gate; it runs on the release commit, not on every push" },
-    { "path": "tools/rsw-keygen", "lane": "ci", "ci_job": "rust", "runner": "tools/rsw-keygen/tests/cli.rs" },
-    { "path": "recipes-contrib", "lane": "ci", "ci_job": "symfony", "runner": "packages/kiwicaptcha/integrations/symfony/tests/RecipePackageValidationTest.php" },
-    { "path": "protocol", "lane": "ci", "ci_job": "lua-parity", "runner": "protocol/risk-v1" }
+    {
+      "path": "integrations-platforms",
+      "lane": "ci",
+      "ci_job": "platform-integrations",
+      "runner": "integrations-platforms/tests/run-all.sh",
+      "kiwi_job": "platform-suites"
+    },
+    {
+      "path": "deploy",
+      "lane": "ci",
+      "ci_job": "docker-reference-deployment",
+      "runner": "deploy/docker-compose.yml",
+      "kiwi_job": "docker-deploy"
+    },
+    {
+      "path": "tools/client-perf",
+      "lane": "ci",
+      "ci_job": "perf-budget",
+      "runner": "tools/client-perf/client-perf.mjs",
+      "kiwi_job": "perf-budget"
+    },
+    {
+      "path": "tools/client-ip",
+      "lane": "fixture",
+      "runner": "tools/client-ip/test-vectors.json"
+    },
+    {
+      "path": "tools/ci",
+      "lane": "ci",
+      "ci_job": "repo-sanity",
+      "runner": "tools/ci",
+      "kiwi_job": "lint-repo"
+    },
+    {
+      "path": "tools/dogfood",
+      "lane": "manual",
+      "runner": "tools/dogfood/dogfood.sh",
+      "reason": "needs a running reference deployment and the browser toolchain; documented in its README"
+    },
+    {
+      "path": "tools/failover",
+      "lane": "ci",
+      "ci_job": "verifier-redis",
+      "runner": "tools/failover/runbook-test.sh",
+      "kiwi_job": "verifier-redis-and-core-lanes"
+    },
+    {
+      "path": "tools/redteam",
+      "lane": "release",
+      "runner": "tools/redteam/exit-criteria.sh",
+      "reason": "the release battery is the release gate; it runs on the release commit, not on every push"
+    },
+    {
+      "path": "tools/rsw-keygen",
+      "lane": "ci",
+      "ci_job": "rust",
+      "runner": "tools/rsw-keygen/tests/cli.rs",
+      "kiwi_job": "rust-workspace"
+    },
+    {
+      "path": "recipes-contrib",
+      "lane": "ci",
+      "ci_job": "symfony",
+      "runner": "packages/kiwicaptcha/integrations/symfony/tests/RecipePackageValidationTest.php",
+      "kiwi_job": "symfony-8x-php8.5"
+    },
+    {
+      "path": "protocol",
+      "lane": "ci",
+      "ci_job": "lua-parity",
+      "runner": "protocol/risk-v1",
+      "kiwi_job": "storage-lua-parity"
+    }
   ],
   "protocols": {
     "risk_lua_dir": "protocol/risk-v1",
-    "risk_lua_mirrors": ["packages/kiwicaptcha-risk/resources", "packages/kiwicaptcha-risk-php/resources"],
+    "risk_lua_mirrors": [
+      "packages/kiwicaptcha-risk/resources",
+      "packages/kiwicaptcha-risk-php/resources"
+    ],
     "minimum_count": 21,
     "corpora": [
       "protocol/decision-v1/corpus.json",
@@ -55,8 +345,20 @@
     ]
   },
   "manual_lanes": [
-    { "name": "red-team battery", "command": "tools/redteam/exit-criteria.sh", "evidence": "THREATS.md" },
-    { "name": "physical client performance", "command": "tools/client-perf/run-frozen.mjs", "evidence": "tools/client-perf/results/baseline.json" },
-    { "name": "dogfood walk", "command": "tools/dogfood/dogfood.sh", "evidence": "tools/dogfood/README.md" }
+    {
+      "name": "red-team battery",
+      "command": "tools/redteam/exit-criteria.sh",
+      "evidence": "THREATS.md"
+    },
+    {
+      "name": "physical client performance",
+      "command": "tools/client-perf/run-frozen.mjs",
+      "evidence": "tools/client-perf/results/baseline.json"
+    },
+    {
+      "name": "dogfood walk",
+      "command": "tools/dogfood/dogfood.sh",
+      "evidence": "tools/dogfood/README.md"
+    }
   ]
 }

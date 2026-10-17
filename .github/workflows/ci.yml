@@ -1596,7 +1596,7 @@ jobs:
             --glob '!**/node_modules/**' \
             --glob '!**/target/**' \
             "$PATTERN" \
-            packages tests README.md SECURITY.md .github/workflows .woodpecker; then
+            packages tests README.md SECURITY.md .github/workflows .kiwi; then
             echo "internal-history commentary found in product source/docs (see matches above)" >&2
             exit 1
           fi
