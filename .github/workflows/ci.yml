@@ -2468,7 +2468,7 @@ jobs:
       - name: install
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev
+          sudo apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev libffi-dev pkg-config
           bundle config set --local path vendor/bundle
           bundle install --jobs 4 --retry 3
       - name: test
