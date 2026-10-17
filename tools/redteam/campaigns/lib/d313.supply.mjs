@@ -155,7 +155,30 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
             controlled = true;
         } catch {}
     }
-    if (!controlled) {
+    // Prove the worker is actually rewriting the asset path before
+    // judging anything: a controlled page whose worker does not
+    // intercept would solve normally, and that solve would say nothing
+    // about the product's integrity handling. The probe fetches an
+    // asset the page itself loaded, bypassing the HTTP cache, and looks
+    // for the tampered body's marker.
+    let intercepting = false;
+    if (controlled) {
+        try {
+            intercepting = await page.evaluate(async () => {
+                const entry = performance
+                    .getEntriesByType("resource")
+                    .map((e) => e.name)
+                    .find((n) => n.includes("/kiwi-captcha/assets/"));
+                if (!entry) {
+                    return false;
+                }
+                const res = await fetch(entry, { cache: "no-store" });
+                const body = await res.text();
+                return body.includes("tampered by the MITM service worker");
+            });
+        } catch {}
+    }
+    if (!controlled || !intercepting) {
         // No tampered byte ever reached the page, so the leg proved
         // nothing. It reports that as its own outcome rather than a
         // solve or a refusal, and the driver's verdict treats it as not
@@ -165,7 +188,9 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
             solved_despite_mitm: null,
             widget_state: null,
             console_blocked: [],
-            inconclusive: "the service worker never controlled the page, so no tampered response was ever served",
+            inconclusive: controlled
+                ? "the service worker controlled the page but rewrote no asset, so the tamper was never served"
+                : "the service worker never controlled the page, so no tampered response was ever served",
         };
         await context.close();
     } else {
