@@ -56,7 +56,7 @@ steps:
       - |
         set -eu
         apt-get update -qq
-        apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev
+        apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev libffi-dev pkg-config
         cd packages/kiwicaptcha-ruby
         bundle config set --local path vendor/bundle
         bundle install --jobs 4 --retry 3
