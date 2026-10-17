@@ -42,6 +42,14 @@
 
 local EXPIRY_CEILING_SECS = 2147483647
 
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
 local function ttl_out_of_bounds(value)
     if value == nil or value < 1 or value > EXPIRY_CEILING_SECS then
         return true
@@ -71,20 +79,20 @@ end
 -- a malformed receipt or a non-numeric scope/hour/score would otherwise
 -- create a receipt and then either error (leaving an orphan receipt) or
 -- write a ledger entry with `tonumber(nil)` fields dropped.
-local scope = tonumber(ARGV[6])
+local scope = finite_number(ARGV[6])
 if scope == nil or scope < 1 or scope ~= math.floor(scope) then
-    return redis.error_reply('register_decision: scope must be a positive integer')
+    return redis.error_reply('register_decision: scope must be a positive finite integer')
 end
-local decision_hour = tonumber(ARGV[7])
+local decision_hour = finite_number(ARGV[7])
 if decision_hour == nil or decision_hour ~= math.floor(decision_hour) then
-    return redis.error_reply('register_decision: decision_hour must be an integer')
+    return redis.error_reply('register_decision: decision_hour must be a finite integer')
 end
-local score = tonumber(ARGV[8])
+local score = finite_number(ARGV[8])
 if score == nil or score < 0 or score > 1000 or score ~= math.floor(score) then
-    return redis.error_reply('register_decision: score must be an integer within 0..1000')
+    return redis.error_reply('register_decision: score must be a finite integer within 0..1000')
 end
-local weight = tonumber(ARGV[9])
-if weight == nil or weight ~= weight or weight <= 0 or weight == math.huge then
+local weight = finite_number(ARGV[9])
+if weight == nil or weight <= 0 then
     return redis.error_reply('register_decision: weight must be a positive finite number')
 end
 local ok_decode, receipt = pcall(cjson.decode, ARGV[1])

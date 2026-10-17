@@ -2373,7 +2373,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      */
     private function acceptEmailOwnershipGrant(string $grant, KiwiCaptcha $constraint, ?Request $request): void
     {
-        $presentedChain = $request?->request->get(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::CHAIN_FIELD);
+        $presentedChain = $request?->request->all()[\BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOwnershipStepUp::CHAIN_FIELD] ?? null;
         $payload = null;
         if ($request !== null) {
             try {

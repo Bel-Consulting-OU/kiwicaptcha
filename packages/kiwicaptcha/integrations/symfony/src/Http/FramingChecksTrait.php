@@ -16,6 +16,7 @@ use Symfony\Component\HttpFoundation\Request;
  *                          together with Content-Length.
  *   Content-Type:          max one occurrence.
  *   Content-Encoding:      max one occurrence.
+ *   Host:                  max one occurrence, no controls or spaces.
  *
  * A duplicated header (two different values) is the kind of ambiguity
  * different proxies and application layers interpret differently, so it
@@ -74,6 +75,13 @@ trait FramingChecksTrait
             $path = substr($rawRequestUri, 0, $queryPos);
         }
         if (str_contains($path, '%') || str_contains($path, '\\') || str_contains($path, ';')) {
+            return false;
+        }
+        // RFC 3986 pchar only: an intermediary that is stricter than this
+        // endpoint must never see a second spelling it would reject or
+        // normalize. The rejected set includes pipe, angle brackets,
+        // quotes, braces, caret, backtick and square brackets.
+        if (preg_match('/[^A-Za-z0-9._~!$&\'()*+,=:@\/-]/', $path) === 1) {
             return false;
         }
         // The empty element before the leading slash is the absolute-path
@@ -140,6 +148,20 @@ trait FramingChecksTrait
         }
         if (\count($request->headers->all('Content-Encoding')) > 1) {
             return false;
+        }
+        // The Host header is the routing identity every intermediary
+        // reads. A duplicate or a value carrying whitespace/controls is
+        // parser ambiguity, refused before any header-derived identity
+        // is trusted.
+        $hosts = $request->headers->all('host');
+        if (\count($hosts) > 1) {
+            return false;
+        }
+        if ($hosts !== []) {
+            $host = $hosts[0];
+            if (!\is_string($host) || $host === '' || preg_match('/[\x00-\x20\x7F,]/', $host) === 1) {
+                return false;
+            }
         }
 
         return true;

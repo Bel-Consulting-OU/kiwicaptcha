@@ -146,7 +146,9 @@ end
 local weight = 1
 if mode == 2 then
     weight = tonumber(ARGV[2])
-    if not weight or weight <= 0 or weight ~= weight or weight == math.huge then
+    local finite = weight ~= nil
+        and weight == weight and weight ~= math.huge and weight ~= -math.huge
+    if not finite or weight <= 0 then
         return redis.error_reply('invalid calibration weight')
     end
 end

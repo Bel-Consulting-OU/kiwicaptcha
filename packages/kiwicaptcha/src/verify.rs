@@ -1257,7 +1257,14 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         // Legacy v1 records: `nonce|scope|ip_hash|issued_at` (the binding
         // field carried the legacy hash_ip). Verified for the migration
         // window (max TTL) alongside v2.
-        1 => verify_signature(&payload_from_record(ctx.record), sig, secret),
+        1 => {
+            let payload = payload_from_record(ctx.record);
+            let canonical = crate::challenge::canonical_signing_input(&payload);
+            if !crate::challenge::challenge_payload_matches(&ctx.record.challenge, &canonical) {
+                return VerifyOutcome::Invalid(VerifyError::BadSignature);
+            }
+            verify_signature(&payload, sig, secret)
+        }
         _ => verify_signature_v2_with_tenant(ctx.record, sig, secret, ctx.tenant),
     };
     match sig_ok {
@@ -7264,6 +7271,77 @@ mod tests {
                 VerifyOutcome::Invalid(VerifyError::InsufficientWork)
             ),
             "an argon2id record must reject a presented rsw proof"
+        );
+    }
+}
+
+#[cfg(test)]
+mod wire_timing_tests {
+    //! The constant-time comparison behind the signature and rsw
+    //! checks, measured against an early-exit comparator that
+    //! calibrates the noise floor. A position-dependent timing
+    //! difference on the production comparator fails the test.
+
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use super::ct_eq;
+
+    const LENGTH: usize = 8192;
+    const ROUNDS: usize = 25;
+    const CALLS: usize = 10;
+
+    fn measure(f: impl Fn(&[u8], &[u8]) -> bool, a: &[u8], b: &[u8]) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..ROUNDS {
+            let start = Instant::now();
+            for _ in 0..CALLS {
+                black_box(f(black_box(a), black_box(b)));
+            }
+            best = best.min(start.elapsed().as_nanos() as f64 / CALLS as f64);
+        }
+        best
+    }
+
+    fn leaking(a: &[u8], b: &[u8]) -> bool {
+        for (x, y) in a.iter().zip(b.iter()) {
+            if x != y {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn ct_eq_does_not_leak_the_mismatch_position() {
+        let first = vec![b'a'; LENGTH];
+        let mut last = first.clone();
+        last[LENGTH - 1] = b'b';
+        let mut head = first.clone();
+        head[0] = b'b';
+
+        let noise_a = measure(leaking, &first, &first);
+        let noise_b = measure(leaking, &first, &first);
+        let noise = (noise_a - noise_b).abs().max(1.0);
+
+        let leak_first = measure(leaking, &first, &head);
+        let leak_last = measure(leaking, &first, &last);
+        let leak_delta = (leak_last - leak_first).abs();
+        assert!(
+            leak_delta > (noise * 10.0).max(10_000.0),
+            "the measurement must see an early exit: first={leak_first}ns last={leak_last}ns noise={noise}ns"
+        );
+
+        let real_first = measure(ct_eq, &first, &head);
+        let real_last = measure(ct_eq, &first, &last);
+        eprintln!(
+            "ct_eq timing: noise={noise:.0}ns leak_first={leak_first:.0}ns leak_last={leak_last:.0}ns real_first={real_first:.0}ns real_last={real_last:.0}ns"
+        );
+        let real_delta = (real_last - real_first).abs();
+        let budget = (noise * 10.0).max(real_first * 0.20).max(2_000.0);
+        assert!(
+            real_delta <= budget,
+            "ct_eq leaked the mismatch position: first={real_first}ns last={real_last}ns noise={noise}ns"
         );
     }
 }

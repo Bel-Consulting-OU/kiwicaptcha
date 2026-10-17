@@ -41,52 +41,53 @@ final class StructuredFieldsSubsetParser
     public function parseSignatureInput(string $value): SignatureInputParameters
     {
         $value = trim($value);
-        $label = $this->parseKey($value);
-        $this->expect($value, '=');
-        if ($value === '' || $value[0] !== '(') {
+        $offset = 0;
+        $label = $this->parseKey($value, $offset);
+        $this->expect($value, $offset, '=');
+        if (!isset($value[$offset]) || $value[$offset] !== '(') {
             throw new \InvalidArgumentException('Signature-Input must carry an inner list of covered components');
         }
-        $value = substr($value, 1);
+        ++$offset;
 
         $covered = [];
-        while ($value !== '' && $value[0] === '"') {
-            $covered[] = $this->parseString($value);
-            $value = ltrim($value, ' ');
+        while (isset($value[$offset]) && $value[$offset] === '"') {
+            $covered[] = $this->parseString($value, $offset);
+            $this->skipSpaces($value, $offset);
         }
         if ($covered === []) {
             throw new \InvalidArgumentException('Signature-Input inner list must cover at least one component');
         }
-        $this->expect($value, ')');
+        $this->expect($value, $offset, ')');
 
         $parameters = [];
-        while ($value !== '' && $value[0] === ';') {
-            $value = substr($value, 1);
-            $key = $this->parseKey($value);
-            if ($value === '' || $value[0] !== '=') {
+        $seenKeys = [];
+        while (isset($value[$offset]) && $value[$offset] === ';') {
+            ++$offset;
+            $key = $this->parseKey($value, $offset);
+            if (!isset($value[$offset]) || $value[$offset] !== '=') {
                 // A bare parameter is RFC 8941 boolean true; this
                 // subset parses strings and integers only, so it is
                 // refused, never coerced to "".
                 throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" must carry a string or integer value; bare boolean parameters are refused', $key));
             }
-            $value = substr($value, 1);
-            if ($value !== '' && $value[0] === '"') {
-                $parameterValue = $this->parseString($value);
+            ++$offset;
+            if (isset($value[$offset]) && $value[$offset] === '"') {
+                $parameterValue = $this->parseString($value, $offset);
                 $kind = 'string';
-            } elseif ($value !== '' && ($value[0] === '-' || ctype_digit($value[0]))) {
-                $parameterValue = $this->parseInteger($value);
+            } elseif (isset($value[$offset]) && ($value[$offset] === '-' || ctype_digit($value[$offset]))) {
+                $parameterValue = $this->parseInteger($value, $offset);
                 $kind = 'integer';
             } else {
                 throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" carries an unsupported value', $key));
             }
-            foreach ($parameters as [$existingKey]) {
-                if ($existingKey === $key) {
-                    throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" appears twice', $key));
-                }
+            if (isset($seenKeys[$key])) {
+                throw new \InvalidArgumentException(sprintf('Signature-Input parameter "%s" appears twice', $key));
             }
+            $seenKeys[$key] = true;
             $parameters[] = [$key, $parameterValue, $kind];
         }
 
-        if (trim($value, ' ') !== '') {
+        if (trim(substr($value, $offset), ' ') !== '') {
             throw new \InvalidArgumentException('Signature-Input carries more than one labeled signature; exactly one is accepted');
         }
 
@@ -106,18 +107,19 @@ final class StructuredFieldsSubsetParser
     public function parseSignature(string $value): array
     {
         $value = trim($value);
-        $label = $this->parseKey($value);
-        $this->expect($value, '=');
-        if ($value === '' || $value[0] !== ':') {
+        $offset = 0;
+        $label = $this->parseKey($value, $offset);
+        $this->expect($value, $offset, '=');
+        if (!isset($value[$offset]) || $value[$offset] !== ':') {
             throw new \InvalidArgumentException('Signature must carry a byte-sequence value');
         }
-        $end = strpos($value, ':', 1);
+        $end = strpos($value, ':', $offset + 1);
         if ($end === false) {
             throw new \InvalidArgumentException('Signature byte-sequence is not terminated');
         }
-        $encoded = substr($value, 1, $end - 1);
-        $value = substr($value, $end + 1);
-        if (trim($value, ' ') !== '') {
+        $encoded = substr($value, $offset + 1, $end - $offset - 1);
+        $offset = $end + 1;
+        if (trim(substr($value, $offset), ' ') !== '') {
             throw new \InvalidArgumentException('Signature carries more than one labeled member; exactly one is accepted');
         }
         if (preg_match('/^[A-Za-z0-9+\/]*={0,2}$/D', $encoded) !== 1) {
@@ -135,26 +137,35 @@ final class StructuredFieldsSubsetParser
     }
 
     /** @throws \InvalidArgumentException when the next byte is not the expected one */
-    private function expect(string &$value, string $byte): void
+    private function expect(string $value, int &$offset, string $byte): void
     {
-        if ($value === '' || $value[0] !== $byte) {
+        if (!isset($value[$offset]) || $value[$offset] !== $byte) {
             throw new \InvalidArgumentException(sprintf('Structured field syntax error: expected "%s"', $byte));
         }
-        $value = substr($value, 1);
+        ++$offset;
+    }
+
+    /** Skip the single spaces RFC 8941 permits between inner-list items. */
+    private function skipSpaces(string $value, int &$offset): void
+    {
+        $length = \strlen($value);
+        while ($offset < $length && $value[$offset] === ' ') {
+            ++$offset;
+        }
     }
 
     /**
      * A parameter or label key: lowercase lcalpha start, then the
      * key character set, per RFC 8941 §4.1.1.1.
      */
-    private function parseKey(string &$value): string
+    private function parseKey(string $value, int &$offset): string
     {
-        if ($value === '' || preg_match('/^[a-z]/', $value) !== 1) {
+        if (!isset($value[$offset]) || $value[$offset] < 'a' || $value[$offset] > 'z') {
             throw new \InvalidArgumentException('Structured field keys must start with a lowercase letter');
         }
-        $length = strspn($value, 'abcdefghijklmnopqrstuvwxyz0123456789_-.');
-        $key = substr($value, 0, $length);
-        $value = substr($value, $length);
+        $length = strspn($value, 'abcdefghijklmnopqrstuvwxyz0123456789_-.', $offset);
+        $key = substr($value, $offset, $length);
+        $offset += $length;
 
         return $key;
     }
@@ -164,15 +175,15 @@ final class StructuredFieldsSubsetParser
      * backslash escaping for the backslash and the quote, per RFC
      * 8941 §4.1.2. Every other byte is refused.
      */
-    private function parseString(string &$value): string
+    private function parseString(string $value, int &$offset): string
     {
-        $this->expect($value, '"');
+        $this->expect($value, $offset, '"');
         $out = '';
         $length = \strlen($value);
-        for ($i = 0; $i < $length; ++$i) {
+        for ($i = $offset; $i < $length; ++$i) {
             $byte = $value[$i];
             if ($byte === '"') {
-                $value = substr($value, $i + 1);
+                $offset = $i + 1;
 
                 return $out;
             }
@@ -194,14 +205,24 @@ final class StructuredFieldsSubsetParser
     }
 
     /** An integer: at most 15 digits with an optional sign. */
-    private function parseInteger(string &$value): int
+    private function parseInteger(string $value, int &$offset): int
     {
-        if (preg_match('/^(-?)([0-9]{1,15})/D', $value, $m) !== 1) {
+        $sign = '';
+        if (isset($value[$offset]) && $value[$offset] === '-') {
+            $sign = '-';
+            ++$offset;
+        }
+        $start = $offset;
+        $length = \strlen($value);
+        while ($offset < $length && $offset - $start < 15 && ctype_digit($value[$offset])) {
+            ++$offset;
+        }
+        $digits = substr($value, $start, $offset - $start);
+        if ($digits === '') {
             throw new \InvalidArgumentException('Structured field integers carry at most 15 digits');
         }
-        $value = substr($value, \strlen($m[0]));
 
-        return (int) ($m[1].$m[2]);
+        return (int) ($sign.$digits);
     }
 
     /**

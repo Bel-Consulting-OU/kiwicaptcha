@@ -48,14 +48,28 @@ local function normalize(value, saturation)
     return scaled
 end
 
-local merged_gp = tonumber(ARGV[1])
-local sat_global = tonumber(ARGV[2])
-local hysteresis_ms = tonumber(ARGV[3])
-if merged_gp == nil or sat_global == nil or hysteresis_ms == nil then
-    return redis.error_reply('risk-v1-sharded: ARGV[1]/ARGV[2]/ARGV[3] must be numeric')
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
 end
-if hysteresis_ms < 1 then
-    return redis.error_reply('risk-v1-sharded: hysteresis_ms must be >= 1')
+
+local merged_gp = finite_number(ARGV[1])
+local sat_global = finite_number(ARGV[2])
+local hysteresis_ms = finite_number(ARGV[3])
+if merged_gp == nil or sat_global == nil or hysteresis_ms == nil then
+    return redis.error_reply('risk-v1-sharded: ARGV[1]/ARGV[2]/ARGV[3] must be finite numbers')
+end
+if merged_gp < 0 or merged_gp ~= math.floor(merged_gp) then
+    return redis.error_reply('risk-v1-sharded: merged_gp must be a non-negative integer')
+end
+if sat_global < 1 or sat_global ~= math.floor(sat_global) then
+    return redis.error_reply('risk-v1-sharded: sat_global must be a positive integer')
+end
+if hysteresis_ms < 1 or hysteresis_ms ~= math.floor(hysteresis_ms) then
+    return redis.error_reply('risk-v1-sharded: hysteresis_ms must be a positive integer')
 end
 
 local v = redis.call('HMGET', KEYS[1], 'scope', 'cool')

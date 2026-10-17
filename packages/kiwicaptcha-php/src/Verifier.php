@@ -2947,15 +2947,21 @@ final class Verifier
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {
         $commitsMac = Issuer::signedCanonicalCommitsRecordMeta($record->challenge);
-        $expected = $record->protocolVersion === 1
-            ? Issuer::signPayload(sprintf(
+        // Reconstruct the canonical once: the signature authenticates
+        // these bytes, and the client-visible payload segment must be
+        // exactly those bytes. Comparing only the last dot-segment
+        // would leave the embedded payload unauthenticated, so a party
+        // able to rewrite the challenge string could make the browser
+        // solve a payload that disagrees with the signed fields.
+        $canonical = $record->protocolVersion === 1
+            ? sprintf(
                 '%s|%s|%s|%d',
                 $record->nonce,
                 $record->scope,
                 $record->ipHash(),
                 $record->issuedAt,
-            ), $secretKey)
-            : Issuer::signPayloadV2(Issuer::canonicalPayload(
+            )
+            : Issuer::canonicalPayload(
                 $record->protocolVersion,
                 $record->nonce,
                 $record->scope,
@@ -2979,7 +2985,14 @@ final class Verifier
                 $record->executionCommitment,
                 $record->rswModulusSha256,
                 $commitsMac,
-            ), $secretKey, $this->tenantId);
+            );
+        $presentedPayload = self::payloadFromChallenge($record->challenge);
+        if ($presentedPayload === null || !hash_equals($canonical, $presentedPayload)) {
+            return false;
+        }
+        $expected = $record->protocolVersion === 1
+            ? Issuer::signPayload($canonical, $secretKey)
+            : Issuer::signPayloadV2($canonical, $secretKey, $this->tenantId);
 
         if (!hash_equals($expected, self::signatureFromChallenge($record->challenge))) {
             return false;
@@ -3058,6 +3071,27 @@ final class Verifier
         }
 
         return substr($challenge, $pos + 1);
+    }
+
+    /**
+     * The canonical payload embedded before the final dot, decoded, or
+     * null when that segment is not the canonical base64 of its bytes.
+     * Exactly one spelling per payload is accepted, matching the strict
+     * base64 rules the token decoder applies.
+     */
+    private static function payloadFromChallenge(string $challenge): ?string
+    {
+        $pos = strrpos($challenge, '.');
+        if ($pos === false) {
+            return null;
+        }
+        $encoded = substr($challenge, 0, $pos);
+        $decoded = base64_decode($encoded, true);
+        if ($decoded === false || base64_encode($decoded) !== $encoded) {
+            return null;
+        }
+
+        return $decoded;
     }
 
     /**

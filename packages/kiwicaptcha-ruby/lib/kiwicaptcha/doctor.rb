@@ -15,6 +15,10 @@ module KiwiCaptcha
 
     IDENTIFIER_ALPHABET = /\A[A-Za-z0-9._:-]+\z/.freeze
 
+    # The fixed self-check key of the local store probe; it never leaves
+    # the process.
+    DOCTOR_SELF_CHECK_SECRET = 'kiwicaptcha-doctor-self-check-secret-0000'
+
     module_function
 
     # Run every deployment check. The store probe writes a nonce-shaped
@@ -87,6 +91,38 @@ module KiwiCaptcha
       probe = Digest::SHA256.digest(Time.now.to_f.to_s)
       nonce = Base64Utils.encode_std(probe)
       now = Time.now.to_i
+      salt = Base64Utils.encode_std(probe[0, 16])
+      canonical = Canonical.canonical_payload(
+        Canonical::CanonicalArgs.new(
+          protocol_version: 2,
+          nonce: nonce,
+          scope: 'doctor',
+          binding_tag: '',
+          issued_at: now,
+          expires_at: now + 120,
+          algorithm: 'sha256',
+          m_kib: 0,
+          t: 1,
+          p: 1,
+          target_bits: 1,
+          salt: salt,
+          min_duration_ms: 0,
+          region: nil,
+          policy_version: 1,
+          request_binding: nil,
+          issuer: nil,
+          kid: 1,
+          decoy_field: nil,
+          execution_version: nil,
+          execution_commitment: nil,
+          rsw_modulus_sha256: nil,
+          server_mac_committed: false
+        )
+      )
+      signature = Canonical.sign_payload_v2(
+        canonical, DOCTOR_SELF_CHECK_SECRET, nil
+      )
+      challenge = "#{Base64Utils.encode_std(canonical.b)}.#{signature}"
       record = Record::ChallengeRecord.new(
         nonce: nonce,
         scope: 'doctor',
@@ -98,9 +134,9 @@ module KiwiCaptcha
         t: 1,
         p: 1,
         target_bits: 1,
-        salt: Base64Utils.encode_std(probe[0, 16]),
-        prefix: "#{nonce}.",
-        challenge: "#{nonce}.sig",
+        salt: salt,
+        prefix: "#{challenge}|#{salt}|",
+        challenge: challenge,
         min_duration_ms: 0,
         issued_at_ns: 0,
         protocol_version: 2,

@@ -4553,7 +4553,14 @@ impl ProductionVerifier {
         //     re-deriving per verification.
         let sig = signature_from_challenge(record);
         let sig_ok = match record.protocol_version {
-            1 => verify_signature(&payload_from_record(record), sig, secret),
+            1 => {
+                let payload = payload_from_record(record);
+                let canonical = crate::challenge::canonical_signing_input(&payload);
+                if !crate::challenge::challenge_payload_matches(&record.challenge, &canonical) {
+                    return Err(VerifyError::BadSignature);
+                }
+                verify_signature(&payload, sig, secret)
+            }
             _ => {
                 let keys = self.resolve_derived_keys(record)?;
                 verify_signature_v2_with_keys(record, sig, &keys)

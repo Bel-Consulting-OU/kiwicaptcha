@@ -43,6 +43,14 @@ PHP_VERIFIER="$ROOT/packages/kiwicaptcha-php/src/Verifier.php"
 PHP_EXECUTION="$ROOT/packages/kiwicaptcha-php/src/ExecutionChallengeGenerator.php"
 
 NODE_EXECUTION="$ROOT/packages/kiwicaptcha-node/src/execution.ts"
+NODE_TOKEN="$ROOT/packages/kiwicaptcha-node/src/token.ts"
+
+RUBY_TOKEN="$ROOT/packages/kiwicaptcha-ruby/lib/kiwicaptcha/token.rb"
+PYTHON_CONSTANTS="$ROOT/packages/kiwicaptcha-python-sdk/kiwicaptcha/constants.py"
+GO_CONSTANTS="$ROOT/packages/kiwicaptcha-go/constants.go"
+JVM_KIWI="$ROOT/packages/kiwicaptcha-jvm/core/src/main/java/com/kiwicaptcha/Kiwi.java"
+DOTNET_PRIMITIVES="$ROOT/packages/kiwicaptcha-dotnet/src/KiwiCaptcha/Primitives.cs"
+ELIXIR_JSON="$ROOT/packages/kiwicaptcha-elixir/lib/kiwicaptcha/json.ex"
 
 DRIVER="$ROOT/packages/kiwicaptcha-wasm/assets/widget-driver.js"
 RISK="$ROOT/packages/kiwicaptcha-wasm/assets/widget-risk.js"
@@ -59,7 +67,8 @@ pass() {
 
 for f in "$MANIFEST" "$RUST_CHALLENGE" "$RUST_TOKEN" "$RUST_KEYS" "$RUST_EXECUTION" \
     "$RUST_WASM" "$PHP_CONFIG" "$PHP_TOKEN" "$PHP_VERIFIER" "$PHP_EXECUTION" \
-    "$NODE_EXECUTION" "$DRIVER" "$RISK" "$WORKER"; do
+    "$NODE_EXECUTION" "$NODE_TOKEN" "$RUBY_TOKEN" "$PYTHON_CONSTANTS" "$GO_CONSTANTS" \
+    "$JVM_KIWI" "$DOTNET_PRIMITIVES" "$ELIXIR_JSON" "$DRIVER" "$RISK" "$WORKER"; do
     [ -f "$f" ] || fail "missing source file: $f"
 done
 
@@ -74,7 +83,37 @@ manifest_string_field() {
 }
 
 FIELD_COUNT=$(grep -cE '^  "[a-z0-9_]+": ([0-9]+|"[^"]+"),?$' "$MANIFEST" || true)
-[ "$FIELD_COUNT" -ge 17 ] || fail "the manifest carries only $FIELD_COUNT limit fields; every register row is required"
+[ "$FIELD_COUNT" -ge 19 ] || fail "the manifest carries only $FIELD_COUNT limit fields; every register row is required"
+
+# ruby_const <file> <name>: the numeric value of a module constant.
+ruby_const() {
+    sed -n -E "s/^    $2 = ([0-9_]+)$/\1/p" "$1" | head -n 1 | tr -d '_'
+}
+
+# python_const <file> <name>: the numeric value of a module constant.
+python_const() {
+    sed -n -E "s/^$2 = ([0-9_]+)$/\1/p" "$1" | head -n 1 | tr -d '_'
+}
+
+# go_const <file> <name>: the numeric value of a top-level Go constant.
+go_const() {
+    sed -n -E "s/^const $2 = ([0-9_]+)$/\1/p" "$1" | head -n 1 | tr -d '_'
+}
+
+# java_const <file> <name>: the numeric value of a static final int constant.
+java_const() {
+    sed -n -E "s/^    public static final int $2 = ([0-9_]+);$/\1/p" "$1" | head -n 1 | tr -d '_'
+}
+
+# cs_const <file> <name>: the numeric value of a public const int constant.
+cs_const() {
+    sed -n -E "s/^    public const int $2 = ([0-9_]+);$/\1/p" "$1" | head -n 1 | tr -d '_'
+}
+
+# elixir_attr <file> <name>: the numeric value of a module attribute.
+elixir_attr() {
+    sed -n -E "s/^  @$2 ([0-9_]+)$/\1/p" "$1" | head -n 1 | tr -d '_'
+}
 
 # rust_const <file> <name>: the numeric value of a `pub const NAME: T = N;`
 # declaration (underscores stripped).
@@ -129,6 +168,7 @@ TTL_MAX_SECS=$(manifest_field ttl_max_secs)
 RSW_T_MIN=$(manifest_field rsw_t_min)
 RSW_T_MAX=$(manifest_field rsw_t_max)
 TOKEN_MAX_DURATION_MS=$(manifest_field token_max_duration_ms)
+TOKEN_MAX_TELEMETRY_DEPTH=$(manifest_field token_max_telemetry_depth)
 MIN_MASTER_BYTES=$(manifest_field min_master_bytes)
 MIN_EXECUTION_KEY_BYTES=$(manifest_field min_execution_key_bytes)
 EXECUTION_MAX_VERSION=$(manifest_field execution_max_version)
@@ -149,6 +189,7 @@ for pair in \
     "rsw_t_min:$RSW_T_MIN" \
     "rsw_t_max:$RSW_T_MAX" \
     "token_max_duration_ms:$TOKEN_MAX_DURATION_MS" \
+    "token_max_telemetry_depth:$TOKEN_MAX_TELEMETRY_DEPTH" \
     "min_master_bytes:$MIN_MASTER_BYTES" \
     "min_execution_key_bytes:$MIN_EXECUTION_KEY_BYTES" \
     "execution_max_version:$EXECUTION_MAX_VERSION" \
@@ -230,6 +271,29 @@ assert_eq "Rust token MAX_DURATION_MS" "$TOKEN_MAX_DURATION_MS" \
 assert_eq "PHP SolutionToken::MAX_DURATION_MS" "$TOKEN_MAX_DURATION_MS" \
     "$(php_const "$PHP_TOKEN" MAX_DURATION_MS)"
 pass "the TTL ceiling, the rsw T ladder and the token duration ceiling agree"
+
+# ── Telemetry nesting depth ────────────────────────────────────────────
+# The depth ceiling is the token parser's contract, not just a server
+# bound: all nine hosted decoders must accept the same telemetry tree.
+assert_eq "Rust token MAX_TELEMETRY_DEPTH" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(rust_const "$RUST_TOKEN" MAX_TELEMETRY_DEPTH)"
+assert_eq "PHP SolutionToken::MAX_TELEMETRY_DEPTH" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(php_const "$PHP_TOKEN" MAX_TELEMETRY_DEPTH)"
+assert_eq "Node token MAX_TELEMETRY_DEPTH" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(js_value "$NODE_TOKEN" 's/^export const MAX_TELEMETRY_DEPTH = ([0-9_]+);$/\1/p')"
+assert_eq "Ruby Token::MAX_TELEMETRY_DEPTH" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(ruby_const "$RUBY_TOKEN" MAX_TELEMETRY_DEPTH)"
+assert_eq "Python constants.MAX_TELEMETRY_DEPTH" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(python_const "$PYTHON_CONSTANTS" MAX_TELEMETRY_DEPTH)"
+assert_eq "Go MaxTelemetryDepth" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(go_const "$GO_CONSTANTS" MaxTelemetryDepth)"
+assert_eq "JVM Kiwi.MAX_TELEMETRY_DEPTH" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(java_const "$JVM_KIWI" MAX_TELEMETRY_DEPTH)"
+assert_eq ".NET Kiwi.MaxTelemetryDepth" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(cs_const "$DOTNET_PRIMITIVES" MaxTelemetryDepth)"
+assert_eq "Elixir Json max_telemetry_depth" "$TOKEN_MAX_TELEMETRY_DEPTH" \
+    "$(elixir_attr "$ELIXIR_JSON" max_telemetry_depth)"
+pass "the telemetry depth ceiling agrees across all nine hosted decoders"
 
 # ── Secret floors ──────────────────────────────────────────────────────
 assert_eq "Rust MIN_MASTER_BYTES" "$MIN_MASTER_BYTES" \

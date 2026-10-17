@@ -192,6 +192,83 @@ func canonicalB64urlCheck(trace string) bool {
 	return reencoded == trace
 }
 
+// hasUnpairedSurrogateEscape reports a JSON string literal carrying a
+// \u escape that encodes an unpaired surrogate. encoding/json replaces
+// such an escape with U+FFFD, while the reference decoder rejects the
+// token; rejecting it here keeps every host on one value. Escaped
+// backslashes are skipped, so the literal text \\ud800 is not an
+// escape. Malformed escapes are left to the JSON parser.
+func hasUnpairedSurrogateEscape(text string) bool {
+	inString := false
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		if c == '"' {
+			inString = false
+			continue
+		}
+		if c != '\\' {
+			continue
+		}
+		if i+1 >= len(text) {
+			return false
+		}
+		if text[i+1] != 'u' {
+			i++
+			continue
+		}
+		if i+5 >= len(text) {
+			return false
+		}
+		unit, ok := parseHex4(text[i+2 : i+6])
+		if !ok {
+			return false
+		}
+		if unit >= 0xd800 && unit <= 0xdbff {
+			if i+11 < len(text) && text[i+6] == '\\' && text[i+7] == 'u' {
+				if low, lok := parseHex4(text[i+8 : i+12]); lok && low >= 0xdc00 && low <= 0xdfff {
+					i += 11
+					continue
+				}
+			}
+			return true
+		}
+		if unit >= 0xdc00 && unit <= 0xdfff {
+			return true
+		}
+		i += 5
+	}
+	return false
+}
+
+func parseHex4(text string) (int, bool) {
+	if len(text) != 4 {
+		return 0, false
+	}
+	value := 0
+	for i := 0; i < 4; i++ {
+		c := text[i]
+		var digit int
+		switch {
+		case c >= '0' && c <= '9':
+			digit = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			digit = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			digit = int(c-'A') + 10
+		default:
+			return 0, false
+		}
+		value = value*16 + digit
+	}
+	return value, true
+}
+
 // DecodeToken parses wire bytes and returns a typed error on any
 // grammar violation.
 func DecodeToken(raw string) (*SolutionToken, error) {
@@ -249,11 +326,21 @@ func DecodeToken(raw string) (*SolutionToken, error) {
 	if !ok || len(nonceBytes) != NonceB64Bytes {
 		return nil, &DecodeError{Code: DecodeErrMalformed}
 	}
-	counter, ok := canonicalDecimal(counterStr)
-	if !ok {
+	// The syntax gate and the length gate are separate rejections, the
+	// reference decoder's order: a nine digit spelling is a
+	// counter-ceiling rejection even when it is too large for a native
+	// integer, never a generic syntax rejection.
+	if !isDigits(counterStr) || (len(counterStr) > 1 && counterStr[0] == '0') {
 		return nil, &DecodeError{Code: DecodeErrInvalidCounter}
 	}
-	if len(counterStr) > 8 || counter >= MaxSolverCounter {
+	if len(counterStr) > 8 {
+		return nil, &DecodeError{Code: DecodeErrInvalidCount}
+	}
+	counter, err := strconv.Atoi(counterStr)
+	if err != nil {
+		return nil, &DecodeError{Code: DecodeErrInvalidCounter}
+	}
+	if counter >= MaxSolverCounter {
 		return nil, &DecodeError{Code: DecodeErrInvalidCount}
 	}
 	duration, ok := canonicalDecimal(durationStr)
@@ -262,6 +349,9 @@ func DecodeToken(raw string) (*SolutionToken, error) {
 	}
 	if duration > MaxDurationMs {
 		return nil, &DecodeError{Code: DecodeErrInvalidDur}
+	}
+	if hasUnpairedSurrogateEscape(telemetryStr) {
+		return nil, &DecodeError{Code: DecodeErrMalformed}
 	}
 	telemetry, err := parseJSONObject(telemetryStr)
 	if err != nil {

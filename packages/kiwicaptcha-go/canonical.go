@@ -204,6 +204,24 @@ func SignatureFromChallenge(challenge string) string {
 	return challenge[dot+1:]
 }
 
+// ChallengePayloadMatches reports whether the challenge's payload
+// segment (everything before the final dot) is the canonical standard
+// base64 of exactly canonical. Challenge writers emit
+// base64(canonical) || "." || signature, so a segment that decodes to
+// anything else is a malformed record whose client-visible payload
+// disagrees with the signed fields.
+func ChallengePayloadMatches(challenge, canonical string) bool {
+	dot := strings.LastIndexByte(challenge, '.')
+	if dot < 0 {
+		return false
+	}
+	decoded, ok := b64CanonicalDecode(challenge[:dot])
+	if !ok {
+		return false
+	}
+	return string(decoded) == canonical
+}
+
 // HashIPV1 is the legacy v1 binding value: the sha256 hex of
 // secret plus ip.
 func HashIPV1(ip, secret string) string {
@@ -391,12 +409,15 @@ func ServerStateMacConsumedResult(key []byte, challenge string, valid bool, bind
 // the marker accepts an absent mac and always verifies a present one.
 func VerifyRecordSignature(record *ChallengeRecord, secretKey, tenantID string) bool {
 	commitsMac := SignedCanonicalCommitsRecordMeta(record.Challenge)
-	var expected string
+	// Reconstruct the canonical once: the signature authenticates these
+	// bytes, and the client-visible payload segment must be exactly
+	// those bytes. Comparing only the last dot-segment would leave the
+	// embedded payload unauthenticated, so a party able to rewrite the
+	// challenge string could make the browser solve a payload that
+	// disagrees with the signed fields.
+	var canonical string
 	if record.ProtocolVersion == 1 {
-		expected = SignPayloadV1(
-			LegacyV1Payload(record.Nonce, record.Scope, record.BindingTag, record.IssuedAt),
-			secretKey,
-		)
+		canonical = LegacyV1Payload(record.Nonce, record.Scope, record.BindingTag, record.IssuedAt)
 	} else {
 		payload, err := CanonicalPayloadChecked(
 			record.ProtocolVersion,
@@ -426,7 +447,16 @@ func VerifyRecordSignature(record *ChallengeRecord, secretKey, tenantID string) 
 		if err != nil {
 			return false
 		}
-		signed, err := SignPayloadV2(payload, secretKey, tenantID)
+		canonical = payload
+	}
+	if !ChallengePayloadMatches(record.Challenge, canonical) {
+		return false
+	}
+	var expected string
+	if record.ProtocolVersion == 1 {
+		expected = SignPayloadV1(canonical, secretKey)
+	} else {
+		signed, err := SignPayloadV2(canonical, secretKey, tenantID)
 		if err != nil {
 			return false
 		}

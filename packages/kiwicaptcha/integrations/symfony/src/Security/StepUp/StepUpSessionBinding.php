@@ -164,12 +164,24 @@ final class StepUpSessionBinding
         // Stateless challenge: the per-challenge client secret, compared
         // against the stored hash (never a plaintext secret).
         if ($challenge->clientSecretHash !== null && $challenge->clientSecretHash !== '') {
-            $presented = (string) $request->request->get(self::CLIENT_SECRET_FIELD, '');
+            $presented = self::clientSecretOf($request);
 
             return $presented !== '' && $challenge->clientSecretMatches($presented);
         }
 
         return false;
+    }
+
+    /**
+     * The submitted client secret, or the empty string when the field
+     * is absent or not a string. The typed accessor would throw on an
+     * array-shaped field, so the raw map is read.
+     */
+    private static function clientSecretOf(Request $request): string
+    {
+        $value = $request->request->all()[self::CLIENT_SECRET_FIELD] ?? '';
+
+        return \is_string($value) ? $value : '';
     }
 
     /**
@@ -192,7 +204,7 @@ final class StepUpSessionBinding
             return StepUpChallenge::sessionHash($requestSession);
         }
         if ($challenge->clientSecretHash !== null && $challenge->clientSecretHash !== '') {
-            $presented = (string) $request->request->get(self::CLIENT_SECRET_FIELD, '');
+            $presented = self::clientSecretOf($request);
 
             return $presented === '' ? null : StepUpChallenge::clientSecretHash($presented);
         }

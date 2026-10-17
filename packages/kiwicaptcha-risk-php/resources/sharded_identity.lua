@@ -188,13 +188,21 @@ local function ttl_out_of_bounds(value)
     return value ~= math.floor(value)
 end
 
-local dimension = tonumber(ARGV[3])
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
+local dimension = finite_number(ARGV[3])
 local has_write_arg = ARGV[4]
-local dedupe_ttl = tonumber(ARGV[5])
+local dedupe_ttl = finite_number(ARGV[5])
 local event_id = ARGV[6] or ''
-local state_ttl = tonumber(ARGV[7])
-if dimension == nil or dimension < 1 or dimension > 7 then
-    return redis.error_reply('risk-v1-sharded: dimension must be 1..7')
+local state_ttl = finite_number(ARGV[7])
+if dimension == nil or dimension ~= math.floor(dimension) or dimension < 1 or dimension > 7 then
+    return redis.error_reply('risk-v1-sharded: dimension must be an integer within 1..7')
 end
 -- Fail closed on a malformed has_write: a garbage flag that silently
 -- coerced to read-only would drop the event instead of refusing it.
@@ -209,15 +217,18 @@ if has_write and ttl_out_of_bounds(state_ttl) then
     return redis.error_reply('risk-v1-sharded: state_ttl_s must be a positive integer no greater than 2147483647')
 end
 for _, i in ipairs({1, 2}) do
-    if tonumber(ARGV[i]) == nil then
-        return redis.error_reply('risk-v1-sharded: ARGV['..i..'] must be numeric')
+    if finite_number(ARGV[i]) == nil then
+        return redis.error_reply('risk-v1-sharded: ARGV['..i..'] must be a finite number')
     end
 end
 
-local event = tonumber(ARGV[1])
-local scope = tonumber(ARGV[2])
+local event = finite_number(ARGV[1])
+local scope = finite_number(ARGV[2])
 if event ~= math.floor(event) or event < 1 or event > 22 then
     return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
+end
+if scope ~= math.floor(scope) then
+    return redis.error_reply('risk-v1-sharded: scope must be an integer')
 end
 
 -- ── Per-dimension dedupe: the marker is SET NX inside this script, so

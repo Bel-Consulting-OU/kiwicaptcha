@@ -97,6 +97,12 @@ const MaxSolverCounter = 20_000_000
 // duration.
 const MaxDurationMs = 3_600_000
 
+// MaxTelemetryDepth is the maximum nesting depth of the telemetry
+// object, the protocol/limits.json token_max_telemetry_depth register
+// row. The scalar level is zero, so the 32nd nested container is
+// accepted and the 33rd is outside the wire language.
+const MaxTelemetryDepth = 32
+
 // NonceB64Bytes is the decoded nonce length in bytes.
 const NonceB64Bytes = 32
 

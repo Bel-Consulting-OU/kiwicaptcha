@@ -157,8 +157,16 @@ local function ttl_out_of_bounds(value)
     return value ~= math.floor(value)
 end
 
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
 local has_write_arg = ARGV[3]
-local dedupe_ttl = tonumber(ARGV[4])
+local dedupe_ttl = finite_number(ARGV[4])
 -- Fail closed on a malformed has_write: a garbage flag that silently
 -- coerced to read-only would drop the event instead of refusing it.
 if has_write_arg ~= '0' and has_write_arg ~= '1' then
@@ -168,14 +176,17 @@ local has_write = has_write_arg == '1'
 if ttl_out_of_bounds(dedupe_ttl) then
     return redis.error_reply('risk-v1-sharded: dedupe_ttl_s must be a positive integer no greater than 2147483647')
 end
-if tonumber(ARGV[1]) == nil or tonumber(ARGV[2]) == nil then
-    return redis.error_reply('risk-v1-sharded: ARGV[1]/ARGV[2] must be numeric')
+if finite_number(ARGV[1]) == nil or finite_number(ARGV[2]) == nil then
+    return redis.error_reply('risk-v1-sharded: ARGV[1]/ARGV[2] must be finite numbers')
 end
 
-local event = tonumber(ARGV[1])
-local scope = tonumber(ARGV[2])
+local event = finite_number(ARGV[1])
+local scope = finite_number(ARGV[2])
 if event ~= math.floor(event) or event < 1 or event > 22 then
     return redis.error_reply('risk-v1-sharded: event must be an integer within 1..22')
+end
+if scope ~= math.floor(scope) then
+    return redis.error_reply('risk-v1-sharded: scope must be an integer')
 end
 
 -- ── Per-shard dedupe: the marker is SET NX inside this script, so the

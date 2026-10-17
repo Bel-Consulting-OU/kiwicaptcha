@@ -155,6 +155,15 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     private array $mergePerShard = [];
     private int $mergedAtMs = 0;
 
+    /**
+     * The highest merged pressure observed since the last refresh. The
+     * level ratchet runs once per staleness window; a short burst can
+     * peak and leak back below an entry threshold inside that window.
+     * Feeding the ratchet the window's peak keeps the documented
+     * emergency tripwire from missing the burst, at no extra Redis call.
+     */
+    private int $peakGp = 0;
+
     private readonly int $stateTtlSecs;
     private readonly int $sessionTtlSecs;
     private readonly int $principalTtlSecs;
@@ -524,6 +533,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
      */
     public function registerOutcome(string $decisionId, int $scope, int $decisionHour, int $score): bool
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
         $result = $this->runOutcomeScript('outcome_register.lua', $decisionId, [
             (string) $scope,
             (string) $decisionHour,
@@ -537,6 +547,8 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     /** The canonical exactly-once confirmation on the decision-id key family. */
     public function confirmOutcome(string $decisionId, bool $legitimate): int
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
+
         return (int) $this->runOutcomeScript('outcome_confirm.lua', $decisionId, [
             $legitimate ? 'L' : 'A',
             (string) $this->outcomeTtlSecs,
@@ -546,6 +558,7 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
     /** The canonical correction on the decision-id key family. */
     public function correctOutcome(string $decisionId, bool $legitimate): bool
     {
+        RedisRiskStateStore::assertKeySafeIdentifier('decisionId', $decisionId);
         $result = $this->runOutcomeScript('outcome_correct.lua', $decisionId, [
             $legitimate ? 'L' : 'A',
             (string) $this->outcomeTtlSecs,
@@ -712,6 +725,12 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
      */
     private function sessionFirstTagRecord(string $key, string $tag): ?string
     {
+        if (strlen($tag) > 64) {
+            throw new \InvalidArgumentException(sprintf(
+                'tag must be at most 64 bytes (got %d)',
+                strlen($tag),
+            ));
+        }
         $replies = $this->dispatch([
             [
                 'endpoint' => $this->endpointForKey($key),
@@ -951,6 +970,12 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
             $targetSpreadAsns = max(0, self::scriptInteger($targetReply[2], 'target spread asns'));
             if ($observation->event === RiskEventKind::AuthenticationFailure && !$isDuplicate) {
                 $targetKeys = KeyspaceMode::targetStateKeys($ns, $targetId, KeyspaceMode::Sharded);
+                $targetKeys[] = KeyspaceMode::targetFailureMarkerKey(
+                    $ns,
+                    $targetId,
+                    $observation->eventId,
+                    KeyspaceMode::Sharded,
+                );
                 $failScript = self::shardedScript('target_failure.lua');
                 $failReply = $this->dispatch([[
                     'endpoint' => $this->endpointForKey($targetKeys[0]),
@@ -959,6 +984,12 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
                         $registration->targetSourceElement ?? '',
                         $registration->targetAsnElement ?? '',
                         (string) $this->targetTtlSecs,
+                        // The report event id rides the same per-report
+                        // marker target_failure.lua maintains, so a
+                        // report delivered through both the assessment
+                        // and the outcome bridge books one failure.
+                        $observation->eventId,
+                        (string) $this->dedupeTtlSecs,
                     ]),
                     'script' => $failScript,
                 ]]);
@@ -1006,8 +1037,10 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         );
 
         // The written shard's post-apply sum lands in the cache, so the
-        // next merged read sees every committed increment.
+        // next merged read sees every committed increment. The window's
+        // peak is carried into the next level transition.
         $this->mergePerShard[$shard] = $shardSum;
+        $this->peakGp = max($this->peakGp, array_sum($this->mergePerShard));
         $this->lastGlobalLevel = $globalLevel;
         $this->lastCooldownUntilMs = $cooldownUntilMs;
         $this->lastIsDuplicate = $isDuplicate;
@@ -1167,13 +1200,17 @@ final class ShardedRedisRiskStateStore implements RiskStateStoreInterface, Sessi
         // published level/cooldown, so the hysteresis hash is no longer
         // a per-request single-slot write.
         $sat = array_replace(self::DEFAULT_SATURATIONS, $this->saturations);
+        // The window's peak feeds the ratchet, then the next window
+        // starts from the refreshed merged value.
+        $hysteresisGp = max($mergedGp, $this->peakGp);
+        $this->peakGp = $mergedGp;
         $hystKey = KeyspaceMode::hysteresisKey($this->namespace);
         $hystReplies = $this->dispatch([[
             'endpoint' => $this->endpointForKey($hystKey),
             'cmd' => $this->evalshaCmd(
                 self::shardedScript('sharded_hysteresis.lua'),
                 [$hystKey],
-                [$mergedGp, $sat['global'], $this->hysteresisMs],
+                [$hysteresisGp, $sat['global'], $this->hysteresisMs],
             ),
             'script' => self::shardedScript('sharded_hysteresis.lua'),
         ]]);

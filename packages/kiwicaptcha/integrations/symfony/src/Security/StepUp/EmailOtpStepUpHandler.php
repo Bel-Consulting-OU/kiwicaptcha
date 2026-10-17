@@ -318,7 +318,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
-        $code = (string) $request->request->get(self::CODE_FIELD, '');
+        $code = $this->fieldString($request, self::CODE_FIELD);
         if (!preg_match('/^[0-9]{6,8}$/D', $code) || !hash_equals((string) $challenge->codeHash, $this->codeHash($code))) {
             return $this->failedAttempt($challenge, $boundContextKey);
         }
@@ -385,7 +385,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
      */
     private function challengeOfRequest(Request $request, int $now): StepUpChallenge|StepUpChallengeExpired|null
     {
-        $ticket = (string) $request->request->get(self::TICKET_FIELD, '');
+        $ticket = $this->fieldString($request, self::TICKET_FIELD);
         if ($ticket === '') {
             return null;
         }
@@ -412,6 +412,14 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     private function proof(StepUpChallenge $challenge, string $boundSessionId): StepUpResult
     {
         return StepUpResult::proved($challenge, $this->assurance());
+    }
+
+    /** One submitted string field, or '' for an absent/non-string value. */
+    private function fieldString(Request $request, string $key): string
+    {
+        $value = $request->request->all()[$key] ?? '';
+
+        return \is_string($value) ? $value : '';
     }
 
     /**

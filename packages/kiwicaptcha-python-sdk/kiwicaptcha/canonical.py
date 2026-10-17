@@ -20,6 +20,8 @@ the signature.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import ipaddress
@@ -150,6 +152,27 @@ def signature_from_challenge(challenge: str) -> str:
     if pos < 0:
         return ""
     return challenge[pos + 1:]
+
+
+def challenge_payload_matches(challenge: str, canonical: str) -> bool:
+    """True when the challenge's payload segment is exactly ``canonical``.
+
+    The segment is everything before the final dot; it must be the
+    canonical standard base64 of the reconstructed canonical. A segment
+    that decodes to anything else is a malformed record whose
+    client-visible payload disagrees with the signed fields.
+    """
+    pos = challenge.rfind(".")
+    if pos < 0:
+        return False
+    encoded = challenge[:pos]
+    try:
+        decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (binascii.Error, UnicodeEncodeError):
+        return False
+    if base64.b64encode(decoded).decode("ascii") != encoded:
+        return False
+    return decoded == canonical.encode("utf-8", "surrogatepass")
 
 
 def hash_ip_v1(ip: str, secret: str) -> str:
@@ -349,42 +372,47 @@ def verify_record_signature(record: Any, secret_key: str,
 
     assert isinstance(record, ChallengeRecord)
     commits_mac = signed_canonical_commits_record_meta(record.challenge)
+    # Reconstruct the canonical once: the signature authenticates these
+    # bytes, and the client-visible payload segment must be exactly
+    # those bytes. Comparing only the last dot-segment would leave the
+    # embedded payload unauthenticated, so a party able to rewrite the
+    # challenge string could make the browser solve a payload that
+    # disagrees with the signed fields.
     if record.protocol_version == 1:
-        expected = sign_payload_v1(
-            legacy_v1_payload(record.nonce, record.scope, record.binding_tag,
-                              record.issued_at),
-            secret_key,
-        )
+        canonical = legacy_v1_payload(record.nonce, record.scope, record.binding_tag,
+                                      record.issued_at)
     else:
-        expected = sign_payload_v2(
-            canonical_payload(
-                record.protocol_version,
-                record.nonce,
-                record.scope,
-                record.binding_tag,
-                record.issued_at,
-                record.expires_at,
-                record.algorithm,
-                record.m_kib,
-                record.t,
-                record.p,
-                record.target_bits,
-                record.salt,
-                record.min_duration_ms,
-                record.region,
-                record.policy_version if record.policy_version is not None else 1,
-                record.request_binding,
-                record.issuer,
-                record.kid if record.kid is not None else 1,
-                record.decoy_field,
-                record.execution_version,
-                record.execution_commitment,
-                record.rsw_modulus_sha256,
-                commits_mac,
-            ),
-            secret_key,
-            tenant_id,
+        canonical = canonical_payload(
+            record.protocol_version,
+            record.nonce,
+            record.scope,
+            record.binding_tag,
+            record.issued_at,
+            record.expires_at,
+            record.algorithm,
+            record.m_kib,
+            record.t,
+            record.p,
+            record.target_bits,
+            record.salt,
+            record.min_duration_ms,
+            record.region,
+            record.policy_version if record.policy_version is not None else 1,
+            record.request_binding,
+            record.issuer,
+            record.kid if record.kid is not None else 1,
+            record.decoy_field,
+            record.execution_version,
+            record.execution_commitment,
+            record.rsw_modulus_sha256,
+            commits_mac,
         )
+    if not challenge_payload_matches(record.challenge, canonical):
+        return False
+    if record.protocol_version == 1:
+        expected = sign_payload_v1(canonical, secret_key)
+    else:
+        expected = sign_payload_v2(canonical, secret_key, tenant_id)
     presented = signature_from_challenge(record.challenge)
     if not constant_time_equals(expected, presented):
         return False

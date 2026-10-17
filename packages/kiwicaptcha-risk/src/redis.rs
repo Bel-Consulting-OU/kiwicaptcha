@@ -102,6 +102,12 @@ pub const DEFAULT_MARK_TTL_SECS: u64 = 7_776_000;
 /// The largest accepted mark kind length in bytes (the outcome name).
 pub const MAX_MARK_KIND_BYTES: usize = 64;
 
+/// The largest accepted caller identifier in bytes, mirroring PHP
+/// `RedisRiskStateStore::MAX_KEY_COMPONENT_BYTES`. Identifiers are
+/// interpolated into Redis keys, so an unbounded value would let one
+/// report mint a multi-megabyte key.
+pub const MAX_KEY_COMPONENT_BYTES: usize = 4096;
+
 /// Default raw saturations in Lua argv order:
 /// src_fast, src_slow, issue, bad, mal, rep, action, switch, global,
 /// trust, principal.
@@ -645,6 +651,7 @@ impl RedisRiskStateStore {
     /// enforce the same rule so every decision-id key path agrees.
     pub(crate) fn valid_key_component(value: &str) -> bool {
         !value.is_empty()
+            && value.len() <= MAX_KEY_COMPONENT_BYTES
             && !value
                 .chars()
                 .any(|c| c.is_control() || matches!(c, ':' | '}' | '\u{2028}' | '\u{2029}'))
@@ -824,7 +831,8 @@ impl RedisRiskStateStore {
             Some(reg) => keys.push(self.outcome_ledger_key(&reg.decision_id)),
             None => keys.push(format!("{}:risk:ledger:unused", self.key_tag)),
         }
-        match registration.and_then(|reg| reg.target_id.as_deref()) {
+        let target_id = registration.and_then(|reg| reg.target_id.as_deref());
+        match target_id {
             Some(target_id) => keys.extend(self.target_state_keys(target_id)),
             None => {
                 keys.push(format!("{}:risk:tgt:unused", self.key_tag));
@@ -832,6 +840,20 @@ impl RedisRiskStateStore {
                 keys.push(format!("{}:risk:tgt:asn:unused", self.key_tag));
             }
         }
+        // KEYS[17]: the per-report target-failure dedupe marker. The
+        // canonical target_failure.lua writes the identical key, so one
+        // report event id books one failure whichever report path
+        // reaches the state first. Always present so positions never
+        // shift; a target-less assessment passes an unused slot.
+        keys.push(match target_id {
+            Some(target_id) => crate::keyspace::target_failure_marker_key(
+                &self.namespace,
+                target_id,
+                &o.event_id,
+                KeyspaceMode::Legacy,
+            ),
+            None => format!("{}:risk:tgt:dd:unused", self.key_tag),
+        });
         // The real cluster contract: every key of the invocation hashes
         // to one slot (a divergent key set is refused server-side with a
         // cross-slot error, so the contract is enforced here first).
@@ -1668,6 +1690,12 @@ impl RedisRiskStateStore {
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
         use ::redis::Commands;
+        if tag.len() > 64 {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "session tag must be at most 64 bytes (got {})",
+                tag.len()
+            )));
+        }
         // ONE command: `SET key tag NX EX ttl`. The previous SET NX plus
         // a separate EXPIRE could be interrupted between the two (process
         // death, connection drop, command timeout), leaving a first-seen

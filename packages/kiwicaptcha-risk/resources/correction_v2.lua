@@ -81,7 +81,9 @@ if new_o ~= 'L' and new_o ~= 'A' then
 end
 
 local weight = tonumber(ARGV[2])
-if not weight or weight <= 0 or weight ~= weight or weight == math.huge then
+local finite_weight = weight ~= nil
+    and weight == weight and weight ~= math.huge and weight ~= -math.huge
+if not finite_weight or weight <= 0 then
     return redis.error_reply('invalid correction weight')
 end
 

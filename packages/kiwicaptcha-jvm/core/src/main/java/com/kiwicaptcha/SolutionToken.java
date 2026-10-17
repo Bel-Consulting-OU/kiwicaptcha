@@ -162,11 +162,23 @@ public final class SolutionToken {
         if (nonceBytes == null || nonceBytes.length != Kiwi.NONCE_B64_BYTES) {
             throw new DecodeException(DECODE_ERR_MALFORMED);
         }
-        long counter = canonicalDecimal(counterStr);
-        if (counter < 0) {
+        // The syntax gate and the length gate are separate rejections,
+        // the reference decoder's order: a nine digit spelling is a
+        // counter-ceiling rejection even when it is too large for a
+        // native long, never a generic syntax rejection.
+        if (!isDigits(counterStr) || (counterStr.length() > 1 && counterStr.charAt(0) == '0')) {
             throw new DecodeException(DECODE_ERR_INVALID_COUNTER);
         }
-        if (counterStr.length() > 8 || counter >= Kiwi.MAX_SOLVER_COUNTER) {
+        if (counterStr.length() > 8) {
+            throw new DecodeException(DECODE_ERR_INVALID_COUNT);
+        }
+        long counter;
+        try {
+            counter = Long.parseLong(counterStr);
+        } catch (NumberFormatException e) {
+            throw new DecodeException(DECODE_ERR_INVALID_COUNTER);
+        }
+        if (counter >= Kiwi.MAX_SOLVER_COUNTER) {
             throw new DecodeException(DECODE_ERR_INVALID_COUNT);
         }
         long duration = canonicalDecimal(durationStr);
@@ -175,6 +187,12 @@ public final class SolutionToken {
         }
         if (duration > Kiwi.MAX_DURATION_MS) {
             throw new DecodeException(DECODE_ERR_INVALID_DUR);
+        }
+        // A lone surrogate escape decodes to a UTF-16 value that has no
+        // UTF-8 spelling, while the reference decoder rejects the
+        // token; reject it here so every host reads one value.
+        if (hasUnpairedSurrogateEscape(telemetryStr)) {
+            throw new DecodeException(DECODE_ERR_MALFORMED);
         }
         JsonObject telemetry;
         try {
@@ -227,6 +245,86 @@ public final class SolutionToken {
         } catch (NumberFormatException e) {
             return -1;
         }
+    }
+
+    /**
+     * True when a JSON string literal carries a backslash-u escape that encodes
+     * an unpaired surrogate. Escaped backslashes are skipped, so the
+     * literal text with an escaped backslash before ud800 is not an escape. Malformed escapes are
+     * left to the JSON parser.
+     */
+    static boolean hasUnpairedSurrogateEscape(String text) {
+        boolean inString = false;
+        int i = 0;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (!inString) {
+                if (c == '"') {
+                    inString = true;
+                }
+                i++;
+                continue;
+            }
+            if (c == '"') {
+                inString = false;
+                i++;
+                continue;
+            }
+            if (c != '\\') {
+                i++;
+                continue;
+            }
+            if (i + 1 >= text.length()) {
+                return false;
+            }
+            if (text.charAt(i + 1) != 'u') {
+                i += 2;
+                continue;
+            }
+            if (i + 5 >= text.length()) {
+                return false;
+            }
+            int unit = parseHex4(text, i + 2);
+            if (unit < 0) {
+                return false;
+            }
+            if (unit >= 0xd800 && unit <= 0xdbff) {
+                if (i + 11 < text.length()
+                        && text.charAt(i + 6) == '\\'
+                        && text.charAt(i + 7) == 'u') {
+                    int low = parseHex4(text, i + 8);
+                    if (low >= 0xdc00 && low <= 0xdfff) {
+                        i += 12;
+                        continue;
+                    }
+                }
+                return true;
+            }
+            if (unit >= 0xdc00 && unit <= 0xdfff) {
+                return true;
+            }
+            i += 6;
+        }
+        return false;
+    }
+
+    private static int parseHex4(String text, int offset) {
+        int value = 0;
+        for (int i = 0; i < 4; i++) {
+            char c = text.charAt(offset + i);
+            int digit;
+            if (c >= '0' && c <= '9') {
+                digit = c - '0';
+            } else if (c >= 'a' && c <= 'f') {
+                digit = c - 'a' + 10;
+            } else if (c >= 'A' && c <= 'F') {
+                digit = c - 'A' + 10;
+            } else {
+                return -1;
+            }
+            value = value * 16 + digit;
+        }
+        return value;
     }
 
     static boolean isHexN(String s, int n) {

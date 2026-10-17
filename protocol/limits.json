@@ -12,6 +12,7 @@
   "rsw_t_min": 10000,
   "rsw_t_max": 300000,
   "token_max_duration_ms": 3600000,
+  "token_max_telemetry_depth": 32,
   "min_master_bytes": 32,
   "min_execution_key_bytes": 32,
   "execution_max_version": 6,

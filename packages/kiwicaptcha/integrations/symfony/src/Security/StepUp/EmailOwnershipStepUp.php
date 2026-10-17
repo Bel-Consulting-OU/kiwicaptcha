@@ -306,7 +306,7 @@ final class EmailOwnershipStepUp
      */
     private function demandOf(Request $request, int $now): ?StepUpDemand
     {
-        $id = $request->request->get(self::DEMAND_FIELD);
+        $id = $this->field($request, self::DEMAND_FIELD);
         if (!\is_string($id) || preg_match('/^[A-Za-z0-9_-]{16,43}$/D', $id) !== 1) {
             return null;
         }
@@ -575,7 +575,7 @@ final class EmailOwnershipStepUp
         if ($demand === null || !isset($this->emailCarrierScopes[$demand->scope])) {
             return self::json(['status' => 'failed', 'failure_code' => StepUpResult::FAIL_UNKNOWN_CHALLENGE], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
-        $ticket = (string) $request->request->get(EmailOtpStepUpHandler::TICKET_FIELD, '');
+        $ticket = $this->fieldString($request, EmailOtpStepUpHandler::TICKET_FIELD);
         $payload = $ticket === '' ? null : $this->ticket->verify($ticket, $now);
         $challenge = $payload === null ? null : $this->store->read($payload['challengeId']);
         if ($challenge === null || $challenge->kind !== StepUpChallengeKind::EmailOwnership) {
@@ -601,7 +601,7 @@ final class EmailOwnershipStepUp
         if (!$this->sessionMatches($request, $challenge)) {
             return self::json(['status' => 'failed', 'failure_code' => StepUpResult::FAIL_SESSION_MISMATCH], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
-        $code = (string) $request->request->get(EmailOtpStepUpHandler::CODE_FIELD, '');
+        $code = $this->fieldString($request, EmailOtpStepUpHandler::CODE_FIELD);
         if (!preg_match('/^[0-9]{6}$/D', $code) || !hash_equals((string) $challenge->codeHash, $this->codeHash($code))) {
             $answer = $this->store->recordFailure($challenge->id, $challenge->maxAttempts);
             if ($answer === 0) {
@@ -831,14 +831,38 @@ final class EmailOwnershipStepUp
     }
 
     /**
+     * One submitted form value, read without the typed accessor: an
+     * array-shaped occurrence is non-scalar input the caller refuses,
+     * never an exception from the parameter bag.
+     */
+    private function field(Request $request, string $key): mixed
+    {
+        return $request->request->all()[$key] ?? null;
+    }
+
+    /** One submitted form value that must be a string, or ''. */
+    private function fieldString(Request $request, string $key): string
+    {
+        $value = $this->field($request, $key);
+
+        return \is_string($value) ? $value : '';
+    }
+
+    /**
      * The presented address: a bounded, syntactically deliverable
      * address of at most 254 bytes. The check is shape-only; ownership
      * is what the code proves.
      */
     private function emailOf(Request $request): ?string
     {
-        $email = $request->request->get(self::EMAIL_FIELD);
+        $email = $this->field($request, self::EMAIL_FIELD);
         if (!\is_string($email) || \strlen($email) > 254) {
+            return null;
+        }
+        // A control byte is never part of a deliverable address. In
+        // particular trim() would silently drop a trailing NUL, so the
+        // raw value is checked before any whitespace normalization.
+        if (preg_match('/[\x00-\x1F\x7F]/', $email) === 1) {
             return null;
         }
         $trimmed = trim($email);
@@ -1001,7 +1025,7 @@ final class EmailOwnershipStepUp
             return $presented;
         }
         if ($challenge->clientSecretHash !== null && $challenge->clientSecretHash !== '') {
-            $presented = (string) $request->request->get(StepUpSessionBinding::CLIENT_SECRET_FIELD, '');
+            $presented = $this->fieldString($request, StepUpSessionBinding::CLIENT_SECRET_FIELD);
 
             return $presented === '' ? null : StepUpChallenge::clientSecretHash($presented);
         }

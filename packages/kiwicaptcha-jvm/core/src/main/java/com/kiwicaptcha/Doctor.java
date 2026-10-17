@@ -69,7 +69,11 @@ public final class Doctor {
         String payload = Canonical.canonicalPayload(2, nonce, "doctor", "", now, expires,
                 "sha256", 1, 1, 1, 1, salt, 0, "", 1, "", "", 1, "", 0, "", "", false);
         String signature = Canonical.signPayloadV2(payload, secret, "");
-        String challenge = payload + "." + signature;
+        // The challenge wire is base64(canonical) "." signature: the
+        // embedded payload must be the canonical bytes the fields
+        // reconstruct, never the raw canonical text.
+        String challenge = Base64.getEncoder().encodeToString(
+                payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)) + "." + signature;
         ChallengeRecord record = new ChallengeRecord();
         record.nonce = nonce;
         record.scope = "doctor";

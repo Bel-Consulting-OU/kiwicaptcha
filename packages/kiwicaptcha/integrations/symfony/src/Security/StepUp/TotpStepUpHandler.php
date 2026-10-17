@@ -294,7 +294,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_SECRET_UNUSABLE, $challenge->id);
         }
-        $code = (string) $request->request->get(self::CODE_FIELD, '');
+        $code = $this->fieldString($request, self::CODE_FIELD);
         $step = $this->matchingStep($secret, $code, TotpCode::stepOf($now));
         if ($step === null) {
             return $this->failedAttempt($challenge, $boundContextKey);
@@ -382,6 +382,14 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
         return StepUpResult::pending($challenge->id);
     }
 
+    /** One submitted string field, or '' for an absent/non-string value. */
+    private function fieldString(Request $request, string $key): string
+    {
+        $value = $request->request->all()[$key] ?? '';
+
+        return \is_string($value) ? $value : '';
+    }
+
     /**
      * The challenge of the request, the StepUpChallengeExpired marker
      * when the presented ticket is well-signed but past its own expiry,
@@ -389,7 +397,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
      */
     private function challengeOfRequest(Request $request, int $now): StepUpChallenge|StepUpChallengeExpired|null
     {
-        $ticket = (string) $request->request->get(self::TICKET_FIELD, '');
+        $ticket = $this->fieldString($request, self::TICKET_FIELD);
         if ($ticket === '') {
             return null;
         }

@@ -81,6 +81,45 @@ end
 -- the same clipped distances.
 local BOUNDARY_T = 600
 
+-- Every numeric knob is validated as a finite value inside its declared
+-- range BEFORE the bucket walk. A NaN or infinite knob would otherwise
+-- reach the means and the rate limiter, where the fail-high guard would
+-- mask a caller contract violation as a maximum adjustment.
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+local min_samples = finite_number(ARGV[2])
+if min_samples == nil or min_samples < 1 or min_samples ~= math.floor(min_samples) then
+    return redis.error_reply('calibration: min_samples must be a positive finite integer')
+end
+local max_adjustment = finite_number(ARGV[3])
+if max_adjustment == nil or max_adjustment < 1 or max_adjustment ~= math.floor(max_adjustment) then
+    return redis.error_reply('calibration: max_adjustment must be a positive finite integer')
+end
+local max_change = finite_number(ARGV[4])
+if max_change == nil or max_change < 1 or max_change ~= math.floor(max_change) then
+    return redis.error_reply('calibration: max_change_per_minute must be a positive finite integer')
+end
+local min_ratio = finite_number(ARGV[5])
+if min_ratio == nil or min_ratio < 0 or min_ratio > 1 then
+    return redis.error_reply('calibration: minimum_resolution_ratio must be a finite number within 0..1')
+end
+local calibration_mode = finite_number(ARGV[6])
+if calibration_mode == nil or calibration_mode ~= math.floor(calibration_mode)
+    or calibration_mode < 0 or calibration_mode > 2 then
+    return redis.error_reply('calibration: mode must be an integer within 0..2')
+end
+local fp_cost = finite_number(ARGV[7])
+local fn_cost = finite_number(ARGV[8])
+if fp_cost == nil or fp_cost < 0.1 or fp_cost > 10
+    or fn_cost == nil or fn_cost < 0.1 or fn_cost > 10 then
+    return redis.error_reply('calibration: false_positive_cost and false_negative_cost must be finite numbers within 0.1..10')
+end
+
 local legit_count = 0
 local legit_score_sum = 0
 local legit_above_sum = 0

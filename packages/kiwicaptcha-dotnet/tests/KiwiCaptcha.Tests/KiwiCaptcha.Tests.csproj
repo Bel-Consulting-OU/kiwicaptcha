@@ -21,6 +21,8 @@
     <!-- The php-written sqlite interop fixture travels with the
          tests, so the interop assertions run from any checkout. -->
     <Content Include="testdata\php_interop.db" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="fixtures\wire-hostile-corpus.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="fixtures\wire-signature-corpus.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
