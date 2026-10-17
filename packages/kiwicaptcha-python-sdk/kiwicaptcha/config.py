@@ -138,10 +138,21 @@ class Settings:
             )
 
     def build_verifier(self) -> Verifier:
-        """Build the verifier over the configured store adapter."""
+        """Build the verifier over the configured store adapter.
+
+        The deployment secret is validated again here: ``Settings`` is
+        mutable, so a value edited after construction must not reach a
+        verifier silently. The per-call ``secret_key`` option keeps its
+        own behavior in :meth:`Verifier.verify`.
+        """
+        if self.secret and len(self.secret) < MIN_SECRET_BYTES:
+            raise ValueError(
+                f"secret must be at least {MIN_SECRET_BYTES} bytes"
+            )
         config = VerifierConfig(
             accept_legacy_v1=self.accept_legacy_v1,
             region=self.region,
+            scopes=self.scopes,
             expected_policy_version=self.expected_policy_version,
             expected_issuer=self.expected_issuer,
             tenant_id=self.tenant_id,

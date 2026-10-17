@@ -127,5 +127,53 @@ $plugin->reset();
 check('confirm denies a missing token', $plugin->confirm() === false);
 check('attempts counted', $plugin->get_attempt_count() === 1);
 
+// The ACP surface: the module files exist and the module writes every
+// config key the captcha plugin reads.
+$extDir = dirname(__DIR__);
+foreach ([
+    'acp/main_info.php',
+    'acp/main_module.php',
+    'adm/style/acp_kiwi_settings.html',
+    'language/en/info_acp_kiwi.php',
+] as $relative) {
+    check("ACP file {$relative} exists", is_file($extDir.'/'.$relative));
+}
+
+if (!defined('IN_PHPBB')) {
+    define('IN_PHPBB', true);
+}
+$lang = [];
+require $extDir.'/language/en/info_acp_kiwi.php';
+require $extDir.'/acp/main_info.php';
+$info = (new \kiwi\captcha\acp\main_info())->module();
+check('ACP module points at main_module', str_ends_with((string) ($info['filename'] ?? ''), 'main_module'));
+check('ACP settings mode has the extension auth', isset($info['modes']['settings']['auth']) && str_contains((string) $info['modes']['settings']['auth'], 'ext_kiwi/captcha'));
+check('ACP mode title is a declared language key', array_key_exists((string) ($info['modes']['settings']['title'] ?? ''), $lang));
+
+$moduleSource = (string) file_get_contents($extDir.'/acp/main_module.php');
+$captchaSource = (string) file_get_contents($extDir.'/captcha/kiwi.php');
+preg_match_all("/config\['(kiwi_[a-z_]+)'\]/", $captchaSource, $matches);
+$configKeys = array_values(array_unique($matches[1]));
+sort($configKeys);
+check(
+    'captcha reads the documented config keys',
+    $configKeys === ['kiwi_bearer', 'kiwi_mode', 'kiwi_scope', 'kiwi_shim_url', 'kiwi_trusted_proxies', 'kiwi_verify_url']
+);
+foreach ($configKeys as $key) {
+    check("ACP writes {$key}", str_contains($moduleSource, "'{$key}'"));
+}
+
+$template = (string) file_get_contents($extDir.'/adm/style/acp_kiwi_settings.html');
+$languageSource = (string) file_get_contents($extDir.'/language/en/info_acp_kiwi.php');
+preg_match_all('/\{L_([A-Z0-9_]+)\}/', $template, $languageMatches);
+$coreKeys = ['COLON', 'RESET', 'SUBMIT'];
+foreach (array_unique($languageMatches[1]) as $key) {
+    if (in_array($key, $coreKeys, true)) {
+        continue;
+    }
+    check("ACP language key {$key}", str_contains($languageSource, "'{$key}'"));
+}
+check('ACP template is wired to the module', str_contains($moduleSource, "'acp_kiwi_settings'"));
+
 fwrite($failures === 0 ? STDOUT : STDERR, sprintf("%d checks, %d failures\n", $checks, $failures));
 exit($failures === 0 ? 0 : 1);

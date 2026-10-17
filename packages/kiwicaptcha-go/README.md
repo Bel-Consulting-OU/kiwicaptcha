@@ -64,7 +64,10 @@ The scope option is REQUIRED. Verify with an empty `ExpectedScope`
 answers the typed `required_scope` failure instead of silently
 accepting a token minted for any scope; every framework middleware
 takes the scope as a required constructor parameter, so the loose
-default is unrepresentable.
+default is unrepresentable. The configured `Scopes` list is an
+allowlist: when non-empty, a verify call naming an expected scope
+outside it answers the typed `wrong_scope` failure. An empty list
+accepts any scope.
 
 ## Execution-armed records: the ExecutionPolicy
 
@@ -243,7 +246,7 @@ ok or rejected per the declared floor.
 Not exported, deliberately: the php core's consumed-operation resume
 path (`resumeConsumedOperation`), the replication barrier fence, and
 the resume-derivation claim fencing, which are php deployment
-recovery surfaces outside the shared server SDK contract; the
-browser-trace walker described above; and a SQLite store, as
-discussed. The `Store` interface is the extension point for anything
-else.
+recovery surfaces outside the shared server SDK contract; and the
+browser-trace walker described above. The shipped SQLite store is
+documented under the storage section above. The `Store` interface is
+the extension point for anything else.

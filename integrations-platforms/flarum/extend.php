@@ -17,7 +17,4 @@ return [
 
     (new Extend\Middleware('api'))
         ->add(VerifySignupMiddleware::class),
-
-    (new Extend\Settings())
-        ->serializeToForum('kiwiSignupScope', 'kiwi-signup-scope'),
 ];

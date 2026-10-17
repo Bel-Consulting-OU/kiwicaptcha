@@ -25,7 +25,15 @@ const handle = renderKiwiCaptcha(document.getElementById("mount")!, {
 
 Everything else is the driver's documented opt-ins: theme, action,
 cData, chainTicket, requestBinding, fetchTimeoutMs, algorithm,
-responseField, execution, tokenFieldName, buildMarkup.
+riskContext, responseField, execution, tokenFieldName, buildMarkup.
+`riskContext: "coarse"` rides the container's
+`data-kiwi-risk-context` attribute, which the driver reads.
+
+The loader controls are `scriptSrc`, `integrity`, `crossorigin`,
+`timeoutMs` and `scriptNonce` (`loadKiwiCaptcha(options)`). `scriptNonce`
+is assigned to the injected driver script's `nonce` property for
+CSP-restricted pages; the driver can read its own nonce through
+`document.currentScript`.
 
 ## Lifecycle rules (identical in every framework wrapper)
 
@@ -52,9 +60,11 @@ shared `widget.css` with the driver as usual.
 
 `npm test` runs the vitest suite under happy-dom with a faithful mock
 of the driver surface (render/reset/execute/getResponse/remove/
-isExpired/destroy plus the kiwi:* events): 21 tests cover the loader,
-the markup builder, the render lifecycle, token delivery, reset,
-destroy hygiene and re-render safety.
+isExpired/ready/observe/destroy plus the kiwi:* events): 32 tests cover
+the loader (including SRI, crossorigin and nonce), the markup builder,
+the render lifecycle, asynchronous load-and-render, token delivery,
+reset, expiry, the legacy remove fallback, destroy hygiene and
+re-render safety.
 
 The four-setting shape (endpoint, sitekey, scope, lang) is the client
 mirror of the server's four-setting quickstart; the server's own

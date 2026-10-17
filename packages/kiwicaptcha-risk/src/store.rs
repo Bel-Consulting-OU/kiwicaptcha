@@ -558,3 +558,102 @@ pub trait RiskStateStoreExt: RiskStateStore {
 }
 
 impl<T: RiskStateStore + ?Sized> RiskStateStoreExt for T {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::RiskObservation;
+    use crate::store::{Observed, RiskStateStore, RiskStoreError};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct CapturingStore {
+        seen: Mutex<Option<RiskObservation>>,
+    }
+
+    impl RiskStateStore for CapturingStore {
+        fn observe(&self, o: &RiskObservation) -> Result<Observed, RiskStoreError> {
+            *self.seen.lock().unwrap() = Some(o.clone());
+            Ok(Observed {
+                vector: SignalVector::default(),
+                global_level: 0,
+                cooldown_until_ms: 0,
+                is_duplicate: false,
+            })
+        }
+
+        fn register_outcome(
+            &self,
+            _decision_id: &str,
+            _scope: u32,
+            _decision_hour: i64,
+            _score: u32,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(true)
+        }
+
+        fn confirm_outcome(
+            &self,
+            _decision_id: &str,
+            _legitimate: bool,
+        ) -> Result<u8, RiskStoreError> {
+            Ok(0)
+        }
+
+        fn correct_outcome(
+            &self,
+            _decision_id: &str,
+            _legitimate: bool,
+        ) -> Result<bool, RiskStoreError> {
+            Ok(false)
+        }
+    }
+
+    #[test]
+    fn record_event_builds_the_identityless_observation_and_delegates_to_observe() {
+        let store = CapturingStore::default();
+        let observed = store
+            .record_event(
+                RiskEventKind::PreIssue,
+                7,
+                11,
+                "aa",
+                "ab",
+                "ac",
+                12,
+                "ba",
+                "bb",
+                "bc",
+                "event-1",
+                1_700_000_000_000,
+            )
+            .expect("the wrapper delegates");
+        assert_eq!(observed.vector, SignalVector::default());
+
+        let seen = store
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("observe was called");
+        assert_eq!(seen.event, RiskEventKind::PreIssue);
+        assert_eq!(seen.scope, 7);
+        assert_eq!(seen.source_epoch, 11);
+        assert_eq!(seen.source_id_prev, "aa");
+        assert_eq!(seen.source_id, "ab");
+        assert_eq!(seen.source_id_next, "ac");
+        assert_eq!(seen.subnet_epoch, 12);
+        assert_eq!(seen.subnet_id_prev, "ba");
+        assert_eq!(seen.subnet_id, "bb");
+        assert_eq!(seen.subnet_id_next, "bc");
+        assert_eq!(seen.event_id, "event-1");
+        assert_eq!(seen.now_ms, 1_700_000_000_000);
+        // The convenience wrapper carries no identity dimensions and no
+        // classifier-derived risk: callers that need them build the
+        // observation themselves.
+        assert_eq!(seen.session_id, None);
+        assert_eq!(seen.principal_id, None);
+        assert_eq!(seen.device_id, None);
+        assert_eq!(seen.network_risk, 0);
+    }
+}

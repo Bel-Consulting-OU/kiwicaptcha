@@ -24,10 +24,19 @@
         public private(set) var token: String = ""
         public private(set) var state: KiwiWidgetState = .idle { didSet { render() } }
 
-        private let client: KiwiClient
-        private let scope: String
-        private var task: Task<Void, Never>?
-        private var expiryTask: Task<Void, Never>?
+        private var client: KiwiClient
+        public private(set) var scope: String
+        /// The configuration the live client was built from. SwiftUI's
+        /// `updateUIView` compares these against the incoming values.
+        public private(set) var endpoint: URL
+        public private(set) var sitekey: String?
+        /// The in-flight work. Internal so the test target (@testable)
+        /// can assert a configuration change cancels the previous run.
+        private(set) var task: Task<Void, Never>?
+        private(set) var expiryTask: Task<Void, Never>?
+        /// Number of full teardown/rebuild cycles (observability for the
+        /// update path; also makes the no-op case assertable).
+        private(set) var restartCount: Int = 0
 
         private let statusLabel = UILabel()
         private let badgeLabel = UILabel()
@@ -37,6 +46,8 @@
         public init(client: KiwiClient, scope: String) {
             self.client = client
             self.scope = scope
+            self.endpoint = client.endpoint
+            self.sitekey = client.sitekey
             super.init(frame: CGRect(x: 0, y: 0, width: 320, height: 72))
             build()
             render()
@@ -44,6 +55,13 @@
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("init(client:scope:) is the only initializer") }
+
+        deinit {
+            // A view leaving the hierarchy cancels both the solve and the
+            // expiry timer: neither task may outlive the widget.
+            task?.cancel()
+            expiryTask?.cancel()
+        }
 
         private func build() {
             let stack = UIStackView(arrangedSubviews: [statusLabel, badgeLabel, progress, retryButton])
@@ -68,11 +86,57 @@
             accessibilityTraits = [.staticText]
         }
 
+        /// Cancel and release both in-flight tasks. Cancellation is
+        /// cooperative; the solves check `Task.isCancelled` after each
+        /// await, and the expiry task's sleep throws on cancellation.
+        private func cancelTasks() {
+            task?.cancel()
+            task = nil
+            expiryTask?.cancel()
+            expiryTask = nil
+        }
+
+        /// Apply a new SwiftUI configuration. Callbacks are always
+        /// refreshed (they are read at invocation, so a changed closure
+        /// takes effect immediately). A changed endpoint, scope or
+        /// sitekey invalidates the pending challenge, so the widget is
+        /// torn down and restarted against the new connection; an
+        /// unchanged configuration is a no-op (no timer churn, no second
+        /// solve). Returns true when a restart happened.
+        @discardableResult
+        public func applyConfiguration(
+            endpoint: URL, scope: String, sitekey: String?,
+            onVerify: @escaping (String) -> Void,
+            onError: @escaping (String) -> Void = { _ in },
+            onExpire: @escaping () -> Void = {}
+        ) -> Bool {
+            self.onVerify = onVerify
+            self.onError = onError
+            self.onExpire = onExpire
+            guard endpoint != self.endpoint || scope != self.scope || sitekey != self.sitekey
+            else { return false }
+            cancelTasks()
+            self.endpoint = endpoint
+            self.scope = scope
+            self.sitekey = sitekey
+            // Rebuild the client but keep the session: a host may have
+            // injected a custom URLSession (tests do; apps may pin a
+            // certificate policy). Nothing else from the old run is
+            // carried over.
+            self.client = KiwiClient(
+                endpoint: endpoint, sitekey: sitekey, session: client.session)
+            token = ""
+            state = .idle
+            accessibilityValue = nil
+            restartCount += 1
+            start()
+            return true
+        }
+
         /// Acquire and solve a challenge. Safe to call again: the
         /// previous run is cancelled first.
         @objc public func start() {
-            task?.cancel()
-            expiryTask?.cancel()
+            cancelTasks()
             token = ""
             state = .solving
             let client = client
@@ -88,6 +152,7 @@
                 } catch is CancellationError {
                     return
                 } catch {
+                    guard !Task.isCancelled else { return }
                     await MainActor.run { self?.fail(String(describing: error)) }
                 }
             }
@@ -166,6 +231,19 @@
             return view
         }
 
-        public func updateUIView(_ uiView: KiwiCaptchaUIView, context: Context) {}
+        public func updateUIView(_ uiView: KiwiCaptchaUIView, context: Context) {
+            // SwiftUI calls this after every parent update. The widget
+            // refreshes its callbacks either way, and tears down/rebuilds
+            // the run only when endpoint, scope or sitekey changed; the
+            // previous task and expiry timer are cancelled first, so no
+            // observer or task is left behind.
+            uiView.applyConfiguration(
+                endpoint: endpoint,
+                scope: scope,
+                sitekey: sitekey,
+                onVerify: onVerify,
+                onError: onError,
+                onExpire: onExpire)
+        }
     }
 #endif

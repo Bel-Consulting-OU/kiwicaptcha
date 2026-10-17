@@ -6,6 +6,7 @@ import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.http.HttpRequest;
+import org.keycloak.models.AuthenticationExecutionModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -19,16 +20,19 @@ import org.keycloak.models.UserModel;
  * deployment fails the flow closed.
  *
  * Configuration rides the authenticator's config model:
- * kiwi.verify.url, kiwi.bearer, kiwi.scope. There is deliberately no
- * custom forwarding-header option: the bound client IP is the socket
- * peer (see authenticate()), and proxy handling is Keycloak's own
- * KC_PROXY configuration.
+ * kiwi.verify.url, kiwi.bearer, kiwi.scope, kiwi.trust.proxy. The
+ * trust-proxy switch is off by default: the bound client IP is then
+ * the socket peer that Keycloak's own KC_PROXY configuration
+ * adjusted, and no forwarding header is parsed. When it is on, the
+ * rightmost X-Forwarded-For hop (the value the nearest trusted proxy
+ * appended) is the binding, with X-Real-IP as the no-chain fallback.
  */
 public class KiwiAuthenticator implements Authenticator {
 
     public static final String CONFIG_VERIFY_URL = "kiwi.verify.url";
     public static final String CONFIG_BEARER = "kiwi.bearer";
     public static final String CONFIG_SCOPE = "kiwi.scope";
+    public static final String CONFIG_TRUST_PROXY = "kiwi.trust.proxy";
 
     public static final String VERIFY_URL_DEFAULT = "http://127.0.0.1:7371/verify";
 
@@ -58,6 +62,13 @@ public class KiwiAuthenticator implements Authenticator {
         );
         if (token == null) {
             context.getEvent().detail("kiwi_captcha", "missing_token");
+            if (isAlternative(context)) {
+                // ALTERNATIVE: this execution is optional, so let the
+                // flow continue with its other alternatives instead of
+                // blocking on a challenge that will never be answered.
+                context.attempted();
+                return;
+            }
             challenge(context, "The security check did not run. Solve the challenge and try again.");
             return;
         }
@@ -67,15 +78,21 @@ public class KiwiAuthenticator implements Authenticator {
         String verifyUrl = configValue(configModel, CONFIG_VERIFY_URL, VERIFY_URL_DEFAULT);
         String bearer = configValue(configModel, CONFIG_BEARER, "");
         String scope = configValue(configModel, CONFIG_SCOPE, "login");
-        // The socket peer only: Keycloak's own proxy configuration
-        // (KC_PROXY) rewrites the connection's remote address, so the
-        // authenticator must never parse forwarding headers itself —
-        // a client-supplied X-Forwarded-For would otherwise choose the
-        // bound IP with one header. A missing peer fails closed: never
-        // invent 127.0.0.1 (the remoteip is the challenge's binding
-        // key).
-        String ip = context.getConnection() == null ? null : context.getConnection().getRemoteAddr();
-        if (ip == null || ip.isBlank()) {
+        boolean trustProxy = Boolean.parseBoolean(configValue(configModel, CONFIG_TRUST_PROXY, "false"));
+        // Default: the socket peer (the value Keycloak's own KC_PROXY
+        // configuration adjusted); forwarding headers are never read.
+        // With the trust-proxy switch on, the resolver takes the
+        // rightmost X-Forwarded-For hop appended by the nearest trusted
+        // proxy (a client-supplied leftmost entry is ignored), with
+        // X-Real-IP as the no-chain fallback. A missing peer fails
+        // closed: never invent 127.0.0.1 (the remoteip is the
+        // challenge's binding key).
+        var requestHeaders = httpHeaders == null ? null : httpHeaders.getRequestHeaders();
+        String forwardedFor = requestHeaders == null ? null : requestHeaders.getFirst("X-Forwarded-For");
+        String realIp = requestHeaders == null ? null : requestHeaders.getFirst("X-Real-IP");
+        String remoteAddr = context.getConnection() == null ? null : context.getConnection().getRemoteAddr();
+        String ip = KiwiVerifyClient.resolveClientIp(remoteAddr, forwardedFor, realIp, trustProxy);
+        if (ip.isEmpty()) {
             LOG.warn("kiwicaptcha: no socket peer for the verify binding; failing the flow closed");
             context.getEvent().detail("kiwicaptcha", "missing_client_ip");
             context.failure(AuthenticationFlowError.INTERNAL_ERROR);
@@ -94,7 +111,25 @@ public class KiwiAuthenticator implements Authenticator {
             return;
         }
         context.getEvent().detail("kiwi_captcha", result.code());
+        if (isAlternative(context)) {
+            // A failed or missing challenge under ALTERNATIVE must not
+            // block the flow's other alternatives; the execution is
+            // marked attempted and the flow moves on. A success above
+            // still required a verified token.
+            context.attempted();
+            return;
+        }
         challenge(context, "The security check did not pass. Solve the challenge and try again.");
+    }
+
+    /**
+     * Whether this execution is configured ALTERNATIVE. Under that
+     * requirement a missing or failed challenge continues the flow;
+     * under REQUIRED it blocks (and an outage always fails closed).
+     */
+    private static boolean isAlternative(AuthenticationFlowContext context) {
+        return context.getExecution() != null
+                && context.getExecution().getRequirement() == AuthenticationExecutionModel.Requirement.ALTERNATIVE;
     }
 
     private void challenge(AuthenticationFlowContext context, String message) {

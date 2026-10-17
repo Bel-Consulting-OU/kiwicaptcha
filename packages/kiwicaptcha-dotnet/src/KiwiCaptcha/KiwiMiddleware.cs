@@ -231,14 +231,16 @@ public static class KiwiCaptchaEndpoints
     /// <summary>
     /// Maps GET /kiwicaptcha/health to a plain-text readiness probe
     /// over the verifier's store, the doctor's one-shot roundtrip in
-    /// miniature.
+    /// miniature. The probe runs against the verifier's actual store,
+    /// never a substitute: a down backend answers degraded instead of
+    /// a false green.
     /// </summary>
     public static IEndpointConventionBuilder MapKiwiCaptchaHealth(this IEndpointRouteBuilder endpoints,
         Verifier verifier)
     {
         return endpoints.MapGet("/kiwicaptcha/health", () =>
         {
-            var check = Doctor.CheckStore("memory://");
+            var check = Doctor.CheckStore(verifier.Storage());
             return Results.Text(check.Ok ? "ok" : "degraded: " + check.Detail);
         });
     }

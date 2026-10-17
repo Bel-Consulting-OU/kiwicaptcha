@@ -21,6 +21,57 @@ import { base64Decode } from "./validate.js";
 export const LOW_DIFFICULTY_MAX_BITS = 8;
 
 /**
+ * Progress reports land at most every this many completed attempts on
+ * the JS-thread solve. The low-difficulty window holds at most 2^8
+ * attempts, so this caps the callback count at a handful even in the
+ * pathological case (the winning/exhausted report below is the final
+ * one).
+ */
+export const PROGRESS_ATTEMPT_INTERVAL = 64;
+
+/**
+ * Wall-clock floor between progress reports, shared by both solver
+ * paths. A native module may report after every hash or squaring; the
+ * bridge callback is throttled to this cadence so a fast solve can
+ * never flood the JS thread (the first and final reports always pass).
+ */
+export const PROGRESS_MIN_INTERVAL_MS = 100;
+
+/** The progress shape both solver paths report. */
+export interface SolveProgress {
+  /** Hashes (or rsw squarings) completed so far. */
+  attempted: number;
+}
+
+/** Options of the solve entry points. */
+export interface SolveOptions {
+  /**
+   * Progress callback, invoked at a bounded frequency: the first
+   * report, periodic reports (attempt- and wall-clock-gated) and one
+   * final report. Never once per loop iteration.
+   */
+  onProgress?: (info: SolveProgress) => void;
+}
+
+/**
+ * The one progress gate: drops duplicate counts and reports that
+ * arrive inside the wall-clock floor. `force` is used for the first and
+ * final report so the caller always observes both bounds.
+ */
+function progressReporter(onProgress: ((info: SolveProgress) => void) | undefined) {
+  let lastAttempted = -1;
+  let lastReportAt = Number.NEGATIVE_INFINITY;
+  return function report(attempted: number, force = false): void {
+    if (!onProgress || attempted === lastAttempted) return;
+    const now = Date.now();
+    if (!force && now - lastReportAt < PROGRESS_MIN_INTERVAL_MS) return;
+    lastAttempted = attempted;
+    lastReportAt = now;
+    onProgress({ attempted });
+  };
+}
+
+/**
  * The optional quick-crypto peer. Resolution is lazy and guarded: an
  * absent module resolves to null instead of throwing (fail-closed to
  * the native module), and a failed require is cached so the lookup cost
@@ -69,13 +120,18 @@ function decimalBytes(n: number): Uint8Array {
  * when the target was not met within the search window (the caller then
  * fails closed to the native module).
  */
-export function solveSha256Low(challenge: KiwiChallenge): KiwiSolution | null {
+export function solveSha256Low(
+  challenge: KiwiChallenge,
+  onProgress?: (info: SolveProgress) => void,
+): KiwiSolution | null {
   const salt = base64Decode(challenge.salt);
   if (!salt) throw new KiwiSolveError("malformed", "the salt stopped decoding");
   const prefix = utf8(challenge.prefix);
   const started = Date.now();
   const crypto = loadQuickCrypto();
+  const report = progressReporter(onProgress);
   const cap = 1 << challenge.targetBits;
+  report(0, true);
   for (let counter = 0; counter < cap; counter++) {
     const digest = crypto
       ? (() => {
@@ -87,13 +143,22 @@ export function solveSha256Low(challenge: KiwiChallenge): KiwiSolution | null {
         })()
       : sha256([prefix, decimalBytes(counter), salt]);
     if (leadingZeroBits(digest) >= challenge.targetBits) {
+      // The final report is forced: the caller always sees the winning
+      // count, even when the solve finished inside the throttle window.
+      report(counter + 1, true);
       return {
         counter,
         durationMs: Date.now() - started,
         hashHex: hex(digest),
       };
     }
+    // Attempt-gated: at most cap / PROGRESS_ATTEMPT_INTERVAL callbacks,
+    // then the wall-clock gate drops any that arrive too close together.
+    if ((counter + 1) % PROGRESS_ATTEMPT_INTERVAL === 0) report(counter + 1);
   }
+  // The search window closed; report the full attempt count before the
+  // caller fails closed to the native module.
+  report(cap, true);
   return null;
 }
 
@@ -105,10 +170,25 @@ export function solveSha256Low(challenge: KiwiChallenge): KiwiSolution | null {
 export async function solveNative(
   challenge: KiwiChallenge,
   solver: NativeKiwiSolver,
+  onProgress?: (info: SolveProgress) => void,
 ): Promise<KiwiSolution> {
+  const report = progressReporter(onProgress);
+  report(0, true);
   let raw: string;
   try {
-    raw = await solver.solve(JSON.stringify(challenge));
+    if (typeof solver.solveWithProgress === "function") {
+      // The optional native progress channel: the native side owns the
+      // attempt cadence; the reporter still enforces the wall-clock
+      // floor and drops duplicates, so the bridge can never flood the
+      // JS thread.
+      raw = await solver.solveWithProgress(JSON.stringify(challenge), (info) => {
+        if (info && Number.isFinite(info.attempted) && info.attempted >= 0) {
+          report(Math.floor(info.attempted));
+        }
+      });
+    } else {
+      raw = await solver.solve(JSON.stringify(challenge));
+    }
   } catch (err) {
     throw new KiwiSolveError(
       "solver-unavailable",
@@ -132,13 +212,19 @@ export async function solveNative(
   if (challenge.algorithm === "rsw" && typeof solution.rswProof !== "string") {
     throw new KiwiSolveError("solver-unavailable", "the native rsw answer carries no proof");
   }
+  // The final report: the winning counter for hash algorithms, the
+  // squaring count for rsw. Forced so it is never lost to the throttle.
+  report(challenge.algorithm === "rsw" ? challenge.t : solution.counter + 1, true);
   return solution as KiwiSolution;
 }
 
 /** Dispatch one validated challenge to the right solver. */
-export async function solve(challenge: KiwiChallenge): Promise<KiwiSolution> {
+export async function solve(
+  challenge: KiwiChallenge,
+  options: SolveOptions = {},
+): Promise<KiwiSolution> {
   if (challenge.algorithm === "sha256" && challenge.targetBits <= LOW_DIFFICULTY_MAX_BITS) {
-    const low = solveSha256Low(challenge);
+    const low = solveSha256Low(challenge, options.onProgress);
     if (low) return low;
     // The window missed: fail closed to the native module (same
     // profile, never a weaker one).
@@ -152,5 +238,5 @@ export async function solve(challenge: KiwiChallenge): Promise<KiwiSolution> {
         : "this profile needs the KiwiCaptchaSolver native module, which is not linked",
     );
   }
-  return solveNative(challenge, solver);
+  return solveNative(challenge, solver, options.onProgress);
 }

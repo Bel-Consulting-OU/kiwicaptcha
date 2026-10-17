@@ -29,22 +29,22 @@ echo "== unit tests: endpoint logic =="
 php "$HERE/unit-kiwi-verify.php" >/dev/null
 check $? "unit-kiwi-verify"
 
-echo "== gateway shims load the one canonical endpoint =="
-# The three gateway directories ship a shim that requires the
-# canonical integrations-platforms/kiwi-verify.php; no duplicated
-# endpoint logic may reappear next to a shim.
-shim_status=0
+echo "== gateway endpoint copies =="
+# The three gateway directories ship the canonical
+# integrations-platforms/kiwi-verify.php byte for byte;
+# tools/ci/verify-gateway-parity.sh is the owning gate. Assert the
+# same contract here so a standalone run.sh catches drift too.
+copy_status=0
 for d in nginx caddy traefik; do
-    if ! grep -q "dirname(__DIR__).'/kiwi-verify.php'" "$ROOT/$d/kiwi-verify.php" 2>/dev/null; then
-        echo "missing canonical shim: $d/kiwi-verify.php" >&2
-        shim_status=1
-    fi
-    if grep -q 'function kiwi_verify_config' "$ROOT/$d/kiwi-verify.php" 2>/dev/null; then
-        echo "duplicated endpoint logic: $d/kiwi-verify.php" >&2
-        shim_status=1
+    if [ ! -f "$ROOT/$d/kiwi-verify.php" ]; then
+        echo "missing gateway endpoint copy: $d/kiwi-verify.php" >&2
+        copy_status=1
+    elif ! cmp -s "$ROOT/kiwi-verify.php" "$ROOT/$d/kiwi-verify.php"; then
+        echo "gateway endpoint copy drifted: $d/kiwi-verify.php" >&2
+        copy_status=1
     fi
 done
-check "$shim_status" "gateway shims delegate to the canonical endpoint"
+check "$copy_status" "gateway endpoint copies are byte-identical"
 
 echo "== nginx config lint =="
 if command -v nginx >/dev/null 2>&1; then
@@ -52,6 +52,10 @@ if command -v nginx >/dev/null 2>&1; then
     nginx -t -c "$ROOT/nginx/kiwi-gate.conf.example" -p "$tmpdir" >/dev/null 2>&1
     check $? "nginx -t on kiwi-gate.conf.example"
 
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "skip: python3 not installed (composed nginx fragment lint)"
+        rm -rf "$tmpdir"
+    else
     # The gitea-forgejo sign-up fragment, composed into the example
     # config (a fragment alone is not a complete nginx config).
     python3 - "$tmpdir" "$ROOT" <<'PYEOF' >/dev/null 2>&1
@@ -69,9 +73,217 @@ open(tmpd + '/composed.conf', 'w').write(base.replace(anchor, indented + "\n" + 
 PYEOF
     nginx -t -c "$tmpdir/composed.conf" -p "$tmpdir" >/dev/null 2>&1
     check $? "nginx -t on the composed gitea-forgejo fragment"
+
+    # The gitlab sign-up fragment, composed the same way. Its fault
+    # named location would duplicate the example's, so drop it like
+    # the gitea composition does.
+    python3 - "$tmpdir" "$ROOT" <<'PYEOF' >/dev/null 2>&1
+import sys
+tmpd, root = sys.argv[1], sys.argv[2]
+base = open(root + '/nginx/kiwi-gate.conf.example').read()
+frag = open(root + '/gitlab/nginx-signup-gate.conf').read()
+body = "\n".join(l for l in frag.splitlines() if not l.strip().startswith('#'))
+body = body.replace("""location @kiwi_gate_fault {
+    return 503;
+}""", "")
+indented = "\n".join(("        " + l) if l.strip() else l for l in body.splitlines())
+anchor = "        # ---- piece 3: the deny and fault outcomes"
+open(tmpd + '/composed-gitlab.conf', 'w').write(base.replace(anchor, indented + "\n" + anchor))
+PYEOF
+    nginx -t -c "$tmpdir/composed-gitlab.conf" -p "$tmpdir" >/dev/null 2>&1
+    check $? "nginx -t on the composed gitlab fragment"
     rm -rf "$tmpdir"
+    fi
 else
     echo "skip: nginx not installed; documented in nginx/README.md"
+fi
+
+echo "== caddy/traefik structural guards =="
+# These guards are pure shell/awk: no caddy, traefik or docker
+# required. They catch the drift classes the hand-written configs
+# failed on before: a forward-auth directive with no upstream
+# address, and a directive that slipped out of the block (wrong
+# indentation/nesting). The real validators run afterwards when the
+# binary is installed.
+caddy_guard_status=0
+awk '
+BEGIN { depth = 0; fa = 0; fa_depth = -1; fa_indent = -1; uri = 0; uri_indent = -1; bad = 0 }
+{
+    line = $0
+    sub(/#.*/, "", line)
+    if (line ~ /[^[:space:]]/) {
+        if (line ~ /^[[:space:]]*forward_auth([[:space:]]|$)/) {
+            fa++
+            match(line, /^[[:space:]]*/)
+            fa_indent = RLENGTH
+            fa_depth = depth
+            rest = line
+            sub(/^[[:space:]]*forward_auth[[:space:]]*/, "", rest)
+            sub(/[[:space:]]*\{.*$/, "", rest)
+            if (rest == "") {
+                print "caddy: forward_auth has no upstream address" > "/dev/stderr"
+                bad = 1
+            }
+            if (depth < 1) {
+                print "caddy: forward_auth is outside a site block" > "/dev/stderr"
+                bad = 1
+            }
+            if (fa_indent == 0) {
+                print "caddy: forward_auth is not indented inside its site block" > "/dev/stderr"
+                bad = 1
+            }
+        }
+        if (fa > 0 && depth > fa_depth && line ~ /^[[:space:]]*uri([[:space:]]|$)/) {
+            uri++
+            match(line, /^[[:space:]]*/)
+            uri_indent = RLENGTH
+            if (uri_indent <= fa_indent) {
+                print "caddy: uri is not indented under forward_auth" > "/dev/stderr"
+                bad = 1
+            }
+        }
+    }
+    opened = gsub(/\{/, "{", line)
+    closed = gsub(/\}/, "}", line)
+    depth += opened - closed
+    if (depth < 0) {
+        print "caddy: unbalanced closing brace" > "/dev/stderr"
+        bad = 1
+        depth = 0
+    }
+}
+END {
+    if (fa == 0) {
+        print "caddy: no forward_auth directive" > "/dev/stderr"
+        bad = 1
+    }
+    if (fa > 0 && uri == 0) {
+        print "caddy: forward_auth has no uri directive" > "/dev/stderr"
+        bad = 1
+    }
+    if (depth != 0) {
+        print "caddy: unbalanced braces" > "/dev/stderr"
+        bad = 1
+    }
+    exit bad
+}' "$ROOT/caddy/Caddyfile" || caddy_guard_status=1
+check "$caddy_guard_status" "caddy/Caddyfile structural guard"
+
+traefik_guard_status=0
+awk '
+BEGIN { http = -1; mws = -1; named = -1; fa = -1; addr = 0; bad = 0 }
+{
+    line = $0
+    sub(/#.*/, "", line)
+    if (line ~ /^[[:space:]]*$/) next
+    if (line ~ /\t/) {
+        print "traefik: tab indentation is invalid YAML" > "/dev/stderr"
+        bad = 1
+    }
+    match(line, /^[[:space:]]*/)
+    indent = RLENGTH
+    text = substr(line, indent + 1)
+    if (text ~ /^http:[[:space:]]*$/) {
+        http = indent
+        if (indent != 0) {
+            print "traefik: http must be a top-level key" > "/dev/stderr"
+            bad = 1
+        }
+    } else if (text ~ /^middlewares:[[:space:]]*$/) {
+        mws = indent
+        if (http < 0 || indent <= http) {
+            print "traefik: middlewares is not nested under http" > "/dev/stderr"
+            bad = 1
+        }
+    } else if (text ~ /^kiwi-captcha:[[:space:]]*$/) {
+        named = indent
+        if (mws < 0 || indent <= mws) {
+            print "traefik: kiwi-captcha is not nested under middlewares" > "/dev/stderr"
+            bad = 1
+        }
+    } else if (text ~ /^forwardAuth:[[:space:]]*$/) {
+        fa = indent
+        if (named < 0 || indent <= named) {
+            print "traefik: forwardAuth is not nested under kiwi-captcha" > "/dev/stderr"
+            bad = 1
+        }
+    } else if (text ~ /^address:/) {
+        if (fa < 0 || indent <= fa) {
+            print "traefik: address is not nested under forwardAuth" > "/dev/stderr"
+            bad = 1
+        }
+        value = text
+        sub(/^address:[[:space:]]*/, "", value)
+        if (value == "") {
+            print "traefik: forwardAuth has no address" > "/dev/stderr"
+            bad = 1
+        }
+        addr++
+    }
+}
+END {
+    if (http != 0) {
+        print "traefik: no top-level http key" > "/dev/stderr"
+        bad = 1
+    }
+    if (mws < 0) {
+        print "traefik: no middlewares block" > "/dev/stderr"
+        bad = 1
+    }
+    if (named < 0) {
+        print "traefik: no kiwi-captcha middleware" > "/dev/stderr"
+        bad = 1
+    }
+    if (fa < 0) {
+        print "traefik: no forwardAuth block" > "/dev/stderr"
+        bad = 1
+    }
+    if (addr == 0) {
+        print "traefik: no forwardAuth address" > "/dev/stderr"
+        bad = 1
+    }
+    exit bad
+}' "$ROOT/traefik/kiwi-forwardauth.yml" || traefik_guard_status=1
+check "$traefik_guard_status" "traefik/kiwi-forwardauth.yml structural guard"
+
+if command -v caddy >/dev/null 2>&1; then
+    caddy validate --config "$ROOT/caddy/Caddyfile" >/dev/null 2>&1
+    check $? "caddy validate on Caddyfile"
+else
+    echo "skip: caddy not installed (structural guard ran)"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ROOT/traefik/kiwi-forwardauth.yml" <<'PYEOF'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.exit(2)
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = yaml.safe_load(handle)
+
+try:
+    middlewares = document["http"]["middlewares"]
+    forward_auth = middlewares["kiwi-captcha"]["forwardAuth"]
+    address = forward_auth["address"]
+except (KeyError, TypeError):
+    print("traefik: the forwardAuth address is missing", file=sys.stderr)
+    sys.exit(1)
+if not isinstance(address, str) or not address.startswith(("http://", "https://")):
+    print("traefik: the forwardAuth address is not an http(s) URL", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+    traefik_parse_status=$?
+    if [ "$traefik_parse_status" -eq 2 ]; then
+        echo "skip: PyYAML not installed (structural guard ran)"
+    else
+        check "$traefik_parse_status" "traefik yaml parse"
+    fi
+else
+    echo "skip: python3 not installed (structural guard ran)"
 fi
 
 echo "== live matrix: php -S + curl =="
@@ -84,17 +296,23 @@ fi
 
 stub_port=17371
 stub_bearer_port=17372
+stub_secret_port=17374
 gate_port=18788
 gate_bearer_port=18789
 gate_nobearer_port=18793
 gate_dead_port=18790
 gate_redirect_port=18791
 gate_compat_port=18792
+# Keep these clear of attack-gate.mjs's own 18794-18796 range.
+gate_compat_secret_port=18797
+gate_compat_nosecret_port=18798
 
 php -S 127.0.0.1:$stub_port "$HERE/stub-kiwi-router.php" >/dev/null 2>&1 &
 pid_stub=$!
 STUB_BEARER=s3cret-1 php -S 127.0.0.1:$stub_bearer_port "$HERE/stub-kiwi-router.php" >/dev/null 2>&1 &
 pid_stub_bearer=$!
+STUB_SECRET=compat-secret php -S 127.0.0.1:$stub_secret_port "$HERE/stub-kiwi-router.php" >/dev/null 2>&1 &
+pid_stub_secret=$!
 
 KIWI_VERIFY_URL=http://127.0.0.1:$stub_port/verify KIWI_TRUSTED_PROXIES=127.0.0.0/8 \
   php -S 127.0.0.1:$gate_port "$HERE/endpoint-router.php" >/dev/null 2>&1 &
@@ -115,8 +333,14 @@ pid_gate_redirect=$!
 KIWI_VERIFY_URL=http://127.0.0.1:$stub_port/verify KIWI_VERIFY_MODE=compat KIWI_BEARER=compat-secret \
   php -S 127.0.0.1:$gate_compat_port "$HERE/endpoint-router.php" >/dev/null 2>&1 &
 pid_gate_compat=$!
+KIWI_VERIFY_URL=http://127.0.0.1:$stub_secret_port/verify KIWI_VERIFY_MODE=compat KIWI_BEARER=compat-secret \
+  php -S 127.0.0.1:$gate_compat_secret_port "$HERE/endpoint-router.php" >/dev/null 2>&1 &
+pid_gate_compat_secret=$!
+KIWI_VERIFY_URL=http://127.0.0.1:$stub_secret_port/verify KIWI_VERIFY_MODE=compat \
+  php -S 127.0.0.1:$gate_compat_nosecret_port "$HERE/endpoint-router.php" >/dev/null 2>&1 &
+pid_gate_compat_nosecret=$!
 
-trap 'kill $pid_stub $pid_stub_bearer $pid_gate $pid_gate_bearer $pid_gate_nobearer $pid_gate_dead $pid_gate_redirect $pid_gate_compat 2>/dev/null' EXIT
+trap 'kill $pid_stub $pid_stub_bearer $pid_stub_secret $pid_gate $pid_gate_bearer $pid_gate_nobearer $pid_gate_dead $pid_gate_redirect $pid_gate_compat $pid_gate_compat_secret $pid_gate_compat_nosecret 2>/dev/null' EXIT
 
 sleep 1
 gate=http://127.0.0.1:$gate_port/kiwi-verify.php
@@ -169,6 +393,17 @@ check $? "deny redirect is a 302 ($out)"
 compat_gate=http://127.0.0.1:$gate_compat_port/kiwi-verify.php
 code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Kiwi-Token: good' "$compat_gate")
 check "$([ "$code" = 204 ]; echo $?)" "compat mode verifies against the provider surface (got $code)"
+
+# The compat mode forwards KIWI_BEARER as the siteverify `secret`.
+# The stub below requires STUB_SECRET=compat-secret on that surface:
+# a gate that dropped the secret would answer 403 (bad-secret), so a
+# 204 proves the forwarding; the same gate without a bearer must deny.
+compat_secret_gate=http://127.0.0.1:$gate_compat_secret_port/kiwi-verify.php
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Kiwi-Token: good' "$compat_secret_gate")
+check "$([ "$code" = 204 ]; echo $?)" "compat mode forwards the bearer as the secret (got $code)"
+compat_nosecret_gate=http://127.0.0.1:$gate_compat_nosecret_port/kiwi-verify.php
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Kiwi-Token: good' "$compat_nosecret_gate")
+check "$([ "$code" = 403 ]; echo $?)" "compat mode without a bearer fails a secret-requiring stub (got $code)"
 
 echo "== raw-http attack script (node) =="
 if command -v node >/dev/null 2>&1; then

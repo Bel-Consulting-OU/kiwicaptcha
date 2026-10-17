@@ -15,8 +15,37 @@ defmodule Kiwicaptcha.DoctorTest do
     report = Doctor.run(secret: secret(), store: memory_store())
     assert report.ok, inspect(report.checks)
 
-    assert %{"secret" => _, "region" => _, "issuer" => _, "store" => _} =
+    assert %{"secret" => _, "region" => _, "issuer" => _, "scopes" => _, "store" => _} =
              Map.new(report.checks, &{&1.name, &1})
+  end
+
+  test "the doctor validates scope names and risk classes" do
+    report =
+      Doctor.run(
+        secret: secret(),
+        store: memory_store(),
+        scopes: "login=critical,comment=low,signup"
+      )
+
+    scopes_check = finding(report, "scopes")
+    assert scopes_check.ok, scopes_check.detail
+    assert scopes_check.detail =~ "login=critical"
+    assert report.ok
+
+    report = Doctor.run(secret: secret(), store: memory_store(), scopes: "bad scope=low")
+    scopes_check = finding(report, "scopes")
+    refute scopes_check.ok
+    assert scopes_check.detail =~ "not a valid identifier"
+
+    report = Doctor.run(secret: secret(), store: memory_store(), scopes: "login=urgent")
+
+    scopes_check = finding(report, "scopes")
+    refute scopes_check.ok
+    assert scopes_check.detail =~ "unknown risk class"
+
+    # The empty map stays valid.
+    report = Doctor.run(secret: secret(), store: memory_store(), scopes: %{})
+    assert finding(report, "scopes").ok
   end
 
   test "the doctor flags a weak secret and a dead store" do
@@ -94,6 +123,32 @@ defmodule Kiwicaptcha.DoctorTest do
     assert %{"signup" => ""} == from_env.scopes
     assert Settings.valid_secret?(from_env)
     refute Settings.valid_secret?(Settings.new(env: %{"KIWI_SECRET" => "tiny"}))
+  end
+
+  test "the settings expose the scope allowlist helper" do
+    settings =
+      Settings.new(
+        secret: secret(),
+        store_url: "memory://",
+        profile: "minimal",
+        scopes: "login=critical,comment=low",
+        env: %{}
+      )
+
+    assert Settings.scope_allowed?(settings, "login")
+    refute Settings.scope_allowed?(settings, "signup")
+
+    assert Settings.scope_allowed?(
+             Settings.new(secret: secret(), profile: "minimal", scopes: %{}),
+             "anything"
+           )
+
+    assert Settings.valid_scope_class?("")
+    assert Settings.valid_scope_class?("standard")
+    refute Settings.valid_scope_class?("urgent")
+
+    assert %{"login" => "critical", "signup" => ""} ==
+             Settings.parse_scopes("login=critical,signup")
   end
 
   test "the settings open store surface" do

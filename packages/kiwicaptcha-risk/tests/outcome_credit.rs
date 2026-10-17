@@ -21,7 +21,6 @@ use std::thread;
 use kiwicaptcha_risk::context::{RiskContext, RiskV2Context};
 use kiwicaptcha_risk::event::RiskEventKind;
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::network::CidrNetworkClassifier;
 use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::outcomes::{KiwiOutcomes, Outcome, OutcomeHandle};
 use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
@@ -91,14 +90,9 @@ fn redis_store(url: &str, namespace: &str) -> RedisRiskStateStore {
         .with_io_timeouts(2_000, 2_000)
 }
 
-fn engine(store: RedisRiskStateStore) -> RiskEngine<RedisRiskStateStore, CidrNetworkClassifier> {
-    RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&[0x42; 32]),
-    )
-    .with_target_resolver(resolver())
+fn engine(store: RedisRiskStateStore) -> RiskEngine<RedisRiskStateStore> {
+    RiskEngine::new(store, policy(), RiskKeys::from_master(&[0x42; 32]))
+        .with_target_resolver(resolver())
 }
 
 /// Reads one ledger entry as raw JSON, or None when the key is absent.

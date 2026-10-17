@@ -15,7 +15,7 @@ use kiwicaptcha_risk::context::{RiskContext, RiskV2Context};
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::identity::RiskIdentityFactory;
 use kiwicaptcha_risk::keys::RiskKeys;
-use kiwicaptcha_risk::network::{CidrNetworkClassifier, NetworkFlags};
+use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::policy::{RiskPolicy, RiskReason};
 use kiwicaptcha_risk::resources::ResourcePressure;
 use kiwicaptcha_risk::signals::SignalVector;
@@ -360,14 +360,10 @@ fn run_cell(case: &Case, enforce: NoveltyEnforcement, expected: &serde_json::Val
     } else {
         None
     };
-    let mut engine = kiwicaptcha_risk::RiskEngine::new(
-        store,
-        CidrNetworkClassifier::from_entries(vec![]),
-        policy(),
-        RiskKeys::from_master(&MASTER),
-    )
-    .with_principal_networks(Arc::new(networks.clone()))
-    .with_novelty_enforcement(enforce);
+    let mut engine =
+        kiwicaptcha_risk::RiskEngine::new(store, policy(), RiskKeys::from_master(&MASTER))
+            .with_principal_networks(Arc::new(networks.clone()))
+            .with_novelty_enforcement(enforce);
     if let Some(dataset) = dataset {
         engine = engine.with_asn_dataset(dataset);
     }

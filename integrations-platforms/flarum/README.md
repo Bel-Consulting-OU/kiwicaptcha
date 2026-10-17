@@ -16,9 +16,15 @@ before Flarum's RegisterController runs.
   JSON; a failed challenge answers 403; an unreachable deployment
   answers 503 (fail closed).
 - `src/Api/KiwiVerifier.php` is the framework-free verify client.
-- `js/dist/forum.js` is a plain, build-free asset: it patches fetch so
-  registration calls carry the `X-Kiwi-Token` header read from the
-  shim widget's hidden field or the `kiwi_token` cookie.
+- `js/dist/forum.js` is a plain, hand-maintained asset (the extension
+  ships no JS build toolchain): it patches fetch so registration
+  calls carry the `X-Kiwi-Token` header read from the shim widget's
+  hidden field or the `kiwi_token` cookie.
+- The extension has no admin settings UI. Its settings are ordinary
+  rows in Flarum's settings table, read by the middleware; set them
+  with `flarum config` (which writes the table) or a SQL insert. No
+  locale keys or serialized settings are shipped for a modal that
+  does not exist.
 
 ## Deployment steps
 
@@ -26,8 +32,10 @@ before Flarum's RegisterController runs.
    path repository (or copy it to the extensions path), then enable
    the extension in the admin panel.
 2. Set the settings (`kiwi-enabled`, `kiwi-verify-url`,
-   `kiwi-bearer`, `kiwi-signup-scope`) in the extension's settings
-   modal or `flarum config` / the settings table.
+   `kiwi-bearer`, `kiwi-signup-scope`, `kiwi-trusted-proxies`) in
+   Flarum's settings table with `flarum config` or a SQL insert. The
+   extension deliberately ships no admin UI: there is no settings
+   modal, and no locale file claims one.
 3. Serve the deployment's shim script on the forum (a header/footer
    HTML block or your theme):
 
@@ -40,11 +48,12 @@ before Flarum's RegisterController runs.
 
 ## Test status
 
-`tests/test-middleware.php` (17 checks, plain `php`) declares the
+`tests/test-middleware.php` (27 checks, plain `php`) declares the
 framework interfaces the extension references (Flarum settings, Guzzle
 client, PSR-7/15, the diactoros JSON response) and loads the real
 middleware: pass-through for non-register requests, the 403/503 deny
 paths, the pass path through header and form tokens, and the disable
-switch, plus the pure verifier. A live Flarum install remains the
-place where the admin UI and the extension boot get their final
-verification.
+switch, plus the pure verifier. It also pins the honest packaging:
+`extend.php` serializes no dead admin setting and no admin locale file
+is shipped. A live Flarum install remains the place where the
+extension boot gets its final verification.

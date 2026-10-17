@@ -17,8 +17,17 @@ is missing or failed. An unreachable deployment fails the flow closed.
   challenge error page on deny, `failure(INTERNAL_ERROR)` when the
   deployment is unreachable.
 - `KiwiAuthenticatorFactory.java` registers it (id `kiwi-captcha`)
-  with the flow-editor config: verify URL, bearer, scope,
-  trust-proxy switch.
+  with the flow-editor config: verify URL, bearer, scope and the
+  trust-proxy switch. The switch is off by default (the socket peer
+  is the binding and forwarding headers are ignored); when on, the
+  rightmost `X-Forwarded-For` hop appended by the nearest proxy is
+  used, with `X-Real-IP` as the no-chain fallback. Enable it only
+  behind a reverse proxy that appends or overwrites the header.
+- The factory offers REQUIRED, ALTERNATIVE and DISABLED. Under
+  ALTERNATIVE a missing or failed challenge calls `attempted()`, so
+  the flow can continue with its other alternatives; success still
+  requires a verified token, and an unreachable deployment fails the
+  flow closed under either requirement.
 - `KiwiVerifyClient.java` is the dependency-free client (java.net.http
   plus a hand-rolled JSON encoder) and `Json.java` is its strict
   RFC 8259 parser: the verify response is parsed as real JSON and
@@ -35,10 +44,13 @@ is missing or failed. An unreachable deployment fails the flow closed.
    `bin/kc.sh build && bin/kc.sh start` (or restart the container).
 3. Admin console, Authentication, Flows: copy the browser flow, add
    the "KiwiCaptcha" execution where the protection belongs
-   (registration path or login), set it REQUIRED (ALTERNATIVE is also
-   safe: `action()` never continues the flow unverified), and configure the
-   verify URL (default `http://127.0.0.1:7371/verify`), the bearer
-   and the scope.
+   (registration path or login), set it REQUIRED. ALTERNATIVE is also
+   supported: a missing or failed challenge marks the execution
+   attempted so the flow's other alternatives can satisfy it, while
+   this execution never reaches `success()` without a verified token.
+   Configure the verify URL (default `http://127.0.0.1:7371/verify`),
+   the bearer, the scope and, only behind a trusted proxy, the
+   trust-proxy switch.
 4. Bind the flow to the relevant action (browser or direct grant).
 5. The client side: Keycloak's login theme needs the shim. Drop the
    deployment's script tag into your theme's `footer.ftl` (or a
@@ -49,7 +61,7 @@ is missing or failed. An unreachable deployment fails the flow closed.
 
 ## Test status
 
-`KiwiVerifyClientTest.java` (25 checks) is a plain-JDK test compiled
+`KiwiVerifyClientTest.java` (33 checks) is a plain-JDK test compiled
 and run here:
 
 ```
@@ -61,10 +73,19 @@ java -cp /tmp/kiwi-kc-classes ee.bel.kiwi.keycloak.KiwiVerifyClientTest
 
 It covers the decision surface (status mapping, real-JSON body
 parsing — truncated documents, trailing garbage, string lookalikes and
-duplicate keys all fail closed), token extraction, the
-no-forwarding-parser pin, JSON escaping and live round trips against a
-local HTTP stub (success, failure, 5xx fail closed, unreachable fail
-closed). `mvn package` was run on this host (Java 17, Keycloak 23
-artifacts from Central) and produces the jar; exercising the
-authenticator inside a running Keycloak (flow editor, login theme)
-needs a server, which this repository does not ship.
+duplicate keys all fail closed), token extraction, the opt-in client-ip
+resolver (peer by default, rightmost forwarded hop with the switch on,
+malformed chains and inputs fail closed), JSON escaping and live round
+trips against a local HTTP stub (success, failure, 5xx fail closed,
+unreachable fail closed).
+
+`KiwiAuthenticatorFactoryTest.java` (9 checks) pins the flow-editor
+surface: REQUIRED, ALTERNATIVE and DISABLED are offered, and the
+config properties are the verify URL, bearer, scope and the
+trust-proxy boolean defaulting to false. It compiles against
+`target/classes` plus the Keycloak SPI jars (`mvn -o compile` first).
+
+`mvn -o compile` was run on this host (Java 17, Keycloak 23
+artifacts from the local repository); `mvn package` produces the jar.
+Exercising the authenticator inside a running Keycloak (flow editor,
+login theme) needs a server, which this repository does not ship.

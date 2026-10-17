@@ -1,0 +1,14 @@
+{#
+  Default template for the kiwicaptcha_widget theme hook.
+
+  Available variables:
+  - scope: the challenge scope (a short kiwi identifier).
+  - shim_url: the deployment's shim script URL; empty when the site
+    loads the shim some other way.
+#}
+<div class="kiwi-container" data-kiwi-scope="{{ scope }}">
+  <input type="hidden" name="kiwi__token" data-kiwi-token value="">
+</div>
+{% if shim_url %}
+  <script src="{{ shim_url }}" defer></script>
+{% endif %}

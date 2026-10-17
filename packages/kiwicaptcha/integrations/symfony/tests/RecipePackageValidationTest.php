@@ -50,7 +50,7 @@ final class RecipePackageValidationTest extends TestCase
     {
         $path = $this->recipeDir().'/'.$relative;
         if (!is_file($path)) {
-            self::markTestSkipped(sprintf('the recipe package is not present at %s', $path));
+            self::fail(sprintf('the recipe package is missing the required file %s (resolved from the test at %s)', $relative, $path));
         }
 
         return $path;
@@ -191,6 +191,22 @@ final class RecipePackageValidationTest extends TestCase
         foreach (['symfony/flex', 'predis/predis', 'bel-consulting/kiwicaptcha-symfony'] as $required) {
             self::assertArrayHasKey($required, $fixture['require'], 'the fixture must require '.$required);
         }
+        self::assertTrue($fixture['config']['allow-plugins']['symfony/flex'] ?? false, 'the fixture allows the Flex plugin');
+    }
+
+    /**
+     * The recipe package ships the documented .env reference next to the
+     * manifest: the generated secret placeholder and the two defaults the
+     * manifest declares, so a manual setup can copy the exact keys.
+     */
+    public function testEnvReferenceFileCarriesTheManifestPlaceholders(): void
+    {
+        $env = (string) file_get_contents($this->recipeFile('.env'));
+        $manifest = $this->manifest();
+
+        self::assertMatchesRegularExpression('/^KIWI_SECRET_KEY=.*$/m', $env, 'the .env reference carries the secret placeholder');
+        self::assertStringContainsString('KIWI_REDIS_DSN='.$manifest['env']['KIWI_REDIS_DSN'], $env, 'the .env reference carries the manifest DSN default');
+        self::assertStringContainsString('KIWI_PUBLIC_URL='.$manifest['env']['KIWI_PUBLIC_URL'], $env, 'the .env reference carries the manifest origin default');
     }
 
     public function testRecipeShapedConfigBootsAKernelAndPassesDoctorWithTheDsn(): void

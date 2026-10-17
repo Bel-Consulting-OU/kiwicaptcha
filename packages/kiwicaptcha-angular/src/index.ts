@@ -1,6 +1,6 @@
-export { KiwiCaptcha } from "./kiwi-captcha.component.js";
-export { KiwiCaptchaService } from "./kiwi-captcha.service.js";
-export type { KiwiLoadOptions } from "./kiwi-captcha.service.js";
+export { KiwiCaptcha } from "./kiwi-captcha.component";
+export { KiwiCaptchaService } from "./kiwi-captcha.service";
+export type { KiwiLoadOptions } from "./kiwi-captcha.service";
 export type {
   KiwiRenderOptions,
   KiwiWidgetHandle,

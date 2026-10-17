@@ -48,6 +48,8 @@ as the final 512-hex segment). Verification stays server-to-server.
 `npm test` runs the Jest suite (ts-jest, `react-native` mapped onto a
 controllable mock): the SHA-256 vectors, the token grammar, the
 validation refusals, the low-difficulty solve against a pinned
-counter, native dispatch and malformed-answer handling, the full
-acquireToken flow against a mocked fetch, and the siteverify body.
+counter, native dispatch and malformed-answer handling, bounded
+`onProgress` reporting on both solver paths, the optional
+`react-native-quick-crypto` branch, the full acquireToken flow against
+a mocked fetch, and the siteverify body.
 `npm run typecheck` runs the strict `tsc --noEmit`.

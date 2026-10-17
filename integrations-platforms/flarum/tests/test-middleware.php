@@ -223,5 +223,12 @@ $disabled = new VerifySignupMiddleware(new TestSettings(['kiwi-enabled' => false
 $handler = new TestHandler();
 check('disabled middleware passes everything through', is_object($disabled->process(new TestRequest('POST', '/register'), $handler)) && $handler->handled);
 
+// Packaging honesty: there is no admin UI, so neither a serialized
+// forum setting nor a locale file advertising a settings modal may
+// reappear.
+$extend = (string) file_get_contents(dirname(__DIR__).'/extend.php');
+check('extend.php serializes no dead admin setting', !str_contains($extend, 'serializeToForum'));
+check('no dead admin locale is shipped', !is_file(dirname(__DIR__).'/resources/locale/en.yml'));
+
 fwrite($failures === 0 ? STDOUT : STDERR, sprintf("%d checks, %d failures\n", $checks, $failures));
 exit($failures === 0 ? 0 : 1);

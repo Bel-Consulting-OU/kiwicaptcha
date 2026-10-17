@@ -9,9 +9,10 @@ needed for any of it.
 - `kiwicaptcha_form_alter()` matches the core form ids
   (`user_login_form`, `user_login_block`, `user_register_form`,
   `comment_form`, any `contact_message_*` form), attaches the widget
-  element (a scoped container with the hidden `kiwi__token` field),
-  adds the shared validate handler and attaches the deployment's shim
-  script through `html_head`.
+  through the `kiwicaptcha_widget` theme hook and adds the shared
+  validate handler. `templates/kiwicaptcha-widget.html.twig` renders
+  the scoped container, the hidden `kiwi__token` field and, when
+  configured, the deployment's shim script.
 - The validate handler delegates token extraction to
   `Drupal\kiwicaptcha\KiwiVerifyLogic` and verification to the
   `kiwicaptcha.verifier` service (the pure decision table plus Guzzle
@@ -36,12 +37,12 @@ needed for any of it.
 
 ## Test status
 
-`tests/test-kiwicaptcha-pure.php` (27 checks, plain `php`) loads
+`tests/test-kiwicaptcha-pure.php` (47 checks, plain `php`) loads
 `src/KiwiVerifyLogic.php` and `src/KiwiMarkup.php` directly; neither
 file references a Drupal class, so the token extraction, the scope
 resolution over the settings shape, both wire formats, the full
-decision table over a fake transport and the markup element are
-covered outside Drupal. The thin Drupal glue (the `.module` hooks,
+decision table over a fake transport, the theme-hook render element
+and the shipped template are covered outside Drupal. The thin Drupal glue (the `.module` hooks,
 the service constructor, the ConfigFormBase form) is `php -l` checked
 here and follows the documented Drupal 10 conventions; exercising it
 end to end needs a Drupal install, which this repository does not

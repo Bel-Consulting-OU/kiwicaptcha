@@ -6,7 +6,30 @@
 #   ruby tests/middleware_disposition_test.rb
 
 require "json"
-require "rack"
+
+begin
+  require "rack"
+rescue LoadError
+  # The test only uses Rack::Request#cookies and the Rack::Runtime
+  # constant; the fallback keeps this a plain-ruby test on a box
+  # without the gem.
+  module Rack
+    class Runtime; end
+
+    class Request
+      def initialize(env)
+        @env = env
+      end
+
+      def cookies
+        (@env["HTTP_COOKIE"] || "").split(/;\s*/).each_with_object({}) do |pair, out|
+          name, value = pair.split("=", 2)
+          out[name] = value if name && value
+        end
+      end
+    end
+  end
+end
 
 $failures = 0
 $checks = 0

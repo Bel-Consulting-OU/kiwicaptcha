@@ -41,7 +41,7 @@ export async function acquireToken(options: AcquireTokenOptions): Promise<string
   }
   const document: unknown = await response.json();
   const challenge = validateChallenge(document);
-  const solution: KiwiSolution = await solve(challenge);
+  const solution: KiwiSolution = await solve(challenge, { onProgress: options.onProgress });
   return encodeToken({
     nonce: challenge.nonce,
     counter: solution.counter,

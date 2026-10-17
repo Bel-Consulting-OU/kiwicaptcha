@@ -102,6 +102,9 @@ public sealed class Verifier
     /// constructor. NowSecs supplies the wall clock in unix seconds.
     /// SecretsByKid maps positive kid values to secrets of at least
     /// 32 bytes; an empty map keeps the legacy single-secret path.
+    /// Scopes is the accepted scope allowlist: a non-empty list refuses
+    /// a verify call whose expected scope is outside it with
+    /// wrong_scope; an empty list accepts any scope.
     /// </summary>
     public sealed class Config
     {
@@ -109,6 +112,7 @@ public sealed class Verifier
         public Func<long>? NowSecs { get; set; }
         public bool AcceptLegacyV1 { get; set; }
         public string Region { get; set; } = "";
+        public IReadOnlyList<string> Scopes { get; set; } = Array.Empty<string>();
         public int ExpectedPolicyVersion { get; set; }
         public int PolicyVersionFloor { get; set; }
         public string ExpectedIssuer { get; set; } = "";
@@ -135,6 +139,7 @@ public sealed class Verifier
     /// </summary>
     public static Config ValidateConfig(Config config)
     {
+        config.Scopes ??= Array.Empty<string>();
         foreach (var entry in config.SecretsByKid)
         {
             if (entry.Key < 1
@@ -473,10 +478,33 @@ public sealed class Verifier
     }
 
     /// <summary>
+    /// Whether the configured scope allowlist accepts one scope. An
+    /// empty list accepts any scope; a non-empty one is the
+    /// deployment's accepted set.
+    /// </summary>
+    private bool ScopeAllowed(string scope)
+    {
+        if (_config.Scopes.Count == 0)
+        {
+            return true;
+        }
+        foreach (var allowed in _config.Scopes)
+        {
+            if (allowed == scope)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// The scope validation and the expected request binding. The
     /// expected scope is REQUIRED: an empty scope option answers the
     /// typed required_scope failure instead of silently accepting a
-    /// token minted for any scope.
+    /// token minted for any scope. The configured scope set is an
+    /// allowlist: a call naming a scope outside it fails with
+    /// wrong_scope before the record comparison.
     /// </summary>
     private VerifyError? CheckScopeAndBinding(ChallengeRecord record, string expectedScope,
         RequestBindingExpectation expectation)
@@ -484,6 +512,10 @@ public sealed class Verifier
         if (expectedScope.Length == 0)
         {
             return VerifyError.RequiredScope;
+        }
+        if (!ScopeAllowed(expectedScope))
+        {
+            return VerifyError.WrongScope;
         }
         if (record.Scope != expectedScope)
         {

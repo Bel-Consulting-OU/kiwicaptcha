@@ -68,7 +68,10 @@ recovers.
 The scope option is REQUIRED (`Options.ExpectedScope` is a `required`
 property): an empty option answers the typed `required_scope` refusal
 instead of silently accepting a token minted for any scope, and the
-middleware takes the scope as a required constructor parameter.
+middleware takes the scope as a required constructor parameter. The
+configured `Scopes` list is an allowlist: when non-empty, a verify call
+naming an expected scope outside it answers the typed `wrong_scope`
+failure. An empty list accepts any scope.
 
 ## Execution-armed records: the ExecutionPolicy
 

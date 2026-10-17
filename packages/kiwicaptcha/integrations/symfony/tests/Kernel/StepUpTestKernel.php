@@ -33,13 +33,16 @@ final class StepUpTestKernel extends TestKernel
         string $environment,
         bool $debug,
         private readonly bool $stepUpEnabled = true,
+        private readonly bool $allowSignupBootstrap = false,
     ) {
         parent::__construct($environment, $debug);
     }
 
     public function getCacheDir(): string
     {
-        return parent::getCacheDir().($this->stepUpEnabled ? '-stepup-on' : '-stepup-off');
+        return parent::getCacheDir()
+            .($this->stepUpEnabled ? '-stepup-on' : '-stepup-off')
+            .($this->allowSignupBootstrap ? '-bootstrap' : '');
     }
 
     protected function build(ContainerBuilder $container): void
@@ -65,7 +68,8 @@ final class StepUpTestKernel extends TestKernel
     public function registerContainerConfiguration(LoaderInterface $loader): void
     {
         $stepUpEnabled = $this->stepUpEnabled;
-        $loader->load(function (ContainerBuilder $container) use ($stepUpEnabled): void {
+        $allowSignupBootstrap = $this->allowSignupBootstrap;
+        $loader->load(function (ContainerBuilder $container) use ($stepUpEnabled, $allowSignupBootstrap): void {
             $container->register('fake_redis', \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient::class)
                 ->setPublic(true);
             // The security token storage the step-up controller and the
@@ -103,6 +107,7 @@ final class StepUpTestKernel extends TestKernel
                         'enabled' => true,
                         'scope' => 'login',
                         'default_handler' => 'email_otp',
+                        'allow_signup_bootstrap' => $allowSignupBootstrap,
                         'handlers' => [
                             'email_otp' => ['enabled' => true],
                             'totp' => ['enabled' => true],

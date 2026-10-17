@@ -4222,4 +4222,35 @@ mod tests {
              without a browser (pass rate 1.0, rejection rate 0.0)"
         );
     }
+
+    #[test]
+    fn protocol_version_and_tag_grammar_are_pinned() {
+        // The op-version byte is part of the cross-language program
+        // grammar: every interpreter (Rust, JS worker, PHP) reads it and
+        // rejects an unknown value. The tag list feeds DOM_CREATE, so a
+        // reorder or an invalid entry changes every generated program.
+        assert_eq!(PROTOCOL_VERSION, 1);
+        assert_eq!(TAG_NAMES, ["div", "span", "section", "p"]);
+
+        let mut seen = std::collections::HashSet::new();
+        for tag in TAG_NAMES {
+            assert!(seen.insert(tag), "tag names must be unique");
+            assert!(!tag.is_empty());
+            assert!(
+                tag.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+                "tag names are lowercase HTML element names: {tag}"
+            );
+            assert_ne!(tag, "id", "the fixed list never contains 'id'");
+        }
+
+        // The generated program carries the same protocol version, so a
+        // decoder and an encoder can never disagree on the grammar rung.
+        let program = generate(KEY, "nonce-abc", "login", "login-action", 1)
+            .expect("version 1 must generate");
+        assert_eq!(
+            decode(&program).expect("the program parses").op_version,
+            PROTOCOL_VERSION
+        );
+    }
 }

@@ -27,8 +27,18 @@ export interface KiwiChallenge {
   p: number;
   targetBits: number;
   ttlSecs?: number;
+  /**
+   * The server's minimum accepted solve duration. It is a verifier-side
+   * floor (the token carries the measured duration); the client only
+   * validates the wire shape, it never pads or delays a solve.
+   */
   minDurationMs?: number;
   prefix: string;
+  /**
+   * The server-issued honeypot field name for the BROWSER widget. The
+   * native path has no DOM form to arm it in, so it is validated and
+   * exposed but never acted on.
+   */
   decoy_field?: string;
   execution_program?: string;
   rsw_modulus?: string;
@@ -72,6 +82,17 @@ export interface NativeKiwiSolver {
    * of the KiwiSolution shape, or reject with a message.
    */
   solve(challengeJson: string): Promise<string>;
+  /**
+   * Optional progress channel. When the module implements it, `solve`
+   * dispatches here and forwards bounded progress reports; when it does
+   * not, `solve` is used and the caller still observes the start and
+   * final reports. The module must report at its own bounded cadence
+   * (never once per hash) and answer the same JSON shape as `solve`.
+   */
+  solveWithProgress?(
+    challengeJson: string,
+    onProgress: (info: { attempted: number }) => void,
+  ): Promise<string>;
 }
 
 /** Options of the orchestration entry point. */

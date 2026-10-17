@@ -95,6 +95,11 @@ export interface KiwiRenderOptions extends KiwiEventHandlers {
   fetchTimeoutMs?: number;
   /** Request a non-default proof-of-work profile. */
   algorithm?: "sha256" | "argon2id" | "rsw" | (string & {});
+  /**
+   * The documented risk-context opt-in. The value rides the container's
+   * data-kiwi-risk-context attribute, which the driver reads.
+   */
+  riskContext?: "coarse";
   /** Alias response field name, or false to disable the alias write. */
   responseField?: string | false;
   /** Explicit-execution mode: the solve starts on execute() only. */

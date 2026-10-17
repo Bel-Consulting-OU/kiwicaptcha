@@ -26,21 +26,13 @@ function kiwicaptcha_form_alter(&$form, FormStateInterface $form_state, $form_id
         return;
     }
     // The display scope: the configured scope name for the matched
-    // form (scopeForForm already resolved it).
-    $form['kiwicaptcha_widget'] = Drupal\kiwicaptcha\KiwiMarkup::renderElement($scope);
+    // form (scopeForForm already resolved it). The theme hook's
+    // template renders the container and, when configured, the shim
+    // script tag.
+    $shimUrl = (string) ($config->get('shim_url') ?? '');
+    $form['kiwicaptcha_widget'] = Drupal\kiwicaptcha\KiwiMarkup::renderElement($scope, $shimUrl);
     $form['kiwicaptcha_widget']['#weight'] = 100;
     $form['#validate'][] = 'kiwicaptcha_validate_captcha';
-    $shimUrl = (string) ($config->get('shim_url') ?? '');
-    if ($shimUrl !== '') {
-        $form['#attached']['html_head'][] = [
-            [
-                '#type' => 'html_tag',
-                '#tag' => 'script',
-                '#attributes' => ['src' => $shimUrl, 'defer' => true],
-            ],
-            'kiwicaptcha_shim',
-        ];
-    }
 }
 
 /**

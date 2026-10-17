@@ -507,6 +507,23 @@ impl RedisRiskStateStore {
         self.namespace_version
     }
 
+    /// Builds the Redis-backed decoy-escalation reader over this store's
+    /// client and encoded namespace: the write/read path of the canonical
+    /// `decoy_escalation.lua` (the PHP `DecoyEscalationStore` mirror).
+    /// `gate_open` is the autofill-qualification decision; a closed gate
+    /// makes the script refuse the record before any write.
+    pub fn decoy_escalation_reader(
+        &self,
+        gate_open: bool,
+    ) -> crate::escalation::RedisDecoyEscalationStore {
+        crate::escalation::RedisDecoyEscalationStore::new(
+            self.client.clone(),
+            self.namespace.clone(),
+            gate_open,
+        )
+        .expect("the derived namespace is a safe key component")
+    }
+
     /// Re-derive every key from the raw namespace under an explicit key
     /// version: switching an existing deployment to
     /// [`NamespaceVersion::Digest`] changes its key space, so the caller

@@ -24,15 +24,19 @@ let controls: KiwiSolidControls | undefined;
 ## Lifecycle
 
 Config props (endpoint, sitekey, scope, lang is the four-setting
-quickstart) are captured when the widget mounts; callback props stay
-live, so parents may pass fresh inline functions on every render.
-Cleanup destroys the driver record when the component unmounts. The
-`ref` prop receives the imperative controls
-(`getResponse/isExpired/reset/execute`) once the widget is mounted.
+quickstart, plus theme/action/cData/execution/riskContext and the
+loader controls `scriptSrc`, `scriptIntegrity`, `scriptCrossorigin`,
+`scriptTimeoutMs`, `scriptNonce`) are captured when the widget mounts;
+callback props stay live, so parents may pass fresh inline functions on
+every render. Cleanup destroys the driver record when the component
+unmounts. The `ref` prop receives the imperative controls
+(`getResponse/isExpired/reset/execute/destroy`) once the widget is
+mounted.
 
 ## Tests
 
 `npm test` runs the vitest suite with vite-plugin-solid under
 happy-dom and a faithful mock driver: mount and markup, verify/error/
-expire/retry callbacks, the ref-delivered controls, ref-once
-semantics, and dispose hygiene.
+expire/retry callbacks, theme/lang/action/execution/riskContext and
+loader-control forwarding, the ref-delivered controls (including
+`isExpired` and `destroy`), ref-once semantics, and dispose hygiene.

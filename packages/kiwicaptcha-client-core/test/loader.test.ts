@@ -89,20 +89,35 @@ describe("loadKiwiCaptcha", () => {
     await expect(pending).rejects.toThrow(/window.KiwiCaptcha is missing/);
   });
 
-  it("carries integrity and crossorigin onto the script element", async () => {
+  it("carries integrity, crossorigin and nonce onto the script element", async () => {
     const w = freshWindow();
     const pending = loadKiwiCaptcha({
       doc: w.document,
       scriptSrc: "/vendor/kiwi.js",
       integrity: "sha384-abc",
       crossorigin: "anonymous",
+      scriptNonce: "nonce-xyz",
     });
     const script = w.document.scripts[0] as HTMLScriptElement;
     expect(script.integrity).toBe("sha384-abc");
     expect(script.crossOrigin).toBe("anonymous");
+    expect(script.nonce).toBe("nonce-xyz");
     installMockDriver(w.document);
     script.dispatchEvent(new w.Event("load"));
     await pending;
+  });
+
+  it("the driver can read the nonce it was loaded with", async () => {
+    const w = freshWindow();
+    const pending = loadKiwiCaptcha({ doc: w.document, scriptNonce: "nonce-driver" });
+    const script = w.document.scripts[0] as HTMLScriptElement;
+    expect(script.nonce).toBe("nonce-driver");
+    // Stand in for the driver reading its own element's nonce.
+    installMockDriver(w.document);
+    (w as unknown as { __kiwiNonce?: string }).__kiwiNonce = script.nonce;
+    script.dispatchEvent(new w.Event("load"));
+    await pending;
+    expect((w as unknown as { __kiwiNonce?: string }).__kiwiNonce).toBe("nonce-driver");
   });
 
   it("times out when the driver never appears", async () => {

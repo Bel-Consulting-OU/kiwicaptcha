@@ -1,0 +1,34 @@
+# Woodpecker CI: the browser framework adapters (mirrors the GitHub job
+# web-wrappers). client-core is built first because every adapter
+# consumes it through file:../kiwicaptcha-client-core, then each adapter
+# installs from its committed lockfile, runs its unit suite and builds
+# its package. React Native has no build script; its typecheck runs
+# after the suites.
+labels:
+  capability: docker
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: client-core-and-adapters
+    image: node:22-bookworm
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-client-core
+        npm ci --no-audit --no-fund
+        npm run build
+        npm test
+        cd ../..
+        for p in kiwicaptcha-react kiwicaptcha-vue kiwicaptcha-svelte \
+                 kiwicaptcha-solid kiwicaptcha-angular kiwicaptcha-react-native; do
+          echo "== $$p"
+          (cd "packages/$$p" && npm ci --no-audit --no-fund && npm test)
+        done
+        for p in kiwicaptcha-react kiwicaptcha-vue kiwicaptcha-svelte \
+                 kiwicaptcha-solid kiwicaptcha-angular; do
+          echo "== build $$p"
+          (cd "packages/$$p" && npm run build)
+        done
+        cd packages/kiwicaptcha-react-native
+        npm run typecheck

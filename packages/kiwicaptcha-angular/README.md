@@ -35,35 +35,47 @@ export class LoginForm {
 
 ## Component and service
 
-- Inputs: the four-setting quickstart plus the core's remaining
-  options and the loader controls.
-- Outputs: `verified` (token detail), `failed` (message), `expired`,
-  `widgetReady` (scope), `retrying`, `workerUnavailable`,
-  `executionUnavailable`. Driver work runs outside the Angular zone;
-  every emission re-enters it, so OnPush parents see the change.
+- Inputs: the four-setting quickstart (`endpoint`, `sitekey`, `scope`,
+  `lang`), the core's remaining render options (`theme`, `action`,
+  `cData`, `chainTicket`, `requestBinding`, `fetchTimeoutMs`,
+  `algorithm`, `riskContext`, `responseField`, `execution`,
+  `tokenFieldName`, `buildMarkup`), a preloaded `api`, and the loader
+  controls (`scriptSrc`, `scriptIntegrity`, `scriptCrossorigin`,
+  `scriptTimeoutMs`, `scriptNonce`). Changing any input destroys the
+  live widget and rebuilds it from the new options.
+- Outputs: `verified` (token detail), `failed` (message),
+  `expired`, `widgetReady` (scope), `verifying` (scope), `retrying`,
+  `workerUnavailable`, `executionUnavailable`. `failed` carries both
+  terminal solve failures and render/load failures (the message says
+  which; a solve failure is the driver's own error text). Driver work
+  runs outside the Angular zone; every emission re-enters it, so
+  OnPush parents see the change.
 - `KiwiCaptchaService.load()/render()` is the injectable facade for
-  layouts that manage their own DOM.
+  layouts that manage their own DOM. Both accept the loader controls;
+  `render()` also accepts a preloaded `api` (the same option the
+  component exposes as an input) and then skips the script load.
 - The component exposes `getResponse/isExpired/reset/execute` and a
   `ready` signal; teardown runs through `DestroyRef`, and a render
-  landing after view death is discarded.
+  landing after view death or after a newer rebuild is discarded.
 
-## Tests and their status in this checkout
+## Tests
 
-`src/kiwi-captcha.component.spec.ts` holds the TestBed specs
-(mount and markup, verified emission, failed/expired, destroy hygiene,
-the imperative controls, the injectable service). Two runners are
-wired: `npm run test:unit` executes the suite under vitest + jsdom
-with the Angular compiler transform, and `npm test` keeps the strict
-`tsc --noEmit` gate. `ng test` (karma.conf.cjs, angular.json) is the
-workspace runner and launches the headless Chromium named by
-CHROME_BIN.
+`src/kiwi-captcha.component.spec.ts` holds 12 TestBed specs: mount and
+markup, verified/verifying emissions, failed/expired, destroy hygiene,
+the imperative controls, the injectable service, the remaining render
+inputs, `buildMarkup: false` failure reporting, loader-control
+forwarding, the preloaded `api` input, and rebuild-on-input-change.
 
-Status in this checkout: the vitest runner discovers and executes all
-six specs (one passes; five fail on Angular's required view-query
-signals never resolving under the jsdom transform chain, reproduced
-with a minimal probe component with no project code involved). The
-Karma runner launches the browser but the builder's bundle does not
-attach to the karma file list in this container. Both symptoms are
-environment-level, neither is a claim of passing: the suite is
-expected to pass in an Angular CI image with a system Chrome, and no
-pass is claimed here beyond the one assertion the vitest run proves.
+`npm test` runs the strict `tsc --noEmit` gate and then the vitest +
+jsdom suite through the Angular AOT transform. `npm run test:unit`
+runs the suite alone. The vitest config sets `jit: false` (the plugin's
+test default is JIT, where `input()`/`viewChild()` metadata cannot be
+reflected) and `tsconfig.spec.json` sets `noEmit: false` so the AOT
+compiler can emit the transformed components. `ng test`
+(karma.conf.cjs, angular.json) remains the optional browser-workspace
+runner and launches the headless Chromium named by CHROME_BIN.
+
+## Build
+
+`npm run build` compiles the library with `ng-packagr` (partial
+compilation mode) into `dist/`.

@@ -73,7 +73,9 @@ The scope option is REQUIRED (`expected_scope` is a positional
 argument of `VerifyOptions`): an empty option answers the typed
 `required_scope` refusal instead of silently accepting a token minted
 for any scope, and every framework middleware takes the scope at
-construction.
+construction. The configured `scopes` tuple is an allowlist: when
+non-empty, a verify call naming an expected scope outside it answers
+the typed `wrong_scope` failure. An empty tuple accepts any scope.
 
 ## Execution-armed records: the execution policy
 

@@ -1,0 +1,85 @@
+# Woodpecker CI: the seven first-party server SDKs (mirrors the GitHub
+# jobs sdk-go, sdk-python, sdk-jvm, sdk-dotnet, sdk-ruby, sdk-elixir and
+# sdk-node). One workflow with one step per language: the shared
+# workspace is only read, and each step installs its own toolchain in
+# its own image. The Go step also runs the four framework adapters,
+# which are separate modules and therefore invisible to the root
+# `go test ./...`.
+labels:
+  capability: docker
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: go
+    image: golang:1.26-bookworm
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-go
+        go vet ./...
+        go test -race ./...
+        for d in integrations/*/; do
+          echo "== $$d"
+          (cd "$$d" && go test ./...)
+        done
+
+  - name: python
+    image: python:3.12-bookworm
+    commands:
+      - |
+        set -eu
+        python3 -m pip install --upgrade pip
+        python3 -m pip install argon2-cffi
+        cd packages/kiwicaptcha-python-sdk
+        python3 -m unittest discover -s tests -v
+
+  - name: jvm
+    image: maven:3.9-eclipse-temurin-17
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-jvm
+        mvn -B -ntp test
+
+  - name: dotnet
+    image: mcr.microsoft.com/dotnet/sdk:8.0
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-dotnet
+        dotnet test KiwiCaptcha.sln --nologo
+
+  - name: ruby
+    image: ruby:3.3-bookworm
+    commands:
+      - |
+        set -eu
+        apt-get update -qq
+        apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev
+        cd packages/kiwicaptcha-ruby
+        bundle config set --local path vendor/bundle
+        bundle install --jobs 4 --retry 3
+        bundle exec rake test
+
+  - name: elixir
+    image: elixir:1.18-otp-27
+    commands:
+      - |
+        set -eu
+        apt-get update -qq
+        apt-get install -y -qq build-essential
+        cd packages/kiwicaptcha-elixir
+        mix local.hex --force
+        mix local.rebar --force
+        mix deps.get
+        mix test
+
+  - name: node
+    image: node:22-bookworm
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-node
+        npm ci --no-audit --no-fund
+        npm test

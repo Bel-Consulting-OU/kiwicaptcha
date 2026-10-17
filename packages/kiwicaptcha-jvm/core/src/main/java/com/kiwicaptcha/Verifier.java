@@ -135,7 +135,12 @@ public final class Verifier {
      * constructor. nowSecs supplies the wall clock in unix seconds and
      * stands in for it in tests. secretsByKid maps positive kid values
      * to secrets of at least 32 bytes; an empty map keeps the legacy
-     * single-secret path.
+     * single-secret path. scopes is the accepted scope allowlist: a
+     * non-empty list refuses a verify call whose expected scope is
+     * outside it with wrong_scope; an empty list accepts any scope.
+     * storage is the optional store binding: a Config-only
+     * construction uses it, while the two-argument constructor rejects
+     * a conflicting separate store.
      */
     public static final class Config {
         public Store.StoreAdapter storage;
@@ -143,6 +148,7 @@ public final class Verifier {
         public LongSupplier nowSecs;
         public boolean acceptLegacyV1;
         public String region = "";
+        public java.util.List<String> scopes = java.util.List.of();
         public int expectedPolicyVersion;
         public int policyVersionFloor;
         public String expectedIssuer = "";
@@ -165,6 +171,9 @@ public final class Verifier {
      * trapdoors once at build time, mirroring the php memo.
      */
     public static Config validateConfig(Config config) {
+        if (config.scopes == null) {
+            config.scopes = java.util.List.of();
+        }
         for (Map.Entry<Integer, String> entry : config.secretsByKid.entrySet()) {
             if (entry.getKey() == null || entry.getKey() < 1
                     || entry.getValue() == null
@@ -235,9 +244,36 @@ public final class Verifier {
     private final Store.StoreAdapter storage;
     private final Config config;
 
-    /** Builds a verifier over a validated config. */
+    /**
+     * Builds a verifier over the store carried by the config. A config
+     * without a store refuses: a verifier can never silently run over
+     * no store.
+     */
+    public Verifier(Config config) {
+        this(null, config);
+    }
+
+    /**
+     * Builds a verifier over a validated config. The store argument and
+     * config.storage name the same seam, so a caller cannot silently
+     * get a different store: a null store falls back to config.storage,
+     * two set stores must be the same instance, and two null stores
+     * refuse.
+     */
     public Verifier(Store.StoreAdapter storage, Config config) {
+        if (config == null) {
+            throw new VerifierBuildException("a config is required");
+        }
         validateConfig(config);
+        if (storage == null) {
+            storage = config.storage;
+        } else if (config.storage != null && config.storage != storage) {
+            throw new VerifierBuildException(
+                    "the verifier store and config.storage disagree; pass one store adapter");
+        }
+        if (storage == null) {
+            throw new VerifierBuildException("a store adapter is required");
+        }
         this.storage = storage;
         this.config = config;
     }
@@ -458,15 +494,29 @@ public final class Verifier {
     }
 
     /**
+     * Whether the configured scope allowlist accepts one scope. An
+     * empty list accepts any scope; a non-empty one is the
+     * deployment's accepted set.
+     */
+    private boolean scopeAllowed(String scope) {
+        return config.scopes.isEmpty() || config.scopes.contains(scope);
+    }
+
+    /**
      * The scope validation and the expected request binding, in
      * cheap-phase order. The expected scope is REQUIRED: an empty
      * scope option answers the typed required_scope failure instead of
-     * silently accepting a token minted for any scope.
+     * silently accepting a token minted for any scope. The configured
+     * scope set is an allowlist: a call naming a scope outside it
+     * fails with wrong_scope before the record comparison.
      */
     private VerifyError checkScopeAndBinding(ChallengeRecord record, String expectedScope,
                                              RequestBindingExpectation expectation) {
         if (expectedScope.isEmpty()) {
             return VerifyError.REQUIRED_SCOPE;
+        }
+        if (!scopeAllowed(expectedScope)) {
+            return VerifyError.WRONG_SCOPE;
         }
         if (!record.scope.equals(expectedScope)) {
             return VerifyError.WRONG_SCOPE;

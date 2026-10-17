@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "ng-packagr -p ng-package.json",
-    "test": "npm run typecheck",
+    "test": "npm run typecheck && vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:unit": "vitest run"
   },
@@ -54,9 +54,10 @@
     "karma": "^6.4.4",
     "karma-chrome-launcher": "^3.2.0",
     "karma-jasmine": "^5.1.0",
+    "ng-packagr": "^20.3.2",
     "rxjs": "^7.8.1",
     "typescript": "~5.8.2",
-    "vitest": "^5.0.3",
+    "vitest": "^3.1.1",
     "zone.js": "~0.15.0"
   }
 }

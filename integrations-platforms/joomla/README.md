@@ -22,7 +22,11 @@ kiwi widget and the server-side verification.
   framework-free). Boolean answer, the contract's shape.
 - Params (the plugin's Basic tab): verify URL, shim URL, bearer
   secret, wire format (sidecar json or siteverify compat), the form
-  scope, and the trust-proxy switch.
+  scope, and the trust-proxy switch. The field labels and option
+  values are language keys resolved from
+  `language/en-GB/en-GB.plg_captcha_kiwicaptcha.ini`; the `.sys.ini`
+  carries the plugin name and description Joomla shows in the
+  extension manager.
 
 ## Deployment steps
 
@@ -38,12 +42,13 @@ kiwi widget and the server-side verification.
 
 ## Test status
 
-`tests/test-kiwicaptcha-plugin.php` (23 checks, plain `php`) boots a
+`tests/test-kiwicaptcha-plugin.php` (58 checks, plain `php`) boots a
 Joomla shim layer (CMSPlugin with the params registry, a recording
 document, an application with raw input) and loads the real plugin
 file: the three contract methods pass and deny against a stubbed
-transport, and the framework-free client is covered (extraction,
-scopes, both wire formats, the decision table). The shim layer is a
+transport, the framework-free client is covered (extraction, scopes,
+both wire formats, the decision table), and every language key the
+XML declares is checked against the shipped en-GB files. The shim layer is a
 test double, so a live Joomla install remains the place where the
 installer path and the captcha dispatcher wiring get their final
 verification.

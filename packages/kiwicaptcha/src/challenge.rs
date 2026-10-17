@@ -4959,6 +4959,80 @@ mod tests {
         ));
     }
 
+    /// Issue with one named Argon profile, solve a real counter, and
+    /// verify end to end. The profile allocation (32 or 64 MiB at t=3)
+    /// happens twice (solve + verify), exactly like a deployment.
+    fn issue_solve_verify_argon_profile(profile: ChallengeProfile, expected_m_kib: u32) {
+        let issued = issue_challenge_with_profile(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            &profile,
+            None,
+        )
+        .unwrap();
+        assert_eq!(issued.challenge.algorithm, PoWAlgorithm::Argon2id);
+        assert_eq!(issued.challenge.target_bits, 1);
+        assert_eq!(issued.challenge.m_kib, expected_m_kib);
+        assert_eq!(issued.challenge.t, 3);
+        assert_eq!(issued.challenge.p, 1);
+        assert_eq!(issued.record.m_kib, expected_m_kib);
+
+        let mut record = issued.record.clone();
+        let counter = crate::verify::solve_for_test(&record).expect("argon solve finds a counter");
+        let mut ctx = crate::verify::VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || 1_000_001),
+            now_ns: 1_700_000_005_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            execution_digest: None,
+            execution_trace: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            policy_version_floor: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+        };
+        assert!(
+            matches!(
+                crate::verify::verify_solution(&mut ctx),
+                crate::verify::VerifyOutcome::Valid { .. }
+            ),
+            "the {expected_m_kib} KiB argon profile must verify"
+        );
+    }
+
+    #[test]
+    fn issue_with_profile_argon32_solves_and_verifies() {
+        issue_solve_verify_argon_profile(ChallengeProfile::argon32(), 32 * 1024);
+    }
+
+    #[test]
+    fn issue_with_profile_argon64_solves_and_verifies() {
+        // The strongest named profile: 64 MiB × 3, one real solve and
+        // one real verification, bounded to a single issuance.
+        issue_solve_verify_argon_profile(ChallengeProfile::argon64(), 64 * 1024);
+    }
+
     #[test]
     fn issue_carries_region_on_the_record() {
         let base = profile_base_config();

@@ -186,12 +186,12 @@ The aggregate required check for protected `main` is the
 Woodpecker workflow `.woodpecker/promotion-gate.yml`: one
 `promotion-gate` status that witnesses the whole push-triggered
 functional matrix (lint, php-core, symfony, risk, rust, browser,
-redis-lanes, redis8, interop, compat-build, release-tools). The gate
-verifies its dependencies through the Woodpecker server API at run
-time: the step queries every workflow status for the commit and exits
-non-zero unless each entry in its depends_on list reports success, so
-the gate is red whenever any dependency is failed, skipped or missing.
-The DAG orders the workflows; the API query is the verification.
+redis-lanes, redis8, interop, compat-build, release-tools, packages,
+docker-deploy, sdks, wrappers, platform-integrations, verifier-redis,
+flutter). The verification IS the DAG: Woodpecker's required
+depends_on semantics refuse to start the gate workflow when any
+dependency failed or was skipped, so the gate running at all proves
+every entry in its list finished green. No server API query is made.
 Enrolling that single check name in the main
 ruleset's required contexts is the governance step; individual lanes
 never need to become required checks, and the list of witnessed lanes

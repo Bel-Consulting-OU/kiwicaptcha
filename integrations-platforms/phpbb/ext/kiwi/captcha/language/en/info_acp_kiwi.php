@@ -8,6 +8,8 @@ if (!defined('IN_PHPBB')) {
 }
 
 $lang = array_merge($lang ?? [], [
+    'ACP_KIWI_SETTINGS' => 'KiwiCaptcha settings',
+    'ACP_KIWI_SETTINGS_SAVED' => 'KiwiCaptcha settings saved.',
     'CAPTCHA_KIWI_TITLE' => 'KiwiCaptcha',
     'CAPTCHA_KIWI_TITLE_EXPLAIN' => 'Proof-of-work CAPTCHA verified against a self-hosted KiwiCaptcha deployment.',
     'KIWI_VERIFY_URL' => 'Verify URL',

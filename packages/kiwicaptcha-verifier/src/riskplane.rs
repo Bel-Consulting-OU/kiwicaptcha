@@ -23,7 +23,7 @@ use kiwicaptcha_risk::context::RiskContext;
 use kiwicaptcha_risk::event::{RiskEventKind, RiskObservation};
 use kiwicaptcha_risk::keys::RiskKeys;
 use kiwicaptcha_risk::keyspace::fnv1a32;
-use kiwicaptcha_risk::network::{CidrNetworkClassifier, NetworkFlags};
+use kiwicaptcha_risk::network::NetworkFlags;
 use kiwicaptcha_risk::policy::RiskPolicy;
 use kiwicaptcha_risk::resources::ResourcePressure;
 use kiwicaptcha_risk::store::{
@@ -138,7 +138,7 @@ impl SessionTlsTagStore for AnyRiskStore {}
 /// policy derived from the scope plan (each scope's rung becomes the
 /// policy's hard minimum, mirroring the bundle's scope floors).
 pub struct RiskPlane {
-    engine: RiskEngine<AnyRiskStore, CidrNetworkClassifier>,
+    engine: RiskEngine<AnyRiskStore>,
 }
 
 impl RiskPlane {
@@ -171,8 +171,7 @@ impl RiskPlane {
         });
         let policy = RiskPolicy::from_config(1, &config)
             .map_err(|e| format!("the derived risk policy is invalid: {e}"))?;
-        let classifier = CidrNetworkClassifier::from_entries(Vec::new());
-        let engine = RiskEngine::new(AnyRiskStore(store), classifier, Arc::new(policy), keys);
+        let engine = RiskEngine::new(AnyRiskStore(store), Arc::new(policy), keys);
         Ok(RiskPlane { engine })
     }
 

@@ -701,7 +701,6 @@ const CLAIM_TTL_SECS: u64 = 60;
 /// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
-
 const CONSUME_TRANSITION_LUA: &str = r#"
 -- kiwicaptcha consume transition
 --
@@ -2395,7 +2394,6 @@ impl RedisChallengeStore {
                 None => (None, true),
             };
             identity_spliced = spliced;
-            let parsed = parsed;
             // Durability barrier: only the fresh pending → consumed
             // transition mutated the store, so only it waits. The wait
             // proves that at least N replicas acknowledged the write; it

@@ -85,7 +85,8 @@ defmodule Kiwicaptcha.Verify do
           tenant_id: String.t() | nil,
           accept_legacy_v1: boolean(),
           rsw: rsw_config() | nil,
-          argon_gate: Kiwicaptcha.ArgonAdmissionGate.t() | nil
+          argon_gate: Kiwicaptcha.ArgonAdmissionGate.t() | nil,
+          allowed_scopes: %{optional(String.t()) => String.t()} | [String.t()] | nil
         }
 
   @doc "The wire ceilings the verifier enforces."
@@ -125,7 +126,8 @@ defmodule Kiwicaptcha.Verify do
       tenant_id: nil,
       accept_legacy_v1: false,
       rsw: nil,
-      argon_gate: nil
+      argon_gate: nil,
+      allowed_scopes: nil
     }
   end
 
@@ -824,12 +826,30 @@ defmodule Kiwicaptcha.Verify do
     end
   end
 
+  # Whether the configured scope allowlist admits one scope. The option
+  # accepts a map (the settings scope map, whose keys are the
+  # allowlist), a list, or nil. An empty (or absent) allowlist accepts
+  # any scope.
+  defp scope_allowed?(nil, _scope), do: true
+
+  defp scope_allowed?(allowed, scope) when is_map(allowed),
+    do: map_size(allowed) == 0 or Map.has_key?(allowed, scope)
+
+  defp scope_allowed?([], _scope), do: true
+  defp scope_allowed?(allowed, scope) when is_list(allowed), do: scope in allowed
+  defp scope_allowed?(_allowed, _scope), do: false
+
   defp check_scope_and_binding(options, record) do
     cond do
       # The scope option is required: an empty option refuses with the
-      # typed code instead of accepting any scope.
+      # typed code instead of accepting any scope. The configured scope
+      # set is an allowlist: a call naming a scope outside it answers
+      # wrong_scope before the record comparison.
       options.expected_scope in [nil, ""] ->
         :required_scope
+
+      not scope_allowed?(options.allowed_scopes, options.expected_scope) ->
+        :wrong_scope
 
       record.scope != options.expected_scope ->
         :wrong_scope

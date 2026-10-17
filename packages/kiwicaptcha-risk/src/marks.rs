@@ -617,6 +617,31 @@ mod tests {
     }
 
     #[test]
+    fn with_target_replaces_and_clears_the_target_record() {
+        // The builder is the deployment's shape for a reader-derived
+        // target record (the evidence plane compiles it when no target
+        // mark was written): it must replace, not append, and clearing
+        // must remove the target entirely.
+        let view = MarksView::from_parts(
+            vec![(MarkDimension::Session, mark("accountBanned", T0 as i64))],
+            None,
+        );
+        assert!(view.target_in_ttl(T0, TTL).is_none());
+
+        let view = view.with_target(Some(mark("targetUnderAttack", T0 as i64)));
+        let target = view
+            .target_in_ttl(T0, TTL)
+            .expect("the injected target is visible");
+        assert_eq!(target.kind, "targetUnderAttack");
+        assert_eq!(target.count, 1);
+
+        let cleared = view.with_target(None);
+        assert!(cleared.target_in_ttl(T0, TTL).is_none());
+        // The own-dimension entries are untouched by the target builder.
+        assert_eq!(cleared.own_in_ttl(T0, TTL).len(), 1);
+    }
+
+    #[test]
     fn unmarked_view_keeps_the_plain_decision() {
         let plain = plain(500);
         let out = apply(

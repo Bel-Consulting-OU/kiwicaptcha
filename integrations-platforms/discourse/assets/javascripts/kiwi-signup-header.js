@@ -24,7 +24,7 @@
         method === "POST" &&
         window.Discourse &&
         window.Discourse.__container__ &&
-        /^\/u(\.json)?(\/|$)/.test(url.replace(/^https?:\/\/[^/]+/, ""))
+        /^\/u(?:sers)?(\.json)?(\/|$)/.test(url.replace(/^https?:\/\/[^/]+/, ""))
       ) {
         var token = readToken();
         if (token) {

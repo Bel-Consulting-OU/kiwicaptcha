@@ -322,6 +322,7 @@ rebind_profile() {
         KIWI_TTL_SECS="${KIWI_RT_TTL_SECS:-120}" \
         KIWI_ISSUANCE_PER_MINUTE_PER_IP="${KIWI_RT_ISSUANCE_LIMIT:-0}" \
         PHP_CLI_SERVER_WORKERS=8 \
+        ${KIWI_RT_EXTRA_ENV:-} \
         php -S "127.0.0.1:$port" -t "$REPO_ROOT/deploy/app" \
             "$REPO_ROOT/deploy/app/router.php" >>"$RT_RUN_DIR/$profile.log" 2>&1 &
     echo $! >"$runprof/php.pid"

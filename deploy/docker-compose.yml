@@ -55,6 +55,7 @@ services:
       KIWI_RSW_T: ${KIWI_RSW_T:-}
       KIWI_ISSUANCE_PER_MINUTE_PER_IP: ${KIWI_ISSUANCE_PER_MINUTE_PER_IP:-}
       KIWI_HEALTHZ_MODE: ${KIWI_HEALTHZ_MODE:-}
+      KIWI_RATE_LIMIT_FAIL_OPEN: ${KIWI_RATE_LIMIT_FAIL_OPEN:-}
     depends_on:
       valkey:
         condition: service_healthy

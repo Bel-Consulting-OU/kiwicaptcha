@@ -16,11 +16,22 @@ export interface KiwiSolidControls {
   isExpired(): boolean;
   reset(): void;
   execute(): Promise<string>;
+  destroy(): void;
 }
 
 export interface KiwiCaptchaProps extends KiwiRenderOptions {
   class?: string;
   style?: JSX.CSSProperties | string;
+  /** The driver script URL. Default "/kiwi.js". */
+  scriptSrc?: string;
+  /** Optional SRI integrity for the driver script. */
+  scriptIntegrity?: string;
+  /** Optional crossorigin for the driver script. */
+  scriptCrossorigin?: "anonymous" | "use-credentials";
+  /** Reject the load when the driver has not appeared within the budget. */
+  scriptTimeoutMs?: number;
+  /** Optional CSP nonce set on the injected driver script. */
+  scriptNonce?: string;
   /** Receives the imperative controls once the widget is mounted. */
   ref?: (controls: KiwiSolidControls) => void;
 }
@@ -36,6 +47,7 @@ export interface KiwiCaptchaProps extends KiwiRenderOptions {
 export function KiwiCaptcha(props: KiwiCaptchaProps): JSX.Element {
   let el: HTMLDivElement | undefined;
   let handle: KiwiWidgetHandle | null = null;
+  let disposed = false;
 
   const controls: KiwiSolidControls = {
     getResponse: () => handle?.getResponse() ?? "",
@@ -45,6 +57,11 @@ export function KiwiCaptcha(props: KiwiCaptchaProps): JSX.Element {
       handle
         ? handle.execute()
         : Promise.reject(new Error("kiwicaptcha: widget not mounted")),
+    destroy: () => {
+      disposed = true;
+      handle?.destroy();
+      handle = null;
+    },
   };
 
   onMount(() => {
@@ -54,6 +71,11 @@ export function KiwiCaptcha(props: KiwiCaptchaProps): JSX.Element {
       class: _class,
       style: _style,
       ref: _ref,
+      scriptSrc,
+      scriptIntegrity,
+      scriptCrossorigin,
+      scriptTimeoutMs,
+      scriptNonce,
       onReady,
       onVerifying,
       onVerify,
@@ -78,7 +100,16 @@ export function KiwiCaptcha(props: KiwiCaptchaProps): JSX.Element {
     try {
       handle = renderKiwiCaptcha(el as HTMLElement, options);
     } catch {
-      void loadKiwiCaptcha().then((api) => {
+      void loadKiwiCaptcha({
+        scriptSrc,
+        integrity: scriptIntegrity,
+        crossorigin: scriptCrossorigin,
+        timeoutMs: scriptTimeoutMs,
+        scriptNonce,
+      }).then((api) => {
+        // The component may have unmounted (or been destroyed) while the
+        // driver loaded; never resurrect a dead widget.
+        if (disposed) return;
         handle = renderKiwiCaptcha(el as HTMLElement, { ...options, api });
       });
     }
@@ -86,6 +117,7 @@ export function KiwiCaptcha(props: KiwiCaptchaProps): JSX.Element {
   });
 
   onCleanup(() => {
+    disposed = true;
     handle?.destroy();
     handle = null;
   });

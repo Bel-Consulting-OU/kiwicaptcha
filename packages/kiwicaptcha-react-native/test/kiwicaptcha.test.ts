@@ -148,6 +148,42 @@ describe("challenge validation", () => {
       })),
     ).toThrow(/interpreter/);
   });
+
+  it("validates the optional duration floor and keeps it on the wire type", () => {
+    expect(validateChallenge(shaChallenge({ minDurationMs: 0, ttlSecs: 120 })).minDurationMs).toBe(0);
+    expect(
+      validateChallenge(shaChallenge({ minDurationMs: 500, ttlSecs: 120 })).minDurationMs,
+    ).toBe(500);
+    expect(() => validateChallenge(shaChallenge({ minDurationMs: -1 }))).toThrow(
+      /minDurationMs/,
+    );
+    expect(() => validateChallenge(shaChallenge({ minDurationMs: 1.5 }))).toThrow(
+      /minDurationMs/,
+    );
+    // The issuer refuses a floor at or above the TTL; the client parser
+    // mirrors that bound when the optional ttlSecs rides the document.
+    expect(() =>
+      validateChallenge(shaChallenge({ minDurationMs: 120_000, ttlSecs: 120 })),
+    ).toThrow(/minDurationMs/);
+  });
+
+  it("validates the browser decoy name even though the native path never arms it", () => {
+    expect(
+      validateChallenge(
+        shaChallenge({ decoy_field: "office_contact_email_2d128c0075ba08fd" }),
+      ).decoy_field,
+    ).toBe("office_contact_email_2d128c0075ba08fd");
+    expect(() => validateChallenge(shaChallenge({ decoy_field: "" }))).toThrow(/decoy_field/);
+    expect(() => validateChallenge(shaChallenge({ decoy_field: "bad name" }))).toThrow(
+      /decoy_field/,
+    );
+    expect(() => validateChallenge(shaChallenge({ decoy_field: "x".repeat(65) }))).toThrow(
+      /decoy_field/,
+    );
+    expect(() => validateChallenge(shaChallenge({ decoy_field: 7 as never }))).toThrow(
+      /decoy_field/,
+    );
+  });
 });
 
 describe("solver dispatch", () => {
@@ -215,6 +251,117 @@ describe("solver dispatch", () => {
   it("reports native failures as solver-unavailable", async () => {
     __setNativeSolver({ solve: async () => Promise.reject(new Error("oom")) });
     await expect(solve(shaChallenge({ targetBits: 12 }))).rejects.toThrow(/refused or failed/);
+  });
+});
+
+describe("progress reporting", () => {
+  it("reports bounded progress on the JS-thread path", () => {
+    const infos: Array<{ attempted: number }> = [];
+    const solution = solveSha256Low(shaChallenge({ targetBits: 8 }), (info) => {
+      infos.push(info);
+    });
+    expect(solution?.counter).toBe(45);
+    // The callback shape is exactly { attempted: number }.
+    for (const info of infos) {
+      expect(Object.keys(info)).toEqual(["attempted"]);
+      expect(Number.isInteger(info.attempted)).toBe(true);
+      expect(info.attempted).toBeGreaterThanOrEqual(0);
+    }
+    // Start plus the forced winning report; the attempt interval (64)
+    // is never reached before the hit at counter 45, and the callback
+    // is never per-iteration.
+    expect(infos.map((info) => info.attempted)).toEqual([0, 46]);
+  });
+
+  it("reports the full window on a miss before failing closed", () => {
+    const events: number[] = [];
+    expect(
+      solveSha256Low(shaChallenge({ targetBits: 8, salt: "////" }), (info) => {
+        events.push(info.attempted);
+      }),
+    ).toBeNull();
+    expect(events).toEqual([0, 256]);
+  });
+
+  it("forwards bounded native progress when the module implements the channel", async () => {
+    const events: number[] = [];
+    const now = jest.spyOn(Date, "now");
+    let clock = 0;
+    now.mockImplementation(() => clock);
+    __setNativeSolver({
+      solve: async () => {
+        throw new Error("solve() must not be used when solveWithProgress exists");
+      },
+      solveWithProgress: async (_json, onProgress) => {
+        clock = 150;
+        onProgress({ attempted: 10 });
+        clock = 300;
+        onProgress({ attempted: 20 });
+        // A duplicate count is dropped by the gate.
+        onProgress({ attempted: 20 });
+        return JSON.stringify({ counter: 30, durationMs: 5 });
+      },
+    });
+    try {
+      const solution = await solve(shaChallenge({ targetBits: 12 }), {
+        onProgress: (info) => events.push(info.attempted),
+      });
+      expect(solution.counter).toBe(30);
+    } finally {
+      now.mockRestore();
+    }
+    // Start, the two wall-clock-spaced native reports, and the forced
+    // final count (counter + 1).
+    expect(events).toEqual([0, 10, 20, 31]);
+  });
+
+  it("falls back to solve() and still reports start and final progress", async () => {
+    const events: number[] = [];
+    __setNativeSolver({
+      solve: async () => JSON.stringify({ counter: 4096, durationMs: 55 }),
+    });
+    await solve(shaChallenge({ targetBits: 12 }), {
+      onProgress: (info) => events.push(info.attempted),
+    });
+    expect(events).toEqual([0, 4097]);
+  });
+
+  it("never floods the callback when the native side reports every attempt", async () => {
+    const events: number[] = [];
+    __setNativeSolver({
+      solve: async () => JSON.stringify({ counter: 1000, durationMs: 1 }),
+      solveWithProgress: async (_json, onProgress) => {
+        for (let attempted = 0; attempted < 1000; attempted++) {
+          onProgress({ attempted });
+        }
+        return JSON.stringify({ counter: 1000, durationMs: 1 });
+      },
+    });
+    await solve(shaChallenge({ targetBits: 12 }), {
+      onProgress: (info) => events.push(info.attempted),
+    });
+    // Start and final only: every per-iteration report lands inside the
+    // same wall-clock window and is dropped.
+    expect(events).toEqual([0, 1001]);
+  });
+
+  it("propagates onProgress through acquireToken", async () => {
+    const events: number[] = [];
+    const fetchImpl = jest.fn(
+      async () =>
+        new Response(JSON.stringify(shaChallenge()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+    const token = await acquireToken({
+      endpoint: "https://api.example.com/kcaptcha/challenge",
+      scope: "login",
+      fetchImpl,
+      onProgress: (info) => events.push(info.attempted),
+    });
+    expect(Buffer.from(token, "base64").toString("utf8").startsWith(`${NONCE}.45.`)).toBe(true);
+    expect(events).toEqual([0, 46]);
   });
 });
 

@@ -93,6 +93,7 @@ public sealed class Settings
         {
             AcceptLegacyV1 = AcceptLegacyV1,
             Region = Region,
+            Scopes = Scopes ?? Array.Empty<string>(),
             ExpectedPolicyVersion = ExpectedPolicyVersion,
             PolicyVersionFloor = PolicyVersionFloor,
             ExpectedIssuer = ExpectedIssuer,
@@ -220,6 +221,20 @@ public static class Doctor
         catch (Exception e)
         {
             return new Check("store", false, "the store did not open: " + e.Message);
+        }
+        return CheckStore(storage);
+    }
+
+    /// <summary>
+    /// Runs the full one-shot roundtrip over an already-open store:
+    /// the health probe and the doctor share one seam, so a readiness
+    /// answer always reflects the verifier's actual backend.
+    /// </summary>
+    public static Check CheckStore(Store.IStoreAdapter storage)
+    {
+        if (storage == null)
+        {
+            return new Check("store", false, "the store adapter is required");
         }
         ChallengeRecord record;
         try

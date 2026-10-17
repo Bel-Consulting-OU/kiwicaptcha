@@ -1,6 +1,10 @@
 target/
 pkg/
 vendor/
+# The model-checking jar is a pinned release artifact, not a package
+# manager tree: the release gate runs it from a clean checkout.
+!tools/redteam/tla/vendor/
+!tools/redteam/tla/vendor/tla2tools.jar
 composer.lock
 # The release-battery harnesses under tools/redteam/target/ are source,
 # not build output: the D3.12 dual-read harness and the storage-matrix

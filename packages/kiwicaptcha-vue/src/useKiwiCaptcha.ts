@@ -8,6 +8,7 @@ import {
 import {
   loadKiwiCaptcha,
   renderKiwiCaptcha,
+  type KiwiCaptchaApi,
   type KiwiRenderOptions,
   type KiwiWidgetHandle,
 } from "@kiwicaptcha/client-core";
@@ -26,6 +27,8 @@ export interface UseKiwiCaptchaOptions extends KiwiRenderOptions {
   scriptCrossorigin?: "anonymous" | "use-credentials";
   /** Reject the load when the driver has not appeared within the budget. */
   scriptTimeoutMs?: number;
+  /** Optional CSP nonce set on the injected driver script. */
+  scriptNonce?: string;
 }
 
 export type UseKiwiCaptchaSource =
@@ -41,6 +44,50 @@ export interface UseKiwiCaptchaReturn {
   reset(): void;
   getResponse(): string;
   isExpired(): boolean;
+  destroy(): void;
+}
+
+// Preloaded apis are compared by identity: JSON serialization collapses
+// two distinct api objects with methods to the same "{}".
+const apiIds = new WeakMap<object, number>();
+let nextApiId = 0;
+
+function apiKey(api: KiwiCaptchaApi | undefined): number | undefined {
+  if (!api) return undefined;
+  let id = apiIds.get(api);
+  if (id === undefined) {
+    id = ++nextApiId;
+    apiIds.set(api, id);
+  }
+  return id;
+}
+
+/** Every declared option that must rebuild the widget when it changes. */
+function configKey(options: UseKiwiCaptchaOptions): string {
+  return JSON.stringify([
+    options.endpoint,
+    options.sitekey,
+    options.scope,
+    options.lang,
+    options.theme,
+    options.action,
+    options.cData,
+    options.chainTicket,
+    options.requestBinding,
+    options.fetchTimeoutMs,
+    options.algorithm,
+    options.riskContext,
+    options.responseField,
+    options.execution,
+    options.tokenFieldName,
+    options.buildMarkup,
+    apiKey(options.api),
+    options.scriptSrc,
+    options.scriptIntegrity,
+    options.scriptCrossorigin,
+    options.scriptTimeoutMs,
+    options.scriptNonce,
+  ]);
 }
 
 /**
@@ -73,6 +120,7 @@ export function useKiwiCaptcha(source: UseKiwiCaptchaSource): UseKiwiCaptchaRetu
         integrity: options.scriptIntegrity,
         crossorigin: options.scriptCrossorigin,
         timeoutMs: options.scriptTimeoutMs,
+        scriptNonce: options.scriptNonce,
       });
       if (ticket !== buildToken || containerRef.value !== node) return;
       handle = renderKiwiCaptcha(node, { ...options, api });
@@ -93,25 +141,7 @@ export function useKiwiCaptcha(source: UseKiwiCaptchaSource): UseKiwiCaptchaRetu
   onUnmounted(unmount);
 
   watch(
-    () =>
-      JSON.stringify([
-        read().endpoint,
-        read().sitekey,
-        read().scope,
-        read().lang,
-        read().theme,
-        read().action,
-        read().cData,
-        read().chainTicket,
-        read().requestBinding,
-        read().fetchTimeoutMs,
-        read().algorithm,
-        read().responseField,
-        read().execution,
-        read().tokenFieldName,
-        read().buildMarkup,
-        read().scriptSrc,
-      ]),
+    () => configKey(read()),
     () => {
       if (!containerRef.value) return;
       unmount();
@@ -129,5 +159,6 @@ export function useKiwiCaptcha(source: UseKiwiCaptchaSource): UseKiwiCaptchaRetu
     reset: () => handle?.reset(),
     getResponse: () => handle?.getResponse() ?? "",
     isExpired: () => handle?.isExpired() ?? false,
+    destroy: unmount,
   };
 }
