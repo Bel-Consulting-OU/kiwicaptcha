@@ -182,20 +182,25 @@ These three milestones sit outside the package publication sequence
 but are tracked here so the checklist is the complete record of the
 open work. Each lists its pass criteria and its current status.
 
-The aggregate required check for protected `main` is the
-Woodpecker workflow `.woodpecker/promotion-gate.yml`: one
-`promotion-gate` status that witnesses the whole push-triggered
-functional matrix (lint, php-core, symfony, risk, rust, browser,
-redis-lanes, redis8, interop, compat-build, release-tools, packages,
-docker-deploy, sdks, wrappers, platform-integrations, verifier-redis,
-flutter). The verification IS the DAG: Woodpecker's required
-depends_on semantics refuse to start the gate workflow when any
-dependency failed or was skipped, so the gate running at all proves
-every entry in its list finished green. No server API query is made.
-Enrolling that single check name in the main
-ruleset's required contexts is the governance step; individual lanes
-never need to become required checks, and the list of witnessed lanes
-is reviewed whenever a lane is added.
+The aggregate gate is the `promotion-gate` job in the Kiwi-CI
+pipeline `.kiwi/pipeline.yaml`: one job whose `needs` names the whole
+push-triggered functional matrix (lint, php-core, symfony, risk, rust,
+browser, redis-lanes, redis8, interop, compat-build, release-tools,
+packages, docker-deploy, sdks, wrappers, platform-integrations,
+verifier-redis, wasm-host, flutter, ios, feature-inventory). The
+verification IS the DAG: Kiwi-CI schedules a job only after every
+`needs` dependency has succeeded, so the gate running proves every
+lane finished green. The tag-triggered release pipeline is
+`.kiwi/release.yaml`; the manual lanes (assets, public-install,
+perf-latency, latency-regression) are `.kiwi/manual.yaml` and run with
+`kiwi run -f .kiwi/manual.yaml --job <name>`. Every pipeline is
+checked with `kiwi validate -f <file>`; the same validator is part of
+the lint lane. On macOS with Docker Desktop, set
+`TMPDIR=$HOME/kiwi-tmp` so the per-job workspace is on a shared path;
+`.kiwi/README.md` records the local-run and migration details. Enrolling the gate job's status in the main ruleset's
+required contexts is the governance step; individual lanes never need
+to become required checks, and the list of witnessed lanes is reviewed
+whenever a lane is added.
 
 ### The widget accessibility re-qualification
 

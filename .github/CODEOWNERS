@@ -7,7 +7,7 @@
 /THREATS.md                     @sbelakho2
 /protocol/                      @sbelakho2
 /.github/workflows/             @sbelakho2
-/.woodpecker/                   @sbelakho2
+/.kiwi/                         @sbelakho2
 /deploy/                        @sbelakho2
 /tools/redteam/                 @sbelakho2
 /tools/ci/                      @sbelakho2

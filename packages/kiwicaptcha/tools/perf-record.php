@@ -89,7 +89,7 @@ function perf_record_is_runner_var(string $name): bool
     if ($name === 'CI') {
         return true;
     }
-    foreach (['GITHUB_', 'RUNNER_', 'WOODPECKER_', 'BUILDKITE_', 'GITLAB_', 'CIRCLE_', 'JENKINS_', 'TRAVIS', 'DRONE_', 'TF_BUILD', 'AZURE_', 'BITBUCKET_', 'CODEBUILD_', 'SEMAPHORE', 'TEAMCITY_', 'APPVEYOR'] as $prefix) {
+    foreach (['GITHUB_', 'RUNNER_', 'KIWI_', 'BUILDKITE_', 'GITLAB_', 'CIRCLE_', 'JENKINS_', 'TRAVIS', 'DRONE_', 'TF_BUILD', 'AZURE_', 'BITBUCKET_', 'CODEBUILD_', 'SEMAPHORE', 'TEAMCITY_', 'APPVEYOR'] as $prefix) {
         if (str_starts_with($name, $prefix)) {
             return true;
         }

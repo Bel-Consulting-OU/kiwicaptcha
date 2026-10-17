@@ -53,11 +53,12 @@ function markerExists(base, marker) {
 const manifest = JSON.parse(read("tools/ci/feature-inventory.json"));
 const ci = read(".github/workflows/ci.yml");
 
-const woodpecker = fs
-  .readdirSync(path.join(root, ".woodpecker"))
-  .filter((name) => name.endsWith(".yml"))
-  .map((name) => read(path.join(".woodpecker", name)))
-  .join("\n");
+const kiwiFiles = fs
+  .readdirSync(path.join(root, ".kiwi"))
+  .filter((name) => name.endsWith(".yaml"))
+  .sort();
+const kiwiSources = new Map(kiwiFiles.map((name) => [name, read(path.join(".kiwi", name))]));
+const kiwiText = [...kiwiSources.values()].join("\n");
 
 const runners = [
   read("integrations-platforms/tests/run-all.sh"),
@@ -66,7 +67,7 @@ const runners = [
   read("tools/dogfood/dogfood.sh"),
 ].join("\n");
 
-const allWorkflows = ci + "\n" + woodpecker;
+const allWorkflows = ci + "\n" + kiwiText;
 const jobsBlock = ci.slice(ci.indexOf("\njobs:"));
 const jobNames = new Set(
   jobsBlock
@@ -75,6 +76,16 @@ const jobNames = new Set(
     .filter(Boolean)
     .map((match) => match[1]),
 );
+
+// Kiwi-CI job keys are indented two spaces under each file's jobs map.
+const kiwiJobs = new Set();
+for (const [name, source] of kiwiSources) {
+  const block = source.slice(source.indexOf("\njobs:"));
+  for (const line of block.split("\n")) {
+    const match = /^  ([A-Za-z0-9_.:-]+):\s*$/.exec(line);
+    if (match) kiwiJobs.add(match[1]);
+  }
+}
 
 // ---------- packages ----------
 const packageDirs = fs
@@ -99,6 +110,11 @@ for (const entry of manifest.packages) {
   }
   if (!jobNames.has(entry.ci_job)) {
     failures.push(`${entry.path}: CI job "${entry.ci_job}" does not exist in ci.yml`);
+  }
+  if (!entry.kiwi_job) {
+    failures.push(`${entry.path}: no kiwi_job mapping in the inventory`);
+  } else if (!kiwiJobs.has(entry.kiwi_job)) {
+    failures.push(`${entry.path}: Kiwi job "${entry.kiwi_job}" does not exist in .kiwi/`);
   }
   const basename = path.basename(entry.path);
   if (!ci.includes(entry.path) && !new RegExp(`(^|[^a-z-])${basename}([^a-z-]|$)`, "m").test(ci)) {
@@ -137,6 +153,9 @@ for (const surface of manifest.surfaces) {
   if (surface.lane === "ci") {
     if (!jobNames.has(surface.ci_job)) {
       failures.push(`${surface.path}: CI job "${surface.ci_job}" does not exist in ci.yml`);
+    }
+    if (surface.kiwi_job && !kiwiJobs.has(surface.kiwi_job)) {
+      failures.push(`${surface.path}: Kiwi job "${surface.kiwi_job}" does not exist in .kiwi/`);
     }
   }
   if (surface.lane === "manual" || surface.lane === "release") {
@@ -199,6 +218,24 @@ for (const job of jobNames) {
   }
 }
 notes.push(`ci: ${jobNames.size} jobs, ${needs.size} gated, ${nonGating.size} declared non-gating`);
+
+const kiwiGateSource = kiwiSources.get("pipeline.yaml") ?? "";
+const kiwiGateStart = kiwiGateSource.indexOf("\n  promotion-gate:");
+const kiwiGateBlock = kiwiGateStart === -1 ? "" : kiwiGateSource.slice(kiwiGateStart);
+const kiwiNeedsMatch = /^    needs:\n([\s\S]*?)^    [a-z]/m.exec(kiwiGateBlock);
+const kiwiNeeds = new Set(
+  (kiwiNeedsMatch ? kiwiNeedsMatch[1] : "")
+    .split("\n")
+    .map((line) => /^    - ([A-Za-z0-9_.:-]+)\s*$/.exec(line))
+    .filter(Boolean)
+    .map((match) => match[1]),
+);
+for (const job of kiwiJobs) {
+  if (kiwiSources.get("pipeline.yaml")?.includes(`\n  ${job}:`) && job !== "promotion-gate" && !kiwiNeeds.has(job)) {
+    failures.push(`Kiwi job "${job}" is not in promotion-gate.needs`);
+  }
+}
+notes.push(`kiwi: ${kiwiJobs.size} jobs in ${kiwiFiles.length} pipelines, ${kiwiNeeds.size} gated`);
 
 // ---------- Symfony config-tree inventory ----------
 if (!exists("packages/kiwicaptcha/integrations/symfony/tests/FeatureUseTest.php")) {
