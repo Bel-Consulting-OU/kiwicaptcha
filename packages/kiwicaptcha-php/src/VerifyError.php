@@ -17,6 +17,7 @@ enum VerifyError: string
     case BadSignature = 'bad_signature';
     case Expired = 'expired';
     case WrongScope = 'wrong_scope';
+    case RequiredScope = 'required_scope';
     case IpMismatch = 'ip_mismatch';
     case MissingClientIp = 'missing_client_ip';
     case WrongRegion = 'wrong_region';
@@ -39,6 +40,7 @@ enum VerifyError: string
     case RequestBindingMismatch = 'request_binding_mismatch';
     case ExecutionMismatch = 'execution_mismatch';
     case UnsupportedRswParams = 'unsupported_rsw_params';
+    case TokenSourceConflict = 'token_source_conflict';
 
     /**
      * Whether this failure is exempt from the one-shot policy on a
@@ -66,6 +68,20 @@ enum VerifyError: string
     }
 
     /**
+     * Whether this failure is transient: the same token may be
+     * resubmitted once the backend recovers. The four codes are the
+     * shared retry table of protocol/decision-v1/corpus.json.
+     */
+    public function isRetryable(): bool
+    {
+        return match ($this) {
+            self::CapacityExceeded, self::AdmissionUnavailable,
+            self::StorageUnavailable, self::ConsumeIndeterminate => true,
+            default => false,
+        };
+    }
+
+    /**
      * The human-readable explanation of the failure (operator-facing
      * prose; never a value to switch on — use the case or ->value for
      * that).
@@ -76,6 +92,7 @@ enum VerifyError: string
             self::BadSignature => 'challenge signature is invalid',
             self::Expired => 'challenge has expired',
             self::WrongScope => 'challenge was issued for a different scope',
+            self::RequiredScope => 'the scope option is required: verify refuses to accept a token for any scope',
             self::IpMismatch => 'challenge was issued to a different client IP',
             self::MissingClientIp => 'challenge is IP-bound but no client IP was supplied',
             self::WrongRegion => 'challenge was issued for a different region',
@@ -98,6 +115,7 @@ enum VerifyError: string
             self::RequestBindingMismatch => 'the challenge is not bound to the expected application transaction',
             self::ExecutionMismatch => 'the execution digest does not match the expected program trace of the challenge',
             self::UnsupportedRswParams => 'the rsw challenge cannot be verified: this verifier is not configured with the matching rsw trapdoor, or the signed sequential cost is outside the supported bounds',
+            self::TokenSourceConflict => 'the request carries different solution tokens in more than one source (header, form field, query parameter)',
         };
     }
 }

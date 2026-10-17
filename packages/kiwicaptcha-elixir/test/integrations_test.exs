@@ -105,7 +105,7 @@ defmodule Kiwicaptcha.IntegrationsTest do
         verify: fn _conn -> golden_options(row["verify_opts"], record, failing_store) end
       )
 
-    assert 422 == conn.status
+    assert 503 == conn.status
     {:ok, body} = Kiwicaptcha.Json.decode(conn.resp_body)
     assert "storage_unavailable" == body["error"]["code"]
   end
@@ -154,7 +154,79 @@ defmodule Kiwicaptcha.IntegrationsTest do
       )
 
     refute conn.assigns[:kiwi]
-    assert conn.status == 422
+    # The MFA options resolved; their empty storage answers the retry
+    # disposition, which is 503 on every integration.
+    assert conn.status == 503
+  end
+
+  test "the token authority matrix refuses conflicts before verification" do
+    {_store, _record, row} = store_of("sha_plain")
+    token = row["token_b64"]
+
+    raw = fn body, query ->
+      conn(:post, "/login" <> query, body)
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> call(verify: verifier_fun("sha_plain"))
+    end
+
+    header_body =
+      conn(:post, "/login", "kiwi__token=different-token")
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> put_req_header("x-kiwi-token", token)
+      |> call(verify: verifier_fun("sha_plain"))
+
+    assert 422 == header_body.status
+    {:ok, body} = Kiwicaptcha.Json.decode(header_body.resp_body)
+    assert "token_source_conflict" == body["error"]["code"]
+
+    header_query =
+      conn(:post, "/login?kiwi__token=different-token", "")
+      |> put_req_header("x-kiwi-token", token)
+      |> call(verify: verifier_fun("sha_plain"))
+
+    assert 422 == header_query.status
+    {:ok, body} = Kiwicaptcha.Json.decode(header_query.resp_body)
+    assert "token_source_conflict" == body["error"]["code"]
+
+    body_query = raw.("kiwi__token=#{URI.encode_www_form(token)}", "?kiwi__token=different-token")
+    assert 422 == body_query.status
+    {:ok, body} = Kiwicaptcha.Json.decode(body_query.resp_body)
+    assert "token_source_conflict" == body["error"]["code"]
+
+    two_headers =
+      conn(:post, "/login", "")
+      |> put_req_header("x-kiwi-token", token)
+      |> then(fn conn ->
+        %{conn | req_headers: [{"x-kiwi-token", "different-token"} | conn.req_headers]}
+      end)
+      |> call(verify: verifier_fun("sha_plain"))
+
+    assert 422 == two_headers.status
+    {:ok, body} = Kiwicaptcha.Json.decode(two_headers.resp_body)
+    assert "token_source_conflict" == body["error"]["code"]
+
+    repeated_form = raw.("kiwi__token=#{URI.encode_www_form(token)}&kiwi__token=different-token", "")
+    assert 422 == repeated_form.status
+    {:ok, body} = Kiwicaptcha.Json.decode(repeated_form.resp_body)
+    assert "token_source_conflict" == body["error"]["code"]
+
+    repeated_query =
+      conn(:post, "/login?kiwi__token=#{URI.encode_www_form(token)}&kiwi__token=different-token", "")
+      |> call(verify: verifier_fun("sha_plain"))
+
+    assert 422 == repeated_query.status
+    {:ok, body} = Kiwicaptcha.Json.decode(repeated_query.resp_body)
+    assert "token_source_conflict" == body["error"]["code"]
+
+    same_everywhere =
+      conn(:post, "/login?kiwi__token=#{URI.encode_www_form(token)}",
+        "kiwi__token=#{URI.encode_www_form(token)}")
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> put_req_header("x-kiwi-token", token)
+      |> call(verify: verifier_fun("sha_plain"))
+
+    refute same_everywhere.halted
+    assert same_everywhere.assigns.kiwi.ok
   end
 
   test "the phoenix form helpers emit the drop in fragments" do

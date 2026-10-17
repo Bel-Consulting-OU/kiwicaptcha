@@ -37,10 +37,11 @@ public final class MockHttp {
     public static final class Request implements HttpServletRequest {
         private final String method;
         private final String uri;
-        private final Map<String, String> headers = new LinkedHashMap<>();
-        private final Map<String, String> parameters = new LinkedHashMap<>();
+        private final Map<String, List<String>> headers = new LinkedHashMap<>();
+        private final Map<String, List<String>> parameters = new LinkedHashMap<>();
         private final Map<String, Object> attributes = new HashMap<>();
         private String remoteAddr;
+        private String queryString;
         private byte[] body = new byte[0];
         private String contentType = "";
         private boolean readerConsumed;
@@ -52,12 +53,24 @@ public final class MockHttp {
         }
 
         public Request header(String name, String value) {
-            headers.put(name.toLowerCase(Locale.ROOT), value);
+            headers.computeIfAbsent(name.toLowerCase(Locale.ROOT), key -> new java.util.ArrayList<>())
+                    .add(value);
             return this;
         }
 
         public Request parameter(String name, String value) {
-            parameters.put(name, value);
+            parameters.computeIfAbsent(name, key -> new java.util.ArrayList<>()).add(value);
+            return this;
+        }
+
+        public Request query(String value) {
+            this.queryString = value;
+            return this;
+        }
+
+        public Request formBody(String encoded) {
+            this.body = encoded.getBytes(StandardCharsets.UTF_8);
+            this.contentType = "application/x-www-form-urlencoded";
             return this;
         }
 
@@ -71,9 +84,7 @@ public final class MockHttp {
                         .append('=')
                         .append(java.net.URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8));
             }
-            this.body = sb.toString().getBytes(StandardCharsets.UTF_8);
-            this.contentType = "application/x-www-form-urlencoded";
-            return this;
+            return formBody(sb.toString());
         }
 
         public Request remoteAddr(String value) {
@@ -93,7 +104,8 @@ public final class MockHttp {
 
         @Override
         public String getHeader(String name) {
-            return headers.get(name.toLowerCase(Locale.ROOT));
+            List<String> values = headers.get(name.toLowerCase(Locale.ROOT));
+            return values == null || values.isEmpty() ? null : values.get(0);
         }
 
         @Override
@@ -108,14 +120,15 @@ public final class MockHttp {
 
         @Override
         public String getParameter(String name) {
-            return parameters.get(name);
+            List<String> values = parameters.get(name);
+            return values == null || values.isEmpty() ? null : values.get(0);
         }
 
         @Override
         public Map<String, String[]> getParameterMap() {
             Map<String, String[]> out = new HashMap<>();
-            for (Map.Entry<String, String> entry : parameters.entrySet()) {
-                out.put(entry.getKey(), new String[]{entry.getValue()});
+            for (Map.Entry<String, List<String>> entry : parameters.entrySet()) {
+                out.put(entry.getKey(), entry.getValue().toArray(new String[0]));
             }
             return out;
         }
@@ -127,8 +140,8 @@ public final class MockHttp {
 
         @Override
         public String[] getParameterValues(String name) {
-            String value = parameters.get(name);
-            return value == null ? null : new String[]{value};
+            List<String> values = parameters.get(name);
+            return values == null ? null : values.toArray(new String[0]);
         }
 
         @Override
@@ -190,14 +203,14 @@ public final class MockHttp {
         @Override public long getDateHeader(String name) { return -1; }
         @Override
         public Enumeration<String> getHeaders(String name) {
-            String value = headers.get(name.toLowerCase(Locale.ROOT));
-            return value == null ? Collections.emptyEnumeration() : Collections.enumeration(java.util.List.of(value));
+            List<String> values = headers.get(name.toLowerCase(Locale.ROOT));
+            return values == null ? Collections.emptyEnumeration() : Collections.enumeration(values);
         }
         @Override public int getIntHeader(String name) { return -1; }
         @Override public String getPathInfo() { return null; }
         @Override public String getPathTranslated() { return null; }
         @Override public String getContextPath() { return ""; }
-        @Override public String getQueryString() { return null; }
+        @Override public String getQueryString() { return queryString; }
         @Override public String getRemoteUser() { return null; }
         @Override public boolean isUserInRole(String role) { return false; }
         @Override public Principal getUserPrincipal() { return null; }

@@ -99,10 +99,12 @@ post '/login' do
 end
 ```
 
-The middleware reads the `kiwi__token` field (or the `X-Kiwi-Token`
-header), verifies locally, and answers 422 with a JSON error body on
-failure, or a 303 redirect with `failure_redirect:`. A storage outage
-is a typed `storage_unavailable` 422, fail closed.
+The middleware collects the `kiwi__token` field, the `X-Kiwi-Token`
+header and the query string under the shared authority rule: distinct
+values refuse with `token_source_conflict`. A definitive denial
+answers 422 with a JSON error body, or a 303 redirect with
+`failure_redirect:`. A storage outage is a typed
+`storage_unavailable` 503, fail closed.
 
 ## Rails
 

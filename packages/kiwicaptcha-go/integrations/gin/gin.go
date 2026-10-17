@@ -22,9 +22,9 @@ func Middleware(verifier *kiwi.Verifier, secretKey, expectedScope string, option
 			ctx.Next()
 			return
 		}
-		token := tokenFrom(ctx)
-		if token == "" {
-			abort(ctx, kiwi.DecisionFromOutcome(kiwi.InvalidOutcome(kiwi.ErrCodeMalformedToken), ""))
+		token, failure := kiwi.TokenFromRequest(ctx.Request)
+		if failure != "" {
+			abort(ctx, kiwi.DecisionFromOutcome(kiwi.InvalidOutcome(failure), ""))
 			return
 		}
 		outcome := verifier.Verify(token, kiwi.VerifyOptions{
@@ -72,16 +72,6 @@ func optionsConfig(options []Option) ginConfig {
 		option(&config)
 	}
 	return config
-}
-
-func tokenFrom(ctx *gin.Context) string {
-	if header := ctx.GetHeader(kiwi.TokenHeader); header != "" {
-		return header
-	}
-	if value, ok := ctx.GetPostForm(kiwi.TokenField); ok && value != "" {
-		return value
-	}
-	return ctx.Query(kiwi.TokenField)
 }
 
 func abort(ctx *gin.Context, decision kiwi.VerifyDecision) {

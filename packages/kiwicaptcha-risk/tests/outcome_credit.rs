@@ -87,16 +87,11 @@ fn context<'a>(
 }
 
 fn redis_store(url: &str, namespace: &str) -> RedisRiskStateStore {
-    RedisRiskStateStore::new(
-        redis::Client::open(url).expect("url parses"),
-        namespace,
-    )
-    .with_io_timeouts(2_000, 2_000)
+    RedisRiskStateStore::new(redis::Client::open(url).expect("url parses"), namespace)
+        .with_io_timeouts(2_000, 2_000)
 }
 
-fn engine(
-    store: RedisRiskStateStore,
-) -> RiskEngine<RedisRiskStateStore, CidrNetworkClassifier> {
+fn engine(store: RedisRiskStateStore) -> RiskEngine<RedisRiskStateStore, CidrNetworkClassifier> {
     RiskEngine::new(
         store,
         CidrNetworkClassifier::from_entries(vec![]),
@@ -145,7 +140,11 @@ fn the_consolidated_ledger_score_is_the_decision_score() {
             "target failure event",
             engine
                 .assess_pre_issue(
-                    context(RiskEventKind::AuthenticationFailure, "198.51.100.23", &target_fields()),
+                    context(
+                        RiskEventKind::AuthenticationFailure,
+                        "198.51.100.23",
+                        &target_fields(),
+                    ),
                     None,
                 )
                 .expect("assessment"),
@@ -163,7 +162,11 @@ fn the_consolidated_ledger_score_is_the_decision_score() {
             "honeypot event",
             engine
                 .assess_pre_issue(
-                    context(RiskEventKind::HoneypotTriggered, "198.51.100.25", &target_fields()),
+                    context(
+                        RiskEventKind::HoneypotTriggered,
+                        "198.51.100.25",
+                        &target_fields(),
+                    ),
                     None,
                 )
                 .expect("assessment"),
@@ -234,12 +237,14 @@ fn a_retried_target_failure_report_books_one_failure() {
         }
         for handle in handles {
             let receipt = handle.join().expect("worker");
-            assert!(receipt.channel_booked, "the report books the mapped channel");
+            assert!(
+                receipt.channel_booked,
+                "the report books the mapped channel"
+            );
         }
     });
 
-    let state = RiskStateStore::read_target_state(&store, TARGET_PSEUDONYM)
-        .expect("target state");
+    let state = RiskStateStore::read_target_state(&store, TARGET_PSEUDONYM).expect("target state");
     assert_eq!(
         state.fails, 1,
         "eight concurrent deliveries of one report book one target failure"
@@ -288,7 +293,9 @@ fn a_sharded_step_up_completion_credits_trust() {
         for n in 0..4u64 {
             let operation = observation(n, common::event_id(2_000 + n));
             handles.push(scope.spawn(move || {
-                shared.observe(&operation).expect("sharded step-up observation")
+                shared
+                    .observe(&operation)
+                    .expect("sharded step-up observation")
             }));
         }
         for handle in handles {
@@ -312,7 +319,10 @@ fn a_sharded_step_up_completion_credits_trust() {
         .observe(&observation(9, common::event_id(3_000)))
         .expect("classic step-up observation");
     assert_eq!(observed.vector.trust_credit, 80, "classic trust credit");
-    assert_eq!(observed.vector.principal_credit, 200, "classic principal credit");
+    assert_eq!(
+        observed.vector.principal_credit, 200,
+        "classic principal credit"
+    );
 
     // The raced credit left no poisoned state behind: an assessment on
     // the sharded namespace is not degraded.

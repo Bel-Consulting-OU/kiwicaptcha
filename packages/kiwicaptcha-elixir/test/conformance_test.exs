@@ -28,7 +28,7 @@ defmodule Kiwicaptcha.ConformanceTest do
       consume_indeterminate execution_mismatch expired insufficient_work
       ip_mismatch malformed_record malformed_token missing_client_ip
       record_not_found request_binding_mismatch required_scope
-      storage_unavailable telemetry_rejected too_fast too_many_attempts
+      storage_unavailable telemetry_rejected token_source_conflict too_fast too_many_attempts
       unknown_kid
       unsupported_argon2_params unsupported_rsw_params wrong_issuer
       wrong_policy_version wrong_region wrong_scope

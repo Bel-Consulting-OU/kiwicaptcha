@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -147,6 +148,75 @@ class KiwiCaptchaFilterTest {
         Result replay = run(filter, replayRequest);
         assertEquals(403, replay.status());
         assertTrue(replay.body().contains("already_consumed"));
+    }
+
+    @Test
+    void conflictingSourcesAreRefusedBeforeAnyVerification() throws Exception {
+        Verifier verifier = newVerifier(ISSUED_AT);
+        ChallengeRecord record = mint();
+        ((com.kiwicaptcha.Store.Storer) verifier.storage()).storeRecord(record);
+        KiwiCaptchaFilter filter = new KiwiCaptchaFilter(verifier, SECRET, "login");
+        MockHttp.Request request = new MockHttp.Request("POST", "/api/submit")
+                .header(KiwiCaptchaFilter.TOKEN_HEADER, tokenFor(record))
+                .formBody(Map.of(KiwiCaptchaFilter.TOKEN_FIELD, "different-token"));
+        Result result = run(filter, request);
+        assertEquals(403, result.status());
+        assertFalse(result.proceeded());
+        assertTrue(result.body().contains("token_source_conflict"), result.body());
+        assertTrue(result.body().contains("\"disposition\":\"deny\""));
+        // The valid header token was never consumed: a clean single
+        // source request still verifies the same record.
+        MockHttp.Request clean = new MockHttp.Request("POST", "/api/submit")
+                .header(KiwiCaptchaFilter.TOKEN_HEADER, tokenFor(record));
+        assertTrue(run(filter, clean).proceeded());
+    }
+
+    @Test
+    void tokenAuthorityMatrixRefusesConflictsBeforeVerification() throws Exception {
+        String[] names = {
+                "header only", "form only", "query only", "header A form B",
+                "header A query B", "form A query B", "two header values",
+                "repeated form values", "repeated query values",
+                "same token every source",
+        };
+        for (int index = 0; index < names.length; index++) {
+            Verifier verifier = newVerifier(ISSUED_AT);
+            ChallengeRecord record = mint();
+            ((com.kiwicaptcha.Store.Storer) verifier.storage()).storeRecord(record);
+            KiwiCaptchaFilter filter = new KiwiCaptchaFilter(verifier, SECRET, "login");
+            String token = tokenFor(record);
+            String encoded = java.net.URLEncoder.encode(token, StandardCharsets.UTF_8);
+            MockHttp.Request request = new MockHttp.Request("POST", "/api/submit");
+            switch (index) {
+                case 0 -> request.header(KiwiCaptchaFilter.TOKEN_HEADER, token);
+                case 1 -> request.formBody(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded);
+                case 2 -> request.query(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded);
+                case 3 -> request.header(KiwiCaptchaFilter.TOKEN_HEADER, token)
+                        .formBody(KiwiCaptchaFilter.TOKEN_FIELD + "=different-token");
+                case 4 -> request.header(KiwiCaptchaFilter.TOKEN_HEADER, token)
+                        .query(KiwiCaptchaFilter.TOKEN_FIELD + "=different-token");
+                case 5 -> request.formBody(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded)
+                        .query(KiwiCaptchaFilter.TOKEN_FIELD + "=different-token");
+                case 6 -> request.header(KiwiCaptchaFilter.TOKEN_HEADER, token)
+                        .header(KiwiCaptchaFilter.TOKEN_HEADER, "different-token");
+                case 7 -> request.formBody(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded
+                        + "&" + KiwiCaptchaFilter.TOKEN_FIELD + "=different-token");
+                case 8 -> request.query(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded
+                        + "&" + KiwiCaptchaFilter.TOKEN_FIELD + "=different-token");
+                default -> request.header(KiwiCaptchaFilter.TOKEN_HEADER, token)
+                        .formBody(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded)
+                        .query(KiwiCaptchaFilter.TOKEN_FIELD + "=" + encoded);
+            }
+            Result result = run(filter, request);
+            if (index >= 3 && index <= 8) {
+                assertEquals(403, result.status(), names[index]);
+                assertFalse(result.proceeded(), names[index]);
+                assertTrue(result.body().contains("token_source_conflict"), names[index]);
+            } else {
+                assertEquals(200, result.status(), names[index]);
+                assertTrue(result.proceeded(), names[index]);
+            }
+        }
     }
 
     @Test

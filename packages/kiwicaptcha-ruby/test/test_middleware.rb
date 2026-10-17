@@ -36,10 +36,11 @@ class RackMiddlewareTest < Minitest::Test
     }
   end
 
-  def env_for(params: {}, header: nil)
+  def env_for(params: {}, header: nil, query: nil)
     env = {
       'REQUEST_METHOD' => 'POST',
       'CONTENT_TYPE' => 'application/x-www-form-urlencoded',
+      'QUERY_STRING' => query.to_s,
       'rack.input' => StringIO.new(::Rack::Utils.build_query(params)),
       'rack.errors' => StringIO.new
     }
@@ -86,15 +87,77 @@ class RackMiddlewareTest < Minitest::Test
     assert_equal '/try-again', headers['Location']
   end
 
-  def test_a_storage_outage_is_fail_closed_422
+  def test_a_storage_outage_answers_the_retry_status_503
     failing = Object.new
     failing.define_singleton_method(:runtime_state) { raise 'down' }
     app = KiwiCaptcha::Rack::Verifier.new(
       downstream, verify: ->(_env) { TestSupport.verify_options(storage: failing, secret_key: SECRET) }
     )
     status, _headers, body = app.call(env_for(params: { 'kiwi__token' => golden[:row]['token_b64'] }))
-    assert_equal 422, status
+    assert_equal 503, status
     assert_equal 'storage_unavailable', JSON.parse(body.first).fetch('error').fetch('code')
+    assert_equal 'retry', KiwiCaptcha::Verify.disposition_for('storage_unavailable')
+    assert_equal 'deny', KiwiCaptcha::Verify.disposition_for('malformed_token')
+  end
+
+  def test_conflicting_token_sources_are_refused_before_verification
+    app = KiwiCaptcha::Rack::Verifier.new(downstream, verify: ->(_env) { fresh_options })
+    token = golden[:row]['token_b64']
+    rows = [
+      ['header A / body B', { 'HTTP_X_KIWI_TOKEN' => token },
+       env_for(params: { 'kiwi__token' => 'different-token' })],
+      ['header A / query B', { 'HTTP_X_KIWI_TOKEN' => token }, nil],
+      ['body A / query B', nil, nil],
+      ['two header values', { 'HTTP_X_KIWI_TOKEN' => "#{token}, different-token" }, nil],
+      ['repeated form values', nil, nil],
+      ['repeated query values', nil, nil],
+    ]
+    # Header A / query B.
+    env = env_for(query: "kiwi__token=different-token")
+    env['HTTP_X_KIWI_TOKEN'] = token
+    status, _headers, body = app.call(env)
+    assert_equal 422, status
+    assert_equal 'token_source_conflict', JSON.parse(body.first).fetch('error').fetch('code')
+
+    # Body A / query B.
+    env = env_for(params: { 'kiwi__token' => token }, query: 'kiwi__token=different-token')
+    status, _headers, body = app.call(env)
+    assert_equal 422, status
+    assert_equal 'token_source_conflict', JSON.parse(body.first).fetch('error').fetch('code')
+
+    # Two different header values.
+    env = env_for
+    env['HTTP_X_KIWI_TOKEN'] = "#{token}, different-token"
+    status, _headers, body = app.call(env)
+    assert_equal 422, status
+    assert_equal 'token_source_conflict', JSON.parse(body.first).fetch('error').fetch('code')
+
+    # Repeated form values.
+    env = env_for
+    env['rack.input'] = StringIO.new(
+      "kiwi__token=#{::Rack::Utils.escape(token)}&kiwi__token=different-token"
+    )
+    status, _headers, body = app.call(env)
+    assert_equal 422, status
+    assert_equal 'token_source_conflict', JSON.parse(body.first).fetch('error').fetch('code')
+
+    # Repeated query values.
+    env = env_for(query: "kiwi__token=#{::Rack::Utils.escape(token)}&kiwi__token=different-token")
+    status, _headers, body = app.call(env)
+    assert_equal 422, status
+    assert_equal 'token_source_conflict', JSON.parse(body.first).fetch('error').fetch('code')
+
+    assert_equal 6, rows.length
+  end
+
+  def test_the_same_token_in_every_source_still_verifies
+    app = KiwiCaptcha::Rack::Verifier.new(downstream, verify: ->(_env) { fresh_options })
+    token = golden[:row]['token_b64']
+    env = env_for(params: { 'kiwi__token' => token }, query: "kiwi__token=#{::Rack::Utils.escape(token)}")
+    env['HTTP_X_KIWI_TOKEN'] = token
+    status, _headers, body = app.call(env)
+    assert_equal 200, status
+    assert_equal 'ok:true', body.first
   end
 
   def test_the_factory_accepts_a_plain_hash

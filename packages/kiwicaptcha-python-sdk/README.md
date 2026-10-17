@@ -143,10 +143,13 @@ def submit(decision: VerifyDecision = Depends(guard)):
     ...
 ```
 
-Every shell reads the token from the `x-kiwi-token` header, then the
-`kiwi_token` form field, then the query string. Unauthenticated
-requests get `403 Forbidden` with the machine-readable code; a retry
-disposition gets `503 Service Unavailable`.
+Every shell collects the token from the `x-kiwi-token` header, the
+`kiwi_token` form field and the query string under the shared
+authority rule: one distinct value verifies, while distinct values in
+more than one source refuse with `token_source_conflict`.
+Unauthenticated requests get `403 Forbidden` with the
+machine-readable code; a retry disposition gets `503 Service
+Unavailable`.
 
 ## Outcomes
 

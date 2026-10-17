@@ -48,21 +48,30 @@ class WsgiHarness:
         self.headers = headers
 
     def request(self, method="GET", path="/api/submit", token=None,
-                form=None, query=None, remote_addr="203.0.113.7"):
+                form=None, query=None, remote_addr="203.0.113.7",
+                header_values=None, form_pairs=None, query_values=None):
+        if form_pairs is not None:
+            body = urllib.parse.urlencode(form_pairs).encode()
+        elif form is not None:
+            body = urllib.parse.urlencode(form).encode()
+        else:
+            body = b""
+        if query_values is not None:
+            query = urllib.parse.urlencode(query_values)
         environ = {
             "REQUEST_METHOD": method,
             "PATH_INFO": path,
             "SCRIPT_NAME": "",
             "QUERY_STRING": query or "",
             "REMOTE_ADDR": remote_addr,
-            "CONTENT_TYPE": "application/x-www-form-urlencoded" if form else "",
-            "wsgi.input": io.BytesIO(
-                urllib.parse.urlencode(form).encode() if form else b""
-            ),
+            "CONTENT_TYPE": "application/x-www-form-urlencoded" if body else "",
+            "wsgi.input": io.BytesIO(body),
         }
-        if form:
-            environ["CONTENT_LENGTH"] = str(len(environ["wsgi.input"].getvalue()))
-        if token:
+        if body:
+            environ["CONTENT_LENGTH"] = str(len(body))
+        if header_values is not None:
+            environ["HTTP_X_KIWI_TOKEN"] = ", ".join(header_values)
+        elif token:
             environ["HTTP_X_KIWI_TOKEN"] = token
         self.status = None
         self.headers = None
@@ -144,6 +153,66 @@ class WsgiMiddlewareTest(unittest.TestCase):
         harness.request(token=token, remote_addr="198.51.100.1")
         self.assertEqual("403 Forbidden", harness.status)
         self.assertEqual("ip_mismatch", json.loads(harness.body)["error"])
+
+
+    def test_token_source_conflict_matrix(self):
+        rows = [
+            {"name": "header A / form B", "header": ["TOKEN"], "form": ["TOKEN", "other"], "query": []},
+            {"name": "header A / query B", "header": ["TOKEN"], "form": [], "query": ["TOKEN", "other"]},
+            {"name": "form A / query B", "header": [], "form": ["TOKEN"], "query": ["other"]},
+            {"name": "two header values", "header": ["TOKEN", "other"], "form": [], "query": []},
+            {"name": "repeated form values", "header": [], "form": ["TOKEN", "other"], "query": []},
+            {"name": "repeated query values", "header": [], "form": [], "query": ["TOKEN", "other"]},
+        ]
+        for row in rows:
+            verifier = make_verifier()
+            record, token = issue_token()
+            verifier.storage.store(record)
+
+            def target_app(environ, start_response):
+                start_response("200 OK", [("Content-Type", "text/plain")])
+                return [b"ok"]
+
+            app = WsgiKiwiCaptcha(target_app, verifier, SECRET, expected_scope="login")
+            harness = WsgiHarness(app)
+
+            def material(values):
+                return [token if value == "TOKEN" else value for value in values]
+
+            harness.request(
+                method="POST",
+                header_values=material(row["header"]),
+                form_pairs=[("kiwi_token", value) for value in material(row["form"])],
+                query_values=[("kiwi_token", value) for value in material(row["query"])],
+            )
+            self.assertEqual("403 Forbidden", harness.status, row["name"])
+            self.assertEqual(
+                "token_source_conflict",
+                json.loads(harness.body)["error"],
+                row["name"],
+            )
+
+    def test_the_same_token_in_every_source_verifies(self):
+        verifier = make_verifier()
+        record, token = issue_token()
+        verifier.storage.store(record)
+        captured = {}
+
+        def target_app(environ, start_response):
+            captured["decision"] = environ["kiwi.decision"]
+            start_response("200 OK", [("Content-Type", "text/plain")])
+            return [b"ok"]
+
+        app = WsgiKiwiCaptcha(target_app, verifier, SECRET, expected_scope="login")
+        harness = WsgiHarness(app)
+        harness.request(
+            method="POST",
+            header_values=[token],
+            form_pairs=[("kiwi_token", token)],
+            query_values=[("kiwi_token", token)],
+        )
+        self.assertEqual("200 OK", harness.status)
+        self.assertTrue(captured["decision"].ok)
 
 
 class _DuckRequest:

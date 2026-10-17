@@ -27,9 +27,12 @@ module KiwiCaptcha
       # failure it writes the error response and returns nil, so the
       # route body is skipped by an explicit return in the caller.
       def kiwi_verify!(token_field: DEFAULT_TOKEN_FIELD, failure_status: 422, failure_redirect: nil, &options_block)
-        raw_token = kiwi_read_token(token_field)
-        if raw_token.nil?
-          kiwi_render_failure('malformed_token', "the #{token_field} field is missing", failure_status, failure_redirect)
+        raw_token, failure = kiwi_read_token(token_field)
+        unless failure.nil?
+          detail = failure == 'token_source_conflict' ?
+            'the request carries conflicting token sources' :
+            "the #{token_field} field is missing"
+          kiwi_render_failure(failure, detail, failure_status, failure_redirect)
           return nil
         end
 
@@ -40,6 +43,15 @@ module KiwiCaptcha
           return result
         end
 
+        if result.disposition == 'retry'
+          kiwi_render_failure(
+            result.code.empty? ? 'invalid' : result.code,
+            result.detail || 'verification failed',
+            503,
+            nil
+          )
+          return nil
+        end
         kiwi_render_failure(
           result.code.empty? ? 'invalid' : result.code,
           result.detail || 'verification failed',
@@ -52,19 +64,39 @@ module KiwiCaptcha
       private
 
       def kiwi_read_token(token_field)
-        value = params[token_field]
-        return value if value.is_a?(String) && !value.empty?
+        env = respond_to?(:request) && request.respond_to?(:env) ? request.env : {}
+        header_values = KiwiCaptcha::TokenSource.split_header(env['HTTP_X_KIWI_TOKEN'])
+        query_values = KiwiCaptcha::TokenSource.values_for(
+          KiwiCaptcha::TokenSource.form_pairs(env['QUERY_STRING']), token_field
+        )
+        form_values = []
+        content_type = env['CONTENT_TYPE'].to_s
+        if content_type.include?('application/x-www-form-urlencoded')
+          body = env['rack.input']
+          if body.respond_to?(:read)
+            encoded = body.read
+            body.rewind if body.respond_to?(:rewind)
+            form_values = KiwiCaptcha::TokenSource.values_for(
+              KiwiCaptcha::TokenSource.form_pairs(encoded), token_field
+            )
+          end
+        end
+        token, failure = KiwiCaptcha::TokenSource.resolve_values(
+          header_values: header_values, form_values: form_values, query_values: query_values
+        )
+        return [token, failure] unless token.nil? && failure == 'malformed_token'
 
-        header = if respond_to?(:request) && request.respond_to?(:env)
-                   request.env['HTTP_X_KIWI_TOKEN']
-                 else
-                   nil
-                 end
-        return header if header.is_a?(String) && !header.empty?
-
-        nil
-      rescue StandardError
-        nil
+        value = begin
+          params[token_field]
+        rescue StandardError
+          nil
+        end
+        values = value.is_a?(Array) ? value : [value]
+        KiwiCaptcha::TokenSource.resolve_values(
+          header_values: header_values,
+          form_values: values.compact,
+          query_values: []
+        )
       end
 
       def kiwi_render_failure(code, detail, failure_status, failure_redirect)

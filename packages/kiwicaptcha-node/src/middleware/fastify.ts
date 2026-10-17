@@ -1,16 +1,21 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { resolveClientIp } from '../clientip.js';
-import { verify, type VerifyOptions } from '../verify.js';
+import { verify, type Disposition, type VerifyOptions } from '../verify.js';
+import { headerTokenValues, resolveTokenValues, stringValues } from './token-source.js';
 
 /**
- * The Fastify plugin: a preValidation hook that reads the configured
- * token field, verifies the token locally, and answers 422 with a JSON
- * error body on failure. A verified request exposes request.kiwi for
- * downstream handlers. When trustedProxies is configured, the plugin
- * resolves the canonical client IP itself (the same trusted-proxy walk
- * every SDK ships) and fills clientIp on the factory's options when
- * the factory left it unset, so fastify's own trustProxy setting is
- * never consulted and the behavior matches every other framework.
+ * The Fastify plugin: a preValidation hook that collects the token
+ * from the header, the form or body field and the query parameter
+ * under the shared authority rule, verifies the one agreed token
+ * locally, and answers a definitive denial with the configured denial
+ * response. A retry decision answers 503 Service Unavailable so a
+ * backend outage stays retryable. A verified request exposes
+ * request.kiwi for downstream handlers. When trustedProxies is
+ * configured, the plugin resolves the canonical client IP itself (the
+ * same trusted-proxy walk every SDK ships) and fills clientIp on the
+ * factory's options when the factory left it unset, so fastify's own
+ * trustProxy setting is never consulted and the behavior matches
+ * every other framework.
  */
 
 export const DEFAULT_TOKEN_FIELD_FASTIFY = 'kiwi__token';
@@ -20,8 +25,10 @@ export interface FastifyVerifyOptions {
   verify: (req: FastifyRequest) => VerifyOptions | Promise<VerifyOptions>;
   /** The body field carrying the token (default kiwi__token). */
   tokenField?: string;
-  /** Failure status (default 422). */
+  /** Failure status of a definitive denial (default 422). */
   failureStatus?: number;
+  /** Status of a retry decision (default 503). */
+  retryStatus?: number;
   /**
    * The trusted-proxy CIDR list. The default (option absent) leaves
    * the client-IP choice to the factory; when configured (an empty
@@ -66,32 +73,22 @@ export function clientIpFromRequestFastify(req: FastifyRequest, trustedProxies: 
   });
 }
 
-function readTokenFastify(req: FastifyRequest, field: string): string | null {
-  const body = req.body as unknown;
-  if (body !== null && typeof body === 'object' && field in (body as Record<string, unknown>)) {
-    const value = (body as Record<string, unknown>)[field];
-    if (typeof value === 'string' && value !== '') {
-      return value;
-    }
+function bodyTokenValues(body: unknown, field: string): string[] {
+  if (body === null || typeof body !== 'object') {
+    return [];
   }
-  const header = req.headers['x-kiwi-token'];
-  if (typeof header === 'string' && header !== '') {
-    return header;
+  if (!Object.prototype.hasOwnProperty.call(body, field)) {
+    return [];
   }
-  const query = req.query as Record<string, unknown>;
-  const queryValue = query[field];
-  if (typeof queryValue === 'string' && queryValue !== '') {
-    return queryValue;
-  }
-  return null;
+  return stringValues((body as Record<string, unknown>)[field]);
 }
 
 /**
  * Register the Fastify verification plugin. The hook never throws: a
- * storage outage is a 422 with the typed storage_unavailable code,
- * fail closed. The plugin carries fastify's skip-override marker, so
- * the hook applies to the routes of the enclosing instance instead of
- * a private child scope.
+ * storage outage answers the retry disposition as 503 with the typed
+ * storage_unavailable code, fail closed. The plugin carries fastify's
+ * skip-override marker, so the hook applies to the routes of the
+ * enclosing instance instead of a private child scope.
  */
 export async function kiwiVerifyFastify(
   instance: FastifyInstance,
@@ -99,11 +96,22 @@ export async function kiwiVerifyFastify(
 ): Promise<void> {
   const field = options.tokenField ?? DEFAULT_TOKEN_FIELD_FASTIFY;
   const status = options.failureStatus ?? 422;
+  const retryStatus = options.retryStatus ?? 503;
   instance.addHook('preValidation', async (req: FastifyRequest, reply: FastifyReply) => {
-    const rawToken = readTokenFastify(req, field);
-    if (rawToken === null) {
+    const resolution = resolveTokenValues({
+      header: headerTokenValues(
+        (req.raw as { rawHeaders?: string[] }).rawHeaders,
+        (req.headers as Record<string, unknown>)['x-kiwi-token'],
+      ),
+      form: bodyTokenValues(req.body, field),
+      query: stringValues((req.query as Record<string, unknown>)[field]),
+    });
+    if (resolution.code !== null) {
+      const detail = resolution.code === 'token_source_conflict'
+        ? 'the request carries conflicting token sources'
+        : `the ${field} field is missing`;
       await reply.code(status).send({
-        error: { code: 'malformed_token', detail: `the ${field} field is missing` },
+        error: { code: resolution.code, detail },
       });
       return reply;
     }
@@ -115,9 +123,9 @@ export async function kiwiVerifyFastify(
       // factory-pinned clientIp always wins.
       verifyOptions.clientIp = clientIpFromRequestFastify(req, options.trustedProxies);
     }
-    const result = await verify(rawToken, verifyOptions);
+    const result = await verify(resolution.token, verifyOptions);
     if (!result.ok) {
-      await reply.code(status).send({
+      await reply.code(result.disposition === 'retry' ? retryStatus : status).send({
         error: { code: result.code === '' ? 'invalid' : result.code, detail: result.detail ?? 'verification failed' },
       });
       return reply;
@@ -137,7 +145,7 @@ declare module 'fastify' {
     /** The verification result once the kiwi hook passed. */
     kiwi?: {
       ok: boolean;
-      disposition: 'allow' | 'deny';
+      disposition: Disposition;
       decisionHandle: string | null;
       price: string | null;
     };

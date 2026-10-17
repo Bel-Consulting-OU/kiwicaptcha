@@ -94,12 +94,14 @@ forward "/kiwi-protected", to: Kiwicaptcha.Plug,
   verify: fn _conn -> %{storage: store, secret_key: secret, expected_scope: "login"} end
 ```
 
-The plug reads the `kiwi__token` field (or the `X-Kiwi-Token` header),
-verifies locally, and answers 422 with a JSON error body on failure, or
-a 303 redirect with `failure_redirect:`. A verified request assigns
-`:kiwi` on the conn, so the decision handle, the price rung and the
-request binding ride into the downstream actions. A storage outage is a
-typed `storage_unavailable` 422, fail closed.
+The plug collects the `kiwi__token` field, the `X-Kiwi-Token` header
+and the query string under the shared authority rule: distinct values
+refuse with `token_source_conflict`. A definitive denial answers 422
+with a JSON error body, or a 303 redirect with `failure_redirect:`. A
+verified request assigns `:kiwi` on the conn, so the decision handle,
+the price rung and the request binding ride into the downstream
+actions. A storage outage is a typed `storage_unavailable` 503, fail
+closed.
 
 ## Phoenix
 

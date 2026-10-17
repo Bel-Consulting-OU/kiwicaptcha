@@ -127,8 +127,10 @@ app.UseKiwiCaptcha(verifier, secret, "login",
     path => path.StartsWithSegments("/api/protected"));
 ```
 
-Every protected request reads the token from the `x-kiwi-token`
-header, then the `kiwi_token` form field, then the query string.
+Every protected request collects the token from the `x-kiwi-token`
+header, the `kiwi_token` form field and the query string under the
+shared authority rule: one distinct value verifies, while distinct
+values in more than one source refuse with `token_source_conflict`.
 Unverified requests get `403 Forbidden` with the machine-readable
 code; a retry disposition gets `503 Service Unavailable`. The
 verified decision rides `HttpContext.Items[KiwiCaptchaMiddleware.

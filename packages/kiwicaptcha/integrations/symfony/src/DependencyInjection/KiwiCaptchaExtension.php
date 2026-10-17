@@ -21,6 +21,7 @@ use BelConsulting\KiwiCaptchaBundle\EventSubscriber\DeviceCookieSubscriber;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\FirstAttemptLoginGuard;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiCredentialsChangedSubscriber;
 use BelConsulting\KiwiCaptchaBundle\EventSubscriber\KiwiOutcomeBridgeSubscriber;
+use BelConsulting\KiwiCaptchaBundle\EventSubscriber\MethodOverrideFramingSubscriber;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\BucketTrustPriceContext;
@@ -2941,6 +2942,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $container->setDefinition('kiwi_captcha.metrics_counters', new Definition(MetricsCounterStore::class, [
             'kiwicaptcha.metrics.'.hash('sha256', $rawNamespace."\0".$config['secret_key']),
         ]));
+
+        // The method-override framing gate: a duplicated, joined or
+        // folded override header, or a header plus a form-body override,
+        // must answer before routing derives the effective method. The
+        // subscriber runs above the router's kernel.request priority and
+        // inspects only the bundle's own paths, so a request without an
+        // override is untouched.
+        $container->setDefinition(MethodOverrideFramingSubscriber::class, (new Definition(MethodOverrideFramingSubscriber::class, [
+            '%kiwi_captcha.route_prefix%',
+        ]))
+            ->addTag('kernel.event_subscriber')
+            ->setPublic(true));
 
         // Challenge route (configured prefix; see KiwiCaptchaRouteLoader).
         $container->setDefinition(KiwiCaptchaRouteLoader::class, (new Definition(KiwiCaptchaRouteLoader::class, [

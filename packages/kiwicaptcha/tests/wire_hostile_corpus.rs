@@ -44,7 +44,11 @@ fn every_corpus_row_has_the_reference_verdict() {
             "accept" => {
                 let token = SolutionToken::decode(raw)
                     .unwrap_or_else(|e| panic!("{id}: rejected by the Rust decoder ({e:?})"));
-                assert_eq!(token.counter as i64, expected["counter"].as_i64().unwrap(), "{id}");
+                assert_eq!(
+                    token.counter as i64,
+                    expected["counter"].as_i64().unwrap(),
+                    "{id}"
+                );
                 assert_eq!(
                     token.duration_ms as i64,
                     expected["duration_ms"].as_i64().unwrap(),
@@ -70,10 +74,7 @@ fn every_corpus_row_has_the_reference_verdict() {
                 }
                 if let Some(score) = expected.get("telemetry_score") {
                     assert_eq!(
-                        kiwicaptcha::verify::score_telemetry(
-                            &token.telemetry,
-                            token.duration_ms
-                        ),
+                        kiwicaptcha::verify::score_telemetry(&token.telemetry, token.duration_ms),
                         score.as_bool().expect("telemetry_score"),
                         "{id}: telemetry score"
                     );

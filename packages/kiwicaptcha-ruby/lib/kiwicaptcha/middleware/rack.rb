@@ -4,13 +4,15 @@ require 'json'
 
 module KiwiCaptcha
   module Rack
-    # The Rack middleware: reads the configured token field, verifies
-    # the token locally, and answers 422 with a JSON error body on
-    # failure (or a redirect when one is configured). A verified
-    # request exposes env['kiwi.verify'] for downstream apps, so the
-    # decision handle, the price rung and the binding ride along.
+    # The Rack middleware: collects the configured token field under
+    # the shared authority rule, verifies the token locally, and
+    # answers 422 with a JSON error body on a definitive denial (or a
+    # redirect when one is configured). A retry decision answers 503.
+    # A verified request exposes env['kiwi.verify'] for downstream
+    # apps, so the decision handle, the price rung and the binding ride
+    # along.
     #
-    # The middleware never raises: a storage outage is a 422 with the
+    # The middleware never raises: a storage outage is a 503 with the
     # typed storage_unavailable code, fail closed.
     class Verifier
       DEFAULT_TOKEN_FIELD = 'kiwi__token'
@@ -47,9 +49,12 @@ module KiwiCaptcha
 
       def call(env)
         request = ::Rack::Request.new(env)
-        raw_token = read_token(request)
-        if raw_token.nil?
-          return fail_with(env, 'malformed_token', "the #{@token_field} field is missing")
+        raw_token, failure = read_token(request)
+        unless failure.nil?
+          detail = failure == 'token_source_conflict' ?
+            'the request carries conflicting token sources' :
+            "the #{@token_field} field is missing"
+          return fail_with(env, failure, detail)
         end
 
         options = @verify.call(env)
@@ -57,7 +62,12 @@ module KiwiCaptcha
         apply_resolved_client_ip(options, request)
         result = KiwiCaptcha.verify(raw_token, options)
         unless result.ok
-          return fail_with(env, result.code.empty? ? 'invalid' : result.code, result.detail || 'verification failed')
+          if result.disposition == 'retry'
+            return fail_with(env, result.code.empty? ? 'invalid' : result.code,
+                             result.detail || 'verification failed', 503, redirect: false)
+          end
+          return fail_with(env, result.code.empty? ? 'invalid' : result.code,
+                           result.detail || 'verification failed')
         end
 
         env['kiwi.verify'] = result
@@ -96,20 +106,52 @@ module KiwiCaptcha
       end
 
       def read_token(request)
+        header_values = KiwiCaptcha::TokenSource.split_header(
+          request.get_header('HTTP_X_KIWI_TOKEN')
+        )
+        form_values = KiwiCaptcha::TokenSource.values_for(
+          KiwiCaptcha::TokenSource.form_pairs(raw_form_body(request)), @token_field
+        )
+        query_values = KiwiCaptcha::TokenSource.values_for(
+          KiwiCaptcha::TokenSource.form_pairs(request.query_string), @token_field
+        )
+        token, failure = KiwiCaptcha::TokenSource.resolve_values(
+          header_values: header_values, form_values: form_values, query_values: query_values
+        )
+        return [token, failure] unless token.nil? && failure == 'malformed_token'
+
+        # A host may have consumed the body before this middleware ran.
+        # The merged params still carries one value per source, so a
+        # single settled token is recovered instead of a false refusal.
         value = request.params[@token_field]
-        return value if value.is_a?(String) && !value.empty?
-
-        header = request.get_header('HTTP_X_KIWI_TOKEN')
-        return header if header.is_a?(String) && !header.empty?
-
-        nil
+        values = value.is_a?(Array) ? value : [value]
+        KiwiCaptcha::TokenSource.resolve_values(
+          header_values: header_values,
+          form_values: values.compact,
+          query_values: []
+        )
       end
 
-      def fail_with(_env, code, detail)
-        return [303, { 'Location' => @failure_redirect }, []] unless @failure_redirect.nil?
+      def raw_form_body(request)
+        return '' unless request.media_type == 'application/x-www-form-urlencoded'
+
+        input = request.get_header('rack.input')
+        return '' if input.nil?
+
+        body = input.read
+        input.rewind if input.respond_to?(:rewind)
+        body
+      rescue StandardError
+        ''
+      end
+
+      def fail_with(_env, code, detail, status = @failure_status, redirect: true)
+        if redirect && !@failure_redirect.nil?
+          return [303, { 'Location' => @failure_redirect }, []]
+        end
 
         body = JSON.generate('error' => { 'code' => code, 'detail' => detail })
-        [@failure_status,
+        [status,
          { 'Content-Type' => 'application/json', 'Content-Length' => body.bytesize.to_s },
          [body]]
       end

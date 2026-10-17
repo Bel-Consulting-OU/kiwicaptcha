@@ -32,6 +32,7 @@ module KiwiCaptcha
     REQUEST_BINDING_MISMATCH = 'request_binding_mismatch'
     EXECUTION_MISMATCH = 'execution_mismatch'
     UNSUPPORTED_RSW_PARAMS = 'unsupported_rsw_params'
+    TOKEN_SOURCE_CONFLICT = 'token_source_conflict'
 
     ALL = [
       BAD_SIGNATURE, EXPIRED, WRONG_SCOPE, REQUIRED_SCOPE, IP_MISMATCH, MISSING_CLIENT_IP,
@@ -40,7 +41,7 @@ module KiwiCaptcha
       UNSUPPORTED_ARGON2_PARAMS, TOO_MANY_ATTEMPTS, TELEMETRY_REJECTED,
       CAPACITY_EXCEEDED, ADMISSION_UNAVAILABLE, STORAGE_UNAVAILABLE,
       CONSUME_INDETERMINATE, ALREADY_CONSUMED, REQUEST_BINDING_MISMATCH,
-      EXECUTION_MISMATCH, UNSUPPORTED_RSW_PARAMS
+      EXECUTION_MISMATCH, UNSUPPORTED_RSW_PARAMS, TOKEN_SOURCE_CONFLICT
     ].freeze
 
     DESCRIPTIONS = {
@@ -69,7 +70,8 @@ module KiwiCaptcha
       ALREADY_CONSUMED => 'the challenge was already consumed by a different logical operation',
       REQUEST_BINDING_MISMATCH => 'the challenge is not bound to the expected application transaction',
       EXECUTION_MISMATCH => 'the execution digest does not match the expected program trace of the challenge',
-      UNSUPPORTED_RSW_PARAMS => 'the rsw challenge cannot be verified: this verifier lacks the matching trapdoor, or the signed sequential cost is out of bounds'
+      UNSUPPORTED_RSW_PARAMS => 'the rsw challenge cannot be verified: this verifier lacks the matching trapdoor, or the signed sequential cost is out of bounds',
+      TOKEN_SOURCE_CONFLICT => 'the request carries different solution tokens in more than one source (header, form field, query parameter)'
     }.freeze
 
     module_function

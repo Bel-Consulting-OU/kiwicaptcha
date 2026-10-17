@@ -12,23 +12,21 @@ use Predis\Client;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Non-finite risk guards: every float boundary in the scoring and
- * calibration path must produce a bounded integer output, never NaN
- * and never lower-risk-than-max.
+ * Non-finite risk guards: the scoring and calibration paths must never
+ * emit NaN and never use a non-finite value as an integer.
+ *
+ * The Lua calibration layer now refuses a persisted non-finite value as
+ * storage corruption before any write. That is stricter than the former
+ * fail-high mapping: a corrupted bucket cannot be laundered into a
+ * maximum adjustment, and the refusal leaves the state untouched. The
+ * PHP conversion boundary still maps a non-finite in-process float to
+ * +maxAdjustment, so a future caller that skips the Lua decoder stays
+ * fail-high rather than zero.
  *
  * Boundaries audited: (a) the PHP calibrator's bias conversion (float ->
- * int). NaN/±Inf from a corrupted bucket value must map to
- * +maxAdjustment, failing high and never returning 0, since a plain
- * `(int)` cast maps both NaN and Inf to 0. (b) The resolution-ratio
- * division (resolved/total): total 0 -> 0.0. The ratio is
- * integer-division-derived (always finite) with a defensive non-finite
- * guard. (c) The score is pure integer math (intdiv in RiskScorer), so
- * there is no float boundary; verified and documented here.
- *
- * The canonical calibration.lua guards its own output (non-finite
- * final_mp → +max_adjustment*1000), so these Redis cases exercise the
- * full guard chain: corrupted state → Lua guard → bounded integer
- * reply → PHP conversion clamp.
+ * int). (b) The resolution-ratio division (resolved/total): total 0 ->
+ * 0.0. (c) The score is pure integer math (intdiv in RiskScorer), so
+ * there is no float boundary.
  */
 final class NonFiniteBiasTest extends TestCase
 {
@@ -107,36 +105,38 @@ final class NonFiniteBiasTest extends TestCase
     }
 
     /**
-     * (a) Integration: a corrupted bucket value ("1e999", which Lua 5.1
-     * tonumber reads as +Inf) makes fp_mean = Inf/Inf = NaN. The Lua
-     * guard maps the NaN final_mp to +max_adjustment*1000 and the PHP
-     * conversion yields exactly +maxAdjustment, never 0 and never an
-     * eval error.
+     * Integration: a corrupted bucket value ("1e999", which Lua 5.1
+     * tonumber reads as +Inf) is storage corruption. The decoder refuses
+     * the read before any write, so the bogus value can never become a
+     * maximum adjustment or a clean zero.
      */
-    public function testCorruptedBucketNaNPathsFailHighToPlusMaxAdjustment(): void
+    public function testCorruptedBucketNonFiniteValueFailsClosed(): void
     {
         $c = $this->calibrator(minSamples: 100);
         $client = $this->requireClient();
         $scope = 1;
 
-        // NaN path: legit_above_sum = Inf and legit_count = Inf ->
-        // fp_mean = NaN -> raw = NaN -> final_mp = NaN -> guard -> +150.
         $client->hset($this->bucketKey($c, $scope), 'legit_count', '1e999');
         $client->hset($this->bucketKey($c, $scope), 'legit_above_sum', '1e999');
 
-        self::assertSame(150, $c->biasForScope($scope, $this->nowMs()), 'NaN must fail HIGH to +maxAdjustment (never 0)');
-        $this->clearCache($c);
-        self::assertSame(150, $c->biasForScope($scope, $this->nowMs()), 'the guarded bias must be stable across re-reads');
+        try {
+            $c->biasForScope($scope, $this->nowMs());
+            self::fail('a non-finite bucket value must fail closed');
+        } catch (\Throwable $e) {
+            self::assertStringContainsString('storage-corruption', $e->getMessage());
+        }
+        self::assertSame(
+            0,
+            (int) $client->exists($this->stateKey($c, $scope)),
+            'the refusal must happen before the rate-limit state is written',
+        );
     }
 
     /**
-     * (a) Integration: corrupted clipped sum "1e999" with a finite count
-     * (fp_mean = +Inf -> error = -Inf) clamps at the raw -maxAdjustment
-     * clamp inside the script — bounded int output, never NaN. The rate
-     * window is pre-seeded so the proportional allowance (maxChangePerMinute
-     * 1e6 over 60 s >> 150) does not clamp the first call to 0.
+     * Integration: a corrupted clipped sum "1e999" with a finite count
+     * is refused before the bias state write.
      */
-    public function testCorruptedBucketNegativeInfClampsToMinusMaxAdjustment(): void
+    public function testCorruptedBucketNegativeInfFailsClosed(): void
     {
         $c = $this->calibrator(minSamples: 100, maxChangePerMinute: 1_000_000);
         $client = $this->requireClient();
@@ -144,23 +144,28 @@ final class NonFiniteBiasTest extends TestCase
 
         $client->hset($this->bucketKey($c, $scope), 'legit_count', '100');
         $client->hset($this->bucketKey($c, $scope), 'legit_above_sum', '1e999');
-        // Seed bias_mp = 0 / ts = Redis now - 60 s: the allowance is
-        // 1_000_000 * 1000 * 60000 / 60000 = 1e9 milli-points >> 150 points.
         $client->hset($this->stateKey($c, $scope), 'bias_mp', '0');
         $client->hset($this->stateKey($c, $scope), 'ts', (string) ((int) $client->time()[0] * 1000 - 60_000));
 
-        $bias = $c->biasForScope($scope, $this->nowMs());
-        self::assertIsInt($bias);
-        self::assertSame(-150, $bias, 'a +Inf fp_mean (error -Inf) must clamp to -maxAdjustment (bounded, never NaN)');
+        try {
+            $c->biasForScope($scope, $this->nowMs());
+            self::fail('a non-finite bucket value must fail closed');
+        } catch (\Throwable $e) {
+            self::assertStringContainsString('storage-corruption', $e->getMessage());
+        }
+        self::assertSame(
+            '0',
+            (string) $client->hget($this->stateKey($c, $scope), 'bias_mp'),
+            'a refused read must leave the stored bias untouched',
+        );
     }
 
     /**
-     * (a) Integration: corrupted rate-limit state (bias_mp = "1e999" ->
-     * +Inf) drags final_mp to +Inf through the lower clamp even when the
-     * target is 0 (below minSamples). The Lua guard must fail high to
-     * +maxAdjustment, never returning the target 0.
+     * Integration: corrupted rate-limit state (bias_mp = "1e999" ->
+     * +Inf) is refused before the state write, never mapped to zero or
+     * to a maximum adjustment.
      */
-    public function testCorruptedStateInfNeverMapsToZero(): void
+    public function testCorruptedStateNonFiniteFailsClosed(): void
     {
         $c = $this->calibrator(minSamples: 1_000_000_000); // target stays 0
         $client = $this->requireClient();
@@ -169,7 +174,17 @@ final class NonFiniteBiasTest extends TestCase
         $client->hset($this->stateKey($c, $scope), 'bias_mp', '1e999');
         $client->hset($this->stateKey($c, $scope), 'ts', (string) ((int) $client->time()[0] * 1000));
 
-        self::assertSame(150, $c->biasForScope($scope, $this->nowMs()), 'a corrupted +Inf bias_mp must fail HIGH to +maxAdjustment, never the 0 target');
+        try {
+            $c->biasForScope($scope, $this->nowMs());
+            self::fail('a non-finite rate-limit state must fail closed');
+        } catch (\Throwable $e) {
+            self::assertStringContainsString('storage-corruption', $e->getMessage());
+        }
+        self::assertSame(
+            '1e999',
+            (string) $client->hget($this->stateKey($c, $scope), 'bias_mp'),
+            'a refused read must not rewrite the corrupt value as a clean one',
+        );
     }
 
     /**

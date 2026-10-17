@@ -181,10 +181,24 @@ module KiwiCaptcha
       end
     end
 
+    # The transient conditions where the same token may legitimately be
+    # resubmitted once the backend recovers. The table is shared with
+    # every server SDK and pinned by protocol/decision-v1/corpus.json.
+    RETRY_CODES = %w[
+      storage_unavailable
+      capacity_exceeded
+      admission_unavailable
+      consume_indeterminate
+    ].freeze
+
+    def self.disposition_for(code)
+      RETRY_CODES.include?(code) ? 'retry' : 'deny'
+    end
+
     class << self
       def invalid(code)
         VerifyResult.new(
-          ok: false, disposition: 'deny', decision_handle: nil, price: nil,
+          ok: false, disposition: disposition_for(code), decision_handle: nil, price: nil,
           code: code, detail: VerifyError.describe(code),
           request_binding: nil, from_stored_result: false,
           solve_duration_ms: nil, decoy_field: nil

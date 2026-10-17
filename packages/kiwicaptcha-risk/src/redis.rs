@@ -1066,7 +1066,11 @@ impl RedisRiskStateStore {
         keys.push(crate::keyspace::target_failure_marker_key(
             &self.namespace,
             target_id,
-            if event_id.is_empty() { "unused" } else { event_id },
+            if event_id.is_empty() {
+                "unused"
+            } else {
+                event_id
+            },
             crate::keyspace::KeyspaceMode::Legacy,
         ));
         // The target dimension's window is the principal retention (the

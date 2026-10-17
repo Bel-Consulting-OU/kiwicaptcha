@@ -36,6 +36,7 @@ const (
 	ErrCodeRequestBinding       VerifyError = "request_binding_mismatch"
 	ErrCodeExecutionMismatch    VerifyError = "execution_mismatch"
 	ErrCodeUnsupportedRswParams VerifyError = "unsupported_rsw_params"
+	ErrCodeTokenSourceConflict  VerifyError = "token_source_conflict"
 )
 
 // Code returns the wire code of this failure.
@@ -93,6 +94,7 @@ var verifyErrorDescriptions = map[VerifyError]string{
 	ErrCodeRequestBinding:       "the challenge is not bound to the expected application transaction",
 	ErrCodeExecutionMismatch:    "the execution digest does not match the expected program trace of the challenge",
 	ErrCodeUnsupportedRswParams: "the rsw challenge cannot be verified: this verifier is not configured with the matching rsw trapdoor, or the signed sequential cost is outside the supported bounds",
+	ErrCodeTokenSourceConflict:  "the request carries different solution tokens in more than one source (header, form field, query parameter)",
 }
 
 // VerifyOutcome is the result of one solution verification. A valid

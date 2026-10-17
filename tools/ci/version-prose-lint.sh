@@ -291,6 +291,32 @@ if [ -n "$protocol_matches" ]; then
   printf '%s\n' "$protocol_matches"
 fi
 
+# 8. ANY hardcoded numeral offered as the live execution maximum. The
+# manifest row is the single authority, so prose that states the
+# maximum, current or live grammar version as a literal can be right
+# today and wrong at the next bump: describe it as the manifest
+# maximum instead. The per-numeral groups above catch frozen-below
+# claims; this family catches the shape at any numeral, including the
+# manifest's own, so the phrase never becomes a second source of truth.
+# Deployment caps and per-request ceilings are different statements and
+# do not match (they name a cap, not the maximum itself).
+authority_patterns=(
+  -e "(maximum|max)[[:space:]]+(execution[- ])?(program[- ])?version[[:space:]]+(is|of|=)[[:space:]]+[0-9]+"
+  -e "(current|live)[[:space:]]+(execution[- ])?(program[- ])?version[[:space:]]+(is|of|=)[[:space:]]+[0-9]+"
+  -e "(maximum|max|highest)[[:space:]]+execution[[:space:]]+(program[[:space:]]+)?version[[:space:]]+[0-9]+"
+  -e "execution[- ]version[[:space:]]+is[[:space:]]+[0-9]+([^0-9]|$)"
+)
+authority_matches="$(
+  search "${authority_patterns[@]}" "${scan_roots[@]}"
+)"
+authority_matches="$(printf '%s
+' "$authority_matches" | drop_compat_files)"
+if [ -n "$authority_matches" ]; then
+  report "hardcoded authority numeral: the live execution maximum is described as a literal (phrase it as the manifest maximum; manifest max_execution_version = ${live_max})"
+  printf '%s
+' "$authority_matches"
+fi
+
 if [ "$hits" -ne 0 ]; then
   echo "version prose lint FAILED: stale claims found (see above)" >&2
   exit 1

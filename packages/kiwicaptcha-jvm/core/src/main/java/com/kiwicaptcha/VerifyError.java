@@ -32,7 +32,8 @@ public enum VerifyError {
     ALREADY_CONSUMED("already_consumed", "the challenge was already consumed by a different logical operation"),
     REQUEST_BINDING("request_binding_mismatch", "the challenge is not bound to the expected application transaction"),
     EXECUTION_MISMATCH("execution_mismatch", "the execution digest does not match the expected program trace of the challenge"),
-    UNSUPPORTED_RSW_PARAMS("unsupported_rsw_params", "the rsw challenge cannot be verified: this verifier is not configured with the matching rsw trapdoor, or the signed sequential cost is outside the supported bounds");
+    UNSUPPORTED_RSW_PARAMS("unsupported_rsw_params", "the rsw challenge cannot be verified: this verifier is not configured with the matching rsw trapdoor, or the signed sequential cost is outside the supported bounds"),
+    TOKEN_SOURCE_CONFLICT("token_source_conflict", "the request carries different solution tokens in more than one source (header, form field, query parameter)");
 
     private final String code;
     private final String description;

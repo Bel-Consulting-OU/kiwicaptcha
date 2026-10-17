@@ -15,9 +15,11 @@ namespace KiwiCaptcha;
 /// proceeds; anything else is answered with a 403 Forbidden carrying
 /// the machine-readable error code, and a retry disposition (a storage
 /// outage or capacity exhaustion) answers with a 503 Service
-/// Unavailable. The token source order is the x-kiwi-token header,
-/// then the kiwi_token form field, then the kiwi_token query
-/// parameter. The verified decision rides the HttpContext.Items entry
+/// Unavailable. Token authority follows the shared rule: the
+/// x-kiwi-token header, the kiwi_token form field and the kiwi_token
+/// query parameter must agree, and distinct values refuse with
+/// token_source_conflict. The verified decision rides the
+/// HttpContext.Items entry
 /// <see cref="KiwiCaptchaMiddleware.DecisionItem"/> for the wrapped
 /// handler.
 /// </summary>
@@ -73,26 +75,23 @@ public sealed class KiwiCaptchaMiddleware
             await _next(context);
             return;
         }
-        var token = context.Request.Headers.TryGetValue(TokenHeader, out var header)
-            && header.Count > 0 && !string.IsNullOrEmpty(header[0])
-            ? header[0]
-            : null;
-        if (token == null && HttpMethods.IsPost(context.Request.Method)
-            && context.Request.HasFormContentType)
+        var headerValues = TokenSourceResolver.SplitHeader(
+            context.Request.Headers[TokenHeader].ToArray());
+        IReadOnlyList<string> formValues = Array.Empty<string>();
+        if (context.Request.HasFormContentType)
         {
             var form = await context.Request.ReadFormAsync();
-            token = form[TokenField].FirstOrDefault();
+            formValues = form[TokenField].ToArray();
         }
-        if (token == null)
-        {
-            token = context.Request.Query[TokenField].FirstOrDefault();
-        }
-        if (string.IsNullOrEmpty(token))
+        var queryValues = context.Request.Query[TokenField].ToArray();
+        var resolution = TokenSourceResolver.ResolveValues(headerValues, formValues, queryValues);
+        if (!resolution.Ok)
         {
             await RenderDenialAsync(context,
-                Decision.FromOutcome(VerifyOutcome.MalformedTokenOutcome("malformed"), ""));
+                Decision.FromOutcome(VerifyOutcome.InvalidOutcome(resolution.Error!.Value), ""));
             return;
         }
+        var token = resolution.Token!;
         var options = new Verifier.Options
         {
             SecretKey = _secretKey,

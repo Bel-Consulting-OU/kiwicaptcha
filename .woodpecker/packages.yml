@@ -1,9 +1,10 @@
 # Woodpecker CI: the package-readiness lanes (mirrors the GitHub jobs
-# package-cargo, package-composer and n1-compat). The cargo lane proves
-# the risk crate ships its Lua resource and builds outside the monorepo,
-# runs the quick start, and packages the core crate with the lockfile;
-# the composer lane proves a clean-room install outside the monorepo;
-# the n1 lane proves the frozen previous release still interoperates.
+# package-cargo, package-composer, n1-compat and android). The cargo lane
+# proves the risk crate ships its Lua resource and builds outside the
+# monorepo, runs the quick start, and packages the core crate with the
+# lockfile; the composer lane proves a clean-room install outside the
+# monorepo; the n1 lane proves the frozen previous release still
+# interoperates; the android lane runs the module's JVM unit tests.
 labels:
   capability: docker
 when:
@@ -88,3 +89,13 @@ steps:
         git -C "$$CI_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
         bash tools/ci/n1-compat.sh /tmp/kiwi-n1
         git -C "$$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1
+
+  - name: android-unit-tests
+    # The image carries the JDK, the Android SDK platform 36 and the
+    # build tools; the module's Gradle wrapper downloads Gradle 9.5.1.
+    image: ghcr.io/cirruslabs/android-sdk:36
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-android
+        ./gradlew testDebugUnitTest --console=plain --no-daemon

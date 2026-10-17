@@ -2,6 +2,7 @@ package com.kiwicaptcha.spring;
 
 import com.kiwicaptcha.Decision;
 import com.kiwicaptcha.servlet.KiwiCaptchaFilter;
+import com.kiwicaptcha.servlet.TokenSourceResolver;
 import com.kiwicaptcha.VerifyOutcome;
 import com.kiwicaptcha.Verifier;
 import jakarta.servlet.http.HttpServletRequest;
@@ -11,9 +12,10 @@ import org.springframework.web.servlet.HandlerInterceptor;
 /**
  * The Spring MVC adapter: verifies at handler-mapping time and stores
  * the decision as a request attribute. Controllers read it under
- * KiwiCaptchaFilter.DECISION_ATTRIBUTE. The token source order is the
- * x-kiwi-token header, then the kiwi_token form field, then the
- * query parameter, the same order the servlet filter applies.
+ * KiwiCaptchaFilter.DECISION_ATTRIBUTE. Token authority follows the
+ * shared rule the servlet filter applies: the x-kiwi-token header, the
+ * kiwi_token form field and the kiwi_token query parameter must agree,
+ * and distinct values refuse with token_source_conflict.
  */
 public final class KiwiTokenInterceptor implements HandlerInterceptor {
     private final Verifier verifier;
@@ -33,15 +35,13 @@ public final class KiwiTokenInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler)
             throws Exception {
-        String token = request.getHeader(KiwiCaptchaFilter.TOKEN_HEADER);
-        if (token == null || token.isEmpty()) {
-            token = request.getParameter(KiwiCaptchaFilter.TOKEN_FIELD);
-        }
-        if (token == null || token.isEmpty()) {
+        TokenSourceResolver.Result resolution = TokenSourceResolver.resolve(request);
+        if (!resolution.ok()) {
             renderDenial(response,
-                    Decision.fromOutcome(VerifyOutcome.malformedToken("malformed"), ""));
+                    Decision.fromOutcome(VerifyOutcome.invalid(resolution.error), ""));
             return false;
         }
+        String token = resolution.token;
         Verifier.Options options = new Verifier.Options();
         options.secretKey = secretKey;
         options.expectedScope = expectedScope;

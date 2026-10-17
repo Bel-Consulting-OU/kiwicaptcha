@@ -33,6 +33,7 @@ public enum VerifyError
     RequestBinding,
     ExecutionMismatch,
     UnsupportedRswParams,
+    TokenSourceConflict,
 }
 
 /// <summary>Extensions over the failure vocabulary: codes and polarity.</summary>
@@ -81,6 +82,7 @@ public static class VerifyErrorExtensions
         VerifyError.RequestBinding => "request_binding_mismatch",
         VerifyError.ExecutionMismatch => "execution_mismatch",
         VerifyError.UnsupportedRswParams => "unsupported_rsw_params",
+        VerifyError.TokenSourceConflict => "token_source_conflict",
         _ => error.ToString(),
     };
 
@@ -113,6 +115,7 @@ public static class VerifyErrorExtensions
         VerifyError.RequestBinding => "the challenge is not bound to the expected application transaction",
         VerifyError.ExecutionMismatch => "the execution digest does not match the expected program trace of the challenge",
         VerifyError.UnsupportedRswParams => "the rsw challenge cannot be verified: this verifier is not configured with the matching rsw trapdoor, or the signed sequential cost is outside the supported bounds",
+        VerifyError.TokenSourceConflict => "the request carries different solution tokens in more than one source (header, form field, query parameter)",
         _ => error.Code(),
     };
 
