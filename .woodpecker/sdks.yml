@@ -51,7 +51,7 @@ steps:
         dotnet test KiwiCaptcha.sln --nologo
 
   - name: ruby
-    image: ruby:3.3-bookworm
+    image: ruby:4.0-bookworm
     commands:
       - |
         set -eu

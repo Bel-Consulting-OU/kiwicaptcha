@@ -2463,6 +2463,12 @@ jobs:
         working-directory: packages/kiwicaptcha-ruby
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
+      - uses: ruby/setup-ruby@651ff0d62c5c79bed6d53ec518387aae20e72c1a # v1 branch head (commit-pinned)
+        with:
+          # The lockfile is Bundler 4; the runner's preinstalled Ruby is
+          # older, so the lane pins the same major the lock was made with.
+          ruby-version: '4.0'
+          bundler-cache: false
       - name: ruby version
         run: ruby --version
       - name: install
