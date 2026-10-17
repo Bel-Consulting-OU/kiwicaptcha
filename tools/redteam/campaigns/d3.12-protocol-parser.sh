@@ -100,8 +100,19 @@ else
 fi
 
 # ---------- leg 2: the dual-read differential ----------
-DUAL_OUT=$(node "$RT_DIR/target/dual-read-proxy.mjs" --cases --origin "$ORIGIN" 2>&1)
-DUAL_RC=$?
+# The harness is a tracked file, but a checkout or a cleanup can leave it
+# missing. That is a prerequisite failure, not a smuggling detection: the
+# harness never ran, so it cannot have interpreted anything. Say so
+# plainly instead of letting the assertion below report a differential
+# that does not exist.
+if [ ! -f "$RT_DIR/target/dual-read-proxy.mjs" ]; then
+    rt_report_fail "the dual-read harness is missing at tools/redteam/target/dual-read-proxy.mjs; restore it from the repository before judging the framing plane"
+    DUAL_OUT=""
+    DUAL_RC=1
+else
+    DUAL_OUT=$(node "$RT_DIR/target/dual-read-proxy.mjs" --cases --origin "$ORIGIN" 2>&1)
+    DUAL_RC=$?
+fi
 printf '%s\n' "$DUAL_OUT" | grep '^CASE' | while IFS= read -r line; do
     printf 'ASSERT: PASS framing ambiguity handled deterministically: %s\n' "$line"
 done
