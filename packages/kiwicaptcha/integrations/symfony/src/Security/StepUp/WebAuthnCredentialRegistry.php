@@ -66,6 +66,12 @@ final class WebAuthnCredentialRegistry
      * assertion ceremony compares the authenticator's user handle
      * against.
      *
+     * The matching records arrive in one pipelined batch: one discovery
+     * call plus one batched read, whatever the deployment's enrolled
+     * credential count. The filter below then runs over the values the
+     * batch already holds, in the key order, so the returned records and
+     * their order match a per-key walk.
+     *
      * @return list<CredentialRecord>
      */
     public function registeredCredentialsOf(string $principalPseudonym): array
@@ -74,9 +80,9 @@ final class WebAuthnCredentialRegistry
         if (!\is_array($keys) || $keys === []) {
             return [];
         }
+        $values = $this->readBatch(array_map(static fn ($key): string => (string) $key, $keys));
         $found = [];
-        foreach ($keys as $key) {
-            $json = $this->redis->get((string) $key);
+        foreach ($values as $json) {
             if (!\is_string($json) || $json === '') {
                 continue;
             }
@@ -124,5 +130,30 @@ final class WebAuthnCredentialRegistry
     private function key(string $credentialId): string
     {
         return $this->prefix.self::KEY_PREFIX.hash('sha256', $credentialId);
+    }
+
+    /**
+     * The values of the given keys as one pipelined batch. The batch
+     * queues one GET per key in the key order and answers one response
+     * per queued command in that same order, so the caller filters the
+     * values it already holds.
+     *
+     * A response list that is not an array is no record set: the lookup
+     * answers with no credential rather than reading the keys one at a
+     * time, which keeps the batched call shape the only read path.
+     *
+     * @param list<string> $keys
+     *
+     * @return list<mixed>
+     */
+    private function readBatch(array $keys): array
+    {
+        $responses = $this->redis->pipeline(static function ($pipe) use ($keys): void {
+            foreach ($keys as $key) {
+                $pipe->get($key);
+            }
+        });
+
+        return \is_array($responses) ? array_values($responses) : [];
     }
 }

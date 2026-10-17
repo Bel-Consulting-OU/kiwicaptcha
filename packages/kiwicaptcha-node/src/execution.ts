@@ -21,6 +21,24 @@ export const EXECUTION_MAX_PROGRAM_BASE64 = 4096;
 export const SRCDOC_PREEXISTING_BODY_ELEMENTS = 1;
 export const SRCDOC_URL_DIGEST = '4a81696362b26de48692e5978ff373d7d11106d55b14b26f0a193e7e1ac94da2';
 
+/**
+ * The ceiling of every geometry trace field in CSS pixels. A geometry
+ * probe measures a node laid out inside the sandboxed execution
+ * document, so a real offset or height stays far below this bound.
+ * The ceiling closes the field: without it the accepted set would
+ * follow this host's number type, the cross-runtime split the shared
+ * register forbids.
+ */
+export const EXECUTION_GEOMETRY_MAX_PX = 4096;
+
+/**
+ * The ancestor-walk step ceiling of the depth probe. A hand-crafted
+ * child record can make the parent map self-referential, so the walk
+ * stops at this count and refuses instead of spinning forever (the
+ * same bound the Rust and PHP walkers carry).
+ */
+const MAX_DEPTH_WALK_STEPS = 4096;
+
 /** The probe word vocabulary of OP_CSS_GEOM (mirrors the Rust core). */
 export const CSS_WORDS: readonly string[] = ['kiwicaptcha', 'execution', 'boundary'];
 
@@ -1103,6 +1121,40 @@ function intObsEnvelope(seed: number): [number, number, number] {
   return [Math.max(qExp - 2, 0), Math.min(qExp + 2, 100), t0];
 }
 
+/**
+ * Read one numeric trace field at `pos`: a non-empty run of ASCII
+ * digits whose exact value is at most `ceiling`, terminated by the
+ * string `terminator`. Returns the value and the position past both,
+ * or null when the field is absent, carries any other byte, or
+ * exceeds the ceiling. The accumulator refuses above the ceiling
+ * instead of rounding, so the accepted set never follows this host's
+ * number type.
+ */
+function readTraceInt(
+  trace: string,
+  pos: number,
+  ceiling: number,
+  terminator: string,
+): { value: number; next: number } | null {
+  let value = 0;
+  let i = pos;
+  while (i < trace.length) {
+    const digit = trace.charCodeAt(i) - 48;
+    if (digit < 0 || digit > 9) {
+      break;
+    }
+    value = value * 10 + digit;
+    if (value > ceiling) {
+      return null;
+    }
+    i += 1;
+  }
+  if (i === pos || trace[i] !== terminator) {
+    return null;
+  }
+  return { value, next: i + 1 };
+}
+
 export function verifyExecutedTrace(
   programB64: string,
   nonce: string,
@@ -1150,18 +1202,23 @@ export function verifyExecutedTrace(
     }
     pos += name.length + 1;
     if (op === OP_DOM_GEOMETRY) {
-      const m = /^\d+,\d+\)/.exec(trace.slice(pos));
-      if (m === null) {
+      // The layout offsets are construction-order positions: each is
+      // non-negative, at most the register ceiling and monotonic
+      // (never below the previous entry's offset). The entry grammar
+      // is the exact digit run of the PHP, Rust and node walkers alike.
+      const topField = readTraceInt(trace, pos, EXECUTION_GEOMETRY_MAX_PX, ',');
+      if (topField === null) {
         return null;
       }
-      const [topText, heightText] = m[0].slice(0, -1).split(',');
-      const top = Number(topText);
-      const height = Number(heightText);
-      if (height < 1 || top < prevTop) {
+      const heightField = readTraceInt(trace, topField.next, EXECUTION_GEOMETRY_MAX_PX, ')');
+      if (heightField === null) {
         return null;
       }
-      prevTop = top;
-      pos += m[0].length;
+      if (heightField.value < 1 || topField.value < prevTop) {
+        return null;
+      }
+      prevTop = topField.value;
+      pos = heightField.next;
     } else if (op === OP_DOM_POINT) {
       const topTag = construction.length > 0 ? 'div' : 'none';
       if (!trace.startsWith(`${topTag})`, pos)) {
@@ -1170,42 +1227,55 @@ export function verifyExecutedTrace(
       pos += topTag.length + 1;
     } else if (op === OP_DOM_SIBLING_INDEX) {
       const expectedRank = appendRank.get(str(operands, 'id'));
-      const m = /^\d+\)/.exec(trace.slice(pos));
-      if (
-        expectedRank === undefined ||
-        m === null ||
-        Number(m[0].slice(0, -1)) !== expectedRank + SRCDOC_PREEXISTING_BODY_ELEMENTS
-      ) {
+      if (expectedRank === undefined) {
         return null;
       }
-      pos += m[0].length;
+      const expected = expectedRank + SRCDOC_PREEXISTING_BODY_ELEMENTS;
+      const field = readTraceInt(trace, pos, expected, ')');
+      if (field === null || field.value !== expected) {
+        return null;
+      }
+      pos = field.next;
     } else if (op === OP_DOM_DEPTH) {
       let depth = 0;
       let cursorId = operands['id'] === undefined ? undefined : str(operands, 'id');
+      let guard = 0;
       while (cursorId !== undefined && parent.has(cursorId)) {
+        // A hand-crafted child record can make the parent map
+        // self-referential, so the walk stops at a bounded step count
+        // instead of spinning forever (the Rust walker guard).
+        if (guard >= MAX_DEPTH_WALK_STEPS) {
+          return null;
+        }
+        guard += 1;
         depth += 1;
         cursorId = parent.get(cursorId);
       }
-      const m = /^\d+\)/.exec(trace.slice(pos));
-      if (m === null || Number(m[0].slice(0, -1)) !== depth) {
+      const field = readTraceInt(trace, pos, depth, ')');
+      if (field === null || field.value !== depth) {
         return null;
       }
-      pos += m[0].length;
+      pos = field.next;
     } else if (op === OP_DOM_OBSERVE) {
-      const m = /^\d+,\d+\)/.exec(trace.slice(pos));
-      if (m === null) {
+      if (!state.docIds.has(str(operands, 'id'))) {
         return null;
       }
-      const [dstText, observedText] = m[0].slice(0, -1).split(',');
-      const dst = Number(dstText);
-      const observed = Number(observedText);
-      if (!state.docIds.has(str(operands, 'id')) || dst !== num(operands, 'idx') || observed < 1 || observed > 255) {
+      const idx = num(operands, 'idx');
+      const dstField = readTraceInt(trace, pos, idx, ',');
+      if (dstField === null) {
         return null;
       }
-      if (dst < state.u8.length) {
-        state.u8[dst] = observed;
+      const observedField = readTraceInt(trace, dstField.next, 255, ')');
+      if (observedField === null) {
+        return null;
       }
-      pos += m[0].length;
+      if (dstField.value !== idx || observedField.value < 1) {
+        return null;
+      }
+      if (dstField.value < state.u8.length) {
+        state.u8[dstField.value] = observedField.value;
+      }
+      pos = observedField.next;
     } else if (op === OP_DOM_URL_CANON) {
       if (trace.slice(pos, pos + 64) !== SRCDOC_URL_DIGEST || trace[pos + 64] !== ')') {
         return null;
@@ -1218,19 +1288,20 @@ export function verifyExecutedTrace(
       if (!state.docIds.has(str(operands, 'id'))) {
         return null;
       }
-      const close = trace.indexOf(')', pos);
-      if (close < 0) {
-        return null;
-      }
-      const parts = trace.slice(pos, close).split(',', 2);
-      const fs = Number(parts[0]);
-      const height = Number(parts[1]);
       const [fsLo, fsHi, hLo, hHi] = cssGeomEnvelope(num(operands, 'seed'));
-      if (!Number.isInteger(fs) || !Number.isInteger(height) || fs < fsLo || fs > fsHi || height < hLo || height > hHi) {
+      const fsField = readTraceInt(trace, pos, fsHi, ',');
+      if (fsField === null) {
         return null;
       }
-      writeV5Cell(state.u8, num(operands, 'cell'), height);
-      pos = close + 1;
+      const heightField = readTraceInt(trace, fsField.next, hHi, ')');
+      if (heightField === null) {
+        return null;
+      }
+      if (fsField.value < fsLo || heightField.value < hLo) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), heightField.value);
+      pos = heightField.next;
     } else if (op === OP_MUT_ORDER) {
       // The mutation delivery-order envelope: the exact record-type
       // sequence the churn operands draw.
@@ -1274,23 +1345,24 @@ export function verifyExecutedTrace(
       if (!state.docIds.has(str(operands, 'id'))) {
         return null;
       }
-      const close = trace.indexOf(')', pos);
-      if (close < 0) {
-        return null;
-      }
-      const parts = trace.slice(pos, close).split(',', 3);
-      const t = Number(parts[0]);
-      const rects = Number(parts[1]);
-      const selCount = Number(parts[2]);
       const [tExact, rectsLo, rectsHi] = rangeOrderEnvelope(num(operands, 'b0'), num(operands, 'b1'));
-      if (
-        !Number.isInteger(t) || !Number.isInteger(rects) || !Number.isInteger(selCount)
-        || t !== tExact || rects < rectsLo || rects > rectsHi || selCount !== 1
-      ) {
+      const tField = readTraceInt(trace, pos, tExact, ',');
+      if (tField === null) {
         return null;
       }
-      writeV5Cell(state.u8, num(operands, 'cell'), rects);
-      pos = close + 1;
+      const rectsField = readTraceInt(trace, tField.next, rectsHi, ',');
+      if (rectsField === null) {
+        return null;
+      }
+      const selCountField = readTraceInt(trace, rectsField.next, 1, ')');
+      if (selCountField === null) {
+        return null;
+      }
+      if (tField.value !== tExact || rectsField.value < rectsLo || selCountField.value !== 1) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), rectsField.value);
+      pos = selCountField.next;
     } else if (op === OP_INT_OBS) {
       // The intersection envelope: the observer's initial delivery,
       // the quantized ratio interval, and isIntersecting agreeing with
@@ -1298,29 +1370,30 @@ export function verifyExecutedTrace(
       if (!state.docIds.has(str(operands, 'id'))) {
         return null;
       }
-      const close = trace.indexOf(')', pos);
-      if (close < 0) {
-        return null;
-      }
-      const parts = trace.slice(pos, close).split(',', 3);
-      const fired = Number(parts[0]);
-      const q = Number(parts[1]);
-      const isInt = Number(parts[2]);
       const [qLo, qHi, t0Pct] = intObsEnvelope(num(operands, 'seed'));
-      if (!Number.isInteger(fired) || !Number.isInteger(q) || !Number.isInteger(isInt)) {
+      const firedField = readTraceInt(trace, pos, 1, ',');
+      if (firedField === null) {
         return null;
       }
-      if (fired !== 1 || q < qLo || q > qHi) {
+      const qField = readTraceInt(trace, firedField.next, qHi, ',');
+      if (qField === null) {
         return null;
       }
-      if (q >= t0Pct + 2 && isInt !== 1) {
+      const isIntField = readTraceInt(trace, qField.next, 1, ')');
+      if (isIntField === null) {
         return null;
       }
-      if (q <= t0Pct - 2 && isInt !== 0) {
+      if (firedField.value !== 1 || qField.value < qLo) {
         return null;
       }
-      writeV5Cell(state.u8, num(operands, 'cell'), q);
-      pos = close + 1;
+      if (qField.value >= t0Pct + 2 && isIntField.value !== 1) {
+        return null;
+      }
+      if (qField.value <= t0Pct - 2 && isIntField.value !== 0) {
+        return null;
+      }
+      writeV5Cell(state.u8, num(operands, 'cell'), qField.value);
+      pos = isIntField.next;
     } else {
       const simEntry = `${sim})`;
       if (!trace.startsWith(simEntry, pos)) {

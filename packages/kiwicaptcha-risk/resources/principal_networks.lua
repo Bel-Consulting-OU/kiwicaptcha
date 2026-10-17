@@ -5,15 +5,16 @@
 --                           pnet:{kiwi:<ns>:<principal_hex>}, the hash
 --                           tag carrying the whole principal identity,
 --                           so one principal owns one Cluster slot)
---   max Redis calls:      6 + 2*evicted (1 TIME + 1 HGET + 1 HSET
+--   max Redis calls:      7 + 2*evicted (1 TIME + 1 HGET + 1 HSET
 --                           [+ 1 HSET trust] + 1 HGETALL + up to 2
 --                           HDELs per evicted victim, bounded by the
---                           cap ceiling + 1 PEXPIRE on the record
---                           path; strictly fewer on the read paths;
---                           the forget_devices and has_any_trusted
---                           paths touch 2: 1 TIME + 1 HGETALL, plus
---                           up to one HGET per trust mirror, bounded
---                           by the cardinality ceiling)
+--                           cap ceiling, + 1 further HGETALL when that
+--                           eviction removed fields + 1 PEXPIRE on the
+--                           record path; strictly fewer on the read
+--                           paths. The forget_devices and
+--                           has_any_trusted paths touch 2: 1 TIME + 1
+--                           HGETALL each, and neither reads a field one
+--                           at a time)
 --   max collection cardinality: 224 hash fields (32 session + 16 device
 --                           + 64 net + 64 asn + 32+16+64+64 trust flags)
 --
@@ -166,22 +167,36 @@ if op == 'has_any_trusted' then
     local time = redis.call('TIME')
     local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
     local fields = redis.call('HGETALL', KEYS[1])
+    -- The reply already carries every field's value: one pass records the
+    -- bare tags' values and the mirrors, and the walk below reads each
+    -- bare tag's lifetime from that table instead of one HGET per mirror.
+    -- A mirror name is skipped when the values are recorded: a name of
+    -- the form t:<x> carries a colon and so can never classify as a
+    -- network class, which is the only thing the walk below asks of the
+    -- field it looks up.
+    local last_use = {}
+    local mirrors = {}
     for i = 1, #fields, 2 do
         local f = fields[i]
         if string.sub(f, 1, 2) == 't:' then
-            local bare = string.sub(f, 3)
-            local v = redis.call('HGET', KEYS[1], bare)
-            if v then
-                local last = tonumber(v)
-                if last ~= nil then
-                    local fclass = classify(bare)
-                    local isNetworkClass = fclass == 'net' or fclass == 'asn'
-                        or (fclass == nil and string.match(bare, '^[0-9a-f]+$') ~= nil)
-                    if isNetworkClass then
-                        local class_ttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net
-                        if now - last <= class_ttl then
-                            return 1
-                        end
+            mirrors[#mirrors + 1] = string.sub(f, 3)
+        else
+            last_use[f] = fields[i + 1]
+        end
+    end
+    for i = 1, #mirrors do
+        local bare = mirrors[i]
+        local v = last_use[bare]
+        if v then
+            local last = tonumber(v)
+            if last ~= nil then
+                local fclass = classify(bare)
+                local isNetworkClass = fclass == 'net' or fclass == 'asn'
+                    or (fclass == nil and string.match(bare, '^[0-9a-f]+$') ~= nil)
+                if isNetworkClass then
+                    local class_ttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net
+                    if now - last <= class_ttl then
+                        return 1
                     end
                 end
             end
@@ -289,6 +304,7 @@ for i = 1, #all, 2 do
         end
     end
 end
+local scan = all
 if #class_tags + 1 > cap then
     -- Sort ascending by last-use (oldest first).
     table.sort(class_tags, function(a, b) return a[2] < b[2] end)
@@ -298,16 +314,18 @@ if #class_tags + 1 > cap then
         redis.call('HDEL', KEYS[1], victim)
         redis.call('HDEL', KEYS[1], 't:' .. victim)
     end
+    -- An evicted victim left the hash, so the surviving set is read back.
+    scan = redis.call('HGETALL', KEYS[1])
 end
 
 -- PEXPIRE computed AFTER the eviction, over the surviving fields: the
 -- key expires when its oldest surviving class would (an evicted
 -- victim's class TTL can no longer hold the key alive past its own
--- eviction).
-local survivors = redis.call('HGETALL', KEYS[1])
+-- eviction). Without an eviction the fields read above, after the
+-- writes, ARE the surviving set, so that reply is scanned directly.
 local max_class_ttl = ttl_ms
-for i = 1, #survivors, 2 do
-    local f = survivors[i]
+for i = 1, #scan, 2 do
+    local f = scan[i]
     if string.sub(f, 1, 2) ~= 't:' then
         local fclass = classify(f)
         local fttl = CLASS_TTL_MAX[fclass] or CLASS_TTL_MAX.net

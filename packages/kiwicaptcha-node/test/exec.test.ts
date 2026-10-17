@@ -19,7 +19,7 @@ import {
 
 test('the corpus cases classify identically to the PHP and Rust cores', () => {
   const corpus = executionCorpus();
-  assert.equal(corpus.cases.length, 19);
+  assert.equal(corpus.cases.length, 28);
   for (const row of corpus.cases) {
     const programOk = isValidProgram(row.program);
     if (row.expected === 'malformed') {

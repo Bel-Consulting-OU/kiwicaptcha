@@ -644,7 +644,11 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
                 'risk.step_up.webauthn.rp_id and risk.step_up.webauthn.allowed_origins must be configured before enrollment can run.',
             );
         }
-        $enrolled = $this->registry->registeredCredentialsOf($context->principalPseudonym);
+        // The allow-list was read above and nothing between the two
+        // points writes to the registry, so the second read is the first
+        // one's answer: one discovery and one batched read per ceremony,
+        // not two.
+        $enrolled = $enrolledNow;
         $challengeBytes = random_bytes(32);
         // The session id binds the creation challenge (never minted as a
         // stateless challenge) and the bootstrap flag records the

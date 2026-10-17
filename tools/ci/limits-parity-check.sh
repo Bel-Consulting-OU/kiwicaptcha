@@ -42,6 +42,8 @@ PHP_TOKEN="$ROOT/packages/kiwicaptcha-php/src/SolutionToken.php"
 PHP_VERIFIER="$ROOT/packages/kiwicaptcha-php/src/Verifier.php"
 PHP_EXECUTION="$ROOT/packages/kiwicaptcha-php/src/ExecutionChallengeGenerator.php"
 
+NODE_EXECUTION="$ROOT/packages/kiwicaptcha-node/src/execution.ts"
+
 DRIVER="$ROOT/packages/kiwicaptcha-wasm/assets/widget-driver.js"
 RISK="$ROOT/packages/kiwicaptcha-wasm/assets/widget-risk.js"
 WORKER="$ROOT/packages/kiwicaptcha-wasm/assets/kiwi-worker.js"
@@ -57,7 +59,7 @@ pass() {
 
 for f in "$MANIFEST" "$RUST_CHALLENGE" "$RUST_TOKEN" "$RUST_KEYS" "$RUST_EXECUTION" \
     "$RUST_WASM" "$PHP_CONFIG" "$PHP_TOKEN" "$PHP_VERIFIER" "$PHP_EXECUTION" \
-    "$DRIVER" "$RISK" "$WORKER"; do
+    "$NODE_EXECUTION" "$DRIVER" "$RISK" "$WORKER"; do
     [ -f "$f" ] || fail "missing source file: $f"
 done
 
@@ -132,6 +134,7 @@ MIN_EXECUTION_KEY_BYTES=$(manifest_field min_execution_key_bytes)
 EXECUTION_MAX_VERSION=$(manifest_field execution_max_version)
 EXECUTION_MAX_PROGRAM_BASE64=$(manifest_field execution_max_program_base64)
 EXECUTION_MAX_OPS=$(manifest_field execution_max_ops)
+EXECUTION_MAX_GEOMETRY_PX=$(manifest_field execution_max_geometry_px)
 WORKER_PROTOCOL_VERSION=$(manifest_field worker_protocol_version)
 WORKER_PROTOCOL_ID=$(manifest_string_field worker_protocol_id)
 
@@ -151,6 +154,7 @@ for pair in \
     "execution_max_version:$EXECUTION_MAX_VERSION" \
     "execution_max_program_base64:$EXECUTION_MAX_PROGRAM_BASE64" \
     "execution_max_ops:$EXECUTION_MAX_OPS" \
+    "execution_max_geometry_px:$EXECUTION_MAX_GEOMETRY_PX" \
     "worker_protocol_version:$WORKER_PROTOCOL_VERSION"; do
     [ -n "${pair#*:}" ] || fail "manifest field ${pair%%:*} is missing"
 done
@@ -270,7 +274,13 @@ assert_eq "Rust MAX_OPS" "$EXECUTION_MAX_OPS" \
     "$(rust_const "$RUST_EXECUTION" MAX_OPS)"
 assert_eq "PHP ExecutionChallengeGenerator::MAX_OPS" "$EXECUTION_MAX_OPS" \
     "$(php_const "$PHP_EXECUTION" MAX_OPS)"
-pass "the execution version, program-size and op-count ceilings agree across PHP, Rust and the widget"
+assert_eq "Rust MAX_GEOMETRY_PX" "$EXECUTION_MAX_GEOMETRY_PX" \
+    "$(rust_const "$RUST_EXECUTION" MAX_GEOMETRY_PX)"
+assert_eq "PHP ExecutionChallengeGenerator::MAX_GEOMETRY_PX" "$EXECUTION_MAX_GEOMETRY_PX" \
+    "$(php_const "$PHP_EXECUTION" MAX_GEOMETRY_PX)"
+assert_eq "node EXECUTION_GEOMETRY_MAX_PX" "$EXECUTION_MAX_GEOMETRY_PX" \
+    "$(js_value "$NODE_EXECUTION" 's/^export const EXECUTION_GEOMETRY_MAX_PX = ([0-9]+);$/\1/p')"
+pass "the execution version, program-size, op-count and geometry ceilings agree across PHP, Rust, the Node SDK and the widget"
 
 # ── Worker protocol generation ─────────────────────────────────────────
 assert_eq "Rust wasm SOLVER_PROTOCOL_VERSION" "$WORKER_PROTOCOL_VERSION" \
@@ -285,4 +295,4 @@ assert_eq "widget-driver KIWI_SOLVER_PROTOCOL_ID" "$WORKER_PROTOCOL_ID" "$DRIVER
 assert_eq "worker KIWI_SOLVER_PROTOCOL_ID" "$WORKER_PROTOCOL_ID" "$WORKER_PROTOCOL_IDS"
 pass "the worker protocol generation agrees across the wasm source, the driver and the worker asset"
 
-echo "limits register: all rows coherent across PHP, Rust, the widget and the worker"
+echo "limits register: all rows coherent across PHP, Rust, the Node SDK, the widget and the worker"
