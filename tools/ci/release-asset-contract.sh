@@ -189,6 +189,24 @@ if [ "$failed" -eq 0 ]; then
   check_equality "publish set" "$publish_set" "$manifest"
 fi
 
+# A tracked file missing from the working tree is either a botched merge
+# or collateral damage from a directory cleaner, and a release input can
+# disappear that way without any manifest noticing: the Flarum
+# extension's dist asset and the red-team harness directory were both
+# lost that way. The working tree a release is built from may not carry
+# an uncommitted deletion.
+if git -C "$(dirname "$0")/../.." rev-parse --git-dir >/dev/null 2>&1; then
+  repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+  deleted=$(git -C "$repo_root" diff --name-only --diff-filter=D HEAD -- 2>/dev/null | head -20)
+  if [ -n "$deleted" ]; then
+    echo "FAIL: tracked file(s) missing from the working tree:" >&2
+    printf '  %s
+' $deleted >&2
+    echo "  a release input deleted outside a commit is a broken tree, not a smaller asset set" >&2
+    failed=$((failed + 1))
+  fi
+fi
+
 if [ "$failed" -ne 0 ]; then
   echo "release asset contract VIOLATED" >&2
   exit 1
