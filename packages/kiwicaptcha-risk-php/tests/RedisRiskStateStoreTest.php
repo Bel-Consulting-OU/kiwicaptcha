@@ -287,9 +287,9 @@ final class RedisRiskStateStoreTest extends TestCase
         $eventId = str_repeat('7', 32);
 
         // The bucket's timestamp is written inside the first call, so the
-        // possible elapsed window starts at the clock read BEFORE it, not
-        // after it: bracketing from the post-call read under-estimates the
-        // decay by the call's own post-script delay, which a loaded
+        // possible elapsed window starts at the clock read taken before it,
+        // not after it. Bracketing from the post-call read under-estimates
+        // the decay by the call's own post-script delay, which a loaded
         // machine turns into a one-tick boundary failure.
         $tBeforeFirst = $this->redisNowMs();
         $first = $store->observe($this->observation($eventId));
