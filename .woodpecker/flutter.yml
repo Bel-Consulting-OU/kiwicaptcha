@@ -1,0 +1,16 @@
+# Woodpecker CI: the Flutter client (mirrors the GitHub job flutter).
+# The image carries the Flutter SDK and its bundled Dart; `flutter test`
+# runs the widget, retry/manual-start and challenge-decoding suites.
+labels:
+  capability: docker
+when:
+  - event: [push, pull_request, tag, manual]
+
+steps:
+  - name: flutter-test
+    image: ghcr.io/cirruslabs/flutter:stable
+    commands:
+      - |
+        set -eu
+        cd packages/kiwicaptcha-flutter
+        flutter test

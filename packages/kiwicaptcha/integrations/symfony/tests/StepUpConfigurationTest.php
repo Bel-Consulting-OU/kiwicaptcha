@@ -14,8 +14,10 @@ use BelConsulting\KiwiCaptchaBundle\Security\StepUp\EmailOtpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\KiwiStepUpHandlerRegistry;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\LoggingStepUpCodeSender;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\RedisStepUpChallengeStore;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpBootstrapGate;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpCompletionCredit;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpKeyRing;
+use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpPendingTokenVoter;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpTicket;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\TotpStepUpHandler;
 use BelConsulting\KiwiCaptchaBundle\Security\StepUp\WebAuthnStepUpHandler;
@@ -268,6 +270,55 @@ final class StepUpConfigurationTest extends TestCase
             self::assertStringContainsString('web-auth/webauthn-lib', $e->getMessage());
             self::assertStringContainsString('composer require', $e->getMessage());
         }
+    }
+
+    /**
+     * risk.step_up.allow_signup_bootstrap is read by the gate service, so
+     * every reference handler that can enroll a first factor must hold
+     * that service. The container assertion catches a handler definition
+     * that accepts the constructor seam but is wired without it (the
+     * knob would stay inert).
+     */
+    public function testBothReferenceHandlersReceiveTheSignupBootstrapGate(): void
+    {
+        $container = $this->load($this->stepUpDefaults([
+            'allow_signup_bootstrap' => true,
+            'handlers' => [
+                'email_otp' => ['enabled' => true],
+                'totp' => ['enabled' => true],
+                'webauthn' => ['enabled' => true, 'rp_id' => 'login.example.com', 'allowed_origins' => ['https://login.example.com']],
+            ],
+        ]));
+
+        foreach ([TotpStepUpHandler::class, WebAuthnStepUpHandler::class] as $handler) {
+            self::assertSame(
+                StepUpBootstrapGate::class,
+                (string) $container->getDefinition($handler)->getArgument('$bootstrapGate'),
+                $handler.' must hold the configured first-enrollment bootstrap gate',
+            );
+        }
+        self::assertTrue($container->getDefinition(StepUpBootstrapGate::class)->getArgument(0), 'the knob value reaches the gate service');
+    }
+
+    /**
+     * The pending-token voter is a security voter: its definition carries
+     * the security.voter tag (SecurityBundle's voter pass compiles it into
+     * the access decision manager) and the class implements Symfony's
+     * VoterInterface.
+     */
+    public function testThePendingTokenVoterCarriesTheSecurityVoterTag(): void
+    {
+        $container = $this->load($this->stepUpDefaults());
+
+        self::assertTrue($container->hasDefinition(StepUpPendingTokenVoter::class), 'the voter is a registered service');
+        self::assertTrue(
+            $container->getDefinition(StepUpPendingTokenVoter::class)->hasTag('security.voter'),
+            'the voter definition carries the security.voter tag',
+        );
+        self::assertTrue(
+            is_a(StepUpPendingTokenVoter::class, \Symfony\Component\Security\Core\Authorization\Voter\VoterInterface::class, true),
+            'the voter class implements VoterInterface',
+        );
     }
 
     public function testEnabledWithoutAnyHandlerIsRefused(): void

@@ -23,6 +23,9 @@ final class InMemoryPrincipalNetworkTagStore implements PrincipalNetworkTagStore
     /** @var list<array{0: string, 1: string}> every write, for assertions */
     public array $writes = [];
 
+    /** @var list<string> every principal whose device tags were revoked */
+    public array $forgotten = [];
+
     public function principalNetworkSeen(string $principalId, string $network): ?bool
     {
         return isset($this->tags[$principalId][$network]);
@@ -54,6 +57,7 @@ final class InMemoryPrincipalNetworkTagStore implements PrincipalNetworkTagStore
 
     public function forgetDevices(string $principalId): void
     {
+        $this->forgotten[] = $principalId;
         foreach (array_keys($this->tags[$principalId] ?? []) as $tag) {
             if (str_starts_with($tag, 'session:') || str_starts_with($tag, 'device:')) {
                 unset($this->tags[$principalId][$tag], $this->trusted[$principalId][$tag]);

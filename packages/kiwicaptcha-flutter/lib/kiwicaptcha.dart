@@ -6,6 +6,11 @@ export 'src/solver.dart';
 export 'src/token.dart'
     show encodeKiwiToken, kiwiBase64Encode, validateKiwiChallenge;
 export 'src/widget.dart'
-    show KiwiCaptcha, KiwiClient, KiwiSiteverifyBody, KiwiHttpResponse;
+    show
+        KiwiCaptcha,
+        KiwiCaptchaState,
+        KiwiClient,
+        KiwiSiteverifyBody,
+        KiwiHttpResponse;
 export 'src/ffi_bindings.dart'
     show KiwiFfi, debugFfiOverride, kiwiOk, kiwiErrArgonUnavailable;

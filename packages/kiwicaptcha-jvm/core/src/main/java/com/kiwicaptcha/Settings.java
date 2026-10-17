@@ -82,6 +82,7 @@ public final class Settings {
         Verifier.Config config = new Verifier.Config();
         config.acceptLegacyV1 = acceptLegacyV1;
         config.region = region;
+        config.scopes = scopes == null ? List.of() : List.copyOf(scopes);
         config.expectedPolicyVersion = expectedPolicyVersion;
         config.policyVersionFloor = policyVersionFloor;
         config.expectedIssuer = expectedIssuer;

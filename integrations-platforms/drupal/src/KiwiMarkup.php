@@ -13,25 +13,22 @@ namespace Drupal\kiwicaptcha;
 final class KiwiMarkup
 {
     /**
-     * The form render element. The #kiwi_scope value rides the element
-     * so the validate handler knows which scope it guards.
+     * The form render element: the kiwicaptcha_widget theme hook with
+     * its scope and shim_url variables. The #kiwi_scope value also
+     * rides the element so the validate handler knows which scope it
+     * guards.
      *
      * @return array<string, mixed>
      */
-    public static function renderElement(string $scope): array
+    public static function renderElement(string $scope, string $shimUrl = ''): array
     {
+        $sanitized = self::sanitizeScope($scope);
+
         return [
-            '#type' => 'html_tag',
-            '#tag' => 'div',
-            '#kiwi_scope' => self::sanitizeScope($scope),
-            '#attributes' => [
-                'class' => ['kiwi-container'],
-                'data-kiwi-scope' => self::sanitizeScope($scope),
-            ],
-            '#value' => '<input type="hidden" name="kiwi__token" data-kiwi-token value="">',
-            '#attached' => [
-                'html_head' => [],
-            ],
+            '#theme' => 'kiwicaptcha_widget',
+            '#scope' => $sanitized,
+            '#shim_url' => $shimUrl,
+            '#kiwi_scope' => $sanitized,
         ];
     }
 

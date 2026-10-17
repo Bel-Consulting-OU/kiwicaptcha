@@ -108,7 +108,56 @@ class OutcomesDoctorTest < Minitest::Test
   def test_the_doctor_passes_a_sound_memory_deployment
     report = KiwiCaptcha::Doctor.run(secret: SECRET, store: KiwiCaptcha::MemoryStore.new)
     assert report.ok, report.checks.map { |c| "#{c.name}: #{c.detail}" }.join(', ')
-    assert_equal %w[secret region issuer argon2 store], report.checks.map(&:name)
+    assert_equal %w[secret region issuer scopes argon2 store], report.checks.map(&:name)
+  end
+
+  def test_the_doctor_validates_scope_names_and_risk_classes
+    report = KiwiCaptcha::Doctor.run(
+      secret: SECRET, store: KiwiCaptcha::MemoryStore.new,
+      scopes: 'login=critical,comment=low,signup'
+    )
+    scopes_check = report.checks.find { |c| c.name == 'scopes' }
+    assert scopes_check.ok, scopes_check.detail
+    assert_match(/login=critical/, scopes_check.detail)
+    assert report.ok
+
+    report = KiwiCaptcha::Doctor.run(
+      secret: SECRET, store: KiwiCaptcha::MemoryStore.new, scopes: 'bad scope=low'
+    )
+    scopes_check = report.checks.find { |c| c.name == 'scopes' }
+    refute scopes_check.ok
+    assert_match(/not a valid identifier/, scopes_check.detail)
+
+    report = KiwiCaptcha::Doctor.run(
+      secret: SECRET, store: KiwiCaptcha::MemoryStore.new, scopes: 'login=urgent'
+    )
+    scopes_check = report.checks.find { |c| c.name == 'scopes' }
+    refute scopes_check.ok
+    assert_match(/unknown risk class/, scopes_check.detail)
+
+    # The empty declaration and the empty map stay valid.
+    report = KiwiCaptcha::Doctor.run(
+      secret: SECRET, store: KiwiCaptcha::MemoryStore.new, scopes: {}
+    )
+    assert report.checks.find { |c| c.name == 'scopes' }.ok
+  end
+
+  def test_settings_scope_allowlist_helper
+    settings = KiwiCaptcha::Settings.new(
+      secret: SECRET, store_url: 'memory://', profile: 'minimal',
+      scopes: 'login=critical,comment=low', env: {}
+    )
+    assert settings.scope_allowed?('login')
+    assert settings.scope_allowed?(:login)
+    refute settings.scope_allowed?('signup')
+
+    open_settings = KiwiCaptcha::Settings.new(
+      secret: SECRET, store_url: 'memory://', profile: 'minimal', scopes: {}, env: {}
+    )
+    assert open_settings.scope_allowed?('anything')
+    assert KiwiCaptcha::Settings.valid_scope_class?('')
+    assert KiwiCaptcha::Settings.valid_scope_class?('standard')
+    refute KiwiCaptcha::Settings.valid_scope_class?('urgent')
   end
 
   def test_the_doctor_flags_a_weak_secret_and_a_dead_store

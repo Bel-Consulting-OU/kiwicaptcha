@@ -360,4 +360,25 @@ public class MiddlewareTests
         var check = Doctor.CheckStore("memory://");
         Assert.True(check.Ok, check.Detail);
     }
+
+    [Fact]
+    public void HealthProbeRunsAgainstTheVerifierStore()
+    {
+        var verifier = NewVerifier();
+        var check = Doctor.CheckStore(verifier.Storage());
+        Assert.True(check.Ok, check.Detail);
+        // The probe's self-check record was consumed and deleted on the
+        // verifier's own backend: no residue and a real roundtrip.
+        var memory = Assert.IsType<MemoryStore>(verifier.Storage());
+        Assert.Equal(0, memory.Len());
+    }
+
+    [Fact]
+    public void HealthProbeReportsDegradedForAFailingStore()
+    {
+        var verifier = new Verifier(new FailingStore(), new Verifier.Config());
+        var check = Doctor.CheckStore(verifier.Storage());
+        Assert.False(check.Ok);
+        Assert.False(string.IsNullOrWhiteSpace(check.Detail));
+    }
 }

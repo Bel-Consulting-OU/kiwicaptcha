@@ -534,9 +534,13 @@ function parseArgs(argv) {
         printHelp();
         process.exit(0);
         break;
-      case '--tiers':
-        opts.tiers = next().split(',').map((s) => s.trim()).filter(Boolean);
+      case '--tiers': {
+        // `all` is the documented spelling of the default matrix; it must
+        // not fall through to the unknown-tier refusal.
+        const value = next();
+        opts.tiers = value === 'all' ? null : value.split(',').map((s) => s.trim()).filter(Boolean);
         break;
+      }
       case '--difficulties':
         opts.difficulties = next().split(',').map((s) => s.trim()).filter(Boolean);
         break;

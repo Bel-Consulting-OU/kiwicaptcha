@@ -34,6 +34,8 @@ export interface LoadKiwiOptions {
   integrity?: string;
   /** Optional crossorigin attribute for the script element. */
   crossorigin?: "anonymous" | "use-credentials";
+  /** Optional CSP nonce set on the injected script element. */
+  scriptNonce?: string;
 }
 
 /**
@@ -81,6 +83,7 @@ function injectDriverScript(
     script.async = true;
     if (options.integrity) script.integrity = options.integrity;
     if (options.crossorigin) script.crossOrigin = options.crossorigin;
+    if (options.scriptNonce) script.nonce = options.scriptNonce;
 
     let timer: ReturnType<typeof setTimeout> | null = null;
     const settle = (fn: () => void) => {

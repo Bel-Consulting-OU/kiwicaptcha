@@ -133,5 +133,34 @@ export function validateChallenge(raw: unknown): KiwiChallenge {
   ) {
     throw new KiwiSolveError("malformed", "ttlSecs is outside 1..=300");
   }
+  // The optional duration floor is server-side (the verifier compares
+  // it with the token's measured duration), but its wire shape is part
+  // of the contract: a non-negative integer below the challenge TTL.
+  // The PHP issuer refuses a floor at or above the TTL, so a document
+  // carrying one is malformed, never a reason to pad or delay a solve.
+  if (
+    data.minDurationMs !== undefined &&
+    (!Number.isInteger(data.minDurationMs) ||
+      data.minDurationMs < 0 ||
+      (data.ttlSecs !== undefined && data.minDurationMs >= data.ttlSecs * 1000))
+  ) {
+    throw new KiwiSolveError(
+      "malformed",
+      "minDurationMs is outside 0..ttl*1000",
+    );
+  }
+  // The decoy field name is a browser-widget honeypot. The native path
+  // never renders it, but the wire parser enforces the same alphabet
+  // the browser driver does, so a malformed name is refused
+  // consistently on every client.
+  if (
+    data.decoy_field !== undefined &&
+    (typeof data.decoy_field !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(data.decoy_field))
+  ) {
+    throw new KiwiSolveError(
+      "malformed",
+      "decoy_field is not 1..=64 characters of [A-Za-z0-9_-]",
+    );
+  }
   return data;
 }

@@ -3,11 +3,13 @@
 # over the consume/commit spec with the vendored tla2tools jar.
 #
 # The toolchain: the jar is committed at vendor/tla2tools.jar (pinned
-# release 1.7.4, downloaded from the project's GitHub releases at
+# release 1.8.0, downloaded from the project's GitHub releases at
 # adoption time; the working tree carries it so the gate never needs
-# the network). Java must be on the PATH. A missing jar or a missing
-# java prints the exact blocker and exits 3, which the gate renders as
-# the TOOLCHAIN-ABSENT row; the row is never green by default.
+# the network). The checksum below is the pin: a substituted or
+# partially downloaded jar is refused before TLC runs. Java must be on
+# the PATH. A missing jar or a missing java prints the exact blocker
+# and exits 3, which the gate renders as the TOOLCHAIN-ABSENT row; the
+# row is never green by default.
 
 set -u
 TLA_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -23,6 +25,11 @@ fi
 if [ ! -f "$JAR" ]; then
     echo "TOOLCHAIN-ABSENT: the tla2tools jar is missing at $JAR"
     echo "TOOLCHAIN-ABSENT: fetch the pinned release: https://github.com/tlaplus/tlaplus/releases (v1.8.0)"
+    exit 3
+fi
+TLA2TOOLS_SHA256=7783a9df73fa8bb8eeb670d10f08bbb0a0a123a4a5af090da65a02c0104dcc53
+if ! printf '%s  %s\n' "$TLA2TOOLS_SHA256" "$JAR" | shasum -a 256 -c - >/dev/null 2>&1; then
+    echo "TOOLCHAIN-ABSENT: the tla2tools jar does not match the pinned 1.8.0 checksum"
     exit 3
 fi
 

@@ -105,13 +105,16 @@ func (ExhaustionGate) Release(interface{}) {}
 // the php constructor. NowFunc returns the wall clock and stands in
 // for it in tests. SecretsByKid maps positive kid values to secrets of
 // at least 32 bytes; an empty map keeps the legacy single-secret path.
-// RswModulusN and RswLambda must be configured together or both left
-// empty.
+// Scopes is the accepted scope allowlist: a non-empty list refuses any
+// verify call whose expected scope is not a member with wrong_scope;
+// an empty list accepts any scope. RswModulusN and RswLambda must be
+// configured together or both left empty.
 type VerifierConfig struct {
 	ArgonGate              AdmissionGate
 	NowFunc                func() time.Time
 	AcceptLegacyV1         bool
 	Region                 string
+	Scopes                 []string
 	ExpectedPolicyVersion  int
 	ExpectedIssuer         string
 	SecretsByKid           map[int]string
@@ -167,6 +170,10 @@ func NewVerifierConfig(config VerifierConfig) (VerifierConfig, error) {
 	if config.ExpectedPolicyVersion < 0 || config.PolicyVersionFloor < 0 {
 		return config, &VerifierBuildError{Reason: "policy versions are non negative"}
 	}
+	config.scopeAllowlist = make(map[string]bool, len(config.Scopes))
+	for _, scope := range config.Scopes {
+		config.scopeAllowlist[scope] = true
+	}
 	activeRsw := (*Rsw)(nil)
 	if config.RswModulusN != "" {
 		decoded, err := NewRsw(config.RswModulusN, config.RswLambda)
@@ -212,6 +219,7 @@ type resolvedConfigFields struct {
 	activeRsw        *Rsw
 	rswByHash        map[string]*Rsw
 	rswModulusByHash map[string]string
+	scopeAllowlist   map[string]bool
 }
 
 // Verifier is the one-shot solution verifier over a store adapter.
@@ -231,6 +239,7 @@ func NewVerifier(storage Store, config VerifierConfig) (*Verifier, error) {
 		activeRsw:        validated.activeRsw,
 		rswByHash:        validated.rswByHash,
 		rswModulusByHash: validated.rswModulusByHash,
+		scopeAllowlist:   validated.scopeAllowlist,
 	}}, nil
 }
 
@@ -309,6 +318,13 @@ func (v *Verifier) ValidateRecord(record *ChallengeRecord) bool {
 		return false
 	}
 	if record.TargetBits < MinDifficulty || record.TargetBits > MaxDifficulty {
+		return false
+	}
+	// The sha256 solver ceiling is the algorithm's own bound. The
+	// absolute difficulty window above already caps every record, so
+	// this check keeps the named register constant enforced rather
+	// than declaration-only.
+	if record.Algorithm == "sha256" && record.TargetBits > MaxShaTargetBits {
 		return false
 	}
 	if executionPresent && !IsValidExecutionProgram(record.ExecutionProgram) {
@@ -439,14 +455,29 @@ func (v *Verifier) checkRequestBinding(record *ChallengeRecord, expectation Requ
 	return ErrCodeRequestBinding
 }
 
+// scopeAllowed reports whether the configured scope allowlist accepts
+// one scope. An empty allowlist accepts any scope; a non-empty one is
+// the deployment's accepted set.
+func (v *Verifier) scopeAllowed(scope string) bool {
+	if len(v.scopeAllowlist) == 0 {
+		return true
+	}
+	return v.scopeAllowlist[scope]
+}
+
 // checkScopeAndBinding runs the scope validation and the expected
 // request binding, hard authorization invariants in cheap-phase order.
 // The expected scope is REQUIRED: an empty scope option answers the
 // typed required_scope failure instead of silently accepting a token
-// minted for any scope the issuer serves.
+// minted for any scope the issuer serves. The configured scope set is
+// an allowlist: a call naming a scope outside it fails with
+// wrong_scope before the record comparison.
 func (v *Verifier) checkScopeAndBinding(record *ChallengeRecord, expectedScope string, expectation RequestBindingExpectation) VerifyError {
 	if expectedScope == "" {
 		return ErrCodeRequiredScope
+	}
+	if !v.scopeAllowed(expectedScope) {
+		return ErrCodeWrongScope
 	}
 	if record.Scope != expectedScope {
 		return ErrCodeWrongScope

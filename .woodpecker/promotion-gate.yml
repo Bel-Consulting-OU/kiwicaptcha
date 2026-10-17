@@ -10,7 +10,9 @@
 # the gate no longer witnesses — review this list whenever a lane is
 # added. Deliberately NOT listed: perf-latency (manual-only hard
 # ratchet, never a merge gate by design), assets and the public-install
-# lanes (manual-only), latency-regression (non-gating by design).
+# lanes (manual-only), latency-regression (non-gating by design), and
+# iOS (the Swift/XCTest lane needs a macOS runner, so it lives in the
+# GitHub workflow only).
 #
 # Forge-side setup (one time, needs repository admin): add a ruleset
 # for main requiring the check `promotion-gate` (and keep the v* tag
@@ -35,6 +37,11 @@ depends_on:
   - release-tools
   - packages
   - docker-deploy
+  - sdks
+  - wrappers
+  - platform-integrations
+  - verifier-redis
+  - flutter
 
 steps:
   - name: promotion-gate

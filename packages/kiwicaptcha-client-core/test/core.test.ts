@@ -6,6 +6,7 @@ import {
   getKiwiCaptcha,
   KIWI_TOKEN_FIELD_NAME,
   renderKiwiCaptcha,
+  renderKiwiCaptchaAsync,
   type KiwiCaptchaApi,
 } from "../src/index.js";
 import { installMockDriver, dispatchKiwi, type MockDriver } from "./mock-driver.js";
@@ -201,6 +202,32 @@ describe("renderKiwiCaptcha", () => {
     expect(inner.classList.contains("kiwi-theme-light")).toBe(false);
   });
 
+  it("reports token expiry through isExpired", () => {
+    const { container, driver } = fixture();
+    const handle = renderKiwiCaptcha(container, { scope: "login" });
+    expect(handle.isExpired()).toBe(false);
+    driver.simulateVerified(handle.id, "tok-short");
+    expect(handle.isExpired()).toBe(false);
+    driver.simulateExpired(handle.id);
+    expect(handle.isExpired()).toBe(true);
+    expect(handle.getResponse()).toBe("");
+  });
+
+  it("falls back to the legacy remove() when the driver has no destroy", () => {
+    const { container, driver } = fixture();
+    // A pre-destroy driver exposes remove only; delete the modern method.
+    delete (driver as Partial<KiwiCaptchaApi>).destroy;
+    const handle = renderKiwiCaptcha(container, { scope: "login" });
+    const inner = container.querySelector(".kiwi-container") as HTMLElement;
+    expect(inner.isConnected).toBe(true);
+
+    handle.destroy();
+    expect(driver.records.size).toBe(0);
+    // remove() unlinks the markup, unlike destroy(); the mount node stays.
+    expect(inner.isConnected).toBe(false);
+    expect(container.isConnected).toBe(true);
+  });
+
   it("propagates metadata, algorithm, lang and execution attributes", () => {
     const { container } = fixture();
     renderKiwiCaptcha(container, {
@@ -234,6 +261,91 @@ describe("markup builder", () => {
     expect(m.widget.querySelectorAll('[data-kiwi-status][role="status"]')).toHaveLength(1);
     expect(m.widget.querySelector(".kiwi-icon-wrapper")?.getAttribute("aria-hidden")).toBe("true");
     expect(getKiwiCaptcha(doc)).toBeNull();
+  });
+
+  it("defaults the token field name and omits optional attributes", () => {
+    const doc = freshDoc();
+    const m = buildKiwiMarkup(doc, {});
+    expect(m.tokenInput.name).toBe(KIWI_TOKEN_FIELD_NAME);
+    expect(m.container.className).toBe("kiwi-container");
+    expect(m.container.getAttribute("data-kiwi-risk-context")).toBeNull();
+    expect(m.container.getAttribute("data-kiwi-endpoint")).toBeNull();
+    expect(m.widget.getAttribute("data-action")).toBeNull();
+  });
+
+  it("carries the coarse risk context on the container", () => {
+    const doc = freshDoc();
+    const m = buildKiwiMarkup(doc, { riskContext: "coarse" });
+    expect(m.container.getAttribute("data-kiwi-risk-context")).toBe("coarse");
+  });
+
+  it("does not add a theme class for auto or an absent theme", () => {
+    const doc = freshDoc();
+    expect(buildKiwiMarkup(doc, { theme: "auto" }).container.className).toBe("kiwi-container");
+    expect(buildKiwiMarkup(doc, { theme: "light" }).container.className).toBe(
+      "kiwi-container kiwi-theme-light",
+    );
+  });
+});
+
+describe("getKiwiCaptcha", () => {
+  it("returns null until a shaped driver registers", () => {
+    const doc = freshDoc();
+    expect(getKiwiCaptcha(doc)).toBeNull();
+    // DOM clobbering: an element named KiwiCaptcha must never be accepted.
+    doc.body.innerHTML = '<div id="KiwiCaptcha"></div>';
+    expect(getKiwiCaptcha(doc)).toBeNull();
+  });
+
+  it("returns the registered provider API", () => {
+    const { doc, driver } = fixture();
+    expect(getKiwiCaptcha(doc)).toBe(driver);
+  });
+});
+
+describe("KiwiCaptchaApi ready and observe", () => {
+  it("ready resolves for a live record and observe disconnects cleanly", async () => {
+    const { doc, driver, container } = fixture();
+    const handle = renderKiwiCaptcha(container, { scope: "login" });
+    const api = getKiwiCaptcha(doc) as KiwiCaptchaApi;
+
+    await expect(api.ready(handle.id)).resolves.toBeUndefined();
+    expect(() => api.ready("missing")).toThrow(/unknown widget id/);
+
+    const root = container.querySelector("[data-kiwi-widget]") as HTMLElement;
+    const observation = api.observe!(root);
+    expect(driver.observed).toEqual([root]);
+    observation.disconnect();
+    observation.disconnect();
+    expect(driver.disconnects).toBe(1);
+  });
+});
+
+describe("renderKiwiCaptchaAsync", () => {
+  it("loads the driver on demand and renders", async () => {
+    const w = new Window({ url: "https://app.example.com/login" });
+    // Hold off happy-dom's own script fetch so the test controls the load.
+    (w as unknown as { fetch: () => Promise<never> }).fetch = () => new Promise(() => {});
+    const doc = w.document;
+    doc.body.innerHTML = '<div id="mount"></div>';
+    const container = doc.getElementById("mount") as HTMLElement;
+
+    const pending = renderKiwiCaptchaAsync(container, { scope: "signup" });
+    expect(doc.scripts.length).toBe(1);
+
+    installMockDriver(doc);
+    (doc.scripts[0] as HTMLScriptElement).dispatchEvent(new w.Event("load"));
+    const handle = await pending;
+    expect(handle.id).toMatch(/^mock-\d+$/);
+    expect(container.querySelector("[data-kiwi-widget]")).not.toBeNull();
+    expect(getKiwiCaptcha(doc)?.getResponse(handle.id)).toBe("");
+  });
+
+  it("renders immediately against a preloaded api", async () => {
+    const { doc, driver, container } = fixture();
+    const handle = await renderKiwiCaptchaAsync(container, { scope: "login", api: driver });
+    expect(handle.id).toMatch(/^mock-\d+$/);
+    expect(doc.scripts.length).toBe(0);
   });
 });
 

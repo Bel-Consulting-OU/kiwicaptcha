@@ -22,6 +22,7 @@ defmodule Kiwicaptcha.Doctor do
     rsw = Keyword.get(opts, :rsw)
     region = Keyword.get(opts, :region)
     issuer = Keyword.get(opts, :issuer)
+    scopes = Keyword.get(opts, :scopes)
     profile = Keyword.get(opts, :profile)
 
     checks =
@@ -29,6 +30,7 @@ defmodule Kiwicaptcha.Doctor do
         secret_check(secret),
         identifier_check("region", region),
         identifier_check("issuer", issuer),
+        scopes_check(scopes),
         argon2_check(profile),
         store_check(store)
       ] ++ if(rsw, do: [rsw_check(rsw)], else: [])
@@ -43,7 +45,9 @@ defmodule Kiwicaptcha.Doctor do
   # space here at config time — never discovered per request.
   defp argon2_check(profile) do
     available = Kiwicaptcha.Pow.argon2_available?()
-    required = profile == nil or profile in ["argon16", "argon32", "argon64", "abuse_first", "high_abuse"]
+
+    required =
+      profile == nil or profile in ["argon16", "argon32", "argon64", "abuse_first", "high_abuse"]
 
     rungs_in_space =
       Enum.all?(
@@ -101,6 +105,63 @@ defmodule Kiwicaptcha.Doctor do
       detail:
         if(ok, do: "identifier shape valid or unset", else: "#{name} must match [A-Za-z0-9._:-]")
     }
+  end
+
+  # Validate the configured scopes: every name must be an identifier
+  # and every declared value class must be one the risk engine prices
+  # (low, standard, high or critical), or empty for an undeclared
+  # class. An empty map accepts any scope.
+  defp scopes_check(scopes) do
+    scopes =
+      case scopes do
+        nil -> %{}
+        %Kiwicaptcha.Settings{scopes: settings_scopes} -> settings_scopes
+        scopes when is_binary(scopes) -> Kiwicaptcha.Settings.parse_scopes(scopes)
+        scopes when is_map(scopes) -> scopes
+        scopes when is_list(scopes) -> Map.new(scopes, fn name -> {to_string(name), ""} end)
+        _ -> %{}
+      end
+
+    Enum.find_value(scopes, fn {name, class_name} ->
+      name = to_string(name)
+
+      cond do
+        name == "" or byte_size(name) > 128 or not Regex.match?(@identifier_re, name) ->
+          %{
+            name: "scopes",
+            ok: false,
+            detail: "the scope #{inspect(name)} is not a valid identifier"
+          }
+
+        not Kiwicaptcha.Settings.valid_scope_class?(class_name) ->
+          %{
+            name: "scopes",
+            ok: false,
+            detail:
+              "the scope #{inspect(name)} carries the unknown risk class " <>
+                "#{inspect(to_string(class_name))} (low, standard, high, critical, or empty)"
+          }
+
+        true ->
+          nil
+      end
+    end) ||
+      if map_size(scopes) == 0 do
+        %{name: "scopes", ok: true, detail: "no scopes configured (every scope is accepted)"}
+      else
+        detail =
+          scopes
+          |> Enum.map(fn {name, class_name} ->
+            if to_string(class_name) == "", do: to_string(name), else: "#{name}=#{class_name}"
+          end)
+          |> Enum.join(" ")
+
+        %{
+          name: "scopes",
+          ok: true,
+          detail: "every scope is a valid identifier with a known risk class: #{detail}"
+        }
+      end
   end
 
   # The store probe writes a nonce-shaped probe record, consumes it,

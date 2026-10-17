@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { render, type Disposer } from "solid-js/web";
+import type { KiwiCaptchaApi } from "@kiwicaptcha/client-core";
 
 import { KiwiCaptcha, type KiwiSolidControls } from "../src/index.js";
 import {
@@ -86,8 +87,69 @@ describe("KiwiCaptcha solid component", () => {
     driver.simulateVerified(id, "tok-ctl");
     expect(c.getResponse()).toBe("tok-ctl");
     await expect(c.execute()).resolves.toBe("tok-ctl");
+    expect(c.isExpired()).toBe(false);
+    driver.simulateExpired(id);
+    expect(c.isExpired()).toBe(true);
     c.reset();
     expect(c.getResponse()).toBe("");
+    c.destroy();
+    expect(driver.records.size).toBe(0);
+    expect(c.getResponse()).toBe("");
+  });
+
+  it("forwards theme, lang, action, execution and riskContext", () => {
+    disposer = render(() => (
+      <KiwiCaptcha
+        scope="comment"
+        theme="dark"
+        lang="pt"
+        action="submit"
+        cData="s-1"
+        execution="execute"
+        riskContext="coarse"
+      />
+    ), host);
+    const container = host.querySelector(".kiwi-container") as HTMLElement;
+    const widget = host.querySelector("[data-kiwi-widget]") as HTMLElement;
+    expect(container.classList.contains("kiwi-theme-dark")).toBe(true);
+    expect(container.getAttribute("data-kiwi-lang")).toBe("pt");
+    expect(container.getAttribute("data-kiwi-risk-context")).toBe("coarse");
+    expect(widget.getAttribute("data-action")).toBe("submit");
+    expect(widget.getAttribute("data-cdata")).toBe("s-1");
+    expect(widget.getAttribute("data-execution")).toBe("execute");
+  });
+
+  it("forwards the loader controls to the injected script", async () => {
+    delete (window as unknown as { KiwiCaptcha?: KiwiCaptchaApi }).KiwiCaptcha;
+    document.head.querySelectorAll("script").forEach((s) => s.remove());
+    const originalFetch = window.fetch;
+    window.fetch = () => new Promise<Response>(() => {});
+
+    disposer = render(() => (
+      <KiwiCaptcha
+        scope="login"
+        scriptSrc="/vendor/kiwi-solid.js"
+        scriptIntegrity="sha384-solid"
+        scriptCrossorigin="anonymous"
+        scriptTimeoutMs={5000}
+        scriptNonce="nonce-solid"
+      />
+    ), host);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const script = document.head.querySelector("script") as HTMLScriptElement | null;
+    expect(script).not.toBeNull();
+    expect(script?.src).toMatch(/\/vendor\/kiwi-solid\.js$/);
+    expect(script?.integrity).toBe("sha384-solid");
+    expect(script?.crossOrigin).toBe("anonymous");
+    expect(script?.nonce).toBe("nonce-solid");
+
+    driver = installMockDriver(document);
+    script?.dispatchEvent(new Event("load"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(driver.records.size).toBe(1);
+    expect(host.querySelector("input[data-kiwi-token]")).not.toBeNull();
+    window.fetch = originalFetch;
+    document.head.querySelectorAll("script").forEach((s) => s.remove());
   });
 
   it("destroys the driver record when disposed", () => {

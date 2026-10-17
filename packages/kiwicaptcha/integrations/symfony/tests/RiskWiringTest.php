@@ -143,7 +143,7 @@ final class RiskWiringTest extends TestCase
         $container = $this->load($risk);
         self::assertTrue($container->getDefinition('kiwi_captcha.risk.engine')->getArgument('$enableGlobalPressure'), 'global_pressure.enabled defaults to true');
 
-        $risk['global_pressure'] = ['enabled' => false, 'hysteresis_secs' => 30];
+        $risk['global_pressure'] = ['enabled' => false];
         $container = $this->load($risk);
         self::assertFalse($container->getDefinition('kiwi_captcha.risk.engine')->getArgument('$enableGlobalPressure'), 'enableGlobalPressure must follow global_pressure.enabled');
     }

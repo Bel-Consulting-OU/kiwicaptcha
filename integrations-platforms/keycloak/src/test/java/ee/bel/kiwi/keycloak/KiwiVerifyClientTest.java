@@ -53,12 +53,36 @@ public final class KiwiVerifyClientTest {
                 f -> f.equals("h-captcha-response") ? "legacy" : null)));
         check("missing token is null", KiwiVerifyClient.extractToken("  ", fields, f -> null) == null);
 
-        // Ip binding: the client must never parse forwarding headers
-        // again — the authenticator passes Keycloak's socket peer (the
-        // value KC_PROXY adjusts) straight through.
-        check("no forwarding-header parser remains",
-                java.util.Arrays.stream(KiwiVerifyClient.class.getDeclaredMethods())
-                        .noneMatch(m -> m.getName().equals("clientIp")));
+        // Ip binding: the forwarding-header resolver is explicit and
+        // opt-in. Off (the default) the socket peer wins and headers
+        // are ignored; on, the rightmost hop appended by the nearest
+        // proxy is taken, so a client-supplied leftmost entry can
+        // never choose the binding.
+        check("trustProxy off binds the socket peer",
+                "192.0.2.9".equals(KiwiVerifyClient.resolveClientIp(
+                        "192.0.2.9", "203.0.113.7", "203.0.113.8", false)));
+        check("trustProxy takes the rightmost forwarded hop",
+                "203.0.113.7".equals(KiwiVerifyClient.resolveClientIp(
+                        "10.0.0.1", "6.6.6.6, 203.0.113.7", null, true)));
+        check("a client-supplied leftmost entry is ignored",
+                "198.51.100.4".equals(KiwiVerifyClient.resolveClientIp(
+                        "10.0.0.1", "6.6.6.6, 198.51.100.4", null, true)));
+        check("an IPv4 hop with a port is canonicalized",
+                "203.0.113.7".equals(KiwiVerifyClient.resolveClientIp(
+                        "10.0.0.1", "203.0.113.7:443", null, true)));
+        check("X-Real-IP is the no-chain fallback",
+                "198.51.100.9".equals(KiwiVerifyClient.resolveClientIp(
+                        "10.0.0.1", null, "198.51.100.9", true)));
+        check("a malformed hop falls back to the peer",
+                "10.0.0.1".equals(KiwiVerifyClient.resolveClientIp(
+                        "10.0.0.1", "203.0.113.7, garbage!!", null, true)));
+        check("a control character in the chain falls back to the peer",
+                "10.0.0.1".equals(KiwiVerifyClient.resolveClientIp(
+                        "10.0.0.1", "203.0.113.7\r\nX-Evil: 1", null, true)));
+        check("a missing peer fails closed",
+                "".equals(KiwiVerifyClient.resolveClientIp(null, "203.0.113.7", null, true)));
+        check("a malformed peer fails closed",
+                "".equals(KiwiVerifyClient.resolveClientIp("not-an-ip", null, null, false)));
 
         // JSON escaping.
         check("quotes escaped", KiwiVerifyClient.jsonEscape("a\"b\\c\nd").equals("a\\\"b\\\\c\\nd"));

@@ -1,7 +1,9 @@
 package ee.bel.kiwi.keycloak;
 
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -130,6 +132,190 @@ public final class KiwiVerifyClient {
         fields.add("frc-captcha-solution");
         fields.add("altcha");
         return fields;
+    }
+
+    /**
+     * The client ip bound into the verify call.
+     *
+     * <p>With {@code trustProxy} off (the default) the socket peer is
+     * returned and every forwarding header is ignored, so a
+     * client-supplied X-Forwarded-For can never choose the binding.
+     *
+     * <p>With it on, the rightmost X-Forwarded-For hop is used: that
+     * is the value the nearest trusted proxy appended, so a forged
+     * leftmost entry is ignored. With no chain, X-Real-IP is the
+     * fallback. A malformed header or hop falls back to the peer.
+     * Enable the switch only behind a reverse proxy that appends (or
+     * overwrites) the header; without such a proxy the header is
+     * client-controlled.
+     *
+     * <p>A missing or malformed socket peer resolves to the empty
+     * string (fail closed): the caller refuses the request rather than
+     * inventing an address.
+     */
+    public static String resolveClientIp(String remoteAddr, String forwardedFor, String realIp, boolean trustProxy) {
+        String peer = canonicalIp(remoteAddr);
+        if (peer == null) {
+            return "";
+        }
+        if (!trustProxy) {
+            return peer;
+        }
+        if (forwardedFor != null && !forwardedFor.isBlank()) {
+            if (hasControl(forwardedFor)) {
+                return peer;
+            }
+            String[] hops = forwardedFor.split(",", -1);
+            String candidate = canonicalIp(hops[hops.length - 1]);
+            return candidate == null ? peer : candidate;
+        }
+        if (realIp != null && !realIp.isBlank() && !hasControl(realIp)) {
+            String candidate = canonicalIp(realIp);
+            if (candidate != null) {
+                return candidate;
+            }
+        }
+        return peer;
+    }
+
+    /**
+     * The canonical text of one IP literal, or null. Bare IPv4, an
+     * IPv4 address with a port, and a bracketed IPv6 address with an
+     * optional port are accepted; hostnames, zone identifiers,
+     * obfuscated tokens and malformed ports are refused, and no DNS
+     * lookup ever runs on untrusted input.
+     */
+    private static String canonicalIp(String identifier) {
+        String value = identifier == null ? "" : identifier.trim();
+        if (value.isEmpty() || value.equalsIgnoreCase("unknown") || value.startsWith("_") || hasControl(value)) {
+            return null;
+        }
+        String candidate = value;
+        if (candidate.startsWith("[")) {
+            int closing = candidate.indexOf(']');
+            if (closing < 0) {
+                return null;
+            }
+            String suffix = candidate.substring(closing + 1);
+            if (!suffix.isEmpty() && !portSuffix(suffix)) {
+                return null;
+            }
+            candidate = candidate.substring(1, closing);
+        } else if (count(candidate, ':') == 1) {
+            int colon = candidate.indexOf(':');
+            String host = candidate.substring(0, colon);
+            if (isIpv4(host) && portSuffix(candidate.substring(colon))) {
+                candidate = host;
+            }
+        }
+        if (isIpv4(candidate)) {
+            return normalizeIpv4(candidate);
+        }
+        if (!isIpv6(candidate)) {
+            return null;
+        }
+        try {
+            return InetAddress.getByName(candidate).getHostAddress();
+        } catch (UnknownHostException e) {
+            return null;
+        }
+    }
+
+    private static boolean hasControl(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < 0x20 || c == 0x7f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int count(String value, char needle) {
+        int count = 0;
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) == needle) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static boolean isIpv4(String value) {
+        String[] parts = value.split("\\.", -1);
+        if (parts.length != 4) {
+            return false;
+        }
+        for (String part : parts) {
+            if (part.isEmpty() || part.length() > 3 || !isAsciiDigits(part)) {
+                return false;
+            }
+            if (Integer.parseInt(part) > 255) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static String normalizeIpv4(String value) {
+        String[] parts = value.split("\\.", -1);
+        StringBuilder out = new StringBuilder(value.length());
+        for (String part : parts) {
+            if (out.length() > 0) {
+                out.append('.');
+            }
+            out.append(Integer.parseInt(part));
+        }
+        return out.toString();
+    }
+
+    /**
+     * A conservative IPv6 check: the token may only contain hex
+     * digits, colons and dots (the IPv4-mapped spelling), so
+     * {@link InetAddress#getByName(String)} is only ever handed an IP
+     * literal and can never resolve a hostname.
+     */
+    private static boolean isIpv6(String value) {
+        if (value.indexOf(':') < 0) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.digit(c, 16) < 0 && c != ':' && c != '.') {
+                return false;
+            }
+        }
+        try {
+            return InetAddress.getByName(value) instanceof Inet6Address;
+        } catch (UnknownHostException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Exactly ":" plus a decimal port in the 1..65535 range, the same
+     * grammar the other platform clients apply.
+     */
+    private static boolean portSuffix(String suffix) {
+        if (suffix.isEmpty() || suffix.charAt(0) != ':') {
+            return false;
+        }
+        String digits = suffix.substring(1);
+        if (digits.isEmpty() || digits.length() > 5 || !isAsciiDigits(digits)) {
+            return false;
+        }
+        int port = Integer.parseInt(digits);
+        return port >= 1 && port <= 65535;
+    }
+
+    private static boolean isAsciiDigits(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return !value.isEmpty();
     }
 
     static String jsonEscape(String value) {

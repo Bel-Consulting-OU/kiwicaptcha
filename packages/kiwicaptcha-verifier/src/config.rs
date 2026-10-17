@@ -553,4 +553,28 @@ mod tests {
         assert_eq!(cfg.t, DEFAULT_RSW_T);
         assert!(validate_rsw_trapdoor(Some("n"), Some("l"), Some("1")).is_err());
     }
+
+    #[test]
+    fn server_limits_bundles_the_validated_worker_and_timeout_knobs() {
+        // The public knob pair the server options consume: the defaults
+        // are the documented 16 workers / 5 s timeout, and explicit
+        // values pass through unchanged (bounded by the parsers above).
+        let defaults = ServerLimits {
+            workers: parse_workers(None).expect("the default parses"),
+            timeout: parse_timeout_ms(None).expect("the default parses"),
+        };
+        assert_eq!(defaults.workers, DEFAULT_WORKERS);
+        assert_eq!(defaults.timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
+
+        let explicit = ServerLimits {
+            workers: parse_workers(Some("4")).expect("bounded workers"),
+            timeout: parse_timeout_ms(Some("250")).expect("bounded timeout"),
+        };
+        assert_eq!(explicit.workers, 4);
+        assert_eq!(explicit.timeout, Duration::from_millis(250));
+        // Copy is part of the contract: ServerOptions stores it by value.
+        let copied = explicit;
+        assert_eq!(copied.workers, explicit.workers);
+        assert_eq!(copied.timeout, explicit.timeout);
+    }
 }

@@ -94,6 +94,40 @@ defmodule Kiwicaptcha.VerifyGatesTest do
     assert Kiwicaptcha.Verify.recompute_valid_proof(nil, record, token) == :unsupported
   end
 
+  test "the configured scope allowlist is enforced" do
+    {storage, record, row} = store_of("sha_plain")
+
+    allowed =
+      Kiwicaptcha.verify(
+        token_of(row),
+        options_for(record, row, storage, %{allowed_scopes: %{"login" => "critical"}})
+      )
+
+    assert allowed.ok, inspect(allowed.code)
+
+    {storage, record, row} = store_of("sha_plain")
+
+    refused =
+      Kiwicaptcha.verify(
+        token_of(row),
+        options_for(record, row, storage, %{allowed_scopes: %{"other" => "low"}})
+      )
+
+    # The record matches the expected scope; only the allowlist refuses,
+    # with the existing wrong_scope code.
+    assert refused.code == :wrong_scope
+
+    {storage, record, row} = store_of("sha_plain")
+
+    open =
+      Kiwicaptcha.verify(
+        token_of(row),
+        options_for(record, row, storage, %{allowed_scopes: []})
+      )
+
+    assert open.ok, inspect(open.code)
+  end
+
   test "an unknown token answers record_not_found" do
     row = golden_record("sha_plain")
 

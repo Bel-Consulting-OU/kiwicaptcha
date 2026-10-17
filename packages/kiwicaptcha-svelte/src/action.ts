@@ -8,6 +8,14 @@ import {
 export interface KiwiActionOptions extends KiwiRenderOptions {
   /** The driver script URL. Default "/kiwi.js". */
   scriptSrc?: string;
+  /** Optional SRI integrity for the driver script. */
+  scriptIntegrity?: string;
+  /** Optional crossorigin for the driver script. */
+  scriptCrossorigin?: "anonymous" | "use-credentials";
+  /** Reject the load when the driver has not appeared within the budget. */
+  scriptTimeoutMs?: number;
+  /** Optional CSP nonce set on the injected driver script. */
+  scriptNonce?: string;
 }
 
 /**
@@ -36,6 +44,10 @@ export function kiwiCaptcha(
     } catch {
       void loadKiwiCaptcha({
         scriptSrc: current.scriptSrc,
+        integrity: current.scriptIntegrity,
+        crossorigin: current.scriptCrossorigin,
+        timeoutMs: current.scriptTimeoutMs,
+        scriptNonce: current.scriptNonce,
       }).then((api) => {
         if (ticket !== generation) return;
         handle = renderKiwiCaptcha(node, { ...current, api });

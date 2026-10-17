@@ -7,7 +7,10 @@ import angular from '@analogjs/vite-plugin-angular';
 // semantics under the test transform. jsdom plus the zone.js setup in
 // vitest.setup.ts provide the TestBed environment.
 export default defineConfig({
-  plugins: [angular({ tsconfig: './tsconfig.spec.json' })],
+  // AOT-compile the component in tests so signal inputs and signal
+  // queries carry their metadata (the plugin otherwise defaults test
+  // mode to JIT, where input()/viewChild() metadata cannot be reflected).
+  plugins: [angular({ tsconfig: './tsconfig.spec.json', jit: false })],
   esbuild: {
     tsconfigRaw: {
       compilerOptions: {

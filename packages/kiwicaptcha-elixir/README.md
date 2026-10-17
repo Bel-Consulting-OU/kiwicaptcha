@@ -49,7 +49,11 @@ result.code              # => "" on success, a typed wire code on failure
 
 The scope option is REQUIRED: an empty `expected_scope` answers the
 typed `required_scope` refusal instead of silently accepting a token
-minted for any scope.
+minted for any scope. The configured scope map is enforced as an
+allowlist: pass `allowed_scopes: settings.scopes` (or a list of names)
+on the verify options and a call naming an expected scope outside it
+answers the typed `wrong_scope` failure. An empty map accepts any
+scope.
 
 ## Execution-armed records: the ExecutionPolicy
 

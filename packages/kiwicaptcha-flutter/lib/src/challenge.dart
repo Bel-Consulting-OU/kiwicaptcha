@@ -48,7 +48,15 @@ class KiwiChallenge {
   /// endpoint's own (camelCase mKib/targetBits/ttlSecs beside the
   /// snake_case optionals).
   factory KiwiChallenge.fromJson(Map<String, dynamic> json) {
-    final algorithmName = (json['algorithm'] as String?) ?? 'sha256';
+    final algorithmValue = json['algorithm'];
+    final String algorithmName;
+    if (algorithmValue == null) {
+      algorithmName = 'sha256';
+    } else if (algorithmValue is String) {
+      algorithmName = algorithmValue;
+    } else {
+      throw const KiwiSolveError.malformed('the algorithm is not a string');
+    }
     final KiwiAlgorithm algorithm = switch (algorithmName) {
       'sha256' => KiwiAlgorithm.sha256,
       'argon2id' => KiwiAlgorithm.argon2id,
@@ -56,26 +64,51 @@ class KiwiChallenge {
       _ => throw const KiwiSolveError.malformed(
           'the algorithm is not one of sha256, argon2id, rsw'),
     };
+    String stringOf(String key) {
+      final value = json[key];
+      if (value is String) return value;
+      throw KiwiSolveError.malformed('the key $key is missing or not a string');
+    }
+
+    String? optionalStringOf(String key) {
+      final value = json[key];
+      if (value == null) return null;
+      if (value is String) return value;
+      throw KiwiSolveError.malformed('the key $key is not a string');
+    }
+
     int intOf(String key) {
       final value = json[key];
       if (value is int) return value;
-      if (value is num && value.toInt() == value) return value.toInt();
+      if (value is num && value.isFinite && value.toInt() == value) {
+        return value.toInt();
+      }
       throw KiwiSolveError.malformed('the key $key is missing or not an integer');
     }
 
+    int optionalIntOf(String key) {
+      final value = json[key];
+      if (value == null) return 0;
+      if (value is int) return value;
+      if (value is num && value.isFinite && value.toInt() == value) {
+        return value.toInt();
+      }
+      throw KiwiSolveError.malformed('the key $key is not an integer');
+    }
+
     return KiwiChallenge(
-      nonce: json['nonce'] as String?,
-      salt: json['salt'] as String?,
+      nonce: stringOf('nonce'),
+      salt: stringOf('salt'),
       algorithm: algorithm,
       mKib: intOf('mKib'),
       t: intOf('t'),
       p: intOf('p'),
       targetBits: intOf('targetBits'),
-      prefix: json['prefix'] as String?,
-      ttlSecs: (json['ttlSecs'] as num?)?.toInt() ?? 0,
-      minDurationMs: (json['minDurationMs'] as num?)?.toInt() ?? 0,
-      executionProgram: json['execution_program'] as String?,
-      rswModulus: json['rsw_modulus'] as String?,
+      prefix: stringOf('prefix'),
+      ttlSecs: optionalIntOf('ttlSecs'),
+      minDurationMs: optionalIntOf('minDurationMs'),
+      executionProgram: optionalStringOf('execution_program'),
+      rswModulus: optionalStringOf('rsw_modulus'),
     );
   }
 }

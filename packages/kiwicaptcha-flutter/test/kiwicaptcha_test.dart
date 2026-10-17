@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kiwicaptcha/kiwicaptcha.dart';
 import 'package:kiwicaptcha/src/solver.dart';
+import 'package:kiwicaptcha/src/widget.dart' as widget;
 
 void main() {
   const nonce = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
@@ -126,6 +128,127 @@ void main() {
       expect(body.toJson(), '{"secret":"s","response":"tok","remoteip":"203.0.113.9"}');
       final minimal = await KiwiClient.siteverifyBody('s', 'tok');
       expect(minimal.toJson(), '{"secret":"s","response":"tok"}');
+    });
+  });
+
+  Map<String, dynamic> challengeJson({int targetBits = 8}) => <String, dynamic>{
+        'nonce': nonce,
+        'salt': salt,
+        'algorithm': 'sha256',
+        'mKib': 0,
+        't': 1,
+        'p': 1,
+        'targetBits': targetBits,
+        'prefix': prefix,
+      };
+
+  group('challenge parsing', () {
+    test('fromJson accepts the wire document', () {
+      final parsed = KiwiChallenge.fromJson(challengeJson());
+      expect(parsed.nonce, nonce);
+      expect(parsed.salt, salt);
+      expect(parsed.algorithm, KiwiAlgorithm.sha256);
+      expect(parsed.ttlSecs, 0);
+    });
+
+    test('fromJson refuses malformed documents', () {
+      final documents = <Map<String, dynamic>>[
+        challengeJson()..remove('nonce'),
+        challengeJson()..remove('salt'),
+        challengeJson()..remove('prefix'),
+        challengeJson()..remove('t'),
+        challengeJson()..['mKib'] = '0',
+        challengeJson()..['targetBits'] = 8.5,
+        challengeJson()..['algorithm'] = 'md5',
+        challengeJson()..['algorithm'] = 7,
+        challengeJson()..['execution_program'] = 7,
+      ];
+      for (final document in documents) {
+        expect(() => KiwiChallenge.fromJson(document),
+            throwsA(isA<KiwiSolveError>()));
+      }
+    });
+  });
+
+  group('widget lifecycle', () {
+    setUp(() {
+      widget.debugHttpPostOverride = null;
+      widget.debugSolveOverride = null;
+    });
+
+    tearDown(() {
+      widget.debugHttpPostOverride = null;
+      widget.debugSolveOverride = null;
+    });
+
+    testWidgets('Retry restarts the flow after a failure', (tester) async {
+      var calls = 0;
+      final verified = <String>[];
+      final errors = <String>[];
+      widget.debugHttpPostOverride = (url, body) async {
+        calls++;
+        if (calls == 1) {
+          return const widget.KiwiHttpResponse(statusCode: 503, body: 'down');
+        }
+        return widget.KiwiHttpResponse(
+            statusCode: 200, body: json.encode(challengeJson()));
+      };
+      widget.debugSolveOverride = (challenge) =>
+          const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+
+      await tester.pumpWidget(MaterialApp(
+        home: KiwiCaptcha(
+          endpoint: Uri.parse('https://kiwi.test/challenge'),
+          scope: 'login',
+          onVerify: verified.add,
+          onError: errors.add,
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Failed'), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+      expect(errors, hasLength(1));
+
+      await tester.tap(find.text('Retry'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, hasLength(1));
+      expect(calls, 2);
+    });
+
+    testWidgets('manual start drives an autoStart false widget',
+        (tester) async {
+      final key = GlobalKey<widget.KiwiCaptchaState>();
+      var verified = 0;
+      widget.debugHttpPostOverride = (url, body) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200, body: json.encode(challengeJson()));
+      widget.debugSolveOverride = (challenge) =>
+          const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+
+      await tester.pumpWidget(MaterialApp(
+        home: KiwiCaptcha(
+          key: key,
+          endpoint: Uri.parse('https://kiwi.test/challenge'),
+          scope: 'login',
+          autoStart: false,
+          onVerify: (_) => verified++,
+        ),
+      ));
+
+      expect(find.text('Idle'), findsOneWidget);
+      expect(key.currentState, isNotNull);
+
+      key.currentState!.start();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, 1);
     });
   });
 }

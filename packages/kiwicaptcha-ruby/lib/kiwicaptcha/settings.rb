@@ -9,6 +9,13 @@ module KiwiCaptcha
   # and the scopes. Settings resolves a store URL into the shipped
   # adapter without any other configuration.
   class Settings
+    # The risk-engine value classes a scope may name, matching
+    # kiwicaptcha-risk's ValueClass wire spellings. An empty class is
+    # also accepted: the quickstart scope string allows a bare name
+    # (``KIWI_SCOPES=signup``) for a deployment that declares no priced
+    # class.
+    RISK_VALUE_CLASSES = %w[low standard high critical].freeze
+
     # Profiles whose work ladder prices Argon2id rungs (the explicit
     # argon budgets and the full-stack adoption profiles). A deployment
     # that names one must run a verifier that can recompute them: the
@@ -85,6 +92,32 @@ module KiwiCaptcha
       @secret.is_a?(String) && @secret.bytesize >= Keys::MIN_SECRET_BYTES
     end
 
+    # Whether the accepted-scope map admits one scope. An empty map
+    # accepts any scope; a non-empty one is the deployment's allowlist.
+    def scope_allowed?(name)
+      @scopes.empty? || @scopes.key?(name.to_s)
+    end
+
+    # Whether one declared value class is a risk-engine class (or
+    # empty, the undeclared spelling).
+    def self.valid_scope_class?(value)
+      text = value.to_s
+      text.empty? || RISK_VALUE_CLASSES.include?(text)
+    end
+
+    # Parse the quickstart scope string: "name=value" pairs joined by
+    # commas. A bare name declares an empty class.
+    def self.parse_scopes(value)
+      scopes = {}
+      value.to_s.split(',').each do |pair|
+        name, _, class_name = pair.partition('=')
+        next if name.strip.empty?
+
+        scopes[name.strip] = class_name.strip
+      end
+      scopes
+    end
+
     # Build the store adapter the URL names: memory, sqlite (path) or
     # redis (host and port). Raises on an unknown scheme.
     def open_store
@@ -113,18 +146,11 @@ module KiwiCaptcha
     private
 
     def parse_scopes_when_string(value)
-      value.is_a?(String) ? parse_scopes(value) : value
+      value.is_a?(String) ? self.class.parse_scopes(value) : value
     end
 
     def parse_scopes(value)
-      scopes = {}
-      value.to_s.split(',').each do |pair|
-        name, _, class_name = pair.partition('=')
-        next if name.strip.empty?
-
-        scopes[name.strip] = class_name.strip
-      end
-      scopes
+      self.class.parse_scopes(value)
     end
   end
 end

@@ -24,6 +24,8 @@ export interface MockRecord {
 export interface MockDriver extends KiwiCaptchaApi {
   records: Map<string, MockRecord>;
   injectedOptions: Array<Record<string, unknown>>;
+  observed: HTMLElement[];
+  disconnects: number;
   simulateVerifying(id: string): void;
   simulateVerified(id: string, token: string, nonce?: string): void;
   simulateError(id: string, message: string): void;
@@ -49,6 +51,8 @@ export function installMockDriver(doc: Document): MockDriver {
 
   const records = new Map<string, MockRecord>();
   const injectedOptions: Array<Record<string, unknown>> = [];
+  const observed: HTMLElement[] = [];
+  let disconnects = 0;
   let counter = 0;
 
   function record(id: string): MockRecord {
@@ -67,6 +71,10 @@ export function installMockDriver(doc: Document): MockDriver {
   const api: MockDriver = {
     records,
     injectedOptions,
+    observed,
+    get disconnects() {
+      return disconnects;
+    },
     render(target, options = {}) {
       const el =
         typeof target === "string"
@@ -148,6 +156,17 @@ export function installMockDriver(doc: Document): MockDriver {
         if (input) input.value = "";
         records.delete(rec.id);
       }
+    },
+    observe(root) {
+      observed.push(root);
+      let active = true;
+      return {
+        disconnect() {
+          if (!active) return;
+          active = false;
+          disconnects += 1;
+        },
+      };
     },
     simulateVerifying(id) {
       const rec = record(id);

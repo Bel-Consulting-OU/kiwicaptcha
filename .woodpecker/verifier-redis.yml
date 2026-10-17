@@ -1,0 +1,46 @@
+# Woodpecker CI: the verifier Redis store feature and the operations
+# lanes that need a real Redis (mirrors the GitHub job verifier-redis).
+# The feature is not part of the default workspace build, so without
+# this lane its store implementation would never be compiled; the
+# failover drill is the automated half of the HA runbook.
+labels:
+  capability: docker
+when:
+  - event: [push, pull_request, tag, manual]
+
+services:
+  redis:
+    image: redis:7-alpine
+    commands:
+      - redis-server --port 6379 --save "" --appendonly no
+
+steps:
+  - name: verifier-redis-and-core-lanes
+    image: rust:1.96
+    environment:
+      TEST_REDIS_URL: redis://redis:6379
+      RISK_REDIS_URL: redis://redis:6379
+    commands:
+      - |
+        set -eu
+        apt-get update -qq
+        apt-get install -y -qq redis-server redis-tools nodejs
+      - |
+        set -eu
+        cargo test -p kiwicaptcha-verifier --features redis-store
+      - |
+        set -eu
+        cargo test -p kiwicaptcha --features redis --test redis_verify
+        cargo test -p kiwicaptcha --features redis --test hkdf_cache
+      - |
+        set -eu
+        cargo build -p kiwicaptcha-verifier --features test-fixtures
+        ./target/debug/kiwicaptcha-verifier exec-evidence --help >/dev/null
+      - |
+        set -eu
+        bash tools/failover/runbook-test.sh
+      - |
+        set -eu
+        cargo test --manifest-path packages/kiwicaptcha-wasm/Cargo.toml --lib
+        node --test packages/kiwicaptcha-wasm/tests/host-surface.test.mjs
+        node packages/kiwicaptcha-wasm/tests/prototype-pollution.test.mjs

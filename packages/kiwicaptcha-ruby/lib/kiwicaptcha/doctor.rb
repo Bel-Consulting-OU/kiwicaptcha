@@ -28,7 +28,7 @@ module KiwiCaptcha
     # ladder the deployment prices (defaults to the quickstart
     # profile): a ladder that prices Argon2id rungs fails the argon2
     # check when the native binding is absent.
-    def run(secret:, store:, rsw: nil, region: nil, issuer: nil, profile: nil)
+    def run(secret:, store:, scopes: nil, rsw: nil, region: nil, issuer: nil, profile: nil)
       checks = []
 
       secret_length = secret.is_a?(String) ? secret.b.bytesize : secret.to_s.bytesize
@@ -53,6 +53,8 @@ module KiwiCaptcha
         name: 'issuer', ok: issuer_ok,
         detail: issuer_ok ? 'identifier shape valid or unset' : 'issuer must match [A-Za-z0-9._:-]'
       )
+
+      checks << scopes_check(scopes)
 
       argon_ok = Pow.argon2_available?
       argon_required = Settings::ARGON_RUNG_PROFILES.include?(profile.to_s) || profile.nil?
@@ -85,6 +87,47 @@ module KiwiCaptcha
       end
 
       DoctorReport.new(ok: checks.all? { |check| check.ok }, checks: checks)
+    end
+
+    # Validate the configured scopes: every name must be an identifier
+    # and every declared value class must be one the risk engine prices
+    # (low, standard, high or critical), or empty for an undeclared
+    # class. An empty map accepts any scope.
+    def scopes_check(scopes)
+      scopes = scopes.scopes if !scopes.nil? && !scopes.is_a?(Hash) && scopes.respond_to?(:scopes)
+      scopes =
+        case scopes
+        when nil then {}
+        when Hash then scopes
+        when String then Settings.parse_scopes(scopes)
+        else Array(scopes).each_with_object({}) { |name, out| out[name.to_s] = '' }
+        end
+
+      scopes.each do |name, class_name|
+        name = name.to_s
+        if name.empty? || name.bytesize > 128 || !IDENTIFIER_ALPHABET.match?(name)
+          return DoctorCheck.new(
+            name: 'scopes', ok: false,
+            detail: "the scope #{name.inspect} is not a valid identifier"
+          )
+        end
+        next if Settings.valid_scope_class?(class_name)
+
+        return DoctorCheck.new(
+          name: 'scopes', ok: false,
+          detail: "the scope #{name.inspect} carries the unknown risk class " \
+                  "#{class_name.to_s.inspect} (low, standard, high, critical, or empty)"
+        )
+      end
+      return DoctorCheck.new(
+        name: 'scopes', ok: true, detail: 'no scopes configured (every scope is accepted)'
+      ) if scopes.empty?
+
+      detail = 'every scope is a valid identifier with a known risk class:'
+      scopes.each do |name, class_name|
+        detail += " #{class_name.to_s.empty? ? name : "#{name}=#{class_name}"}"
+      end
+      DoctorCheck.new(name: 'scopes', ok: true, detail: detail)
     end
 
     def probe_store(store)

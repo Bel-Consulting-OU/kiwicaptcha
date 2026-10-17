@@ -397,6 +397,12 @@ impl SidecarState {
             wire["executionProgram"] = serde_json::Value::String(program.clone());
             wire["executionVersion"] = serde_json::Value::from(self.execution_version);
         }
+        // The rsw public modulus rides the client-facing response (the
+        // solver squares modulo n); lambda never leaves the server. The
+        // key is the solver's snake_case field.
+        if let Some(modulus) = &c.rsw_modulus {
+            wire["rsw_modulus"] = serde_json::Value::String(modulus.clone());
+        }
         if let Some(risk) = disposition {
             wire["risk"] = risk;
         }
@@ -773,7 +779,7 @@ pub fn default_profile() -> ChallengeProfile {
 /// endpoint emits it. The integration tests drive the same renderer.
 pub fn issue_wire_of(issued: &kiwicaptcha::challenge::Issued) -> String {
     let c = &issued.challenge;
-    let wire = serde_json::json!({
+    let mut wire = serde_json::json!({
         "nonce": c.nonce,
         "challenge": c.challenge,
         "salt": c.salt,
@@ -786,6 +792,9 @@ pub fn issue_wire_of(issued: &kiwicaptcha::challenge::Issued) -> String {
         "minDurationMs": c.min_duration_ms,
         "prefix": c.prefix,
     });
+    if let Some(modulus) = &c.rsw_modulus {
+        wire["rsw_modulus"] = serde_json::Value::String(modulus.clone());
+    }
     format!("{wire}\n")
 }
 

@@ -3,9 +3,9 @@ import { test } from 'node:test';
 
 import { timingSafeEqualsHex } from '../src/mac.js';
 
-const LENGTH = 8192;
-const ROUNDS = 25;
-const CALLS = 100;
+const LENGTH = 16_384;
+const ROUNDS = 30;
+const CALLS = 50;
 
 let sink = false;
 
@@ -35,8 +35,16 @@ test('the secret comparison does not leak the mismatch position', () => {
   const head = `b${first.slice(1)}`;
   const last = `${first.slice(0, -1)}b`;
 
-  const noiseA = measure(leaking, first, first);
-  const noiseB = measure(leaking, first, first);
+  // Warm both comparators first: the first rounds pay JIT and IC
+  // costs, and measuring the noise floor on the leaking comparator
+  // before warmup inflated it enough to hide the positive control.
+  measure(leaking, first, first);
+  measure(timingSafeEqualsHex, first, first);
+
+  // The noise floor is the jitter of the comparator under test, not of
+  // the intentionally leaking positive control.
+  const noiseA = measure(timingSafeEqualsHex, first, first);
+  const noiseB = measure(timingSafeEqualsHex, first, first);
   const noise = Math.max(1, Math.abs(noiseA - noiseB));
 
   const leakFirst = measure(leaking, first, head);

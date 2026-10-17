@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -31,7 +32,12 @@ class KiwiClient {
     if (response.statusCode != 200) {
       throw KiwiSolveError.malformed('the challenge endpoint answered ${response.statusCode}');
     }
-    return KiwiChallenge.fromJson(json.decode(response.body) as Map<String, dynamic>);
+    final decoded = json.decode(response.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw const KiwiSolveError.malformed(
+          'the challenge endpoint did not answer a JSON object');
+    }
+    return KiwiChallenge.fromJson(decoded);
   }
 
   static Future<KiwiSiteverifyBody> siteverifyBody(
@@ -56,9 +62,23 @@ class KiwiSiteverifyBody {
       });
 }
 
+/// Test hook: when non-null, [httpPost] delegates to it instead of
+/// dialing the network. Null in production.
+@visibleForTesting
+Future<KiwiHttpResponse> Function(Uri url, String body)? debugHttpPostOverride;
+
+/// Test hook: when non-null, the widget solves through it instead of
+/// spawning the isolate. Null in production.
+@visibleForTesting
+KiwiSolution Function(KiwiChallenge challenge)? debugSolveOverride;
+
 Future<KiwiHttpResponse> httpPost(Uri url, String body) async {
   // Materialized through package:http's Client in the app; the
   // indirection keeps this file test-friendly.
+  final override = debugHttpPostOverride;
+  if (override != null) {
+    return override(url, body);
+  }
   final client = HttpClient();
   try {
     final request = await client.postUrl(url);
@@ -101,22 +121,43 @@ class KiwiCaptcha extends StatefulWidget {
   final VoidCallback? onExpire;
 
   @override
-  State<KiwiCaptcha> createState() => _KiwiCaptchaState();
+  KiwiCaptchaState createState() => KiwiCaptchaState();
 }
 
-class _KiwiCaptchaState extends State<KiwiCaptcha> {
+/// The widget state. Public so an `autoStart: false` widget can be
+/// driven through a `GlobalKey<KiwiCaptchaState>`:
+///
+/// ```dart
+/// final key = GlobalKey<KiwiCaptchaState>();
+/// KiwiCaptcha(key: key, autoStart: false, ...);
+/// ...
+/// key.currentState?.start();
+/// ```
+class KiwiCaptchaState extends State<KiwiCaptcha> {
   String _status = 'Idle';
   double _progress = 0;
   bool _failed = false;
-  int _attempt = 0;
+
+  /// The run generation: every start() increments it, so a late
+  /// completion (or TTL expiry) from a superseded run is ignored.
+  int _generation = 0;
 
   @override
   void initState() {
     super.initState();
-    if (widget.autoStart) _run();
+    if (widget.autoStart) {
+      start();
+    }
   }
 
-  Future<void> _run() async {
+  /// Start (or restart) the challenge flow: fetch, solve and report
+  /// the token. Retry calls it after a failure or expiry; a widget
+  /// built with `autoStart: false` calls it when the user is ready.
+  Future<void> start() => execute();
+
+  /// The explicit action name for [start].
+  Future<void> execute() async {
+    final generation = ++_generation;
     setState(() {
       _status = 'Working';
       _progress = 0;
@@ -128,8 +169,9 @@ class _KiwiCaptchaState extends State<KiwiCaptcha> {
       final started = DateTime.now().millisecondsSinceEpoch;
       // The solve runs off the UI isolate (compute keeps the widget
       // responsive; low-difficulty work stays in pure Dart, the rest
-      // goes through the FFI core).
-      final solution = await compute(_solveIsolate, challenge);
+      // goes through the FFI core). Tests can replace it.
+      final solution = debugSolveOverride?.call(challenge) ??
+          await compute(_solveIsolate, challenge);
       final token = encodeKiwiToken(
         nonce: challenge.nonce,
         counter: solution.counter,
@@ -138,7 +180,7 @@ class _KiwiCaptchaState extends State<KiwiCaptcha> {
             : DateTime.now().millisecondsSinceEpoch - started,
         rswProof: solution.rswProof,
       );
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       setState(() {
         _status = 'Success';
         _progress = 1;
@@ -146,7 +188,7 @@ class _KiwiCaptchaState extends State<KiwiCaptcha> {
       widget.onVerify(token);
       if (challenge.ttlSecs > 0) {
         await Future<void>.delayed(Duration(seconds: challenge.ttlSecs));
-        if (!mounted) return;
+        if (!mounted || generation != _generation) return;
         setState(() {
           _status = 'Expired';
           _failed = true;
@@ -154,7 +196,7 @@ class _KiwiCaptchaState extends State<KiwiCaptcha> {
         widget.onExpire?.call();
       }
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
       setState(() {
         _status = 'Failed';
         _failed = true;
@@ -172,7 +214,7 @@ class _KiwiCaptchaState extends State<KiwiCaptcha> {
         Text(_status),
         LinearProgressIndicator(value: _progress == 0 ? null : _progress),
         if (_failed)
-          TextButton(onPressed: () => setState(() => _attempt++), child: const Text('Retry')),
+          TextButton(onPressed: start, child: const Text('Retry')),
       ],
     );
   }

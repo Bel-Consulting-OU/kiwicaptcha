@@ -22,7 +22,9 @@ run() {
 }
 
 echo "== gateway bundle (nginx, caddy, traefik + the shared endpoint) =="
-run "gateway: php -l + unit + live matrix + nginx -t" sh "$HERE/run.sh"
+run "gateway: endpoint copies byte-identical (tools/ci/verify-gateway-parity.sh)" \
+    bash "$ROOT/../tools/ci/verify-gateway-parity.sh"
+run "gateway: php -l + unit + live matrix + config lint" sh "$HERE/run.sh"
 
 echo "== wordpress =="
 run "wordpress: plugin tests" php "$ROOT/wordpress/tests/test-wordpress-plugin.php"
@@ -42,13 +44,20 @@ run "flarum: middleware tests" php "$ROOT/flarum/tests/test-middleware.php"
 echo "== discourse =="
 if command -v ruby >/dev/null 2>&1; then
     run "discourse: verifier tests" ruby "$ROOT/discourse/tests/verifier_test.rb"
+    run "discourse: middleware disposition tests" ruby "$ROOT/discourse/tests/middleware_disposition_test.rb"
 else
     echo "skip: ruby not installed"
+fi
+if command -v node >/dev/null 2>&1; then
+    run "discourse: signup header pattern tests" node "$ROOT/discourse/tests/signup_header_test.mjs"
+else
+    echo "skip: node not installed (discourse signup header test)"
 fi
 
 echo "== authentik =="
 if command -v python3 >/dev/null 2>&1; then
     run "authentik: verify module tests" python3 "$ROOT/authentik/tests/test_kiwi_verify.py"
+    run "authentik: captcha stage tests" python3 "$ROOT/authentik/tests/test_captcha_stage.py"
 else
     echo "skip: python3 not installed"
 fi

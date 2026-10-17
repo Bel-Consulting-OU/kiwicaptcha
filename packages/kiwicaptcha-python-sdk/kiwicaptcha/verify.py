@@ -318,8 +318,11 @@ class VerifierConfig:
     returns epoch seconds (float or int) and stands in
     for the wall clock in tests. ``secrets_by_kid`` maps positive integer
     kid values to secrets of at least 32 bytes; an empty map keeps the
-    legacy single-secret path. ``rsw_modulus_n`` and ``rsw_lambda`` must
-    be configured together or both left None.
+    legacy single-secret path. ``scopes`` is the accepted scope
+    allowlist: a non-empty tuple refuses a verify call whose expected
+    scope is outside it with ``wrong_scope``; an empty tuple accepts any
+    scope. ``rsw_modulus_n`` and ``rsw_lambda`` must be configured
+    together or both left None.
     """
 
     def __init__(
@@ -339,11 +342,16 @@ class VerifierConfig:
         allow_legacy_rsw_identity: bool = False,
         policy_version_floor: Optional[int] = None,
         argon_sidecar_url: Optional[str] = None,
+        scopes: Tuple[str, ...] = (),
     ) -> None:
         if argon_sidecar_url is not None and not argon_sidecar_url.strip():
             raise ValueError(
                 "argon_sidecar_url must be a non-empty URL when set"
             )
+        if not isinstance(scopes, tuple):
+            scopes = tuple(scopes)
+        self.scopes = scopes
+        self._scope_allowlist = frozenset(scopes)
         secrets_by_kid = dict(secrets_by_kid or {})
         for kid, secret in secrets_by_kid.items():
             if (
@@ -462,17 +470,6 @@ class VerifierConfig:
             argon2_backend.native_available()
             or self.argon_sidecar_url is not None
         )
-
-    def rotate_deployment_expectations(
-        self,
-        policy_version: Optional[int],
-        region: Optional[str],
-        issuer: Optional[str],
-    ) -> None:
-        """Test seam: rotate the current expectations mid-verification."""
-        self.expected_policy_version = policy_version
-        self.region = region
-        self.expected_issuer = issuer
 
 
 class VerifyOptions:
@@ -696,6 +693,16 @@ class Verifier:
             return None
         return VerifyError.REQUEST_BINDING_MISMATCH
 
+    def scope_allowed(self, scope: str) -> bool:
+        """Whether the configured scope allowlist accepts one scope.
+
+        An empty allowlist accepts any scope; a non-empty one is the
+        deployment's accepted set.
+        """
+        if not self.config._scope_allowlist:
+            return True
+        return scope in self.config._scope_allowlist
+
     def check_scope_and_binding(
         self,
         record: ChallengeRecord,
@@ -703,9 +710,13 @@ class Verifier:
         expectation: RequestBindingExpectation,
     ) -> Optional[VerifyError]:
         # The scope option is required: an empty option refuses with
-        # the typed code instead of accepting any scope.
+        # the typed code instead of accepting any scope. The configured
+        # scope set is an allowlist: a call naming a scope outside it
+        # answers wrong_scope before the record comparison.
         if not expected_scope:
             return VerifyError.REQUIRED_SCOPE
+        if not self.scope_allowed(expected_scope):
+            return VerifyError.WRONG_SCOPE
         if record.scope != expected_scope:
             return VerifyError.WRONG_SCOPE
         return self.check_request_binding(record, expectation)

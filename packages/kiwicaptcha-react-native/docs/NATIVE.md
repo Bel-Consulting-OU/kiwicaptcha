@@ -52,6 +52,26 @@ wall-clock solve duration, `hashHex` the winning 64-hex digest
 `error` key) when the challenge is refused; the JS side maps every
 rejection to `solver-unavailable`.
 
+## Optional progress channel
+
+A module may additionally implement:
+
+```
+KiwiCaptchaSolver.solveWithProgress(
+  challengeJson: string,
+  onProgress: (info: { attempted: number }) => void
+): Promise<string>
+```
+
+When present, the JS side dispatches there and forwards the reports
+(same JSON answer shape). The module must report at its own bounded
+cadence, never once per hash; the JS side additionally enforces a
+100 ms wall-clock floor and drops duplicate counts, so the bridge can
+never flood the JS thread. When the method is absent, `solve` is used
+and the caller still receives the start (`attempted: 0`) and final
+(winning counter + 1, or `t` for rsw) reports. `AcquireTokenOptions.onProgress`
+receives the same `{ attempted }` shape.
+
 ## Caps the module must enforce
 
 The module re-checks the client contract before spending work, exactly

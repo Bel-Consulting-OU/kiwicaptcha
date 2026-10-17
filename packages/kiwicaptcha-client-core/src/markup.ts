@@ -16,6 +16,7 @@ function containerAttributes(options: KiwiRenderOptions): Array<[string, string]
   if (options.endpoint) attrs.push(["data-kiwi-endpoint", options.endpoint]);
   if (options.scope) attrs.push(["data-kiwi-scope", options.scope]);
   if (options.algorithm) attrs.push(["data-kiwi-algorithm", options.algorithm]);
+  if (options.riskContext) attrs.push(["data-kiwi-risk-context", options.riskContext]);
   if (options.lang) attrs.push(["data-kiwi-lang", options.lang]);
   if (options.requestBinding) attrs.push(["data-kiwi-request-binding", options.requestBinding]);
   if (options.chainTicket) attrs.push(["data-kiwi-chain-ticket", options.chainTicket]);

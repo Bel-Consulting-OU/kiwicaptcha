@@ -503,8 +503,6 @@ impl RecordStore for FileStore {
 pub struct RedisStore {
     inner: kiwicaptcha::redis_verify::RedisChallengeStore,
     meta: Mutex<HashMap<String, RecordMeta>>,
-    #[allow(dead_code)]
-    url: String,
 }
 
 #[cfg(feature = "redis-store")]
@@ -519,7 +517,6 @@ impl RedisStore {
         Ok(RedisStore {
             inner,
             meta: Mutex::new(HashMap::new()),
-            url: url.to_string(),
         })
     }
 }
@@ -549,7 +546,10 @@ impl RecordStore for RedisStore {
             .get(nonce)
             .cloned()
             .unwrap_or_default();
-        match self.inner.consume(nonce, _now_unix, operation_identity) {
+        match self
+            .inner
+            .consume_with_operation_identity(nonce, operation_identity)
+        {
             Ok(Some(consumed)) => {
                 if consumed.first {
                     ConsumeOutcome::Won {
@@ -559,7 +559,10 @@ impl RecordStore for RedisStore {
                 } else {
                     ConsumeOutcome::AlreadyConsumed {
                         meta,
-                        succeeded: entry.valid,
+                        // The stored verdict of the first verification;
+                        // an absent result is a consumed record whose
+                        // commit never landed.
+                        succeeded: consumed.stored_result.map(|result| result.valid),
                     }
                 }
             }
@@ -731,5 +734,136 @@ mod tests {
         fs::write(dir.join(FILE_STORE_MARKER), "someone-elses-store-9").unwrap();
         assert!(FileStore::open(&dir).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(all(test, feature = "redis-store"))]
+mod redis_store_tests {
+    use super::*;
+    use kiwicaptcha::challenge::{issue_challenge, now_epoch_micros, BindingMode, ChallengeConfig};
+
+    const SECRET: &str = "kiwi-verifier-redis-store-test-secret-0123456789";
+
+    /// The env-gated Redis URL: `TEST_REDIS_URL` first (the shared test
+    /// harness convention), then `RISK_REDIS_URL`. Without either the
+    /// test skips, exactly like the core's Redis suites.
+    fn redis_url() -> Option<String> {
+        for name in ["TEST_REDIS_URL", "RISK_REDIS_URL"] {
+            if let Ok(url) = std::env::var(name) {
+                if !url.is_empty() {
+                    return Some(if let Some(rest) = url.strip_prefix("tcp://") {
+                        format!("redis://{rest}")
+                    } else {
+                        url
+                    });
+                }
+            }
+        }
+        eprintln!("TEST_REDIS_URL/RISK_REDIS_URL unset — redis-store tests skipped");
+        None
+    }
+
+    fn prefix(label: &str) -> String {
+        format!("kiwi:verifier:test:{label}:{}:", std::process::id())
+    }
+
+    fn record() -> ChallengeRecord {
+        let config = ChallengeConfig {
+            secret_key: SECRET.to_string(),
+            algorithm: kiwicaptcha::challenge::PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 8,
+            binding_mode: BindingMode::None,
+            policy_version: 1,
+            region: None,
+            issuer: None,
+            kid: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+            tenant: None,
+        };
+        let now_ns = now_epoch_micros();
+        issue_challenge(
+            &config,
+            "login",
+            "198.51.100.7",
+            now_ns / 1_000_000,
+            now_ns,
+            0,
+            None,
+        )
+        .expect("issue")
+        .record
+    }
+
+    #[test]
+    fn redis_store_round_trips_consume_commit_replay_and_delete() {
+        let Some(url) = redis_url() else { return };
+        let prefix = prefix("roundtrip");
+        let record = record();
+        let nonce = record.nonce.clone();
+        let meta = RecordMeta {
+            action: Some("checkout".to_string()),
+            cdata: None,
+            decision_id: None,
+            operation_identity: None,
+        };
+
+        // Store (pending) through the sidecar's Redis backend.
+        let store = RedisStore::connect(&url, &prefix).expect("the store connects");
+        store.put_pending(&record, meta).expect("the record stores");
+
+        // Load + the one-shot consume transition.
+        let now = now_epoch_micros() / 1_000_000;
+        match store.consume(&nonce, now, None) {
+            ConsumeOutcome::Won { record, meta } => {
+                assert_eq!(record.nonce, nonce);
+                assert_eq!(meta.action.as_deref(), Some("checkout"));
+            }
+            other => panic!("expected the winning consume, got {other:?}"),
+        }
+        // A second consume is the replay answer; the commit echoes the
+        // verdict stored by the first verification.
+        store.commit(&nonce, &record, true);
+        match store.consume(&nonce, now, None) {
+            ConsumeOutcome::AlreadyConsumed { succeeded, .. } => {
+                assert_eq!(succeeded, Some(true));
+            }
+            other => panic!("expected the replay answer, got {other:?}"),
+        }
+
+        // Delete: the core store's best-effort terminal cleanup, then a
+        // fresh sidecar store sees no record at all.
+        let core = kiwicaptcha::redis_verify::RedisChallengeStore::new(
+            redis::Client::open(url.clone()).expect("url parses"),
+            prefix.clone(),
+        );
+        core.best_effort_delete(&nonce);
+        let reread = RedisStore::connect(&url, &prefix).expect("the store reconnects");
+        assert!(matches!(
+            reread.consume(&nonce, now, None),
+            ConsumeOutcome::NotFound
+        ));
+    }
+
+    #[test]
+    fn redis_store_reports_url_shape_and_backend_errors() {
+        // A URL the client cannot parse is refused at construction, not
+        // at the first request.
+        assert!(RedisStore::connect("not-a-redis-url", "p:").is_err());
+        // The describe label is the backend surface /doctor reports.
+        let Some(url) = redis_url() else { return };
+        let store = RedisStore::connect(&url, &prefix("describe")).expect("the store connects");
+        assert!(store.describe().contains("redis"));
     }
 }

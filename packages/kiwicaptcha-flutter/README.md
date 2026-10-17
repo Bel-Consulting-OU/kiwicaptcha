@@ -28,7 +28,18 @@ KiwiCaptcha(
 ```
 
 The widget solves off the UI isolate (compute) and surfaces state,
-progress and Retry.
+progress and Retry. Retry restarts the whole flow (fetch, solve,
+report) and supersedes any in-flight run. With `autoStart: false`,
+drive the widget through its public state:
+
+```dart
+final key = GlobalKey<KiwiCaptchaState>();
+KiwiCaptcha(key: key, autoStart: false, /* ... */);
+// later, when the user is ready:
+key.currentState?.start(); // `execute()` is the same action
+```
+
+`KiwiCaptchaState` is exported from `package:kiwicaptcha/kiwicaptcha.dart`.
 
 ## Solver
 
@@ -75,8 +86,11 @@ cargo build --release --target aarch64-apple-ios
 
 `test/kiwicaptcha_test.dart` pins the SHA-256 vectors, the token
 grammar bytes, the validation refusals (execution, argon fail-closed,
-over-cap, broken nonce), the known low-difficulty counter, and the
-siteverify body shape.
+over-cap, broken nonce), the known low-difficulty counter, the
+siteverify body shape, `KiwiChallenge.fromJson` malformed-input
+refusals, and the widget lifecycle: Retry after a failed fetch
+restarts the flow, and a manual `start()` drives an
+`autoStart: false` widget.
 
 Status in this checkout: NOT RUN. The Dart/Flutter toolchain is not
 installed here (no `dart`, no `flutter`), so these tests are written

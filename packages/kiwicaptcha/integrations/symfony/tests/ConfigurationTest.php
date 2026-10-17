@@ -5,12 +5,15 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 use Symfony\Component\Config\Definition\Processor;
+use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
  * The bundle's config tree must not contradict the core's protocol
@@ -2006,5 +2009,99 @@ final class ConfigurationTest extends TestCase
         } catch (InvalidConfigurationException $e) {
             self::assertStringContainsString('non-empty', $e->getMessage());
         }
+    }
+
+    // ── The risk outcome window and the global-pressure hysteresis ──────
+
+    /**
+     * risk.outcomes.auth_window_secs is declared (it used to be read by
+     * the extension but rejected as an unrecognized option) and the
+     * configured value reaches the store-backed trust gate's window.
+     */
+    public function testAuthWindowSecsIsDeclaredAndReachesTheAuthWindowService(): void
+    {
+        self::assertSame(
+            3600,
+            $this->process()['risk']['outcomes']['auth_window_secs'],
+            'the auth-outcome window defaults to 3600 seconds',
+        );
+
+        $config = [
+            'secret_key' => str_repeat('a', 32),
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'outcomes' => [
+                    'auto_bridge' => true,
+                    'scope' => 'login',
+                    'auth_window_secs' => 120,
+                ],
+            ],
+        ];
+        self::assertSame(120, $this->process($config)['risk']['outcomes']['auth_window_secs'], 'the explicit window is accepted');
+
+        $container = $this->loadExtension($config);
+        self::assertSame(
+            120,
+            $container->getDefinition('kiwi_captcha.risk.auth_window')->getArgument('$windowSecs'),
+            'the configured window reaches the auth-outcome store gate',
+        );
+
+        try {
+            $this->process(['risk' => ['outcomes' => ['auth_window_secs' => 59]]]);
+            self::fail('an auth window below 60 seconds must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('auth_window_secs', $e->getMessage());
+        }
+    }
+
+    /**
+     * risk.hysteresis_ms is the one authoritative global-pressure
+     * hysteresis knob and reaches the risk state store. The former
+     * risk.global_pressure.hysteresis_secs duplicate was never read; it
+     * is gone, so a configuration still carrying it is refused instead of
+     * silently doing nothing.
+     */
+    public function testHysteresisMsReachesTheRiskStateStoreAndTheDeadDuplicateIsGone(): void
+    {
+        $config = [
+            'secret_key' => str_repeat('a', 32),
+            'risk' => [
+                'enabled' => true,
+                'redis_service' => 'fake_redis',
+                'hysteresis_ms' => 1500,
+            ],
+        ];
+        self::assertSame(1500, $this->process($config)['risk']['hysteresis_ms'], 'the millisecond knob is accepted');
+
+        $container = $this->loadExtension($config);
+        self::assertSame(
+            1500,
+            $container->getDefinition('kiwi_captcha.risk.store')->getArgument('$hysteresisMs'),
+            'the configured hysteresis reaches the risk state store',
+        );
+
+        try {
+            $this->process(['risk' => ['global_pressure' => ['enabled' => true, 'hysteresis_secs' => 30]]]);
+            self::fail('the removed global_pressure.hysteresis_secs option must be refused as unrecognized');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('hysteresis_secs', $e->getMessage());
+        }
+    }
+
+    /**
+     * Loads the extension into a fresh container with a registered fake
+     * Redis client (the extension-load compile the wiring tests use).
+     *
+     * @param array<string, mixed> $config
+     */
+    private function loadExtension(array $config): ContainerBuilder
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->register('fake_redis', FakePredisClient::class);
+        (new KiwiCaptchaExtension())->load([$config], $container);
+
+        return $container;
     }
 }

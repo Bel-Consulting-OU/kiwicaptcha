@@ -104,6 +104,67 @@ public class VerifierGateTests
     }
 
     [Fact]
+    public void ScopeAllowlistAllowsConfiguredScopes()
+    {
+        var record = Support.MintRecord(new Support.MintOptions());
+        var config = new Verifier.Config { Scopes = new[] { "login", "comment" } };
+        var verifier = Support.NewTestVerifier(config, Support.TestNow);
+        Support.StoreRecord(verifier.Storage(), record);
+        Support.RequireValid(
+            verifier.Verify(TokenForRecord(record), Options("login", Support.TestClientIp)));
+    }
+
+    [Fact]
+    public void ScopeAllowlistRejectsAnExpectedScopeOutsideTheSet()
+    {
+        var mint = new Support.MintOptions { Scope = "signup" };
+        var record = Support.MintRecord(mint);
+        var config = new Verifier.Config { Scopes = new[] { "login", "comment" } };
+        var verifier = Support.NewTestVerifier(config, Support.TestNow);
+        Support.StoreRecord(verifier.Storage(), record);
+        // The record and the expected scope agree; only the allowlist
+        // refuses, with the existing wrong_scope code.
+        Support.RequireCode(
+            verifier.Verify(TokenForRecord(record), Options("signup", Support.TestClientIp)),
+            VerifyError.WrongScope);
+    }
+
+    [Fact]
+    public void EmptyScopeAllowlistAcceptsAnyScope()
+    {
+        var mint = new Support.MintOptions { Scope = "signup" };
+        var record = Support.MintRecord(mint);
+        var verifier = Support.NewTestVerifier(new Verifier.Config(), Support.TestNow);
+        Support.StoreRecord(verifier.Storage(), record);
+        Support.RequireValid(
+            verifier.Verify(TokenForRecord(record), Options("signup", Support.TestClientIp)));
+    }
+
+    [Fact]
+    public void SettingsCarryTheScopeAllowlistIntoTheVerifier()
+    {
+        var settings = new Settings
+        {
+            Secret = Support.TestSecret,
+            StoreUrl = "memory://",
+            Scopes = new[] { "login" },
+            Profile = "standard",
+        };
+        var verifier = settings.BuildVerifier();
+        // The settings-built verifier runs on the wall clock.
+        var mint = new Support.MintOptions
+        {
+            Scope = "comment",
+            IssuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 10,
+        };
+        var record = Support.MintRecord(mint);
+        Support.StoreRecord(verifier.Storage(), record);
+        Support.RequireCode(
+            verifier.Verify(TokenForRecord(record), Options("comment", Support.TestClientIp)),
+            VerifyError.WrongScope);
+    }
+
+    [Fact]
     public void MissingScopeOptionIsTheTypedRequiredScopeRefusal()
     {
         var record = Support.MintRecord(new Support.MintOptions());

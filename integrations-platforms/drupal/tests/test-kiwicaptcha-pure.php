@@ -92,11 +92,23 @@ check('204 with success body passes', KiwiVerifyLogic::decide($settings, 't', 'l
 check('missing peer fails closed', KiwiVerifyLogic::clientIp([]) === '');
 check('garbage peer fails closed', KiwiVerifyLogic::clientIp(['REMOTE_ADDR' => 'not-an-ip']) === '');
 
-// Markup.
-$element = KiwiMarkup::renderElement('comment');
-check('element carries scope', $element['#attributes']['data-kiwi-scope'] === 'comment' && $element['#kiwi_scope'] === 'comment');
-check('element carries the token field', strpos((string) $element['#value'], 'name="kiwi__token"') !== false);
-check('bad scope falls back to login', KiwiMarkup::sanitizeScope('no such') === 'login');
+// Markup: the render element is the theme hook, not a raw html_tag.
+$element = KiwiMarkup::renderElement('comment', 'https://kiwi.test/api.js?compat=recaptcha');
+check('element renders through the theme hook', ($element['#theme'] ?? '') === 'kiwicaptcha_widget');
+check('element carries scope', ($element['#scope'] ?? '') === 'comment' && ($element['#kiwi_scope'] ?? '') === 'comment');
+check('element carries the shim url', ($element['#shim_url'] ?? '') === 'https://kiwi.test/api.js?compat=recaptcha');
+check('bad scope falls back to login', KiwiMarkup::renderElement('no such')['#scope'] === 'login');
+check('theme variables carry the sanitized scope', KiwiMarkup::themeVariables('checkout:pay', 'x') === ['scope' => 'checkout:pay', 'shim_url' => 'x']);
+
+// The declared theme hook ships a template that renders both
+// variables and keeps the shared widget markup contract.
+$templatePath = dirname(__DIR__).'/templates/kiwicaptcha-widget.html.twig';
+check('widget template exists', is_file($templatePath));
+$template = is_file($templatePath) ? (string) file_get_contents($templatePath) : '';
+check('template renders scope', strpos($template, '{{ scope }}') !== false);
+check('template renders shim url', strpos($template, '{{ shim_url }}') !== false);
+check('template carries the token field', strpos($template, 'name="kiwi__token"') !== false);
+check('template keeps the widget container', strpos($template, 'class="kiwi-container"') !== false);
 check('action suffix scopes survive', KiwiMarkup::sanitizeScope('checkout:pay') === 'checkout:pay');
 
 fwrite($failures === 0 ? STDOUT : STDERR, sprintf("%d checks, %d failures\n", $checks, $failures));

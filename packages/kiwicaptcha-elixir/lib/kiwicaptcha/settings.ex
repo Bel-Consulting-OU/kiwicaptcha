@@ -8,6 +8,13 @@ defmodule Kiwicaptcha.Settings do
 
   defstruct [:profile, :secret, :store_url, :scopes]
 
+  # The risk-engine value classes a scope may name, matching
+  # kiwicaptcha-risk's ValueClass wire spellings. An empty class is
+  # also accepted: the quickstart scope string allows a bare name
+  # (``KIWI_SCOPES=signup``) for a deployment that declares no priced
+  # class.
+  @risk_value_classes ~w[low standard high critical]
+
   # Profiles whose work ladder prices Argon2id rungs (the explicit
   # argon budgets and the full-stack adoption profiles). A deployment
   # that names one must run a verifier that can recompute them: the
@@ -129,6 +136,51 @@ defmodule Kiwicaptcha.Settings do
   end
 
   @doc """
+  Whether the accepted-scope map admits one scope. An empty map accepts
+  any scope; a non-empty one is the deployment's allowlist.
+  """
+  @spec scope_allowed?(t() | map(), String.t()) :: boolean()
+  def scope_allowed?(%__MODULE__{scopes: scopes}, name), do: scope_allowed?(scopes, name)
+
+  def scope_allowed?(scopes, name) when is_map(scopes) do
+    map_size(scopes) == 0 or Map.has_key?(scopes, to_string(name))
+  end
+
+  def scope_allowed?(_scopes, _name), do: true
+
+  @doc "The risk-engine value classes a scope may declare."
+  @spec risk_value_classes() :: [String.t()]
+  def risk_value_classes, do: @risk_value_classes
+
+  @doc """
+  Whether one declared value class is a risk-engine class (or empty,
+  the undeclared spelling).
+  """
+  @spec valid_scope_class?(term()) :: boolean()
+  def valid_scope_class?(nil), do: true
+
+  def valid_scope_class?(value) do
+    text = to_string(value)
+    text == "" or text in @risk_value_classes
+  end
+
+  @doc """
+  Parse the quickstart scope string: ``name=value`` pairs joined by
+  commas. A bare name declares an empty class.
+  """
+  @spec parse_scopes(String.t()) :: %{optional(String.t()) => String.t()}
+  def parse_scopes(value) do
+    value
+    |> String.split(",", trim: true)
+    |> Map.new(fn pair ->
+      case String.split(pair, "=", parts: 2) do
+        [name, class] -> {String.trim(name), String.trim(class)}
+        [name] -> {String.trim(name), ""}
+      end
+    end)
+  end
+
+  @doc """
   Build the store adapter the URL names: memory, sqlite (path) or
   redis (host and port). Raises ArgumentError on an unknown scheme and
   explains the optional dependency when a backend package is missing.
@@ -168,16 +220,5 @@ defmodule Kiwicaptcha.Settings do
       _ ->
         raise ArgumentError, "unsupported store URL scheme: #{url}"
     end
-  end
-
-  defp parse_scopes(value) do
-    value
-    |> String.split(",", trim: true)
-    |> Map.new(fn pair ->
-      case String.split(pair, "=", parts: 2) do
-        [name, class] -> {String.trim(name), String.trim(class)}
-        [name] -> {String.trim(name), ""}
-      end
-    end)
   end
 end

@@ -112,7 +112,11 @@ retained as `Issuer::hashIp()` for this path only.
   a committed result (crash between consume and commit) is reported as
   ConsumeIndeterminate. After the proof derives, a final revalidation
   re-checks expiry and the current policy/region/issuer expectations with
-  the verifier's clock. Strict single-use under concurrency requires an
+  the verifier's clock. A deployment that retains the consumed record can
+  read its committed outcome back without re-deriving through
+  `ConsumedOutcomeRecovery::recover()`: read-only, identity-gated and
+  MAC-authenticated, with the re-deriving `Verifier::resumeConsumedOperation()`
+  as the stronger resume path. Strict single-use under concurrency requires an
   atomic consume (`RedisStorage`, fused Lua transition, an atomic state
   flip on any Redis with Lua). PSR-6 pools are best-effort (see
   [Storage](#storage)).
@@ -255,6 +259,9 @@ pass.
 | `ArrayStorage` | tests, CLI, single-worker only, never production |
 | `Psr6Storage` | any PSR-6 pool (e.g. Symfony Cache). PSR-6 cannot express atomic get-and-transition, so single-use under concurrency is best-effort (read-then-mark). It carries `NonAtomicStorageInterface` and intentionally claims NO consumed-state recovery capability — the retained envelope is readable only through the off-interface `inspectConsumedEnvelope()` diagnostic |
 | `RedisStorage` | atomic consume transition via a fused Lua script. Implements `AtomicStorageInterface`, recommended for production |
+| `SqliteStorage` | zero-infrastructure single-node backend (one file, WAL, every durable transition in one begin-immediate transaction). Requires `ext-pdo_sqlite`; implements the same atomic and recovery interfaces as RedisStorage |
+| `FilesystemStorage` | file-backed single-node backend with a layout/version marker and per-record atomic transitions. Intended for one host with a local disk, not a shared network filesystem |
+| `ApcuStorage` | single-process APCu backend with an APCu-native transition lock. Shared-memory visibility is per process group; use it only where one worker serves the deployment |
 
 In production, use `RedisStorage` (or any `AtomicStorageInterface` backed by
 an atomic transition-style consume) so challenges are shared across workers

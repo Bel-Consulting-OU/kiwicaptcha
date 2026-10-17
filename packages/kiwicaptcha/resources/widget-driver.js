@@ -24,6 +24,39 @@
   if (typeof window !== "undefined") window[KIWI_BOOT] = true;
   var encoder = new TextEncoder();
 
+  // ── CSP nonce propagation ──
+  // The page may load the driver under a nonce-only script-src. The lazy
+  // module loader injects <script> elements, and those elements need the
+  // same nonce or CSP refuses them. Capture the executing script's nonce
+  // once, here: document.currentScript is null later (after this turn),
+  // and the compat loader can execute the source from a fetch
+  // (currentScript null) — in that case the page's own driver script
+  // element is the source. A page without a nonce leaves the captured
+  // value null and the loader adds no attribute.
+  function kiwiCaptureScriptNonce() {
+    try {
+      var current = document.currentScript;
+      if (current) {
+        var own = current.nonce || (current.getAttribute && current.getAttribute("nonce"));
+        if (own) return own;
+      }
+      // The compat loader (/api.js) evaluates this source asynchronously,
+      // where currentScript is null. The page's driver tag is the script
+      // whose src names the driver asset (or the compat loader itself);
+      // it carries the page nonce.
+      var scripts = document.scripts || [];
+      for (var i = 0; i < scripts.length; i++) {
+        var candidate = scripts[i];
+        var nonce = candidate.nonce || (candidate.getAttribute && candidate.getAttribute("nonce"));
+        if (!nonce) continue;
+        var src = candidate.src || "";
+        if (/(?:^|\/)(?:widget-driver|driver|api)[^\/]*\.js(?:\?|#|$)/.test(src)) return nonce;
+      }
+    } catch (e) {}
+    return null;
+  }
+  var kiwiScriptNonce = kiwiCaptureScriptNonce();
+
   // ── Solver PROTOCOL id ──
   // Bumped when the worker protocol changes. The worker reports the same
   // id and verifies the glue's protocol version before ready; the driver
@@ -2246,6 +2279,14 @@
         script = document.createElement("script");
         script.src = attrs.src;
         script.integrity = attrs.integrity;
+        // The captured page nonce: a nonce-only script-src would refuse
+        // this injected module without it. Setting both the reflected
+        // property and the attribute keeps older engines on the same
+        // value.
+        if (kiwiScriptNonce) {
+          script.setAttribute("nonce", kiwiScriptNonce);
+          script.nonce = kiwiScriptNonce;
+        }
         script.setAttribute("data-kiwi-module", kind);
         kiwiModuleScriptKinds.set(script, kind);
         script.onload = function () {
@@ -2378,6 +2419,10 @@
       }
     },
     protocolId: KIWI_SOLVER_PROTOCOL_ID,
+    // The page-issued CSP nonce captured from the driver's script tag.
+    // Lazy modules that build child documents (the execution iframe)
+    // copy it onto their own script tags; null on a page without one.
+    scriptNonce: kiwiScriptNonce,
     compatGlue: null,
     core: {
       render: kiwiRender,

@@ -12,16 +12,11 @@
 package kiwicaptcha
 
 // MaxShaTargetBits is the hard ceiling for issued sha256 difficulty.
+// ValidateRecord enforces it on every stored sha256 record.
 const MaxShaTargetBits = 20
 
 // MinSecretBytes is the minimum master secret length in bytes.
 const MinSecretBytes = 32
-
-// MinExecutionKeyBytes is the minimum execution key length in bytes.
-const MinExecutionKeyBytes = 32
-
-// MaxArgon2TargetBits is the ceiling for issued argon2id difficulty.
-const MaxArgon2TargetBits = 10
 
 // MinDifficulty is the absolute stored-record difficulty floor.
 const MinDifficulty = 1
@@ -120,5 +115,4 @@ const (
 	RecordMetaDomain     = "kiwi/record-meta/v1"
 	ConsumedResultDomain = "kiwi/consumed-result/v1"
 	IPBindDomain         = "kiwicaptcha/ip-bind/v2"
-	MaxRecordIdentityB64 = 512
 )

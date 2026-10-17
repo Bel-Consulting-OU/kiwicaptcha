@@ -1019,8 +1019,14 @@ there.
     # heuristic and is disabled) — operator values for those keys are
     # overridden. In STANDARD mode the operator's choices pass through.
     # privacy_mode: strict
-    # telemetry: off | minimal | full       # widget signal collection;
-    #                                       # forced 'off' under strict
+    # telemetry: off | minimal | full       # LEGACY enforcement surface read
+    #                                       # by enforce_telemetry: whether a
+    #                                       # bot-scored telemetry segment is
+    #                                       # rejected at verification. It does
+    #                                       # NOT render data-kiwi-telemetry;
+    #                                       # the widget's collection mode is
+    #                                       # risk.evidence.telemetry. Forced
+    #                                       # 'off' under strict
     # binding_mode: nonce_ip_hmac | none    # challenge IP binding; stored
     #                                       # tag is nonce-bound, never a
     #                                       # stable IP identifier; 'none'
@@ -1532,6 +1538,10 @@ kiwi_captcha:
         #                                   # Remove the knob once every
         #                                   # node runs the new epoch.
         #     outcomes:                     # the typed outcomes plane
+        #         auth_window_secs: 3600    # the rolling auth-outcome
+        #                                   # window of the store trust
+        #                                   # gate (min 60); fail_closed
+        #                                   # ignores it
         #         auto_bridge: true         # the Symfony security
         #                                   # auto-bridge (default true):
         #                                   # LoginSuccessEvent reports
@@ -1649,6 +1659,26 @@ kiwi_captcha:
         #         # samesite: lax
         #         # http_only: true
 ```
+
+### Step-up routes
+
+The step-up endpoints (`risk.step_up`) are application-facing: their
+chrome, paths and access control belong to the application's own auth flow,
+so they are deliberately **not** part of the bundle's default route loader.
+They are opt-in. When the plane is enabled, import the shipped routing
+resource explicitly (the paths must equal `risk.step_up.begin_path` /
+`complete_path`, or point those knobs at the application's own paths):
+
+```yaml
+# config/routes.yaml
+kiwi_captcha_step_up:
+    resource: '@KiwiCaptchaBundle/Resources/config/routes/step_up.php'
+```
+
+The import registers `kiwi_step_up_begin`, `kiwi_step_up_complete`,
+`kiwi_step_up_email_begin` and `kiwi_step_up_email_complete`. The email
+begin path is the one the step-up 403 body advertises, so an anonymous
+visitor the body addresses can always reach the factor.
 
 ### Scope identity
 

@@ -46,6 +46,7 @@ if Code.ensure_loaded?(Mix) do
             Kiwicaptcha.Doctor.run(
               secret: secret,
               store: store,
+              scopes: Kiwicaptcha.Settings.parse_scopes(System.get_env("KIWI_SCOPES") || ""),
               rsw: rsw,
               region: System.get_env("KIWI_REGION"),
               issuer: System.get_env("KIWI_ISSUER")

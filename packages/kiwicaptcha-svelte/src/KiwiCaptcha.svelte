@@ -21,6 +21,16 @@
   interface Props extends KiwiRenderOptions {
     class?: string;
     style?: string;
+    /** The driver script URL. Default "/kiwi.js". */
+    scriptSrc?: string;
+    /** Optional SRI integrity for the driver script. */
+    scriptIntegrity?: string;
+    /** Optional crossorigin for the driver script. */
+    scriptCrossorigin?: "anonymous" | "use-credentials";
+    /** Reject the load when the driver has not appeared within the budget. */
+    scriptTimeoutMs?: number;
+    /** Optional CSP nonce set on the injected driver script. */
+    scriptNonce?: string;
     onready?: (scope: string) => void;
     onverifying?: (scope: string) => void;
     onverify?: (token: string, detail: KiwiVerifiedDetail) => void;
@@ -34,6 +44,11 @@
   let {
     class: className = "",
     style = "",
+    scriptSrc,
+    scriptIntegrity,
+    scriptCrossorigin,
+    scriptTimeoutMs,
+    scriptNonce,
     onready,
     onverifying,
     onverify,
@@ -47,6 +62,7 @@
 
   let el: HTMLDivElement;
   let handle: KiwiWidgetHandle | null = null;
+  let generation = 0;
 
   /** Cancel the current run and acquire a fresh challenge. */
   export function reset(): void {
@@ -66,8 +82,15 @@
       ? handle.execute()
       : Promise.reject(new Error("kiwicaptcha: widget not mounted"));
   }
+  /** Tear the widget down now (unmount also does this automatically). */
+  export function destroy(): void {
+    ++generation;
+    handle?.destroy();
+    handle = null;
+  }
 
   onMount(() => {
+    const ticket = ++generation;
     // Callbacks read the current prop value at event time, so a parent
     // may pass fresh inline functions without rebuilding the widget.
     // The config fields are captured once: a changed config is expressed
@@ -87,10 +110,15 @@
       handle = renderKiwiCaptcha(el, options);
     } catch {
       void loadAndRender(el, options).then((h) => {
+        if (ticket !== generation) {
+          h.destroy();
+          return;
+        }
         handle = h;
       });
     }
     return () => {
+      ++generation;
       handle?.destroy();
       handle = null;
     };
@@ -101,7 +129,13 @@
     options: KiwiRenderOptions,
   ): Promise<KiwiWidgetHandle> {
     const { loadKiwiCaptcha } = await import("@kiwicaptcha/client-core");
-    const api = await loadKiwiCaptcha();
+    const api = await loadKiwiCaptcha({
+      scriptSrc,
+      integrity: scriptIntegrity,
+      crossorigin: scriptCrossorigin,
+      timeoutMs: scriptTimeoutMs,
+      scriptNonce,
+    });
     return renderKiwiCaptcha(node, { ...options, api });
   }
 </script>

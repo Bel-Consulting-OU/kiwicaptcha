@@ -32,6 +32,7 @@ end
 report = KiwiCaptcha::Doctor.run(
   secret: secret.to_s,
   store: store,
+  scopes: KiwiCaptcha::Settings.parse_scopes(ENV['KIWI_SCOPES'] || ''),
   rsw: rsw,
   region: ENV['KIWI_REGION'],
   issuer: ENV['KIWI_ISSUER'],

@@ -236,6 +236,38 @@ class VerifyGatesTest < Minitest::Test
     assert_equal KiwiCaptcha::VerifyError::WRONG_POLICY_VERSION, expect_code.call(expected_policy_version: 2)
   end
 
+  def test_the_configured_scope_allowlist_is_enforced
+    storage, record, row = store_of('sha_plain')
+    allowed = KiwiCaptcha.verify(
+      row['token_b64'],
+      options_for(record, row, storage, allowed_scopes: { 'login' => 'critical' })
+    )
+    assert allowed.ok, allowed.code
+
+    storage, record, row = store_of('sha_plain')
+    refused = KiwiCaptcha.verify(
+      row['token_b64'],
+      options_for(record, row, storage, allowed_scopes: { 'other' => 'low' })
+    )
+    # The record matches the expected scope; only the allowlist refuses,
+    # with the existing wrong_scope code.
+    assert_equal KiwiCaptcha::VerifyError::WRONG_SCOPE, refused.code
+
+    storage, record, row = store_of('sha_plain')
+    open = KiwiCaptcha.verify(
+      row['token_b64'],
+      options_for(record, row, storage, allowed_scopes: [])
+    )
+    assert open.ok, open.code
+
+    storage, record, row = store_of('sha_plain')
+    array_allowed = KiwiCaptcha.verify(
+      row['token_b64'],
+      options_for(record, row, storage, allowed_scopes: %w[login comment])
+    )
+    assert array_allowed.ok, array_allowed.code
+  end
+
   def test_the_policy_rollout_window_accepts_the_old_epoch_and_fails_closed_above_it
     storage, record, row = store_of('sha_plain')
     strict = KiwiCaptcha.verify(row['token_b64'], options_for(record, row, storage, expected_policy_version: 2))

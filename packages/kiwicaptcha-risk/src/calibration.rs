@@ -1322,6 +1322,35 @@ mod tests {
         RedisCalibrationStore::new(client(), &unique_namespace(prefix))
     }
 
+    /// The scope HMAC key must stay byte-identical to the PHP
+    /// `AggregateCalibrator::deriveScopeHmacKey()`: HKDF over SHA-256 with the
+    /// deployment salt `kiwicaptcha/deploy-salt/v1` and info
+    /// `kiwi/v2/scope-rate`, 32 bytes. A drift here would silently split
+    /// the Rust and PHP per-scope rate buckets.
+    #[test]
+    fn scope_hmac_key_is_the_shared_php_hkdf_derivation() {
+        let master = b"deployment-master-secret-0123456789";
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"kiwicaptcha/deploy-salt/v1"), master);
+        let mut expected = [0u8; 32];
+        hk.expand(b"kiwi/v2/scope-rate", &mut expected)
+            .expect("expand ok");
+        assert_eq!(
+            RedisCalibrationStore::derive_scope_hmac_key(master),
+            expected
+        );
+        assert_ne!(
+            RedisCalibrationStore::derive_scope_hmac_key(b"another master"),
+            expected
+        );
+        // A known-answer pin independent of the helper implementation.
+        assert_eq!(
+            hex::encode(RedisCalibrationStore::derive_scope_hmac_key(
+                b"deployment-master-secret-0123456789"
+            )),
+            "c3c2b8495ab817c2ad263a0d2bb5153248606136ba5ac4c12e23ddf3deba72e3"
+        );
+    }
+
     fn store_limits(
         prefix: &str,
         min_samples: i64,

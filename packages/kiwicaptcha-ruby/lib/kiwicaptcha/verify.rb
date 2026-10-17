@@ -161,6 +161,7 @@ module KiwiCaptcha
       :binding_expectation, :expected_policy_version, :policy_version_floor,
       :region, :expected_issuer, :secrets_by_kid, :revoked_kids,
       :tenant_id, :accept_legacy_v1, :rsw, :execution_policy, :argon_gate,
+      :allowed_scopes,
       keyword_init: true
     ) do
       # The scope option is REQUIRED: the keyword has no default, so a
@@ -175,7 +176,8 @@ module KiwiCaptcha
           expected_policy_version: nil, policy_version_floor: nil,
           region: nil, expected_issuer: nil, secrets_by_kid: {},
           revoked_kids: [].freeze, tenant_id: nil, accept_legacy_v1: false,
-          rsw: nil, execution_policy: nil, argon_gate: nil
+          rsw: nil, execution_policy: nil, argon_gate: nil,
+          allowed_scopes: nil
         }.merge(kwargs)
         super(expected_scope: expected_scope, **opts)
       end
@@ -574,10 +576,24 @@ module KiwiCaptcha
         nil
       end
 
+      # Whether the configured scope allowlist admits one scope. The
+      # option accepts a Hash (the settings scope map, whose keys are
+      # the allowlist), an Array, a Set, or nil. An empty (or absent)
+      # allowlist accepts any scope.
+      def scope_allowed?(allowed, scope)
+        return true if allowed.nil?
+
+        values = allowed.is_a?(Hash) ? allowed.keys : Array(allowed)
+        values.empty? || values.map(&:to_s).include?(scope.to_s)
+      end
+
       def check_scope_and_binding(options, record)
         # The scope option is required: an empty option refuses with
-        # the typed code instead of accepting any scope.
+        # the typed code instead of accepting any scope. The configured
+        # scope set is an allowlist: a call naming a scope outside it
+        # answers wrong_scope before the record comparison.
         return VerifyError::REQUIRED_SCOPE if options.expected_scope.nil? || options.expected_scope.empty?
+        return VerifyError::WRONG_SCOPE unless scope_allowed?(options.allowed_scopes, options.expected_scope)
 
         return VerifyError::WRONG_SCOPE if record.scope != options.expected_scope
 

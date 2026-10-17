@@ -40,6 +40,52 @@ class KiwiSolverTest {
     }
 
     @Test
+    fun solveSha256DirectEntryPointAndExhaustedBranch() {
+        val challenge = shaChallenge()
+        val startedAt = System.currentTimeMillis()
+        val solution = KiwiSolver.solveSha256(challenge, startedAt, maxHashes = 1_000)
+        assertEquals(45L, solution.counter)
+        assertEquals(46L, solution.hashes)
+        assertEquals(
+            "00f9718e2a0397b3ca8fe75c44499fccee788e243173dadea546bd4e45af6982",
+            solution.hashHex,
+        )
+
+        // The first hit is counter 45; a 10-hash window exhausts before
+        // it, and the typed error names the attempted count.
+        try {
+            KiwiSolver.solveSha256(challenge, startedAt, maxHashes = 10)
+            fail("expected the exhausted branch")
+        } catch (e: KiwiSolveError.Exhausted) {
+            assertEquals(10L, e.attempted)
+        }
+    }
+
+    @Test
+    fun solveRswDirectEntryPointProducesTheWireProof() {
+        val challenge = shaChallenge {
+            it.copy(
+                algorithm = "rsw",
+                t = 128,
+                targetBits = 1,
+                rswModulus = KiwiBase64.encode(composite2048()),
+            )
+        }
+        val solution = KiwiSolver.solveRsw(challenge, System.currentTimeMillis())
+        assertEquals(0L, solution.counter)
+        assertEquals(128L, solution.hashes)
+        assertEquals(512, solution.rswProof?.length)
+        assertEquals(solution.rswProof, solution.hashHex)
+        assertTrue(solution.rswProof != "0".repeat(512))
+        // The direct entry point is deterministic: the same challenge
+        // yields the same proof.
+        assertEquals(
+            solution.rswProof,
+            KiwiSolver.solveRsw(challenge, System.currentTimeMillis()).rswProof,
+        )
+    }
+
+    @Test
     fun sha256MatchesTheStandardVectors() {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
             .digest("abc".toByteArray(Charsets.UTF_8))

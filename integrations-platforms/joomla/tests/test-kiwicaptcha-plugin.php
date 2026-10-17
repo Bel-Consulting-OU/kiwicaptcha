@@ -118,5 +118,43 @@ check('onCheckAnswer rejects a missing token', $plugin->onCheckAnswer(null) === 
 KiwiClient::$testTransport = null;
 Factory::$document = null;
 
+// Language packaging: every key the plugin XML declares (field labels
+// and list option values) has an en-GB entry, and the declared
+// description key resolves through the sys.ini Joomla loads for the
+// extension manager.
+$pluginRoot = dirname(__DIR__).'/pkg_kiwicaptcha/plg_captcha_kiwicaptcha';
+$pluginXml = simplexml_load_file($pluginRoot.'/kiwicaptcha.xml');
+check('plugin xml parses', $pluginXml !== false);
+
+$declaredKeys = [];
+foreach ($pluginXml->xpath('//field') as $field) {
+    $declaredKeys[] = trim((string) $field['label']);
+    foreach ($field->option as $option) {
+        $declaredKeys[] = trim((string) $option);
+    }
+}
+$descriptionKey = trim((string) $pluginXml->description);
+check('plugin description is a language key', preg_match('/^PLG_CAPTCHA_KIWICAPTCHA_[A-Z0-9_]+$/', $descriptionKey) === 1);
+$declaredKeys[] = $descriptionKey;
+
+$langDir = $pluginRoot.'/language/en-GB';
+$iniPath = $langDir.'/en-GB.plg_captcha_kiwicaptcha.ini';
+$sysPath = $langDir.'/en-GB.plg_captcha_kiwicaptcha.sys.ini';
+check('en-GB plugin ini exists', is_file($iniPath));
+check('en-GB plugin sys.ini exists', is_file($sysPath));
+$ini = is_file($iniPath) ? (array) parse_ini_file($iniPath, false, INI_SCANNER_RAW) : [];
+$sysIni = is_file($sysPath) ? (array) parse_ini_file($sysPath, false, INI_SCANNER_RAW) : [];
+
+foreach (array_unique($declaredKeys) as $key) {
+    if (preg_match('/^PLG_CAPTCHA_KIWICAPTCHA_[A-Z0-9_]+$/', $key) !== 1) {
+        continue;
+    }
+    check("language entry for {$key}", isset($ini[$key]) && trim((string) $ini[$key]) !== '');
+    check("sys.ini entry for {$key}", isset($sysIni[$key]) && trim((string) $sysIni[$key]) !== '');
+}
+check('sys.ini names the plugin', isset($sysIni['PLG_CAPTCHA_KIWICAPTCHA']));
+$packagedFolders = array_map('strval', $pluginXml->xpath('//files/folder'));
+check('plugin xml packages the language folder', in_array('language', $packagedFolders, true));
+
 fwrite($failures === 0 ? STDOUT : STDERR, sprintf("%d checks, %d failures\n", $checks, $failures));
 exit($failures === 0 ? 0 : 1);

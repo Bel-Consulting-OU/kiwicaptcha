@@ -1,5 +1,37 @@
 import XCTest
+import Foundation
 @testable import KiwiCaptcha
+
+#if canImport(UIKit)
+    import UIKit
+#endif
+
+/// A URLProtocol that answers from a closure: the client and widget
+/// suites exercise the real URLSession path without a network or a
+/// local server.
+final class MockURLProtocol: URLProtocol {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = MockURLProtocol.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
 
 /// The XCTest suite the Xcode CI runs (`swift test` with a full Xcode;
 /// the CLI toolchain on this repository's runners lacks XCTest, so the
@@ -15,6 +47,25 @@ final class KiwiCaptchaTests: XCTestCase {
             prefix: "kiwi|login|")
         mutate(&c)
         return c
+    }
+
+    override func tearDown() {
+        MockURLProtocol.handler = nil
+        super.tearDown()
+    }
+
+    /// A URLSession whose requests land in MockURLProtocol.
+    private func mockSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        return URLSession(configuration: config)
+    }
+
+    private func httpResponse(_ request: URLRequest, _ status: Int) -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: request.url ?? URL(string: "https://invalid.test")!,
+            statusCode: status, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])!
     }
 
     func testSha256Vectors() {
@@ -159,4 +210,207 @@ final class KiwiCaptchaTests: XCTestCase {
         let withIp = String(data: try KiwiClient.siteverifyBody(secret: "s", response: "t", remoteip: "203.0.113.9"), encoding: .utf8) ?? ""
         XCTAssertTrue(withIp.contains("\"remoteip\":\"203.0.113.9\""))
     }
+
+    // MARK: - KiwiClient.fetchChallenge
+
+    func testFetchChallengePostsTheDocumentAndDecodesTheAnswer() async throws {
+        let challenge = shaChallenge()
+        let payload = try JSONEncoder().encode(challenge)
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://api.example.test/api/kcaptcha/challenge")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            let body = try JSONDecoder().decode([String: String].self, from: request.httpBody ?? Data())
+            XCTAssertEqual(body["scope"], "login")
+            XCTAssertEqual(body["sitekey"], "pk-ios")
+            XCTAssertEqual(body["algorithm"], "sha256")
+            XCTAssertEqual(body["request_binding"], "rb-1")
+            return (self.httpResponse(request, 200), payload)
+        }
+        let client = KiwiClient(
+            endpoint: URL(string: "https://api.example.test/api/kcaptcha/challenge")!,
+            sitekey: "pk-ios",
+            session: mockSession())
+        let fetched = try await client.fetchChallenge(
+            scope: "login", algorithm: "sha256", requestBinding: "rb-1")
+        XCTAssertEqual(fetched, challenge)
+        XCTAssertEqual(fetched.prefix, "kiwi|login|")
+    }
+
+    func testFetchChallengeRefusesANon200Answer() async {
+        MockURLProtocol.handler = { request in
+            (self.httpResponse(request, 503), Data("down".utf8))
+        }
+        let client = KiwiClient(
+            endpoint: URL(string: "https://api.example.test/kc")!,
+            session: mockSession())
+        do {
+            _ = try await client.fetchChallenge(scope: "login")
+            XCTFail("a 503 must be refused")
+        } catch let error as KiwiClient.ClientError {
+            XCTAssertEqual(error, .badStatus(503))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testFetchChallengeRefusesAMalformedDocument() async {
+        MockURLProtocol.handler = { request in
+            (self.httpResponse(request, 200), Data("{\"hello\":1}".utf8))
+        }
+        let client = KiwiClient(
+            endpoint: URL(string: "https://api.example.test/kc")!,
+            session: mockSession())
+        do {
+            _ = try await client.fetchChallenge(scope: "login")
+            XCTFail("a non-challenge document must be refused")
+        } catch let error as KiwiClient.ClientError {
+            guard case .malformed = error else {
+                return XCTFail("expected malformed, got \(error)")
+            }
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    // MARK: - Rsw direct entry points
+
+    func testRswMontgomeryRoundTripAndSquaring() {
+        // n = 2^2047 + 1: the canonical wire shape (256 bytes, top bit
+        // set, odd), which is all Modulus requires.
+        var bytes = [UInt8](repeating: 0, count: 256)
+        bytes[0] = 0x80
+        bytes[255] = 0x01
+        let modulus = Rsw.Modulus(bytes)
+        XCTAssertEqual(Rsw.limbs, 64)
+        let one = Rsw.Value([1], modulus: modulus)
+        // Entering Montgomery form then leaving it is the identity.
+        XCTAssertEqual(one.proofHex(modulus: modulus),
+                       String(repeating: "0", count: 510) + "01")
+        // squared(times:) is exactly t sequential Montgomery squarings.
+        var manual = one.words
+        for _ in 0..<3 {
+            manual = Rsw.montMultiply(manual, manual, modulus: modulus)
+        }
+        XCTAssertEqual(one.squared(times: 3, modulus: modulus).words, manual)
+        XCTAssertEqual(Rsw.greaterOrEqual([0, 1], [0, 1]), true)
+        XCTAssertEqual(Rsw.greaterOrEqual([0, 1], [0, 2]), false)
+    }
+
+    // MARK: - Widget update path (UIKit platforms only)
+
+    #if canImport(UIKit)
+        @MainActor
+        func testWidgetApplyConfigurationRestartsOnlyOnConnectionChange() {
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(
+                    endpoint: URL(string: "https://a.example.test/kc")!,
+                    sitekey: "pk-a", session: mockSession()),
+                scope: "login")
+            let same = view.applyConfiguration(
+                endpoint: URL(string: "https://a.example.test/kc")!,
+                scope: "login", sitekey: "pk-a",
+                onVerify: { _ in })
+            XCTAssertFalse(same)
+            XCTAssertEqual(view.restartCount, 0)
+            XCTAssertEqual(view.state, .idle)
+
+            let changed = view.applyConfiguration(
+                endpoint: URL(string: "https://b.example.test/kc")!,
+                scope: "login", sitekey: "pk-a",
+                onVerify: { _ in })
+            XCTAssertTrue(changed)
+            XCTAssertEqual(view.restartCount, 1)
+            XCTAssertEqual(view.endpoint.absoluteString, "https://b.example.test/kc")
+            XCTAssertEqual(view.state, .solving)
+            XCTAssertTrue(view.token.isEmpty)
+
+            // Scope and sitekey are connection identity too.
+            XCTAssertTrue(view.applyConfiguration(
+                endpoint: URL(string: "https://b.example.test/kc")!,
+                scope: "signup", sitekey: "pk-a",
+                onVerify: { _ in }))
+            XCTAssertTrue(view.applyConfiguration(
+                endpoint: URL(string: "https://b.example.test/kc")!,
+                scope: "signup", sitekey: "pk-b",
+                onVerify: { _ in }))
+            XCTAssertEqual(view.restartCount, 3)
+            XCTAssertEqual(view.sitekey, "pk-b")
+        }
+
+        @MainActor
+        func testWidgetRestartCancelsThePreviousTask() async throws {
+            let challenge = shaChallenge()
+            let payload = try JSONEncoder().encode(challenge)
+            MockURLProtocol.handler = { request in
+                // Hold the first fetch open long enough for the update
+                // to cancel it, then answer a valid document anyway.
+                Thread.sleep(forTimeInterval: 0.2)
+                return (self.httpResponse(request, 200), payload)
+            }
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(
+                    endpoint: URL(string: "https://a.example.test/kc")!,
+                    session: mockSession()),
+                scope: "login")
+            view.start()
+            let first = view.task
+            XCTAssertNotNil(first)
+            XCTAssertFalse(first?.isCancelled ?? true)
+
+            view.applyConfiguration(
+                endpoint: URL(string: "https://b.example.test/kc")!,
+                scope: "login", sitekey: nil,
+                onVerify: { _ in })
+            XCTAssertTrue(first?.isCancelled ?? false)
+            XCTAssertNotNil(view.task)
+        }
+
+        @MainActor
+        func testWidgetSolvesAndUsesTheLatestCallback() async throws {
+            let challenge = shaChallenge()
+            let payload = try JSONEncoder().encode(challenge)
+            MockURLProtocol.handler = { request in
+                (self.httpResponse(request, 200), payload)
+            }
+            let endpoint = URL(string: "https://api.example.test/kc")!
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(endpoint: endpoint, session: mockSession()),
+                scope: "login")
+            let verified = expectation(description: "verified")
+            var token: String?
+            // An unchanged connection refreshes the callback without a
+            // restart (the solve started by init's caller observes it).
+            view.applyConfiguration(
+                endpoint: endpoint, scope: "login", sitekey: nil,
+                onVerify: { value in
+                    token = value
+                    verified.fulfill()
+                })
+            XCTAssertEqual(view.restartCount, 0)
+            view.start()
+            await fulfillment(of: [verified], timeout: 10)
+            XCTAssertEqual(view.state, .verified)
+            XCTAssertFalse(view.token.isEmpty)
+            XCTAssertEqual(token, view.token)
+        }
+
+        @MainActor
+        func testSwiftUIWidgetCarriesItsConfiguration() {
+            var verified: String?
+            let view = KiwiCaptchaView(
+                endpoint: URL(string: "https://api.example.test/kc")!,
+                scope: "signup",
+                sitekey: "pk-swiftui",
+                onVerify: { verified = $0 })
+            XCTAssertEqual(view.endpoint.absoluteString, "https://api.example.test/kc")
+            XCTAssertEqual(view.scope, "signup")
+            XCTAssertEqual(view.sitekey, "pk-swiftui")
+            view.onVerify("tok")
+            XCTAssertEqual(verified, "tok")
+        }
+    #endif
 }

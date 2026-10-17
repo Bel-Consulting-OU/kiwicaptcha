@@ -74,6 +74,12 @@ func RungVerifiable(mKib, t, p int) bool {
 // profile naming a rung this verifier cannot verify is a loud
 // configuration error, never a silent downgrade.
 func (s Settings) BuildVerifier() (*Verifier, error) {
+	// The secret is the deployment secret documented on Settings: a
+	// too-short value refuses to boot. The per-call SecretKey option
+	// keeps its own behavior in Verify.
+	if len(s.Secret) < MinSecretBytes {
+		return nil, fmt.Errorf("kiwicaptcha: the secret must be at least %d bytes", MinSecretBytes)
+	}
 	if !ProfileKnown(s.Profile) {
 		return nil, errors.New("kiwicaptcha: the profile must be one of standard, argon16, argon32, argon64")
 	}
@@ -85,6 +91,7 @@ func (s Settings) BuildVerifier() (*Verifier, error) {
 	config, err := NewVerifierConfig(VerifierConfig{
 		AcceptLegacyV1:        s.AcceptLegacyV1,
 		Region:                s.Region,
+		Scopes:                append([]string(nil), s.Scopes...),
 		ExpectedPolicyVersion: s.ExpectedPolicyVersion,
 		PolicyVersionFloor:    s.PolicyVersionFloor,
 		ExpectedIssuer:        s.ExpectedIssuer,

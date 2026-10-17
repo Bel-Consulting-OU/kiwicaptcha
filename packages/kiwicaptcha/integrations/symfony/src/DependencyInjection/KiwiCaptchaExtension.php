@@ -2393,6 +2393,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $stepUpMaster,
                     ]))
                         ->setArgument('$lockout', new Reference(StepUpLockoutGuard::class))
+                        // The first-enrollment bootstrap: the gate owns
+                        // risk.step_up.allow_signup_bootstrap, so the
+                        // handler must hold that same gate or the knob
+                        // stays inert.
+                        ->setArgument('$bootstrapGate', new Reference(StepUpBootstrapGate::class))
                         ->setPublic(true));
                     $stepUpHandlers['totp'] = new Reference(TotpStepUpHandler::class);
                 }
@@ -2430,6 +2435,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         \array_values($stepUpConfig['handlers']['webauthn']['allowed_origins'] ?? []),
                     ]))
                         ->setArgument('$lockout', new Reference(StepUpLockoutGuard::class))
+                        // The same first-enrollment gate the time-based
+                        // handler holds: the knob reaches the ceremony
+                        // through this reference.
+                        ->setArgument('$bootstrapGate', new Reference(StepUpBootstrapGate::class))
                         ->setPublic(true));
                     $stepUpHandlers['webauthn'] = new Reference(WebAuthnStepUpHandler::class);
                 }

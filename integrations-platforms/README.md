@@ -41,11 +41,12 @@ and guards exactly the sign-up endpoint.
 
 `kiwi-verify.php` (the one canonical endpoint, at the top level of
 this directory) is the companion every gateway needs. The gateway
-directories (`nginx/`, `caddy/`, `traefik/`) ship a thin shim that
-requires that canonical file, so in-tree paths keep working without
-duplicated endpoint logic. In a deployment, copy the canonical
-`kiwi-verify.php` to the web root — do not copy a shim alone. All
-three gateways answer the same contract:
+directories (`nginx/`, `caddy/`, `traefik/`) ship that canonical file
+byte for byte, so in-tree paths keep working without endpoint drift;
+`tools/ci/verify-gateway-parity.sh` (run by `tests/run-all.sh`)
+enforces the equality. In a deployment, copy the canonical
+`kiwi-verify.php` to the web root. All three gateways answer the same
+contract:
 
 - verify URL: `KIWI_VERIFY_URL` (default the sidecar at
   `http://127.0.0.1:7371/verify`; `KIWI_VERIFY_MODE=compat` switches
@@ -64,7 +65,10 @@ three gateways answer the same contract:
 
 `tests/run.sh` runs everything the local toolchain allows: PHP unit
 tests of the endpoint logic, a live matrix (php -S plus curl) against
-a stub kiwi deployment, `nginx -t` on the example config, byte
-equality of the endpoint copies, and `php -l` over every PHP file.
-Caddy and Traefik are documented for `caddy validate` and the Traefik
-dashboard check; neither binary is assumed on the host.
+a stub kiwi deployment, `nginx -t` on the example config and on the
+composed gitea-forgejo/gitlab fragments, structural guards for the
+Caddyfile and the Traefik YAML (`caddy validate` and a YAML parse run
+too when those tools exist), byte equality of the endpoint copies,
+and `php -l` over every PHP file. `tests/run-all.sh` is the master
+runner: the gateway/parity suite plus every platform suite whose
+toolchain is installed, with explicit skips otherwise.

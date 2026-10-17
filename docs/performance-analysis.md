@@ -511,12 +511,12 @@ appears in replicated deployments, where it should be budgeted as a
 deployment property, not a code regression.
 
 The measured WAIT numbers are honest about which path they exercise.
-`tools/perf-wait.php` runs against the single-node service only: on a
+`packages/kiwicaptcha/tools/perf-wait.php` runs against the single-node service only: on a
 single authority WAIT acknowledges 0 replicas, so every barrier write
 fails closed with `ReplicaWaitException` after the wait timeout
 (recorded p50 about 101 ms, p95 about 202 ms at the 100 ms store
 timeout), and the reported deltas are the shortfall/fail-closed path,
-the upper bound of the barrier cost. `tools/perf-wait-replica.php`
+the upper bound of the barrier cost. `packages/kiwicaptcha/tools/perf-wait-replica.php`
 boots a real local primary plus replica (WAIT 1 confirms the sync)
 and measures the successful-acknowledgment numbers on the same
 `RedisStorage` barrier: with the replica acked, issuance p50 0.144 ms

@@ -32,24 +32,31 @@ const widgetRef = useRef<KiwiCaptchaRef>(null);
   stay live without a rebuild; only the config fields re-mount the
   widget. StrictMode's double mount is safe (one live record).
 - `useKiwiCaptcha(props)` returns `containerRef` plus
-  `execute/reset/getResponse/isExpired` for layouts that place the
-  mount node themselves.
+  `execute/reset/getResponse/isExpired/destroy` for layouts that place
+  the mount node themselves.
 - The imperative handle (`ref`) exposes `getResponse`, `isExpired`,
-  `reset` and `execute`; `execute` resolves the token (the driver's
-  promise API) and rejects with the driver's failure reason.
+  `reset`, `execute` and `destroy`; `execute` resolves the token (the
+  driver's promise API) and rejects with the driver's failure reason,
+  and `destroy` tears the widget down early (unmount also destroys it).
 
 ## Props
 
 The four-setting shape plus the core's options: theme, action, cData,
-chainTicket, requestBinding, fetchTimeoutMs, algorithm, responseField,
-execution, tokenFieldName, buildMarkup, and the loader controls
-(scriptSrc, scriptIntegrity, scriptCrossorigin, scriptTimeoutMs).
+chainTicket, requestBinding, fetchTimeoutMs, algorithm, riskContext,
+responseField, execution, tokenFieldName, buildMarkup and api
+(a preloaded driver), and the loader controls (scriptSrc,
+scriptIntegrity, scriptCrossorigin, scriptTimeoutMs, scriptNonce).
+Replacing `api` or any config field rebuilds the widget; className and
+style only style the mount node.
 Callbacks: onVerify, onError, onExpire, onReady, onVerifying, onRetry,
 onWorkerUnavailable, onExecutionUnavailable.
 
 ## Tests
 
 `npm test` runs the vitest suite under happy-dom with a faithful mock
-driver: mount and markup, token delivery, error/expiry/retry mapping,
-the imperative handle, StrictMode double-mount safety, config-change
-re-mounts, callback-change stability, and unmount listener hygiene.
+driver: mount and markup, theme/lang/action/cData/execution/riskContext
+forwarding, loader-control forwarding, token delivery,
+error/expiry/retry/unavailable mapping, the imperative handle and
+destroy, api replacement, StrictMode double-mount safety, config-change
+re-mounts, callback-change stability, hook option stripping and unmount
+listener hygiene.

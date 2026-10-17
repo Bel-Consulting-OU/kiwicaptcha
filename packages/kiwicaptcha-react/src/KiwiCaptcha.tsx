@@ -8,6 +8,7 @@ import {
 import {
   loadKiwiCaptcha,
   renderKiwiCaptcha,
+  type KiwiCaptchaApi,
   type KiwiRenderOptions,
   type KiwiWidgetHandle,
 } from "@kiwicaptcha/client-core";
@@ -26,6 +27,8 @@ export interface KiwiCaptchaProps extends KiwiRenderOptions {
   scriptCrossorigin?: "anonymous" | "use-credentials";
   /** Reject the load when the driver has not appeared within the budget. */
   scriptTimeoutMs?: number;
+  /** Optional CSP nonce set on the injected driver script. */
+  scriptNonce?: string;
   /** ClassName and style pass straight onto the mount node. */
   className?: string;
   style?: React.CSSProperties;
@@ -37,6 +40,22 @@ export interface KiwiCaptchaRef {
   isExpired(): boolean;
   reset(): void;
   execute(): Promise<string>;
+  destroy(): void;
+}
+
+// A preloaded api is compared by identity: JSON.stringify would collapse
+// two distinct api objects with methods to the same "{}".
+const apiIds = new WeakMap<object, number>();
+let nextApiId = 0;
+
+function apiKey(api: KiwiCaptchaApi | undefined): number | undefined {
+  if (!api) return undefined;
+  let id = apiIds.get(api);
+  if (id === undefined) {
+    id = ++nextApiId;
+    apiIds.set(api, id);
+  }
+  return id;
 }
 
 function configKey(props: KiwiCaptchaProps): string {
@@ -52,14 +71,17 @@ function configKey(props: KiwiCaptchaProps): string {
     props.requestBinding,
     props.fetchTimeoutMs,
     props.algorithm,
+    props.riskContext,
     props.responseField,
     props.execution,
     props.tokenFieldName,
     props.buildMarkup,
+    apiKey(props.api),
     props.scriptSrc,
     props.scriptIntegrity,
     props.scriptCrossorigin,
     props.scriptTimeoutMs,
+    props.scriptNonce,
   ]);
 }
 
@@ -80,6 +102,7 @@ export const KiwiCaptcha = forwardRef<KiwiCaptchaRef, KiwiCaptchaProps>(
       scriptIntegrity,
       scriptCrossorigin,
       scriptTimeoutMs,
+      scriptNonce,
       className,
       style,
       ...renderOptions
@@ -110,6 +133,7 @@ export const KiwiCaptcha = forwardRef<KiwiCaptchaRef, KiwiCaptchaProps>(
             integrity: scriptIntegrity,
             crossorigin: scriptCrossorigin,
             timeoutMs: scriptTimeoutMs,
+            scriptNonce,
           }).then((loaded) => {
             if (cancelled || !node) return;
             handle = renderKiwiCaptcha(node, { ...latest.current, api: loaded });
@@ -140,6 +164,7 @@ export const KiwiCaptcha = forwardRef<KiwiCaptchaRef, KiwiCaptchaProps>(
           handleRef.current
             ? handleRef.current.execute()
             : Promise.reject(new Error("kiwicaptcha: widget not mounted")),
+        destroy: () => handleRef.current?.destroy(),
       }),
       [],
     );
@@ -159,6 +184,7 @@ export interface UseKiwiCaptchaResult {
   reset(): void;
   getResponse(): string;
   isExpired(): boolean;
+  destroy(): void;
 }
 
 export function useKiwiCaptcha(props: KiwiCaptchaProps): UseKiwiCaptchaResult {
@@ -167,6 +193,9 @@ export function useKiwiCaptcha(props: KiwiCaptchaProps): UseKiwiCaptchaResult {
     scriptIntegrity,
     scriptCrossorigin,
     scriptTimeoutMs,
+    scriptNonce,
+    className: _className,
+    style: _style,
     ...renderOptions
   } = props;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -190,6 +219,7 @@ export function useKiwiCaptcha(props: KiwiCaptchaProps): UseKiwiCaptchaResult {
         integrity: scriptIntegrity,
         crossorigin: scriptCrossorigin,
         timeoutMs: scriptTimeoutMs,
+        scriptNonce,
       }).then((loaded) => {
         if (cancelled || !node) return;
         handle = renderKiwiCaptcha(node, { ...latest.current, api: loaded });
@@ -213,5 +243,6 @@ export function useKiwiCaptcha(props: KiwiCaptchaProps): UseKiwiCaptchaResult {
     reset: () => handleRef.current?.reset(),
     getResponse: () => handleRef.current?.getResponse() ?? "",
     isExpired: () => handleRef.current?.isExpired() ?? false,
+    destroy: () => handleRef.current?.destroy(),
   };
 }

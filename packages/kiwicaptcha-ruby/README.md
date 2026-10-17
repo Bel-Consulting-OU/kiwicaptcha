@@ -51,7 +51,10 @@ result.code                # => '' on success, a typed wire code on failure
 The scope option is REQUIRED (`expected_scope` is a keyword without a
 default, so an omitted option raises at construction): the typed
 `required_scope` refusal answers an empty option, never an any-scope
-acceptance.
+acceptance. The configured scope map is enforced as an allowlist: pass
+`allowed_scopes: settings.scopes` (or an array of names) on the verify
+options and a call naming an expected scope outside it answers the
+typed `wrong_scope` failure. An empty map accepts any scope.
 
 ## Execution-armed records: the ExecutionPolicy
 
@@ -84,9 +87,11 @@ SDK contract):
 
 * Execution-armed records answer `execution_mismatch`: the browser
   trace walker is a browser-behavior oracle this SDK does not carry.
-* Argon2id records answer `unsupported_argon2_params`: no native
-  Argon2id runtime. RSW records verify fully when the trapdoor is
-  configured.
+* Argon2id records verify through the optional native binding (the
+  `argon2` gem): when the gem is present the derivation runs natively;
+  when it is absent the record is refused with the typed
+  `unsupported_argon2_params`, never silently downgraded. RSW records
+  verify fully when the trapdoor is configured.
 
 ## Rack middleware (Tier A)
 
@@ -173,7 +178,7 @@ risk, and exactly the abuse outcomes write long-memory marks.
 ## Doctor
 
 ```sh
-bin/kiwicaptcha-doctor   # checks secret strength, store atomicity, rsw pair
+bin/kiwicaptcha-doctor   # checks secret strength, scopes/risk classes, store atomicity, rsw pair
 ```
 
 Exits zero only when every check passes.

@@ -35,7 +35,7 @@ const emit = defineEmits<{
   executionUnavailable: [reason: string, scope: string];
 }>();
 
-const { containerRef, ready, execute, reset, getResponse, isExpired } =
+const { containerRef, ready, execute, reset, getResponse, isExpired, destroy } =
   useKiwiCaptcha(() => ({
     ...props,
     onReady: (scope) => emit("ready", scope),
@@ -48,7 +48,7 @@ const { containerRef, ready, execute, reset, getResponse, isExpired } =
     onExecutionUnavailable: (reason, scope) => emit("executionUnavailable", reason, scope),
   }));
 
-defineExpose({ ready, execute, reset, getResponse, isExpired });
+defineExpose({ ready, execute, reset, getResponse, isExpired, destroy });
 </script>
 
 <template>

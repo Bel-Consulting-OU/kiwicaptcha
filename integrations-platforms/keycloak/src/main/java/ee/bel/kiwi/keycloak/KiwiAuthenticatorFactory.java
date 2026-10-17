@@ -25,6 +25,7 @@ public class KiwiAuthenticatorFactory implements AuthenticatorFactory {
 
     private static final Requirement[] REQUIREMENT_CHOICES = {
             Requirement.REQUIRED,
+            Requirement.ALTERNATIVE,
             Requirement.DISABLED,
     };
 
@@ -88,6 +89,13 @@ public class KiwiAuthenticatorFactory implements AuthenticatorFactory {
                 KiwiAuthenticator.CONFIG_SCOPE, "Scope",
                 "The challenge scope this flow sends.",
                 ProviderConfigProperty.STRING_TYPE, "login"));
+        properties.add(new ProviderConfigProperty(
+                KiwiAuthenticator.CONFIG_TRUST_PROXY, "Trust proxy headers",
+                "Bind the rightmost X-Forwarded-For hop (with X-Real-IP as the "
+                        + "fallback) instead of the socket peer. Enable only behind a "
+                        + "reverse proxy that appends or overwrites the header; the "
+                        + "default false ignores forwarding headers entirely.",
+                ProviderConfigProperty.BOOLEAN_TYPE, "false"));
         return properties;
     }
 

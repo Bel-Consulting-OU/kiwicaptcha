@@ -754,3 +754,103 @@ fn the_scope_ids_and_the_rung_composition_stay_stable() {
         parse_rung("argon16").unwrap()
     );
 }
+
+// ------------------------------- the strong rungs end to end
+//
+// The hardening contract's rung table must be real, not just parsed:
+// each strong rung is issued through the sidecar, solved by the shipped
+// native solver and verified through the same HTTP surface a deployment
+// drives. The Argon cases stay bounded (one 32 MiB × 3 and one 64 MiB × 3
+// derivation); the rsw case uses the shared fixture trapdoor at the
+// minimum sequential cost.
+
+fn assert_roundtrip(plan: &str, profile: &str, m_kib: u64, t: u64) {
+    let server = spawn(
+        SidecarState::build(config_with(plan, None)),
+        ServerOptions::default(),
+    );
+    let (status, _, wire) = post_json(
+        server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(status, 200, "{wire}");
+    let issued: serde_json::Value = serde_json::from_str(wire.trim_end()).unwrap();
+    assert_eq!(issued["profile"], profile);
+    assert_eq!(issued["mKib"], m_kib);
+    assert_eq!(issued["t"], t);
+    assert_eq!(issued["p"], 1);
+    assert_eq!(issued["targetBits"], 1);
+
+    // Stay above the rung's server-measured timing floor (50 ms for the
+    // Argon profiles) even on a very fast host.
+    std::thread::sleep(Duration::from_millis(80));
+    let token = solve_token(wire.trim_end());
+    let payload = verify_body(&server, &token, "login");
+    assert_eq!(payload["kiwi-code"], "ok", "{payload}");
+}
+
+#[test]
+fn rung_argon32_issues_solves_and_verifies_end_to_end() {
+    assert_roundtrip("login=argon32", "argon32", 32 * 1024, 3);
+}
+
+#[test]
+fn rung_argon64_issues_solves_and_verifies_end_to_end() {
+    // 64 MiB × 3 is the strongest Argon rung; one real derivation is
+    // comfortably inside the suite budget.
+    assert_roundtrip("login=argon64", "argon64", 64 * 1024, 3);
+}
+
+#[test]
+fn rung_rsw_issues_solves_and_verifies_end_to_end() {
+    use kiwicaptcha_verifier::config::RswTrapdoorConfig;
+
+    // The shared cross-language fixture pair (the same modulus and
+    // lambda the core/PHP suites use), read from the published fixture
+    // so this test does not depend on a feature-gated test module.
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/rsw-identity-v1/fixtures.json"
+        ))
+        .expect("the rsw fixture is readable"),
+    )
+    .expect("the rsw fixture is JSON");
+    let modulus = fixture["modulus_n_b64"]
+        .as_str()
+        .expect("modulus")
+        .to_string();
+    let lambda = fixture["lambda_b64"].as_str().expect("lambda").to_string();
+
+    let default_rung = parse_rung("sha18").expect("the default rung parses");
+    let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+    config.plan = parse_scopes(Some("login=rsw"), default_rung).expect("the plan parses");
+    config.rsw = Some(RswTrapdoorConfig {
+        modulus_n: modulus.clone(),
+        lambda,
+        t: kiwicaptcha::challenge::MIN_RSW_T,
+    });
+    let server = spawn(SidecarState::build(config), ServerOptions::default());
+
+    let (status, _, wire) = post_json(
+        server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(status, 200, "{wire}");
+    let issued: serde_json::Value = serde_json::from_str(wire.trim_end()).unwrap();
+    assert_eq!(issued["profile"], "rsw");
+    assert_eq!(issued["algorithm"], "rsw");
+    assert_eq!(issued["t"], kiwicaptcha::challenge::MIN_RSW_T);
+    assert_eq!(issued["targetBits"], 1);
+    // The public modulus must ride the client wire, or no solver can
+    // square modulo n; lambda never appears.
+    assert_eq!(issued["rsw_modulus"].as_str(), Some(modulus.as_str()));
+    assert!(issued.get("rsw_lambda").is_none());
+
+    std::thread::sleep(Duration::from_millis(80));
+    let token = solve_token(wire.trim_end());
+    let payload = verify_body(&server, &token, "login");
+    assert_eq!(payload["kiwi-code"], "ok", "{payload}");
+}

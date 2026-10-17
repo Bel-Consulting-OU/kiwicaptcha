@@ -4,10 +4,11 @@
     <title>Plugin - KiwiCaptcha</title>
     <author>KiwiCaptcha contributors</author>
     <version>1.0.0</version>
-    <description>Proof-of-work CAPTCHA verified against a self-hosted KiwiCaptcha deployment (the verifier sidecar or a siteverify route). The client side loads the deployment's shim script, so incumbent reCAPTCHA, hCaptcha, Turnstile, ALTCHA and Friendly Captcha markup keeps working.</description>
+    <description>PLG_CAPTCHA_KIWICAPTCHA_XML_DESCRIPTION</description>
     <files>
         <filename plugin="kiwicaptcha">kiwicaptcha.php</filename>
         <folder>src</folder>
+        <folder>language</folder>
     </files>
     <config>
         <fields name="params">

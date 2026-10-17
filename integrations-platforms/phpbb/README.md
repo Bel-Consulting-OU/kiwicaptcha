@@ -20,8 +20,12 @@ registers `captcha.plugins.kiwi`.
 - `config/services.yml` wires both; `language/en/info_acp_kiwi.php`
   carries the ACP strings; the config keys are `kiwi_verify_url`,
   `kiwi_bearer`, `kiwi_shim_url`, `kiwi_scope`, `kiwi_mode`,
-  `kiwi_trusted_proxies` (comma-separated trusted-proxy CIDRs; empty never trusts a forwarded header) (set them through a small ACP page or an SQL
-  insert; the plugin reads them from the board config table).
+  `kiwi_trusted_proxies` (comma-separated trusted-proxy CIDRs; empty
+  never trusts a forwarded header). The `acp/` module
+  (`main_info.php` + `main_module.php`) and its template
+  `adm/style/acp_kiwi_settings.html` edit all six keys under ACP,
+  Extensions, KiwiCaptcha settings; the plugin reads them from the
+  board config table.
 
 ## Deployment steps
 
@@ -30,17 +34,20 @@ registers `captcha.plugins.kiwi`.
 3. Select the captcha: ACP, General, Board configuration, User
    registration, "Spambot countermeasures" (or the form's captcha
    setting), choose KiwiCaptcha.
-4. Set the config keys (verify URL, shim URL, scope `signup`) so the
-   widget and the verifier find the deployment.
+4. Open ACP, Extensions, KiwiCaptcha settings and set the config
+   keys (verify URL, shim URL, scope `signup`) so the widget and the
+   verifier find the deployment.
 
 ## Test status
 
-`ext/kiwi/captcha/tests/test-client.php` (20 checks, plain `php`)
+`ext/kiwi/captcha/tests/test-client.php` (61 checks, plain `php`)
 stubs the two framework types (`phpbb\config\config` as an array
 accessory, `GuzzleHttp\ClientInterface` as a one-method interface),
 then loads the real extension classes: both wire formats, the decision
 table, token extraction, the confirm() pass and deny paths, the
-attempt counter and the template feed. A live board install remains
+attempt counter, the template feed, and the ACP structure (module
+metadata, package files, every config key written and every template
+language key declared). A live board install remains
 the place where the ACP flow and the style rendering get their final
 verification; the phpBB version constraint (>=3.3, <4.0) is declared
 in composer.json.

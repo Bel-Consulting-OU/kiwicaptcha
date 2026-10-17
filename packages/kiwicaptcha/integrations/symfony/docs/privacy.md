@@ -33,7 +33,8 @@ carrying a fresh random nonce (see below).
 
 - **strict**: the extension forces the privacy-sensitive options
   regardless of what the operator wrote in the config file.
-  `telemetry: off` means the widget never collects signal fields.
+  The widget evidence arm (`risk.evidence.telemetry`) is forced `off`, so
+  the widget never collects signal fields.
   `same_origin_only: true` means cross-origin challenge requests are
   rejected. `min_duration_ms: 0` means there is no server-side
   solve-timing floor; the timing heuristic is off. Rate limits default to
@@ -64,11 +65,17 @@ acceptance).
 
 ## Telemetry
 
-Behavioral telemetry is **off by default**: the default widget mode is
-`telemetry: off`, and `privacy_mode: strict` forces it regardless of
-operator config. The widget collects signal fields only in the mode the
-page opts into via the `telemetry` option / `data-kiwi-telemetry`
-attribute:
+Behavioral telemetry is **off by default**: the default widget evidence arm
+is `off`, and `privacy_mode: strict` forces it regardless of operator
+config. The rendered collection mode comes from
+`risk.evidence.telemetry` (the protection profile fills its default; every
+privacy-bearing profile derives `off`) and is surfaced on the widget
+container as `data-kiwi-telemetry`; a page may override it per widget
+through the `telemetry` option. The root `telemetry` key is the legacy
+enforcement surface read by `enforce_telemetry` (whether a bot-scored
+telemetry segment is rejected at verification); it does not change the
+rendered `data-kiwi-telemetry` mode. The widget collects signal fields only
+in the mode the page opts into:
 
 - `minimal` — aggregate widget interaction counts only (`me`/`ke`);
 - `full` — adds `navigator.webdriver` and at most 20 coarse 250 ms timing
