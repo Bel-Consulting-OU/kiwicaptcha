@@ -746,6 +746,20 @@ final class ChallengeController
             );
         }
 
+        // Method-override framing: Symfony's method parser reads the
+        // override header (and the optional `_method` form field) before
+        // this method runs. The early request subscriber answers the
+        // ambiguity ahead of routing; the controller keeps the same rule
+        // so a direct invocation can never present a method the framing
+        // gate refused. A single unambiguous override is left to the
+        // framework, unchanged.
+        if (($overrideConflict = $this->methodOverrideConflict($request)) !== null) {
+            return $this->privateJson(
+                ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => $overrideConflict]],
+                Response::HTTP_BAD_REQUEST,
+            );
+        }
+
         // Narrow HTTP: the endpoint is POST-only, enforced here too (the
         // route already restricts the method, but a direct invocation must
         // behave identically). An OPTIONS preflight is a non-POST method
@@ -2402,6 +2416,16 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'CANONICAL_PATH_REQUIRED', 'message' => 'The request target must be the canonical path (no empty, dot or percent-encoded segments).']],
                 Response::HTTP_NOT_FOUND,
+            );
+        }
+
+        // Method-override framing: identical gate to the challenge
+        // endpoint. The early subscriber covers the routed request; the
+        // controller keeps the direct-invocation path identical.
+        if (($overrideConflict = $this->methodOverrideConflict($request)) !== null) {
+            return $this->privateJson(
+                ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => $overrideConflict]],
+                Response::HTTP_BAD_REQUEST,
             );
         }
 

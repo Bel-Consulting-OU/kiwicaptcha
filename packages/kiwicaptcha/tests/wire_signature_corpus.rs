@@ -30,7 +30,10 @@ fn every_signature_corpus_row_has_the_reference_verdict() {
         let record: ChallengeRecord =
             serde_json::from_value(row["record"].clone()).expect("record parses");
         let challenge = row["challenge"].as_str().expect("challenge");
-        assert_eq!(record.challenge, challenge, "{id}: the record carries the row challenge");
+        assert_eq!(
+            record.challenge, challenge,
+            "{id}: the record carries the row challenge"
+        );
         let secret = row["verify_secret"].as_str().expect("secret");
         let tenant = row["verify_tenant"].as_str();
         let signature = signature_from_challenge(challenge);

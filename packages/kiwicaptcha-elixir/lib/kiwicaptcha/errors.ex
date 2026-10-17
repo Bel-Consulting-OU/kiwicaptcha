@@ -36,7 +36,9 @@ defmodule Kiwicaptcha.VerifyError do
     execution_mismatch:
       "the execution digest does not match the expected program trace of the challenge",
     unsupported_rsw_params:
-      "the rsw challenge cannot be verified: this verifier lacks the matching trapdoor, or the signed sequential cost is out of bounds"
+      "the rsw challenge cannot be verified: this verifier lacks the matching trapdoor, or the signed sequential cost is out of bounds",
+    token_source_conflict:
+      "the request carries different solution tokens in more than one source (header, form field, query parameter)"
   }
 
   @type t :: atom()

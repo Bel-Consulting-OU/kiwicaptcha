@@ -32,6 +32,7 @@ export const VerifyErrorCode = {
   RequestBindingMismatch: 'request_binding_mismatch',
   ExecutionMismatch: 'execution_mismatch',
   UnsupportedRswParams: 'unsupported_rsw_params',
+  TokenSourceConflict: 'token_source_conflict',
 } as const;
 
 export type VerifyErrorCode = (typeof VerifyErrorCode)[keyof typeof VerifyErrorCode];
@@ -89,6 +90,8 @@ const DESCRIPTIONS: Readonly<Record<VerifyErrorCode, string>> = {
     'the execution digest does not match the expected program trace of the challenge',
   unsupported_rsw_params:
     'the rsw challenge cannot be verified: this verifier lacks the matching trapdoor, or the signed sequential cost is out of bounds',
+  token_source_conflict:
+    'the request carries different solution tokens in more than one source (header, form field, query parameter)',
 };
 
 /** Operator-facing description of one failure code. */

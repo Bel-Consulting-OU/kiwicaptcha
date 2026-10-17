@@ -141,17 +141,98 @@ func TestMiddlewareTokenSources(t *testing.T) {
 			t.Fatalf("the query source must work: %d", recorder.Code)
 		}
 	})
-	t.Run("header wins", func(t *testing.T) {
-		verifier, handler, _ := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
+	t.Run("header and query conflict", func(t *testing.T) {
+		verifier, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
 		goldenLiveRecordInto(t, verifier)
 		request := goldenIPRequest(http.MethodGet, "/api/submit?"+url.Values{TokenField: {"junk"}}.Encode(), nil)
 		request.Header.Set(TokenHeader, token)
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("the header must win over the query: %d", recorder.Code)
+		if recorder.Code != http.StatusForbidden || *calls != 0 {
+			t.Fatalf("distinct header and query tokens must refuse: %d calls=%d", recorder.Code, *calls)
+		}
+		if !strings.Contains(recorder.Body.String(), `"error":"token_source_conflict"`) {
+			t.Fatalf("the conflict must carry its typed code: %s", recorder.Body.String())
 		}
 	})
+}
+
+func TestMiddlewareTokenAuthorityMatrix(t *testing.T) {
+	rows := []struct {
+		name   string
+		header []string
+		form   []string
+		query  []string
+		status int
+		code   string
+	}{
+		{"header only", []string{"TOKEN"}, nil, nil, http.StatusOK, ""},
+		{"form only", nil, []string{"TOKEN"}, nil, http.StatusOK, ""},
+		{"query only", nil, nil, []string{"TOKEN"}, http.StatusOK, ""},
+		{"header A form B", []string{"TOKEN"}, []string{"other"}, nil, http.StatusForbidden, "token_source_conflict"},
+		{"header A query B", []string{"TOKEN"}, nil, []string{"other"}, http.StatusForbidden, "token_source_conflict"},
+		{"form A query B", nil, []string{"TOKEN"}, []string{"other"}, http.StatusForbidden, "token_source_conflict"},
+		{"two header values", []string{"TOKEN", "other"}, nil, nil, http.StatusForbidden, "token_source_conflict"},
+		{"repeated form values", nil, []string{"TOKEN", "other"}, nil, http.StatusForbidden, "token_source_conflict"},
+		{"repeated query values", nil, nil, []string{"TOKEN", "other"}, http.StatusForbidden, "token_source_conflict"},
+		{"same token every source", []string{"TOKEN"}, []string{"TOKEN"}, []string{"TOKEN"}, http.StatusOK, ""},
+		{"same repeated form values", nil, []string{"TOKEN", "TOKEN"}, nil, http.StatusOK, ""},
+		{"same repeated query values", nil, nil, []string{"TOKEN", "TOKEN"}, http.StatusOK, ""},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			verifier, handler, calls := newMiddlewareStack(t, "login", MiddlewareOptions{SecretKey: testSecret})
+			goldenLiveRecordInto(t, verifier)
+			live := goldenLiveToken(t)
+			material := func(values []string) []string {
+				out := make([]string, 0, len(values))
+				for _, value := range values {
+					if value == "TOKEN" {
+						value = live
+					}
+					out = append(out, value)
+				}
+				return out
+			}
+			target := "/api/submit"
+			query := url.Values{}
+			for _, value := range material(row.query) {
+				query.Add(TokenField, value)
+			}
+			if len(query) > 0 {
+				target += "?" + query.Encode()
+			}
+			body := url.Values{}
+			for _, value := range material(row.form) {
+				body.Add(TokenField, value)
+			}
+			var reader io.Reader
+			if len(body) > 0 {
+				reader = strings.NewReader(body.Encode())
+			}
+			request := goldenIPRequest(http.MethodPost, target, reader)
+			if len(body) > 0 {
+				request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			for _, value := range material(row.header) {
+				request.Header.Add(TokenHeader, value)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != row.status {
+				t.Fatalf("status %d, want %d: %s", recorder.Code, row.status, recorder.Body.String())
+			}
+			if row.code != "" && !strings.Contains(recorder.Body.String(), `"error":"`+row.code+`"`) {
+				t.Fatalf("missing code %s: %s", row.code, recorder.Body.String())
+			}
+			if row.status == http.StatusOK && *calls != 1 {
+				t.Fatalf("an agreed token must verify once: calls=%d", *calls)
+			}
+			if row.status != http.StatusOK && *calls != 0 {
+				t.Fatalf("a refused request must never reach the verifier: calls=%d", *calls)
+			}
+		})
+	}
 }
 
 func TestMiddlewareScopePredicate(t *testing.T) {

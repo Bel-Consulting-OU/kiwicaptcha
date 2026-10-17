@@ -1003,7 +1003,11 @@ impl ShardedRedisRiskStateStore {
         keys.push(crate::keyspace::target_failure_marker_key(
             &self.encoded_namespace,
             target_id,
-            if event_id.is_empty() { "unused" } else { event_id },
+            if event_id.is_empty() {
+                "unused"
+            } else {
+                event_id
+            },
             KeyspaceMode::Sharded,
         ));
         let replies = self.dispatch(vec![BatchUnit {
@@ -1225,6 +1229,11 @@ struct TargetCounts {
 /// Builds the target-dimension `EVALSHA` invocation (the
 /// target_failure.lua contract): three family keys, then op, the two
 /// spread elements and the state TTL.
+//
+// The arity is the script's own argv shape, one parameter per wire
+// field, which keeps the call sites readable and the wire order visible;
+// the same allowance the neighbouring sharded helpers carry.
+#[allow(clippy::too_many_arguments)]
 fn target_evalsha(
     script: &redis_crate::Script,
     keys: &[String],

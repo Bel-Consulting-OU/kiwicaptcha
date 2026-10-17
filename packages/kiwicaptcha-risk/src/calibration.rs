@@ -1008,7 +1008,16 @@ impl CalibrationStore for RedisCalibrationStore {
         invoke.arg(self.false_negative_cost.to_string());
         let bias: i64 = match self.with_connection(|conn| invoke.invoke(conn).map_err(backend)) {
             Ok(bias) => bias,
-            Err(_) => return 0, // fail-open: never break issuance
+            Err(error) => {
+                // The Lua decoder refuses a corrupt persisted value before
+                // any write. The calibration read contract is infallible, so
+                // storage corruption fails high to +max_adjustment: never a
+                // silent zero derived from state the decoder rejected.
+                if error.to_string().contains("storage-corruption") {
+                    return self.max_adjustment;
+                }
+                return 0; // transient backend failure: never break issuance
+            }
         };
         self.script_calls.fetch_add(1, Ordering::Relaxed);
 
@@ -3030,7 +3039,7 @@ mod tests {
             assert_eq!(
                 bounded_bias(i64::MAX, max_adj),
                 max_adj,
-                "overflow fails HIGH"
+                "overflow fails high"
             );
             assert_eq!(bounded_bias(i64::MIN, max_adj), -max_adj);
         }
@@ -3054,11 +3063,11 @@ mod tests {
         store_limits(prefix, 1, 150, 100_000)
     }
 
-    /// Integration: a corrupted bucket value makes fp_mean = Inf/Inf = NaN;
-    /// the Lua guard maps the NaN final_mp to +max_adjustment*1000 and the
-    /// Rust conversion yields exactly +150 — never 0, never an eval error.
+    /// Integration: a corrupted bucket value is storage corruption. The
+    /// decoder refuses the read before any write; the infallible calibration
+    /// contract then fails high, never to a silent zero.
     #[test]
-    fn corrupted_bucket_nan_fails_high_to_plus_max_adjustment() {
+    fn corrupted_bucket_nan_fails_high() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
@@ -3072,22 +3081,22 @@ mod tests {
         assert_eq!(
             s.bias_for_scope(1, now()),
             150,
-            "NaN must fail HIGH to +max_adjustment (never 0)"
+            "a non-finite bucket fails high, never a silent zero"
         );
-        // A cold store re-aggregates the same corrupted state: stable.
+        let state_exists: i64 = redis::cmd("EXISTS")
+            .arg(s.state_key(1))
+            .query(&mut conn)
+            .expect("exists");
         assert_eq!(
-            store_on(s.namespace(), 1, 150, 100_000).bias_for_scope(1, now()),
-            150,
-            "the guarded bias must be stable across re-reads"
+            state_exists, 0,
+            "the refusal happens before the state write"
         );
     }
 
-    /// Integration: a corrupted bucket value (fp_mean = +Inf -> error
-    /// -Inf) clamps at the raw -max_adjustment clamp inside the script —
-    /// bounded int output, never NaN. The rate state is pre-seeded so the
-    /// first call's allowance does not clamp the verdict to 0.
+    /// Integration: a corrupted clipped sum with a finite count is refused
+    /// before the bias state write; the read fails high.
     #[test]
-    fn corrupted_bucket_inf_fp_mean_clamps_bounded() {
+    fn corrupted_bucket_inf_fails_high() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
@@ -3097,8 +3106,6 @@ mod tests {
         let key = s.bucket_key(2, now() / 3_600_000);
         hset_corrupt(&mut conn, &key, "legit_count", "100");
         hset_corrupt(&mut conn, &key, "legit_above_sum", "1e999");
-        // Seed bias_mp = 0 / ts = Redis now - 60 s: the allowance is
-        // 100_000 * 1000 * 60000 / 60000 = 1e8 milli-points >> 150 points.
         redis::cmd("HSET")
             .arg(s.state_key(2))
             .arg("bias_mp")
@@ -3113,19 +3120,26 @@ mod tests {
             .query::<()>(&mut conn)
             .expect("seed ts");
 
-        let bias = s.bias_for_scope(2, now());
         assert_eq!(
-            bias, -150,
-            "a +Inf fp_mean (error -Inf) must clamp to -max_adjustment"
+            s.bias_for_scope(2, now()),
+            150,
+            "storage corruption fails high"
+        );
+        let bias: String = redis::cmd("HGET")
+            .arg(s.state_key(2))
+            .arg("bias_mp")
+            .query(&mut conn)
+            .expect("bias_mp");
+        assert_eq!(
+            bias, "0",
+            "the refused read leaves the stored bias untouched"
         );
     }
 
-    /// Integration: corrupted rate-limit state (bias_mp = "1e999" -> +Inf)
-    /// drags final_mp to +Inf through the lower clamp even when the target
-    /// is 0 — the Lua guard must fail high to +max_adjustment, never
-    /// return the target 0.
+    /// Integration: a corrupted rate-limit state value is refused before
+    /// the state write and fails high, never zero.
     #[test]
-    fn corrupted_state_inf_never_maps_to_zero() {
+    fn corrupted_state_non_finite_fails_high() {
         let Some(_url) = redis_url() else {
             eprintln!("skipping calibration test: RISK_REDIS_URL not set");
             return;
@@ -3145,8 +3159,14 @@ mod tests {
         assert_eq!(
             s.bias_for_scope(3, now()),
             150,
-            "a corrupted +Inf bias_mp must fail HIGH to +max_adjustment, never the 0 target"
+            "storage corruption fails high"
         );
+        let bias: String = redis::cmd("HGET")
+            .arg(s.state_key(3))
+            .arg("bias_mp")
+            .query(&mut conn)
+            .expect("bias_mp");
+        assert_eq!(bias, "1e999", "the corrupt value is not rewritten as clean");
     }
 
     /// (b) The resolution-ratio division is integer-derived: total 0 ->

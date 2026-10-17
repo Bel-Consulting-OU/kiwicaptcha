@@ -18,6 +18,9 @@ export { RedisStore, type RedisLike, type RedisStoreOptions } from './stores/red
 export { SqliteStore, type SqliteLike, type SqliteStoreOptions } from './stores/sqlite.js';
 export {
   verify,
+  invalidResult,
+  dispositionForCode,
+  RETRY_ERROR_CODES,
   ladderRung,
   validateRecord,
   policyVersionAccepted,
@@ -36,6 +39,7 @@ export {
   MAX_PARALLELISM,
   MIN_DIFFICULTY,
   MAX_DIFFICULTY,
+  type Disposition,
   type VerifyOptions,
   type VerifyResult,
   type RswVerifierConfig,
@@ -174,6 +178,13 @@ export {
   DEFAULT_TOKEN_FIELD_FASTIFY,
   type FastifyVerifyOptions,
 } from './middleware/fastify.js';
+export {
+  resolveTokenValues,
+  headerTokenValues,
+  stringValues,
+  type TokenSourceValues,
+  type TokenResolution,
+} from './middleware/token-source.js';
 export {
   resolveClientIp,
   canonicalIp,

@@ -7,6 +7,7 @@ import Fastify from 'fastify';
 import { goldenVectors, frozenClock } from './corpus.js';
 import { challengeRecordFromJson } from '../src/record.js';
 import { MemoryStore } from '../src/stores/memory.js';
+import { StoreUnavailableError, type StoreAdapter } from '../src/store.js';
 import { verify } from '../src/verify.js';
 import { kiwiVerifyExpress, clientIpFromRequest } from '../src/middleware/express.js';
 import { kiwiVerifyFastify, clientIpFromRequestFastify } from '../src/middleware/fastify.js';
@@ -21,7 +22,7 @@ import { kiwiVerifyFastify, clientIpFromRequestFastify } from '../src/middleware
 const SECRET = goldenVectors().hkdf.secret;
 
 interface World {
-  storage: MemoryStore;
+  storage: StoreAdapter;
   token: string;
   nonce: string;
   scope: string;
@@ -151,6 +152,113 @@ describe('express middleware', () => {
     assert.equal(replayBody.error.code, 'already_consumed');
   });
 
+  test('conflicting token sources are refused before any candidate verifies', async () => {
+    const rows: { name: string; request: (token: string) => { url: string; init: RequestInit } }[] = [
+      {
+        name: 'header A / body B',
+        request: (token) => ({
+          url: `${baseUrl}/login`,
+          init: {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-kiwi-token': token },
+            body: new URLSearchParams({ kiwi__token: 'different-token' }).toString(),
+          },
+        }),
+      },
+      {
+        name: 'header A / query B',
+        request: (token) => ({
+          url: `${baseUrl}/login?${new URLSearchParams({ kiwi__token: 'different-token' }).toString()}`,
+          init: { method: 'POST', headers: { 'x-kiwi-token': token } },
+        }),
+      },
+      {
+        name: 'body A / query B',
+        request: (token) => ({
+          url: `${baseUrl}/login?${new URLSearchParams({ kiwi__token: 'different-token' }).toString()}`,
+          init: {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ kiwi__token: token }).toString(),
+          },
+        }),
+      },
+      {
+        name: 'two different header values',
+        request: (token) => ({
+          url: `${baseUrl}/login`,
+          init: {
+            method: 'POST',
+            headers: [
+              ['x-kiwi-token', token],
+              ['x-kiwi-token', 'different-token'],
+            ],
+          },
+        }),
+      },
+      {
+        name: 'repeated form values',
+        request: (token) => ({
+          url: `${baseUrl}/login`,
+          init: {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: `kiwi__token=${encodeURIComponent(token)}&kiwi__token=different-token`,
+          },
+        }),
+      },
+      {
+        name: 'repeated query values',
+        request: (token) => ({
+          url: `${baseUrl}/login?kiwi__token=${encodeURIComponent(token)}&kiwi__token=different-token`,
+          init: { method: 'POST' },
+        }),
+      },
+    ];
+    for (const row of rows) {
+      state = world('sha_plain');
+      const { url, init } = row.request(state.token);
+      const response = await fetch(url, init);
+      assert.equal(response.status, 422, row.name);
+      const body = (await response.json()) as { error: { code: string } };
+      assert.equal(body.error.code, 'token_source_conflict', row.name);
+    }
+  });
+
+  test('the same token in every source still verifies', async () => {
+    state = world('sha_plain');
+    const query = new URLSearchParams({ kiwi__token: state.token }).toString();
+    const response = await fetch(`${baseUrl}/login?${query}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-kiwi-token': state.token,
+      },
+      body: new URLSearchParams({ kiwi__token: state.token }).toString(),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { ok: boolean };
+    assert.equal(body.ok, true);
+  });
+
+  test('a retry decision answers 503, never the denial status', async () => {
+    state = world('sha_plain');
+    const healthy = state.storage;
+    state.storage = failingStore();
+    try {
+      const response = await fetch(`${baseUrl}/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ kiwi__token: state.token }).toString(),
+      });
+      assert.equal(response.status, 503);
+      const body = (await response.json()) as { error: { code: string } };
+      assert.equal(body.error.code, 'storage_unavailable');
+    } finally {
+      state.storage = healthy;
+    }
+  });
+
   test('the redirect mode and the custom field name apply', async () => {
     // One-shot: this path redeems its own fresh record copy.
     state = world('sha_plain');
@@ -216,6 +324,83 @@ describe('fastify middleware', () => {
     }
   });
 
+  test('conflicting sources and the retry status follow the shared rows', async () => {
+    const state = world('sha_plain');
+    const app = Fastify();
+    await app.register(kiwiVerifyFastify, {
+      verify: () => ({
+        storage: state.storage,
+        secretKey: SECRET,
+        expectedScope: state.scope,
+        clientIp: '203.0.113.7',
+        ...state.clock,
+      }),
+    });
+    app.post('/login', async () => ({ ok: true }));
+    try {
+      const headerBody = await app.inject({
+        method: 'POST',
+        url: '/login',
+        headers: { 'x-kiwi-token': state.token },
+        payload: { kiwi__token: 'different-token' },
+      });
+      assert.equal(headerBody.statusCode, 422);
+      assert.equal(
+        (headerBody.json() as { error: { code: string } }).error.code,
+        'token_source_conflict',
+      );
+      const headerQuery = await app.inject({
+        method: 'POST',
+        url: '/login?kiwi__token=different-token',
+        headers: { 'x-kiwi-token': state.token },
+      });
+      assert.equal(headerQuery.statusCode, 422);
+      assert.equal(
+        (headerQuery.json() as { error: { code: string } }).error.code,
+        'token_source_conflict',
+      );
+      const repeatedBody = await app.inject({
+        method: 'POST',
+        url: '/login',
+        payload: { kiwi__token: [state.token, 'different-token'] },
+      });
+      assert.equal(repeatedBody.statusCode, 422);
+      assert.equal(
+        (repeatedBody.json() as { error: { code: string } }).error.code,
+        'token_source_conflict',
+      );
+
+      // A retry decision is 503 even though the denial status is 422.
+      const failing = Fastify();
+      await failing.register(kiwiVerifyFastify, {
+        verify: () => ({
+          storage: failingStore(),
+          secretKey: SECRET,
+          expectedScope: state.scope,
+          clientIp: '203.0.113.7',
+          ...state.clock,
+        }),
+      });
+      failing.post('/login', async () => ({ ok: true }));
+      try {
+        const retry = await failing.inject({
+          method: 'POST',
+          url: '/login',
+          payload: { kiwi__token: state.token },
+        });
+        assert.equal(retry.statusCode, 503);
+        assert.equal(
+          (retry.json() as { error: { code: string } }).error.code,
+          'storage_unavailable',
+        );
+      } finally {
+        await failing.close();
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   test('the plain verify call keeps the contract shape', async () => {
     const state = world('sha_plain');
     await state.storage.store(challengeRecordFromJson(
@@ -230,6 +415,23 @@ describe('fastify middleware', () => {
     assert.ok(result.decisionHandle !== null);
   });
 });
+
+/** A store whose backend is down: every transition answers the
+ * retryable storage_unavailable outcome. */
+function failingStore(): StoreAdapter {
+  const down = (): never => {
+    throw new StoreUnavailableError('backend down');
+  };
+  return {
+    authenticatedResultCommit: true,
+    store: async () => down(),
+    find: async () => down(),
+    runtimeState: async () => down(),
+    consume: async () => down(),
+    commitResult: async () => down(),
+    deleteIfPending: async () => down(),
+  };
+}
 
 describe('adapter client-ip resolution', () => {
   const TRUSTED = ['10.0.0.0/24'];

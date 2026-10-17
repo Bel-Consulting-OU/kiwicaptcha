@@ -160,10 +160,13 @@ import kif "kiwicaptcha/kiwicaptcha-go/integrations/fiber"
 app.Post("/api/submit", handler, kif.Middleware(verifier, secret, "login"))
 ```
 
-Every shell reads the token from the `x-kiwi-token` header, then the
-`kiwi_token` form field, then the query string. Unauthenticated
-requests get `403 Forbidden` with the machine-readable code; a retry
-disposition gets `503 Service Unavailable`. The verified decision
+Every shell collects the token from the `x-kiwi-token` header, the
+`kiwi_token` form field and the query string under the shared
+authority rule: one distinct value verifies, while distinct values in
+more than one source refuse with `token_source_conflict`.
+Unauthenticated requests get `403 Forbidden` with the
+machine-readable code; a retry disposition gets `503 Service
+Unavailable`. The verified decision
 rides the framework context (`http.Request` context, gin context,
 echo context, fiber locals) under the package's decision key.
 

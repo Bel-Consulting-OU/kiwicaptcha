@@ -61,7 +61,8 @@ if (!result.ok) {
   // expired, wrong_scope, required_scope, ip_mismatch, already_consumed, ...
   throw new Error(result.code);
 }
-result.disposition;      // 'allow' on a valid proof, 'deny' on failure
+result.disposition;      // 'allow' on a valid proof, 'retry' on a transient
+                         // failure, 'deny' on a definitive rejection
 result.decisionHandle;   // the challenge nonce (the replay id)
 result.price;            // the paid work-ladder rung, e.g. 'sha20', 'argon64', 'rsw'
 result.requestBinding;   // the application transaction to re-check
@@ -108,10 +109,12 @@ answers with the stored deterministic outcome instead of re-deriving.
 
 ## Middleware
 
-The middleware reads the configured token field, verifies, and on
-failure returns the framework-idiomatic error: a 422 JSON body
-`{error: {code, detail}}`, or a redirect when configured. The
-integrator writes nothing else.
+The middleware collects the configured token field from the body, the
+`x-kiwi-token` header and the query string under the shared authority
+rule: distinct values in more than one source refuse with
+`token_source_conflict`. A definitive denial returns the configured
+response (a 422 JSON body `{error: {code, detail}}` by default, or a
+redirect when configured); a retry decision returns 503.
 
 ```ts
 // Express

@@ -17,9 +17,11 @@ import (
 // proceeds; anything else is answered with a 403 Forbidden carrying
 // the machine-readable error code, and a retry disposition (a storage
 // outage or capacity exhaustion) answers with a 503 Service
-// Unavailable. The token source order is the x-kiwi-token header,
-// then the kiwi_token form field, then the kiwi_token query
-// parameter.
+// Unavailable. Token authority follows the shared rule: every
+// non-empty value from the x-kiwi-token header, the kiwi_token form
+// field and the kiwi_token query parameter is collected, one distinct
+// value verifies, and distinct values in more than one source refuse
+// with token_source_conflict before any candidate is verified.
 
 // Middleware constants of the token source order.
 const (
@@ -78,9 +80,9 @@ func Middleware(verifier *Verifier, expectedScope string, opts MiddlewareOptions
 				next.ServeHTTP(w, r)
 				return
 			}
-			token := TokenFromRequest(r)
-			if token == "" {
-				RenderDenial(w, r, DecisionFromOutcome(InvalidOutcome(ErrCodeMalformedToken), ""), opts.Denied)
+			token, failure := TokenFromRequest(r)
+			if failure != "" {
+				RenderDenial(w, r, DecisionFromOutcome(InvalidOutcome(failure), ""), opts.Denied)
 				return
 			}
 			outcome := verifier.Verify(token, VerifyOptions{
@@ -120,21 +122,56 @@ func RenderDenial(w http.ResponseWriter, r *http.Request, decision VerifyDecisio
 	_, _ = w.Write(body)
 }
 
-// TokenFromRequest resolves the token from the header, then the form
-// field, then the query parameter.
-func TokenFromRequest(r *http.Request) string {
-	if header := r.Header.Get(TokenHeader); header != "" {
-		return header
+// ResolveTokenValues applies the shared token authority rule: every
+// non-empty value from every source is collected, one distinct value
+// verifies, and two or more distinct values refuse with
+// token_source_conflict before any candidate is verified.
+func ResolveTokenValues(headerValues, formValues, queryValues []string) (string, VerifyError) {
+	token := ""
+	seen := make(map[string]bool)
+	for _, group := range [][]string{headerValues, formValues, queryValues} {
+		for _, value := range group {
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			if len(seen) > 1 {
+				return "", ErrCodeTokenSourceConflict
+			}
+			token = value
+		}
 	}
+	if len(seen) == 0 {
+		return "", ErrCodeMalformedToken
+	}
+	return token, ""
+}
+
+// TokenFromRequest resolves the token under the shared authority rule
+// from the x-kiwi-token header, the kiwi_token form field and the
+// kiwi_token query parameter. Repeated header lines, form values and
+// query values are all collected. It returns the token and an empty
+// failure code, or an empty token and the typed failure code.
+func TokenFromRequest(r *http.Request) (string, VerifyError) {
+	headerValues := make([]string, 0, 1)
+	for _, line := range r.Header.Values(TokenHeader) {
+		// A proxy may fold duplicate header lines into one comma list.
+		// The token alphabet has no comma, so each entry is a candidate.
+		for _, part := range strings.Split(line, ",") {
+			if value := strings.TrimSpace(part); value != "" {
+				headerValues = append(headerValues, value)
+			}
+		}
+	}
+	formValues := []string{}
 	if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") && r.PostForm == nil {
-		// Parse only the body, never the query string, for the form
-		// source; a bad body leaves the field empty.
+		// Parse the body for the form source; a bad body leaves the
+		// field empty.
 		_ = r.ParseForm()
 	}
-	if r.PostForm.Get(TokenField) != "" {
-		return r.PostForm.Get(TokenField)
-	}
-	return r.URL.Query().Get(TokenField)
+	formValues = append(formValues, r.PostForm[TokenField]...)
+	queryValues := r.URL.Query()[TokenField]
+	return ResolveTokenValues(headerValues, formValues, queryValues)
 }
 
 // ClientIPFromRequest resolves the canonical client IP of a request

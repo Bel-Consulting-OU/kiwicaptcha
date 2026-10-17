@@ -5,7 +5,8 @@
 --                           pnet:{kiwi:<ns>:<principal_hex>}, the hash
 --                           tag carrying the whole principal identity,
 --                           so one principal owns one Cluster slot)
---   max Redis calls:      7 + 2*evicted (1 TIME + 1 HGET + 1 HSET
+--   max Redis calls:      9 + 2*evicted (1 TYPE + 1 TIME + 2 HGETALL +
+--                          1 HGET + 1 HSET
 --                           [+ 1 HSET trust] + 1 HGETALL + up to 2
 --                           HDELs per evicted victim, bounded by the
 --                           cap ceiling, + 1 further HGETALL when that
@@ -68,6 +69,54 @@
 local EXPIRY_CEILING_MS = 2147483647 * 1000
 local MAX_CAP = 256
 
+-- BEGIN KIWI PERSISTED-STATE DECODER
+-- Shared decoder block: keep byte-identical across the risk scripts.
+-- Missing values keep their documented defaults; a present value must be
+-- a finite number of the required shape. Anything else is storage
+-- corruption and fails closed before the first mutation.
+local function kiwi_decode_number(raw, label)
+    if raw == nil or raw == false then
+        return nil
+    end
+    local n = tonumber(raw)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        error('storage-corruption: ' .. label .. ' is not a finite number')
+    end
+    return n
+end
+
+local function kiwi_decode_integer(raw, label)
+    local n = kiwi_decode_number(raw, label)
+    if n ~= nil and n ~= math.floor(n) then
+        error('storage-corruption: ' .. label .. ' is not an integer')
+    end
+    return n
+end
+
+local function kiwi_assert_type(key, expected)
+    local actual = redis.call('TYPE', key).ok
+    if actual ~= 'none' and actual ~= expected then
+        error('storage-corruption: ' .. key .. ' holds ' .. actual .. ', expected ' .. expected)
+    end
+end
+
+local function kiwi_effect_marker(event_id, now_ms, ttl_seconds)
+    return event_id .. ':' .. (now_ms + ttl_seconds * 1000)
+end
+
+local function kiwi_effect_matches(raw, event_id, now_ms)
+    if raw == nil or raw == false then
+        return false
+    end
+    local id, expiry = string.match(raw, '^(.*):(%d+)$')
+    if id == nil then
+        return raw == event_id
+    end
+    local expires = tonumber(expiry)
+    return id == event_id and expires ~= nil and now_ms <= expires
+end
+-- END KIWI PERSISTED-STATE DECODER
+
 -- Class bounds: the TTL range each class may request and its cap ceiling.
 local CLASS_TTL_MIN = {
     session = 60000,        -- 1 minute
@@ -125,6 +174,8 @@ if op ~= 'seen' and op ~= 'record' and op ~= 'has_trusted'
     and op ~= 'has_any_trusted' and op ~= 'forget_devices' then
     return redis.error_reply('pnet: op must be seen, record, has_trusted, has_any_trusted or forget_devices')
 end
+
+kiwi_assert_type(KEYS[1], 'hash')
 
 if op == 'forget_devices' then
     -- Atomic revocation (F15): the session and device tags of the
@@ -188,7 +239,7 @@ if op == 'has_any_trusted' then
         local bare = mirrors[i]
         local v = last_use[bare]
         if v then
-            local last = tonumber(v)
+            local last = kiwi_decode_integer(v, KEYS[1] .. ':' .. bare)
             if last ~= nil then
                 local fclass = classify(bare)
                 local isNetworkClass = fclass == 'net' or fclass == 'asn'
@@ -237,7 +288,7 @@ if op == 'seen' then
     if not v then
         return 0
     end
-    local last = tonumber(v)
+    local last = kiwi_decode_integer(v, KEYS[1] .. ':' .. tag)
     if last == nil then
         return 0
     end
@@ -252,7 +303,7 @@ if op == 'has_trusted' then
     if not v then
         return 0
     end
-    local last = tonumber(v)
+    local last = kiwi_decode_integer(v, KEYS[1] .. ':' .. tag)
     if last == nil then
         return 0
     end
@@ -281,7 +332,28 @@ end
 -- answer says whether the tag was newly created (0 = existed). This is
 -- a touch-upsert, not SET NX: the first WRITE wins the trust flag, the
 -- newest write wins the last-use.
-local existed = redis.call('HGET', KEYS[1], tag)
+-- Preflight the current hash before the touch: every class tag the
+-- eviction may rank is strictly decoded here, so a corrupt last-use can
+-- never become zero and be evicted as "oldest". The same reply supplies
+-- the pre-write field set for the eviction walk.
+local all = redis.call('HGETALL', KEYS[1])
+local existed = false
+local class_tags = {}
+for i = 1, #all, 2 do
+    local f = all[i]
+    if f == tag then
+        existed = true
+    elseif f ~= trust_key and string.sub(f, 1, 2) ~= 't:' then
+        local fclass = classify(f)
+        if fclass == class then
+            class_tags[#class_tags + 1] = {
+                f,
+                kiwi_decode_integer(all[i + 1], KEYS[1] .. ':' .. f) or 0
+            }
+        end
+    end
+end
+
 redis.call('HSET', KEYS[1], tag, tostring(now_ms))
 if trust == '1' then
     redis.call('HSET', KEYS[1], trust_key, '1')
@@ -293,18 +365,7 @@ end
 -- not stable, so without the exclusion a tie would be free to pick
 -- it), then evict the oldest above the cap together with their trust
 -- flags.
-local all = redis.call('HGETALL', KEYS[1])
-local class_tags = {}
-for i = 1, #all, 2 do
-    local f = all[i]
-    if f ~= tag and f ~= trust_key and string.sub(f, 1, 2) ~= 't:' then
-        local fclass = classify(f)
-        if fclass == class then
-            class_tags[#class_tags + 1] = { f, tonumber(all[i + 1]) or 0 }
-        end
-    end
-end
-local scan = all
+local scan = redis.call('HGETALL', KEYS[1])
 if #class_tags + 1 > cap then
     -- Sort ascending by last-use (oldest first).
     table.sort(class_tags, function(a, b) return a[2] < b[2] end)

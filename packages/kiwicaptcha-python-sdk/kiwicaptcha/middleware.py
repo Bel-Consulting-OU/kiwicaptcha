@@ -13,8 +13,10 @@ The contract per shell: a request carrying a valid, unconsumed token
 proceeds; anything else is answered with ``403 Forbidden`` carrying the
 machine-readable error code, and a retry disposition (a storage outage
 or capacity exhaustion) answers with ``503 Service Unavailable``. The
-token source order is the ``x-kiwi-token`` header, then the
-``kiwi_token`` form field, then the ``kiwi_token`` query parameter.
+shared token authority rule collects the ``x-kiwi-token`` header, the
+``kiwi_token`` form field and the ``kiwi_token`` query parameter. One
+distinct value verifies; distinct values in more than one source refuse
+with ``token_source_conflict`` before any candidate is verified.
 """
 
 import json
@@ -40,18 +42,51 @@ def _json_body(code: str) -> bytes:
     ).encode("utf-8")
 
 
-def _pick_token(
-    header: Optional[str],
-    form: Optional[Dict[str, Any]],
-    query: Optional[Dict[str, Any]],
-) -> Optional[str]:
-    if header:
-        return header
-    if form is not None and form.get(TOKEN_FIELD):
-        return form[TOKEN_FIELD]
-    if query is not None and query.get(TOKEN_FIELD):
-        return query[TOKEN_FIELD]
-    return None
+def _header_values(value: Optional[str]) -> List[str]:
+    """Every token value of the merged header line. The token alphabet
+    has no comma, so a repeated header split by the server arrives as a
+    comma-joined list and every entry is authoritative."""
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _multi_values(values: Any, field: str) -> List[str]:
+    """Every non-empty value under one field, repeated values included."""
+    if values is None:
+        return []
+    getlist = getattr(values, "getlist", None)
+    if callable(getlist):
+        return [value for value in getlist(field) if isinstance(value, str) and value]
+    value = values.get(field) if hasattr(values, "get") else None
+    if isinstance(value, str) and value:
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str) and item]
+    return []
+
+
+def resolve_token_values(
+    header_values: Iterable[str],
+    form_values: Iterable[str],
+    query_values: Iterable[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """The shared token authority rule.
+
+    Collect every non-empty value from every source. One distinct value
+    verifies, however many sources carry it. Two or more distinct
+    values refuse with ``token_source_conflict`` before any candidate
+    is verified. An empty set answers ``malformed_token``.
+    """
+    distinct: List[str] = []
+    for value in (*header_values, *form_values, *query_values):
+        if isinstance(value, str) and value and value not in distinct:
+            distinct.append(value)
+            if len(distinct) > 1:
+                return None, "token_source_conflict"
+    if not distinct:
+        return None, "malformed_token"
+    return distinct[0], None
 
 
 def _client_ip(
@@ -113,30 +148,28 @@ class WsgiKiwiCaptcha:
         self.trusted_proxies = tuple(trusted_proxies or ())
 
     @staticmethod
-    def _form_field(environ: Dict[str, Any]) -> Optional[str]:
+    def _form_values(environ: Dict[str, Any]) -> List[str]:
         try:
             length = int(environ.get("CONTENT_LENGTH") or 0)
         except ValueError:
             length = 0
         content_type = environ.get("CONTENT_TYPE", "")
         if length <= 0 or "application/x-www-form-urlencoded" not in content_type:
-            return None
+            return []
         body = environ["wsgi.input"].read(length)
         from urllib.parse import parse_qs
 
         fields = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
-        values = fields.get(TOKEN_FIELD)
-        return values[0] if values else None
+        return [value for value in fields.get(TOKEN_FIELD, []) if value]
 
     @staticmethod
-    def _query_field(environ: Dict[str, Any]) -> Optional[str]:
+    def _query_values(environ: Dict[str, Any]) -> List[str]:
         from urllib.parse import parse_qs
 
         fields = parse_qs(
             environ.get("QUERY_STRING", ""), keep_blank_values=True
         )
-        values = fields.get(TOKEN_FIELD)
-        return values[0] if values else None
+        return [value for value in fields.get(TOKEN_FIELD, []) if value]
 
     def _respond(self, start_response: Callable, status: int, code: str) -> List[bytes]:
         body = _json_body(code)
@@ -154,13 +187,13 @@ class WsgiKiwiCaptcha:
         path_scope = environ.get("PATH_INFO", "").strip("/") or "default"
         if self.scope_predicate is not None and not self.scope_predicate(path_scope):
             return self.app(environ, start_response)
-        token = (
-            environ.get("HTTP_X_KIWI_TOKEN")
-            or self._form_field(environ)
-            or self._query_field(environ)
+        token, failure = resolve_token_values(
+            _header_values(environ.get("HTTP_X_KIWI_TOKEN")),
+            self._form_values(environ),
+            self._query_values(environ),
         )
-        if token is None:
-            return self._respond(start_response, 403, "malformed_token")
+        if failure is not None:
+            return self._respond(start_response, 403, failure)
         client_ip = _client_ip(
             environ.get("REMOTE_ADDR"),
             environ.get("HTTP_X_FORWARDED_FOR"),
@@ -227,13 +260,13 @@ class KiwiCaptchaMiddleware:
             return self.get_response(request)
         form = getattr(request, "POST", None)
         query = getattr(request, "GET", None)
-        token = _pick_token(
-            request.headers.get(TOKEN_HEADER),
-            form,
-            query,
+        token, failure = resolve_token_values(
+            _header_values(request.headers.get(TOKEN_HEADER)),
+            _multi_values(form, TOKEN_FIELD),
+            _multi_values(query, TOKEN_FIELD),
         )
-        if token is None:
-            return self._denied(request, 403, "malformed_token")
+        if failure is not None:
+            return self._denied(request, 403, failure)
         client_ip = _client_ip(
             request.META.get("REMOTE_ADDR"),
             request.META.get("HTTP_X_FORWARDED_FOR"),
@@ -352,13 +385,13 @@ class FlaskKiwiCaptcha:
             form = request.form
         except Exception:
             form = None
-        token = _pick_token(
-            request.headers.get(TOKEN_HEADER),
-            form,
-            request.args,
+        token, failure = resolve_token_values(
+            _header_values(request.headers.get(TOKEN_HEADER)),
+            _multi_values(form, TOKEN_FIELD),
+            _multi_values(request.args, TOKEN_FIELD),
         )
-        if token is None:
-            return self._json(403, "malformed_token")
+        if failure is not None:
+            return self._json(403, failure)
         assert self.verifier is not None
         decision = _verify_once(
             self.verifier,
@@ -448,11 +481,18 @@ class FastApiKiwiDependency:
         kiwi_token: Optional[str] = None,
         x_kiwi_token: Optional[str] = None,
     ) -> VerifyDecision:
-        token = x_kiwi_token or kiwi_token
-        if token is None and request is not None:
-            token = request.query_params.get(TOKEN_FIELD)
-        if token is None:
-            raise self.on_failure(403, "malformed_token")
+        query_values: List[str] = []
+        if kiwi_token:
+            query_values.append(kiwi_token)
+        if request is not None:
+            query_values.extend(_multi_values(request.query_params, TOKEN_FIELD))
+        token, failure = resolve_token_values(
+            _header_values(x_kiwi_token),
+            [],
+            query_values,
+        )
+        if failure is not None:
+            raise self.on_failure(403, failure)
         client_ip = None
         if request is not None:
             client_ip = _client_ip(

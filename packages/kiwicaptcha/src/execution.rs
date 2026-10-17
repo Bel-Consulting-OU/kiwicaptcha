@@ -2774,13 +2774,10 @@ pub(crate) fn verify_executed_trace_decoded(program: &Program, trace: &str) -> O
                 // program built). The walker computes the exact
                 // expected value from the append order — never an
                 // invariant, never a free scalar.
-                let Some(expected) = append_rank
+                let expected = append_rank
                     .get(&operand_bytes(op, "id"))
                     .copied()
-                    .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS)
-                else {
-                    return None;
-                };
+                    .map(|rank| rank + SRCDOC_PREEXISTING_BODY_ELEMENTS)?;
                 let value = trace_uint(bytes, &mut pos, expected as u64, b')')?;
                 if value != expected as u64 {
                     return None;

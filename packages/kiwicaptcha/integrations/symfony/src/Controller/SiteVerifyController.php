@@ -373,6 +373,17 @@ final class SiteVerifyController
             return $this->privateJson(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST);
         }
 
+        // Method-override framing: the subscriber answers this before
+        // routing; the controller keeps the same rule for direct
+        // invocation. A single unambiguous override is left to the
+        // framework, unchanged.
+        if (($overrideConflict = $this->methodOverrideConflict($request)) !== null) {
+            return $this->privateJson(
+                ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => $overrideConflict]],
+                Response::HTTP_BAD_REQUEST,
+            );
+        }
+
         if ($this->siteverifySecrets === []) {
             return $this->privateJson(['success' => false, 'error-codes' => ['siteverify-not-configured']], Response::HTTP_NOT_FOUND);
         }

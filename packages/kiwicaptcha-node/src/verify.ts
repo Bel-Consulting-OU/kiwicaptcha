@@ -109,6 +109,28 @@ export interface VerifyOptions {
   rsw?: RswVerifierConfig | null;
 }
 
+/** The three decision-plane verbs of the shared server-SDK contract. */
+export type Disposition = 'allow' | 'deny' | 'retry';
+
+/**
+ * The transient conditions where the same token may legitimately be
+ * resubmitted once the backend recovers. This is the decision-plane
+ * table shared with every server SDK and pinned by
+ * protocol/decision-v1/corpus.json.
+ */
+export const RETRY_ERROR_CODES: ReadonlySet<VerifyErrorCode> = new Set([
+  VerifyErrorCode.StorageUnavailable,
+  VerifyErrorCode.CapacityExceeded,
+  VerifyErrorCode.AdmissionUnavailable,
+  VerifyErrorCode.ConsumeIndeterminate,
+]);
+
+/** The disposition of one failure code: retry for the four transient
+ * conditions, deny for every definitive rejection. */
+export function dispositionForCode(code: VerifyErrorCode): Disposition {
+  return RETRY_ERROR_CODES.has(code) ? 'retry' : 'deny';
+}
+
 /**
  * The verification result of the shared server-SDK contract:
  * {ok, disposition, decisionHandle, price} with the additive evidence
@@ -116,8 +138,9 @@ export interface VerifyOptions {
  */
 export interface VerifyResult {
   ok: boolean;
-  /** allow on a valid proof, deny on every failure. */
-  disposition: 'allow' | 'deny';
+  /** allow on a valid proof, retry on a transient failure, deny
+   * otherwise. */
+  disposition: Disposition;
   /** The verified challenge nonce (the replay id); null on failure. */
   decisionHandle: string | null;
   /** The paid work-ladder rung; null on failure. */
@@ -132,10 +155,12 @@ export interface VerifyResult {
   decoyField: string | null;
 }
 
-function invalid(code: VerifyErrorCode): VerifyResult {
+/** The typed failure result the decision plane and the middleware
+ * share, so a synthetic refusal maps through the same retry table. */
+export function invalidResult(code: VerifyErrorCode): VerifyResult {
   return {
     ok: false,
-    disposition: 'deny',
+    disposition: dispositionForCode(code),
     decisionHandle: null,
     price: null,
     code,
@@ -254,7 +279,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   try {
     token = decodeToken(rawToken);
   } catch {
-    return invalid(VerifyErrorCode.MalformedToken);
+    return invalidResult(VerifyErrorCode.MalformedToken);
   }
   const receiptNs = config.nowNs ?? Date.now() * 1000;
   const evidence = { digest: token.executionDigest, trace: token.executionTrace };
@@ -263,20 +288,20 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   try {
     runtime = await config.storage.runtimeState(token.nonce);
   } catch {
-    return invalid(VerifyErrorCode.StorageUnavailable);
+    return invalidResult(VerifyErrorCode.StorageUnavailable);
   }
   if (runtime.kind === 'missing') {
-    return invalid(VerifyErrorCode.RecordNotFound);
+    return invalidResult(VerifyErrorCode.RecordNotFound);
   }
   let peek = runtime.record;
   if (peek === null) {
     try {
       peek = await config.storage.find(token.nonce);
     } catch {
-      return invalid(VerifyErrorCode.StorageUnavailable);
+      return invalidResult(VerifyErrorCode.StorageUnavailable);
     }
     if (peek === null) {
-      return invalid(VerifyErrorCode.RecordNotFound);
+      return invalidResult(VerifyErrorCode.RecordNotFound);
     }
   }
 
@@ -302,7 +327,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
         )) &&
       runtime.kind !== 'consumed'
     ) {
-      return invalid(VerifyErrorCode.TelemetryRejected);
+      return invalidResult(VerifyErrorCode.TelemetryRejected);
     }
     // Always forward the binding this verification expects: the legacy
     // shim's unbound-record pass asserts unboundness so the sidecar's
@@ -326,7 +351,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
     const known = (ALL_VERIFY_ERROR_CODES as readonly string[]).includes(delegated.code)
       ? (delegated.code as VerifyErrorCode)
       : VerifyErrorCode.ExecutionMismatch;
-    return invalid(known);
+    return invalidResult(known);
   }
   if (failure !== null) {
     if (failure !== VerifyErrorCode.MissingClientIp) {
@@ -334,23 +359,23 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
       try {
         cleanup = await config.storage.deleteIfPending(token.nonce);
       } catch {
-        return invalid(VerifyErrorCode.StorageUnavailable);
+        return invalidResult(VerifyErrorCode.StorageUnavailable);
       }
       if (cleanup.kind !== 'consumed') {
         // Missing, deleted-pending, cancelled or corrupt: the one-shot
         // verdict stands.
-        return invalid(failure);
+        return invalidResult(failure);
       }
       if (!isReplayExempt(failure)) {
         // A hard security verdict on a consumed record: the failure
         // stands and the evidence stays preserved.
-        return invalid(failure);
+        return invalidResult(failure);
       }
       // Consumed plus an exempt circumstance: the exempt failure may
       // not mask a hard verdict on the same request.
       const hard = replaySecurityCheck(config, secrets, peek, token, evidence, receiptNs);
       if (hard !== null) {
-        return invalid(hard);
+        return invalidResult(hard);
       }
       return resolveConsumedRecord(
         config,
@@ -366,7 +391,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
     if (runtime.kind === 'consumed' && runtime.consumed !== null) {
       const hard = replaySecurityCheck(config, secrets, peek, token, evidence, receiptNs);
       if (hard !== null) {
-        return invalid(hard);
+        return invalidResult(hard);
       }
       return resolveConsumedRecord(
         config,
@@ -376,7 +401,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
         config.operationIdentity,
       );
     }
-    return invalid(failure);
+    return invalidResult(failure);
   }
 
   // The opt-in telemetry gate: client-controlled evidence about the
@@ -395,14 +420,14 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
     try {
       cleanup = await config.storage.deleteIfPending(token.nonce);
     } catch {
-      return invalid(VerifyErrorCode.StorageUnavailable);
+      return invalidResult(VerifyErrorCode.StorageUnavailable);
     }
     if (cleanup.kind !== 'consumed') {
-      return invalid(VerifyErrorCode.TelemetryRejected);
+      return invalidResult(VerifyErrorCode.TelemetryRejected);
     }
     const hard = replaySecurityCheck(config, secrets, peek, token, evidence, receiptNs);
     if (hard !== null) {
-      return invalid(hard);
+      return invalidResult(hard);
     }
     return resolveConsumedRecord(
       config,
@@ -416,7 +441,7 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   // Terminal-state resolution before the consume: a cancelled or
   // already-consumed record never burns the proof phase.
   if (runtime.kind === 'cancelled') {
-    return invalid(VerifyErrorCode.RecordNotFound);
+    return invalidResult(VerifyErrorCode.RecordNotFound);
   }
   if (runtime.kind === 'consumed' && runtime.consumed !== null) {
     return resolveConsumedRecord(
@@ -436,10 +461,10 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   } catch {
     // A lost transition response is ambiguous: the challenge may or
     // may not have been consumed.
-    return invalid(VerifyErrorCode.ConsumeIndeterminate);
+    return invalidResult(VerifyErrorCode.ConsumeIndeterminate);
   }
   if (consumed === null) {
-    return invalid(VerifyErrorCode.RecordNotFound);
+    return invalidResult(VerifyErrorCode.RecordNotFound);
   }
   if (consumed.consumedBefore) {
     return resolveConsumedRecord(
@@ -463,19 +488,19 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
     !validateRecord(record) ||
     !verifyRecordSignature(config, record, consumedSecret)
   ) {
-    return invalid(VerifyErrorCode.MalformedRecord);
+    return invalidResult(VerifyErrorCode.MalformedRecord);
   }
   if (!argon2CeilingsOk(record)) {
-    return invalid(VerifyErrorCode.UnsupportedArgon2Params);
+    return invalidResult(VerifyErrorCode.UnsupportedArgon2Params);
   }
   if (!rswParamsOk(record)) {
-    return invalid(VerifyErrorCode.UnsupportedRswParams);
+    return invalidResult(VerifyErrorCode.UnsupportedRswParams);
   }
   if (!policyVersionAccepted(config, record.policyVersion)) {
-    return invalid(VerifyErrorCode.WrongPolicyVersion);
+    return invalidResult(VerifyErrorCode.WrongPolicyVersion);
   }
   if (config.expectedIssuer !== null && record.issuer !== config.expectedIssuer) {
-    return invalid(VerifyErrorCode.WrongIssuer);
+    return invalidResult(VerifyErrorCode.WrongIssuer);
   }
 
   const validProof = recomputeValidProof(config, record, token);
@@ -488,28 +513,28 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
         : record.algorithm === 'argon2id'
           ? VerifyErrorCode.UnsupportedArgon2Params
           : VerifyErrorCode.MalformedRecord;
-    return invalid(mapped);
+    return invalidResult(mapped);
   }
 
   // Post-derive final revalidation against the current clock and the
   // current expectations, for both valid and invalid derivations.
   const now = config.now();
   if (now >= record.expiresAt) {
-    return invalid(VerifyErrorCode.Expired);
+    return invalidResult(VerifyErrorCode.Expired);
   }
   if (!policyVersionAccepted(config, record.policyVersion)) {
-    return invalid(VerifyErrorCode.WrongPolicyVersion);
+    return invalidResult(VerifyErrorCode.WrongPolicyVersion);
   }
   if (config.region !== null && record.region !== config.region) {
-    return invalid(VerifyErrorCode.WrongRegion);
+    return invalidResult(VerifyErrorCode.WrongRegion);
   }
   if (config.expectedIssuer !== null && record.issuer !== config.expectedIssuer) {
-    return invalid(VerifyErrorCode.WrongIssuer);
+    return invalidResult(VerifyErrorCode.WrongIssuer);
   }
 
   if (!validProof) {
     await bestEffortCommit(config, secrets, consumed, false);
-    return invalid(VerifyErrorCode.InsufficientWork);
+    return invalidResult(VerifyErrorCode.InsufficientWork);
   }
   await bestEffortCommit(config, secrets, consumed, true);
   return valid(
@@ -1148,13 +1173,13 @@ export function resolveConsumedRecord(
   operationIdentity: string | null,
 ): VerifyResult {
   if (consumed.record.nonce !== tokenNonce) {
-    return invalid(VerifyErrorCode.MalformedRecord);
+    return invalidResult(VerifyErrorCode.MalformedRecord);
   }
   if (consumed.consumedResult === null) {
-    return invalid(VerifyErrorCode.ConsumeIndeterminate);
+    return invalidResult(VerifyErrorCode.ConsumeIndeterminate);
   }
   if (!consumed.consumedResult.valid) {
-    return invalid(VerifyErrorCode.InsufficientWork);
+    return invalidResult(VerifyErrorCode.InsufficientWork);
   }
   if (
     operationIdentity !== null &&
@@ -1162,7 +1187,7 @@ export function resolveConsumedRecord(
     timingSafeEqualsHex(consumed.operationIdentity, operationIdentity)
   ) {
     if (!storedSuccessAuthentic(config, secrets, consumed)) {
-      return invalid(VerifyErrorCode.MalformedRecord);
+      return invalidResult(VerifyErrorCode.MalformedRecord);
     }
     return valid(
       consumed.record.nonce,
@@ -1173,7 +1198,7 @@ export function resolveConsumedRecord(
       consumed.record.decoyField,
     );
   }
-  return invalid(VerifyErrorCode.AlreadyConsumed);
+  return invalidResult(VerifyErrorCode.AlreadyConsumed);
 }
 
 function storedSuccessAuthentic(

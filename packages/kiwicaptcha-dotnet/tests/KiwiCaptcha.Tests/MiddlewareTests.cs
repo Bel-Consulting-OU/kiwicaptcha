@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Razor.TagHelpers;
+using Microsoft.Extensions.Primitives;
 using Xunit;
 
 namespace KiwiCaptcha.Tests;
@@ -147,6 +148,22 @@ public class MiddlewareTests
     }
 
     [Fact]
+    public async Task PutFormTokenSourceResolves()
+    {
+        var verifier = NewVerifier();
+        var (record, token) = Mint();
+        Support.StoreRecord(verifier.Storage(), record);
+        var context = NewContext("PUT");
+        context.Request.ContentType = "application/x-www-form-urlencoded";
+        var form = "kiwi_token=" + Uri.EscapeDataString(token);
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(form));
+        context.Request.ContentLength = form.Length;
+        var (status, _, proceeded, _) = await Run(context, verifier);
+        Assert.True(proceeded);
+        Assert.Equal(200, status);
+    }
+
+    [Fact]
     public async Task FormTokenSourceResolves()
     {
         var verifier = NewVerifier();
@@ -194,6 +211,81 @@ public class MiddlewareTests
         Assert.Equal(503, status);
         Assert.Contains("storage_unavailable", body);
         Assert.Contains("\"disposition\":\"retry\"", body);
+    }
+
+    [Fact]
+    public async Task TokenAuthorityMatrixRefusesConflictsBeforeVerification()
+    {
+        string[][] headers =
+        {
+            new[] { "TOKEN" }, new string[0], new string[0], new[] { "TOKEN" },
+            new[] { "TOKEN" }, new string[0], new[] { "TOKEN", "other" },
+            new string[0], new string[0], new[] { "TOKEN" }, new string[0], new string[0],
+        };
+        string[][] forms =
+        {
+            new string[0], new[] { "TOKEN" }, new string[0], new[] { "other" },
+            new string[0], new[] { "TOKEN" }, new string[0],
+            new[] { "TOKEN", "other" }, new string[0], new[] { "TOKEN" },
+            new[] { "TOKEN", "TOKEN" }, new string[0],
+        };
+        string[][] queries =
+        {
+            new string[0], new string[0], new[] { "TOKEN" }, new string[0],
+            new[] { "other" }, new[] { "other" }, new string[0], new string[0],
+            new[] { "TOKEN", "other" }, new[] { "TOKEN" }, new string[0],
+            new[] { "TOKEN", "TOKEN" },
+        };
+        string[] names =
+        {
+            "header only", "form only", "query only", "header A form B",
+            "header A query B", "form A query B", "two header values",
+            "repeated form values", "repeated query values",
+            "same token every source", "same repeated form values",
+            "same repeated query values",
+        };
+        for (var index = 0; index < names.Length; index++)
+        {
+            var verifier = NewVerifier();
+            var (record, live) = Mint();
+            Support.StoreRecord(verifier.Storage(), record);
+            string Material(string value) => value == "TOKEN" ? live : value;
+
+            var context = NewContext();
+            var headerValues = headers[index].Select(Material).ToArray();
+            if (headerValues.Length > 0)
+            {
+                context.Request.Headers[KiwiCaptchaMiddleware.TokenHeader] = new StringValues(headerValues);
+            }
+            var formPairs = forms[index].Select(Material).ToArray();
+            if (formPairs.Length > 0)
+            {
+                var encoded = string.Join("&", formPairs.Select(value =>
+                    "kiwi_token=" + Uri.EscapeDataString(value)));
+                context.Request.ContentType = "application/x-www-form-urlencoded";
+                context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes(encoded));
+                context.Request.ContentLength = encoded.Length;
+            }
+            var queryPairs = queries[index].Select(Material).ToArray();
+            if (queryPairs.Length > 0)
+            {
+                context.Request.QueryString = new QueryString("?" + string.Join("&", queryPairs.Select(value =>
+                    "kiwi_token=" + Uri.EscapeDataString(value))));
+            }
+            var conflict = index >= 3 && index <= 8;
+            var (status, body, proceeded, _) = await Run(context, verifier);
+            if (conflict)
+            {
+                Assert.False(proceeded, names[index]);
+                Assert.Equal(403, status);
+                Assert.Contains("token_source_conflict", body);
+            }
+            else
+            {
+                Assert.True(proceeded, names[index]);
+                Assert.Equal(200, status);
+            }
+        }
     }
 
     [Fact]

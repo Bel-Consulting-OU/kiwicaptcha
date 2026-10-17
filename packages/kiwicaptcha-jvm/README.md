@@ -132,8 +132,10 @@ first untrusted entry wins, an unparsable hop falls back to the peer),
 and `x-real-ip` is honored only when the peer is trusted and no
 forwarded chain exists.
 
-Every protected request reads the token from the `x-kiwi-token`
-header, then the `kiwi_token` form field, then the query string.
+Every protected request collects the token from the `x-kiwi-token`
+header, the `kiwi_token` form field and the query string under the
+shared authority rule: one distinct value verifies, while distinct
+values in more than one source refuse with `token_source_conflict`.
 Unverified requests get `403 Forbidden` with the machine-readable
 code; a retry disposition gets `503 Service Unavailable`. The verified
 decision rides the `KiwiCaptchaFilter.DECISION_ATTRIBUTE` request

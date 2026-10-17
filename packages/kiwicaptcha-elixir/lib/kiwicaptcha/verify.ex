@@ -43,7 +43,7 @@ defmodule Kiwicaptcha.Verify do
   """
   @type result :: %{
           ok: boolean(),
-          disposition: :allow | :deny,
+          disposition: :allow | :deny | :retry,
           decision_handle: String.t() | nil,
           price: String.t() | nil,
           code: atom(),
@@ -129,10 +129,28 @@ defmodule Kiwicaptcha.Verify do
     }
   end
 
+  # The transient conditions where the same token may legitimately be
+  # resubmitted once the backend recovers. The table is shared with
+  # every server SDK and pinned by protocol/decision-v1/corpus.json.
+  @retry_codes [
+    :storage_unavailable,
+    :capacity_exceeded,
+    :admission_unavailable,
+    :consume_indeterminate
+  ]
+
+  @doc "The retry codes of the shared decision plane."
+  @spec retry_codes() :: [atom()]
+  def retry_codes, do: @retry_codes
+
+  @doc "The disposition of one failure code."
+  @spec disposition_for(atom()) :: :deny | :retry
+  def disposition_for(code), do: if(code in @retry_codes, do: :retry, else: :deny)
+
   defp invalid(code) do
     %{
       ok: false,
-      disposition: :deny,
+      disposition: disposition_for(code),
       decision_handle: nil,
       price: nil,
       code: code,

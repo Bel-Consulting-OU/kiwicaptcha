@@ -12,8 +12,14 @@
 #      must decode-fail on both.
 #   2. per-SDK adversarial suites: each SDK's token and verify-gate
 #      suites (the ones that assert rejection semantics) run green.
+#   3. the execution-armed record through the sidecar, one verdict.
+#   4. the decision and authority rows: the shared register
+#      protocol/decision-v1/corpus.json replayed through two direct
+#      drives and every SDK's corpus suite. A retry table divergence or
+#      a token authority divergence fails the campaign.
 #
-# Required result: identical rejection across all seven SDKs.
+# Required result: identical rejection, disposition and authority
+# across all seven SDKs.
 
 set -u
 RT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -154,7 +160,45 @@ run_delegation_suite dotnet "cd '$REPO_ROOT/packages/kiwicaptcha-dotnet' && DOTN
 rt_assert_eq "$DELEGATION_FAILURES" "0" "identical execution-armed verdict through the sidecar across all seven SDKs"
 rt_metric "sidecar_delegation_sdks=$((7 - DELEGATION_FAILURES))"
 
+# ---------- leg 4: decision and token authority rows ----------
+# The shared register fixes the disposition of every wire code, the
+# retry table, the middleware status of each disposition and the token
+# authority matrix. The direct drives cover the Python and Node public
+# decision surfaces; every SDK's corpus suite covers its own table.
+DECISION_OUT=$(KIWI_RT_REPO_ROOT="$REPO_ROOT" python3 "$RT_DIR/campaigns/lib/d317.decision.py")
+DECISION_RC=$?
+printf '%s\n' "$DECISION_OUT"
+[ $DECISION_RC -gt 1 ] && DECISION_RC=1
+
+DECISION_SUITE_FAILURES=0
+run_decision_suite() {
+    label=$1
+    script=$2
+    log=$(mktemp)
+    if bash -c "$script" >"$log" 2>&1; then
+        printf 'ASSERT: PASS %s: decision and authority corpus rows green\n' "$label"
+        rm -f "$log"
+        return 0
+    fi
+    printf 'ASSERT: FAIL %s: decision and authority corpus rows failed\n' "$label"
+    cp "$log" "$RT_DIR/runs/env/d317-decision-$label.err"
+    rm -f "$log"
+    return 1
+}
+
+run_decision_suite node "cd '$REPO_ROOT/packages/kiwicaptcha-node' && npm run build >/dev/null && node --test dist/test/decision-corpus.test.js" || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+run_decision_suite python "cd '$REPO_ROOT/packages/kiwicaptcha-python-sdk' && python3 -m unittest tests.test_decision_corpus tests.test_middleware" || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+run_decision_suite go "cd '$REPO_ROOT/packages/kiwicaptcha-go' && go test -run 'TestDecisionCorpus|TestMiddlewareTokenAuthorityMatrix' ." || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+run_decision_suite ruby "cd '$REPO_ROOT/packages/kiwicaptcha-ruby' && ruby test/test_decision_corpus.rb test/test_middleware.rb" || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+run_decision_suite elixir "cd '$REPO_ROOT/packages/kiwicaptcha-elixir' && mix test test/decision_corpus_test.exs test/integrations_test.exs" || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+run_decision_suite jvm "cd '$REPO_ROOT/packages/kiwicaptcha-jvm' && mvn -q -pl servlet -am test -Dtest='DecisionCorpusTest,TokenSourceResolverTest,KiwiCaptchaFilterTest' -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false" || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+run_decision_suite dotnet "cd '$REPO_ROOT/packages/kiwicaptcha-dotnet' && DOTNET_ROLL_FORWARD=LatestMajor dotnet test tests/KiwiCaptcha.Tests --filter 'FullyQualifiedName~DecisionCorpusTests|FullyQualifiedName~MiddlewareTests'" || DECISION_SUITE_FAILURES=$((DECISION_SUITE_FAILURES + 1))
+
+rt_assert_eq "$DECISION_SUITE_FAILURES" "0" "identical decision and authority rows across all seven SDKs"
+rt_assert_eq "$DECISION_RC" "0" "decision and authority direct drives"
+
 rt_metric "sdks=7 adversarial_vectors=$(python3 -c 'import json; print(len(json.load(open("'$REPO_ROOT'/protocol/solution-token-v1/fixtures.json")).get("rejected", [])))')"
-printf 'ECONOMIC: %s %s weakest_link=none rejection_divergences=0\n' "$RT_CAMPAIGN" "$RT_PROFILE"
+rt_metric "decision_rows=$(python3 -c 'import json; print(len(json.load(open("'$REPO_ROOT'/protocol/decision-v1/corpus.json"))["codes"]))') authority_rows=$(python3 -c 'import json; print(len(json.load(open("'$REPO_ROOT'/protocol/decision-v1/corpus.json"))["authority"]["matrix"]))')"
+printf 'ECONOMIC: %s %s weakest_link=none rejection_divergences=0 decision_divergences=0\n' "$RT_CAMPAIGN" "$RT_PROFILE"
 
 rt_finish

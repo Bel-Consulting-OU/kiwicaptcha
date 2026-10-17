@@ -14,8 +14,8 @@ use PHPUnit\Framework\TestCase;
  * Slow-script guard (a guard, not a benchmark): the verification-path
  * scripts (risk-v1.lua + the calibration read) must run well under a
  * generous bound when the state is at its maximum allowed size. Every
- * key carries its full bounded field set: 12 flat fields per risk
- * state hash, 6 fields per calibration bucket, and all 24 buckets plus
+ * key carries its full bounded field set: 12 state fields plus the
+ * event effect marker (fx) per risk state hash, 6 fields per calibration bucket, and all 24 buckets plus
  * state present. The asserted bound is a generous 50 ms average over
  * 100 runs so CI noise cannot flake it; typical means are
  * sub-millisecond. Skipped unless a Redis URL is configured.
@@ -111,7 +111,7 @@ final class ScriptBoundPerfTest extends TestCase
         return (int) floor(microtime(true) * 1000);
     }
 
-    /** The 12 state fields of the risk state hashes at their maximum. */
+    /** The 12 state fields plus the effect marker of a risk state hash. */
     private function seedRiskState(string $key, Client $client, int $now): void
     {
         $client->hset($key, 'ts', (string) $now);

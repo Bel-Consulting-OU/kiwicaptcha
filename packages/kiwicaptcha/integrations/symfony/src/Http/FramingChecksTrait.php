@@ -103,6 +103,71 @@ trait FramingChecksTrait
     }
 
     /**
+     * The ambiguity in the request's method-override input, or null when
+     * the input is unambiguous.
+     *
+     * Symfony reads `X-HTTP-Method-Override` (and, when enabled, the
+     * `_method` form field) in Request::getMethod() before routing and
+     * the controller run. A duplicated header, a comma-joined or folded
+     * value, or a header plus a form field lets the routing layer pick
+     * an effective method the framing gate never examined. The early
+     * request subscriber and the controllers both consult this rule.
+     */
+    private function methodOverrideConflict(Request $request): ?string
+    {
+        $values = $request->headers->all('x-http-method-override');
+        if (\count($values) > 1) {
+            return 'The X-HTTP-Method-Override header must appear at most once.';
+        }
+        $headerValue = $values[0] ?? null;
+        if (!\is_string($headerValue)) {
+            $headerValue = null;
+        }
+        // A comma is the collapsed-duplicate marker; CR or LF is an
+        // obsolete fold. Both are second occurrences of a header the
+        // contract requires to be singular, so neither reaches the
+        // framework's method parser.
+        if ($headerValue !== null
+            && (str_contains($headerValue, ',') || str_contains($headerValue, "\r") || str_contains($headerValue, "\n"))
+        ) {
+            return 'The X-HTTP-Method-Override header must carry a single method value.';
+        }
+        if ($headerValue !== null && trim($headerValue) !== '' && $this->hasFormMethodOverride($request)) {
+            return 'The request carries both an X-HTTP-Method-Override header and a _method form field.';
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether a form body carries a `_method` override. A framework-built
+     * request already parsed the form body into the request bag, so the
+     * bag is authoritative. A request built without that parse is scanned
+     * as bounded URL-encoded bytes. A JSON body never counts.
+     */
+    private function hasFormMethodOverride(Request $request): bool
+    {
+        if ($request->request->has('_method')) {
+            return true;
+        }
+        $contentType = strtolower(trim(explode(';', (string) $request->headers->get('Content-Type', ''), 2)[0]));
+        if ($contentType !== 'application/x-www-form-urlencoded') {
+            return false;
+        }
+        $stream = $request->getContent(true);
+        if (!\is_resource($stream)) {
+            return false;
+        }
+        $raw = (string) stream_get_contents($stream, 65536);
+        if ($raw === '') {
+            return false;
+        }
+        parse_str($raw, $parsed);
+
+        return \array_key_exists('_method', $parsed);
+    }
+
+    /**
      * Whether the request's framing headers are canonical. False means
      * the caller must refuse the request (the caller builds its own
      * response vocabulary).

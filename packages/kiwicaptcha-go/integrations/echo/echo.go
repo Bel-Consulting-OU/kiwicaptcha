@@ -25,9 +25,9 @@ func Middleware(verifier *kiwi.Verifier, secretKey, expectedScope string, option
 			if config.scopePredicate != nil && !config.scopePredicate(ctx.Path()) {
 				return next(ctx)
 			}
-			token := tokenFrom(ctx)
-			if token == "" {
-				return abort(ctx, kiwi.DecisionFromOutcome(kiwi.InvalidOutcome(kiwi.ErrCodeMalformedToken), ""))
+			token, failure := kiwi.TokenFromRequest(ctx.Request())
+			if failure != "" {
+				return abort(ctx, kiwi.DecisionFromOutcome(kiwi.InvalidOutcome(failure), ""))
 			}
 			outcome := verifier.Verify(token, kiwi.VerifyOptions{
 				SecretKey:     secretKey,
@@ -74,16 +74,6 @@ func optionsConfig(options []Option) echoConfig {
 		option(&config)
 	}
 	return config
-}
-
-func tokenFrom(ctx echo.Context) string {
-	if header := ctx.Request().Header.Get(kiwi.TokenHeader); header != "" {
-		return header
-	}
-	if value := ctx.FormValue(kiwi.TokenField); value != "" {
-		return value
-	}
-	return ctx.QueryParam(kiwi.TokenField)
 }
 
 func clientIP(ctx echo.Context) string {

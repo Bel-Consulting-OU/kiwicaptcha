@@ -21,9 +21,9 @@ func Middleware(verifier *kiwi.Verifier, secretKey, expectedScope string, option
 		if config.scopePredicate != nil && !config.scopePredicate(ctx.Route().Path) {
 			return ctx.Next()
 		}
-		token := tokenFrom(ctx)
-		if token == "" {
-			return abort(ctx, kiwi.DecisionFromOutcome(kiwi.InvalidOutcome(kiwi.ErrCodeMalformedToken), ""))
+		token, failure := tokenFrom(ctx)
+		if failure != "" {
+			return abort(ctx, kiwi.DecisionFromOutcome(kiwi.InvalidOutcome(failure), ""))
 		}
 		outcome := verifier.Verify(token, kiwi.VerifyOptions{
 			SecretKey:     secretKey,
@@ -80,14 +80,21 @@ func clientIP(ctx fiber.Ctx) string {
 	return ctx.IP()
 }
 
-func tokenFrom(ctx fiber.Ctx) string {
-	if header := ctx.Get(kiwi.TokenHeader); header != "" {
-		return header
+func tokenFrom(ctx fiber.Ctx) (string, kiwi.VerifyError) {
+	request := ctx.Request()
+	headerValues := make([]string, 0, 1)
+	for _, value := range request.Header.PeekAll(kiwi.TokenHeader) {
+		headerValues = append(headerValues, string(value))
 	}
-	if value := ctx.FormValue(kiwi.TokenField); value != "" {
-		return value
+	formValues := make([]string, 0, 1)
+	for _, value := range request.PostArgs().PeekMulti(kiwi.TokenField) {
+		formValues = append(formValues, string(value))
 	}
-	return ctx.Query(kiwi.TokenField)
+	queryValues := make([]string, 0, 1)
+	for _, value := range request.URI().QueryArgs().PeekMulti(kiwi.TokenField) {
+		queryValues = append(queryValues, string(value))
+	}
+	return kiwi.ResolveTokenValues(headerValues, formValues, queryValues)
 }
 
 func abort(ctx fiber.Ctx, decision kiwi.VerifyDecision) error {

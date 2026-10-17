@@ -41,6 +41,7 @@ class VerifyError(str, Enum):
     REQUEST_BINDING_MISMATCH = "request_binding_mismatch"
     EXECUTION_MISMATCH = "execution_mismatch"
     UNSUPPORTED_RSW_PARAMS = "unsupported_rsw_params"
+    TOKEN_SOURCE_CONFLICT = "token_source_conflict"
 
     @property
     def code(self) -> str:
@@ -109,6 +110,9 @@ _DESCRIPTIONS = {
     VerifyError.UNSUPPORTED_RSW_PARAMS:
         "the rsw challenge cannot be verified: this verifier is not configured with the"
         " matching rsw trapdoor, or the signed sequential cost is outside the supported bounds",
+    VerifyError.TOKEN_SOURCE_CONFLICT:
+        "the request carries different solution tokens in more than one source"
+        " (header, form field, query parameter)",
 }
 
 

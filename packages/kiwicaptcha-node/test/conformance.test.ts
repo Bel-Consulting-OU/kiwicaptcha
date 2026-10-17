@@ -43,6 +43,7 @@ test('conformance: every verify error code is in the shared vocabulary', () => {
     'required_scope',
     'storage_unavailable',
     'telemetry_rejected',
+    'token_source_conflict',
     'too_fast',
     'too_many_attempts',
     'unknown_kid',

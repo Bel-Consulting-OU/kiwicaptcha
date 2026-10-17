@@ -55,15 +55,23 @@ module KiwiCaptcha
       def kiwi_verify!
         options = self.class.kiwi_verify_options
         token_field = options.fetch(:token_field, DEFAULT_TOKEN_FIELD)
-        raw_token = kiwi_request_token(token_field)
-        if raw_token.nil?
-          return kiwi_fail('malformed_token', "the #{token_field} field is missing", options)
+        raw_token, failure = kiwi_request_token(token_field)
+        unless failure.nil?
+          detail = failure == 'token_source_conflict' ?
+            'the request carries conflicting token sources' :
+            "the #{token_field} field is missing"
+          return kiwi_fail(failure, detail, options)
         end
 
         verify_options = KiwiCaptcha::Rack::VerifyOptionsFactory.coerce(options.fetch(:options_block).call)
         result = KiwiCaptcha.verify(raw_token, verify_options)
         return result if instance_variable_set(:@kiwi_verify_result, result).ok
 
+        if result.disposition == 'retry'
+          return kiwi_fail(result.code.empty? ? 'invalid' : result.code,
+                           result.detail || 'verification failed',
+                           options.merge(failure_status: 503), result)
+        end
         kiwi_fail(result.code.empty? ? 'invalid' : result.code, result.detail || 'verification failed', options, result)
         result
       end
@@ -73,7 +81,7 @@ module KiwiCaptcha
       def kiwi_fail(code, detail, options, result = nil)
         body = kiwi_render_failure(code, detail, options)
         instance_variable_set(:@kiwi_verify_result, result || KiwiCaptcha::Verify::VerifyResult.new(
-          ok: false, disposition: 'deny', decision_handle: nil, price: nil,
+          ok: false, disposition: KiwiCaptcha::Verify.disposition_for(code), decision_handle: nil, price: nil,
           code: code, detail: detail, request_binding: nil,
           from_stored_result: false, solve_duration_ms: nil, decoy_field: nil
         ))
@@ -81,13 +89,37 @@ module KiwiCaptcha
       end
 
       def kiwi_request_token(token_field)
-        value = kiwi_param(token_field)
-        return value if value.is_a?(String) && !value.empty?
-
         header = respond_to?(:request) ? request.headers['X-Kiwi-Token'] : nil
-        return header if header.is_a?(String) && !header.empty?
-
-        nil
+        header_values = KiwiCaptcha::TokenSource.split_header(header)
+        query_values = []
+        form_values = []
+        raw_available = false
+        if respond_to?(:request)
+          if request.respond_to?(:query_string)
+            raw_available = true
+            query_values = KiwiCaptcha::TokenSource.values_for(
+              KiwiCaptcha::TokenSource.form_pairs(request.query_string), token_field
+            )
+          end
+          if request.respond_to?(:raw_post) && request.respond_to?(:media_type) &&
+             request.media_type == 'application/x-www-form-urlencoded'
+            raw_available = true
+            form_values = KiwiCaptcha::TokenSource.values_for(
+              KiwiCaptcha::TokenSource.form_pairs(request.raw_post), token_field
+            )
+          end
+        end
+        unless raw_available
+          # A framework-pure host or a pre-parsed body: params still
+          # carries the settled value.
+          value = kiwi_param(token_field)
+          form_values = value.is_a?(Array) ? value : [value]
+        end
+        KiwiCaptcha::TokenSource.resolve_values(
+          header_values: header_values,
+          form_values: form_values.compact,
+          query_values: query_values
+        )
       end
 
       def kiwi_param(name)
