@@ -59,6 +59,16 @@ Woodpecker workflows and then adapted:
 - Services are converted by image only; custom service `commands` are
   not. The Redis sidecars use the image's default entrypoint, which
   serves the same port and data directory the workflows need.
+- Woodpecker's `$$` escape is preserved by the importer. The pipeline
+  text normalizes it to a single `$` because Kiwi hands the command to
+  the shell unchanged (a literal `$$` would be the shell's PID).
+- The local workspace snapshot omits tracked paths under a directory
+  named `target/`, which collides with `tools/redteam/target/`. The
+  lint lane restores that path from the checkout before the
+  tracked-deletion guard runs. A runner that snapshots from git does not
+  need the restoration.
+- The lint lane excludes the local Elixir `deps/` tree from the prose
+  scan: it is third-party source and absent on a clean checkout.
 - The reference-deployment lane runs with `runtime: native` because a
   container job cannot reach the host Docker socket (Kiwi's local
   workflow guard refuses Docker-socket mounts). It therefore requires a
