@@ -141,6 +141,23 @@ public final class Canonical {
         return challenge.substring(dot + 1);
     }
 
+    /**
+     * True when the challenge's payload segment (everything before the
+     * final dot) is the canonical standard base64 of exactly canonical.
+     * Challenge writers emit base64(canonical) || "." || signature, so
+     * a segment that decodes to anything else is a malformed record
+     * whose client-visible payload disagrees with the signed fields.
+     */
+    public static boolean challengePayloadMatches(String challenge, String canonical) {
+        int dot = challenge.lastIndexOf('.');
+        if (dot < 0) {
+            return false;
+        }
+        byte[] decoded = b64CanonicalDecode(challenge.substring(0, dot));
+        return decoded != null
+                && java.util.Arrays.equals(decoded, canonical.getBytes(StandardCharsets.UTF_8));
+    }
+
     /** The legacy v1 binding value: the sha256 hex of secret plus ip. */
     public static String hashIpV1(String ip, String secret) {
         return hex(sha256((secret + ip).getBytes(StandardCharsets.UTF_8)));
@@ -315,15 +332,19 @@ public final class Canonical {
      */
     public static boolean verifyRecordSignature(ChallengeRecord record, String secretKey, String tenantId) {
         boolean commitsMac = signedCanonicalCommitsRecordMeta(record.challenge);
-        String expected;
+        // Reconstruct the canonical once: the signature authenticates
+        // these bytes, and the client-visible payload segment must be
+        // exactly those bytes. Comparing only the last dot-segment
+        // would leave the embedded payload unauthenticated, so a party
+        // able to rewrite the challenge string could make the browser
+        // solve a payload that disagrees with the signed fields.
+        String canonical;
         if (record.protocolVersion == 1) {
-            expected = signPayloadV1(
-                    legacyV1Payload(record.nonce, record.scope, record.bindingTag, record.issuedAt),
-                    secretKey);
+            canonical = legacyV1Payload(record.nonce, record.scope, record.bindingTag,
+                    record.issuedAt);
         } else {
-            String payload;
             try {
-                payload = canonicalPayloadChecked(
+                canonical = canonicalPayloadChecked(
                         record.protocolVersion, record.nonce, record.scope, record.bindingTag,
                         record.issuedAt, record.expiresAt, record.algorithm, record.mKib, record.t,
                         record.p, record.targetBits, record.salt, record.minDurationMs, record.region,
@@ -333,8 +354,13 @@ public final class Canonical {
             } catch (RuntimeException e) {
                 return false;
             }
-            expected = signPayloadV2(payload, secretKey, tenantId);
         }
+        if (!challengePayloadMatches(record.challenge, canonical)) {
+            return false;
+        }
+        String expected = record.protocolVersion == 1
+                ? signPayloadV1(canonical, secretKey)
+                : signPayloadV2(canonical, secretKey, tenantId);
         if (!constantTimeEquals(expected, signatureFromChallenge(record.challenge))) {
             return false;
         }

@@ -150,10 +150,6 @@ function kiwiReadBody(array $accepted): ?array
 
         return null;
     }
-    if (trim($raw) === '') {
-        return [];
-    }
-
     // Duplicate JSON keys: json_decode silently keeps the last
     // occurrence of a repeated object key, and intermediaries could
     // disagree on the effective value ({"scope":"login","scope":"signup"}

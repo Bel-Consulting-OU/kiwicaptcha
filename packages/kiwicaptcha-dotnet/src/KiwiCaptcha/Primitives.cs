@@ -38,6 +38,14 @@ public static class Kiwi
     public const int MinParallelism = 1;
     public const int MaxParallelism = 4;
 
+    /// <summary>
+    /// Maximum nesting depth of the telemetry object, the
+    /// protocol/limits.json token_max_telemetry_depth register row. The
+    /// scalar level is zero, so the 32nd nested container is accepted
+    /// and the 33rd is refused.
+    /// </summary>
+    public const int MaxTelemetryDepth = 32;
+
     public const int MaxSolverCounter = 20_000_000;
     public const int MaxDurationMs = 3_600_000;
     public const int NonceB64Bytes = 32;
@@ -337,7 +345,7 @@ public sealed class JsonObject
 
         internal JsonObject ParseObjectBody(int depth)
         {
-            if (depth > 32)
+            if (depth >= Kiwi.MaxTelemetryDepth)
             {
                 throw new ArgumentException("json nesting too deep");
             }
@@ -407,7 +415,7 @@ public sealed class JsonObject
 
         private List<object?> ParseArray(int depth)
         {
-            if (depth > 32)
+            if (depth >= Kiwi.MaxTelemetryDepth)
             {
                 throw new ArgumentException("json nesting too deep");
             }
@@ -636,7 +644,7 @@ public static class StrictJson
 
         private Dictionary<string, object?> ParseObject(int depth)
         {
-            if (depth > 32)
+            if (depth >= Kiwi.MaxTelemetryDepth)
             {
                 throw new ArgumentException("json nesting too deep");
             }
@@ -680,7 +688,7 @@ public static class StrictJson
 
         private List<object?> ParseArray(int depth)
         {
-            if (depth > 32)
+            if (depth >= Kiwi.MaxTelemetryDepth)
             {
                 throw new ArgumentException("json nesting too deep");
             }

@@ -94,6 +94,79 @@ def _canonical_b64_decode(raw: str) -> Optional[bytes]:
     return plain
 
 
+def _json_depth_exceeds(value: Any, max_depth: int) -> bool:
+    """True when a parsed telemetry tree nests deeper than ``max_depth``.
+
+    The scalar level is zero and a container is one level deeper than
+    its deepest child. The walk is iterative so hostile nesting cannot
+    turn the check itself into a stack overflow.
+    """
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            if depth > max_depth:
+                return True
+            stack.extend((child, depth + 1) for child in node.values())
+        elif isinstance(node, list):
+            if depth > max_depth:
+                return True
+            stack.extend((child, depth + 1) for child in node)
+    return False
+
+
+def _has_unpaired_surrogate_escape(text: str) -> bool:
+    """True when a JSON string literal carries an unpaired surrogate escape.
+
+    ``json.loads`` preserves a lone ``\\ud800`` in the decoded string,
+    while the reference decoder rejects the escape. Escaped
+    backslashes are skipped, so the literal text ``\\\\ud800`` is not an
+    escape. Malformed escapes are left for the JSON parser.
+    """
+    in_string = False
+    i = 0
+    length = len(text)
+    while i < length:
+        char = text[i]
+        if not in_string:
+            if char == '"':
+                in_string = True
+            i += 1
+            continue
+        if char == '"':
+            in_string = False
+            i += 1
+            continue
+        if char != "\\":
+            i += 1
+            continue
+        if i + 1 >= length:
+            return False
+        if text[i + 1] != "u":
+            i += 2
+            continue
+        if i + 5 >= length:
+            return False
+        try:
+            unit = int(text[i + 2:i + 6], 16)
+        except ValueError:
+            return False
+        if 0xD800 <= unit <= 0xDBFF:
+            if i + 11 < length and text[i + 6] == "\\" and text[i + 7] == "u":
+                try:
+                    low = int(text[i + 8:i + 12], 16)
+                except ValueError:
+                    low = -1
+                if 0xDC00 <= low <= 0xDFFF:
+                    i += 12
+                    continue
+            return True
+        if 0xDC00 <= unit <= 0xDFFF:
+            return True
+        i += 6
+    return False
+
+
 def _b64url_to_standard(trace: str) -> str:
     standard = trace.replace("-", "+").replace("_", "/")
     pad = (-len(standard)) % 4
@@ -258,11 +331,21 @@ class SolutionToken:
             raise DecodeError.invalid_duration()
         duration_ms = int(duration_str)
 
+        # A lone surrogate escape decodes to a string Python cannot
+        # encode as UTF-8 while the reference decoder rejects the
+        # token; reject it here so every host reads one value.
+        if _has_unpaired_surrogate_escape(telemetry_str):
+            raise DecodeError.malformed()
         try:
             telemetry = json.loads(telemetry_str)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise DecodeError.malformed() from None
         if not isinstance(telemetry, dict):
+            raise DecodeError.malformed()
+        # The depth ceiling is part of the wire language. Python's json
+        # module has host-specific recursion slack; the register value is
+        # the contract, so a deeper object is malformed on every host.
+        if _json_depth_exceeds(telemetry, c.MAX_TELEMETRY_DEPTH):
             raise DecodeError.malformed()
 
         if execution_digest is not None and not HEX64_PATTERN.match(execution_digest):

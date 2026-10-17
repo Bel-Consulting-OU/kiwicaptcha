@@ -180,7 +180,7 @@ func parseJSONObject(text string) (*JSONObject, error) {
 		if !ok {
 			return nil, errors.New("kiwicaptcha: telemetry key is not a string")
 		}
-		value, err := decodeOrderedValue(dec)
+		value, err := decodeOrderedValue(dec, 2)
 		if err != nil {
 			return nil, err
 		}
@@ -198,7 +198,11 @@ func parseJSONObject(text string) (*JSONObject, error) {
 	return obj, nil
 }
 
-func decodeOrderedValue(dec *json.Decoder) (interface{}, error) {
+// decodeOrderedValue parses one value. depth is the container depth
+// being entered, the top-level telemetry object being one; the register
+// ceiling bounds it so a token accepted on one host is accepted on
+// every host.
+func decodeOrderedValue(dec *json.Decoder, depth int) (interface{}, error) {
 	token, err := dec.Token()
 	if err != nil {
 		return nil, err
@@ -206,6 +210,9 @@ func decodeOrderedValue(dec *json.Decoder) (interface{}, error) {
 	if delim, ok := token.(json.Delim); ok {
 		switch delim {
 		case '{':
+			if depth > MaxTelemetryDepth {
+				return nil, errors.New("kiwicaptcha: telemetry nesting too deep")
+			}
 			obj := &JSONObject{values: map[string]interface{}{}}
 			for dec.More() {
 				keyToken, err := dec.Token()
@@ -216,7 +223,7 @@ func decodeOrderedValue(dec *json.Decoder) (interface{}, error) {
 				if !ok {
 					return nil, errors.New("kiwicaptcha: telemetry key is not a string")
 				}
-				value, err := decodeOrderedValue(dec)
+				value, err := decodeOrderedValue(dec, depth+1)
 				if err != nil {
 					return nil, err
 				}
@@ -230,9 +237,12 @@ func decodeOrderedValue(dec *json.Decoder) (interface{}, error) {
 			}
 			return obj, nil
 		case '[':
+			if depth > MaxTelemetryDepth {
+				return nil, errors.New("kiwicaptcha: telemetry nesting too deep")
+			}
 			var out []interface{}
 			for dec.More() {
-				value, err := decodeOrderedValue(dec)
+				value, err := decodeOrderedValue(dec, depth+1)
 				if err != nil {
 					return nil, err
 				}

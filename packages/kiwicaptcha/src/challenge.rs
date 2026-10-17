@@ -871,11 +871,28 @@ pub(crate) fn valid_identifier(s: &str, max_len: usize) -> bool {
 ///
 /// Protocol v1 canonical input (legacy records, `protocol_version == 1`):
 /// `nonce|scope|ip_hash|issued_at`.
-fn canonical_signing_input(payload: &ChallengePayload) -> String {
+pub(crate) fn canonical_signing_input(payload: &ChallengePayload) -> String {
     format!(
         "{}|{}|{}|{}",
         payload.nonce, payload.scope, payload.ip_hash, payload.issued_at
     )
+}
+
+/// True when the challenge's payload segment (everything before the
+/// final dot) is the canonical standard base64 of exactly `canonical`.
+/// The challenge writers emit `base64(canonical) || "." || signature`
+/// and the signed fields reconstruct `canonical`, so a decoded segment
+/// that differs from the reconstruction is a malformed record: the
+/// signature would still cover the stored fields, leaving the
+/// client-visible payload unauthenticated.
+pub(crate) fn challenge_payload_matches(challenge: &str, canonical: &str) -> bool {
+    let Some((encoded, _signature)) = challenge.rsplit_once('.') else {
+        return false;
+    };
+    let Ok(bytes) = B64.decode(encoded) else {
+        return false;
+    };
+    bytes == canonical.as_bytes()
 }
 
 /// Protocol v2..v5 canonical input (canonical revision 4), the full
@@ -1398,15 +1415,14 @@ pub fn verify_signature_v2_with_tenant(
     secret_key: &str,
     tenant: Option<&str>,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2(
-        &canonical_signing_input_v2_with_mac(
-            record,
-            signed_canonical_commits_record_meta(&record.challenge),
-        ),
-        signature,
-        secret_key,
-        tenant,
-    )
+    let canonical = canonical_signing_input_v2_with_mac(
+        record,
+        signed_canonical_commits_record_meta(&record.challenge),
+    );
+    if !challenge_payload_matches(&record.challenge, &canonical) {
+        return Ok(false);
+    }
+    verify_canonical_v2(&canonical, signature, secret_key, tenant)
 }
 
 /// Verify a v2 signature with an already derived challenge-signing key —
@@ -1421,14 +1437,14 @@ pub(crate) fn verify_signature_v2_with_keys(
     signature: &str,
     derived: &DerivedKeys,
 ) -> Result<bool, SignError> {
-    verify_canonical_v2_with_keys(
-        &canonical_signing_input_v2_with_mac(
-            record,
-            signed_canonical_commits_record_meta(&record.challenge),
-        ),
-        signature,
-        derived,
-    )
+    let canonical = canonical_signing_input_v2_with_mac(
+        record,
+        signed_canonical_commits_record_meta(&record.challenge),
+    );
+    if !challenge_payload_matches(&record.challenge, &canonical) {
+        return Ok(false);
+    }
+    verify_canonical_v2_with_keys(&canonical, signature, derived)
 }
 
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {

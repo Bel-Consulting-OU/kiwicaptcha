@@ -82,6 +82,14 @@ MAX_SOLVER_COUNTER = 20_000_000
 MAX_DURATION_MS = 3_600_000
 """Hard ceiling for the client reported token duration."""
 
+MAX_TELEMETRY_DEPTH = 32
+"""Maximum nesting depth of the token telemetry object.
+
+The register row is protocol/limits.json ``token_max_telemetry_depth``.
+The scalar level is zero, so the 32nd nested container is accepted and
+the 33rd is outside the wire language.
+"""
+
 NONCE_B64_BYTES = 32
 """Decoded nonce length: the token nonce is base64 of 32 random bytes."""
 

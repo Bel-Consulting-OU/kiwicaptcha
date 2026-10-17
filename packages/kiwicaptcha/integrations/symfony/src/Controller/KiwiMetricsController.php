@@ -120,7 +120,7 @@ final class KiwiMetricsController
             $presented = $m[1];
         }
         if ($presented === null) {
-            $query = $request->query->get('secret');
+            $query = $request->query->all()['secret'] ?? null;
             $presented = \is_string($query) && $query !== '' ? $query : null;
         }
         if ($presented === null) {

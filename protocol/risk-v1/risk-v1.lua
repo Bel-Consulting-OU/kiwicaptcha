@@ -328,12 +328,46 @@ end
 -- first and parsed the numeric arguments afterwards, so a missing or
 -- non-numeric saturation ARGV errored (nil comparison) AFTER the event
 -- was marked seen. The event was silently lost and an identical retry
--- was refused as a duplicate. Every numeric argument is validated here,
--- before the first write.
-for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
-    if tonumber(ARGV[i]) == nil then
-        return redis.error_reply('risk-v1: ARGV['..i..'] must be numeric')
+-- was refused as a duplicate. A value that passes a bare tonumber()
+-- check but is NaN or infinite can corrupt a state field or abort a
+-- later operation after the first write, so every numeric argument is
+-- validated as a FINITE number here, before the first write.
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
     end
+    return n
+end
+
+for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
+    if finite_number(ARGV[i]) == nil then
+        return redis.error_reply('risk-v1: ARGV['..i..'] must be a finite number')
+    end
+end
+local event_arg = finite_number(ARGV[1])
+if event_arg ~= math.floor(event_arg) or event_arg < 1 or event_arg > 22 then
+    return redis.error_reply('risk-v1: event must be an integer within 1..22')
+end
+local scope_arg = finite_number(ARGV[2])
+if scope_arg ~= math.floor(scope_arg) then
+    return redis.error_reply('risk-v1: scope must be an integer')
+end
+local hysteresis_arg = finite_number(ARGV[7])
+if hysteresis_arg < 1 or hysteresis_arg ~= math.floor(hysteresis_arg) then
+    return redis.error_reply('risk-v1: hysteresis_ms must be a positive integer')
+end
+for _, i in ipairs({8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}) do
+    local saturation = finite_number(ARGV[i])
+    if saturation < 1 or saturation ~= math.floor(saturation) then
+        return redis.error_reply('risk-v1: ARGV['..i..'] must be a positive integer saturation')
+    end
+end
+if ARGV[19] ~= '0' and ARGV[19] ~= '1' then
+    return redis.error_reply('risk-v1: has_session must be 0 or 1')
+end
+if ARGV[20] ~= '0' and ARGV[20] ~= '1' then
+    return redis.error_reply('risk-v1: has_principal must be 0 or 1')
 end
 
 -- ── Dedupe: identical event_id must not double-increment state. On a
@@ -348,10 +382,10 @@ if ARGV[4] ~= '' then
     end
 end
 
-local event = tonumber(ARGV[1])
-local scope = tonumber(ARGV[2])
-local has_session = tonumber(ARGV[19]) == 1
-local has_principal = tonumber(ARGV[20]) == 1
+local event = event_arg
+local scope = scope_arg
+local has_session = ARGV[19] == '1'
+local has_principal = ARGV[20] == '1'
 
 -- The zero-skip in save() stays intentional for the GLOBAL rolling state
 -- (KEYS[9], the one no-expiry record, written with ttl 0 below). The

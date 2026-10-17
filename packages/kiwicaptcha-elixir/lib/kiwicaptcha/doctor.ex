@@ -10,6 +10,10 @@ defmodule Kiwicaptcha.Doctor do
 
   @identifier_re ~r/\A[A-Za-z0-9._:-]+\z/
 
+  # The fixed self-check key of the local store probe; it never leaves
+  # the process.
+  @doctor_self_check_secret "kiwicaptcha-doctor-self-check-secret-0000"
+
   @doc "Run every deployment check. See the module documentation."
   @spec run(keyword()) :: %{ok: boolean(), checks: [map()]}
   def run(opts) do
@@ -106,6 +110,39 @@ defmodule Kiwicaptcha.Doctor do
     probe = :crypto.strong_rand_bytes(32)
     nonce = Kiwicaptcha.B64.encode_std(probe)
     now = System.system_time(:second)
+    salt = Kiwicaptcha.B64.encode_std(binary_part(probe, 0, 16))
+
+    canonical =
+      Kiwicaptcha.Canonical.canonical_payload(%Kiwicaptcha.Canonical.Args{
+        protocol_version: 2,
+        nonce: nonce,
+        scope: "doctor",
+        binding_tag: "",
+        issued_at: now,
+        expires_at: now + 120,
+        algorithm: "sha256",
+        m_kib: 0,
+        t: 1,
+        p: 1,
+        target_bits: 1,
+        salt: salt,
+        min_duration_ms: 0,
+        region: nil,
+        policy_version: 1,
+        request_binding: nil,
+        issuer: nil,
+        kid: 1,
+        decoy_field: nil,
+        execution_version: nil,
+        execution_commitment: nil,
+        rsw_modulus_sha256: nil,
+        server_mac_committed: false
+      })
+
+    signature =
+      Kiwicaptcha.Canonical.sign_payload_v2(canonical, @doctor_self_check_secret, nil)
+
+    challenge = Kiwicaptcha.B64.encode_std(canonical) <> "." <> signature
 
     record = %Kiwicaptcha.Record{
       nonce: nonce,
@@ -118,9 +155,9 @@ defmodule Kiwicaptcha.Doctor do
       t: 1,
       p: 1,
       target_bits: 1,
-      salt: Kiwicaptcha.B64.encode_std(binary_part(probe, 0, 16)),
-      prefix: "#{nonce}.",
-      challenge: "#{nonce}.sig",
+      salt: salt,
+      prefix: "#{challenge}|#{salt}|",
+      challenge: challenge,
       min_duration_ms: 0,
       issued_at_ns: 0,
       protocol_version: 2,

@@ -18,19 +18,27 @@
 -- an invalid TTL would abort after the SET had landed.
 local EXPIRY_CEILING_SECS = 2147483647
 
-local scope = tonumber(ARGV[1])
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
+local scope = finite_number(ARGV[1])
 if scope == nil or scope < 1 or scope ~= math.floor(scope) then
-    return redis.error_reply('outcome_register: scope must be a positive integer')
+    return redis.error_reply('outcome_register: scope must be a positive finite integer')
 end
-local hour = tonumber(ARGV[2])
+local hour = finite_number(ARGV[2])
 if hour == nil or hour ~= math.floor(hour) then
-    return redis.error_reply('outcome_register: decision_hour must be an integer')
+    return redis.error_reply('outcome_register: decision_hour must be a finite integer')
 end
-local score = tonumber(ARGV[3])
+local score = finite_number(ARGV[3])
 if score == nil or score < 0 or score > 1000 or score ~= math.floor(score) then
-    return redis.error_reply('outcome_register: score must be an integer within 0..1000')
+    return redis.error_reply('outcome_register: score must be a finite integer within 0..1000')
 end
-local outcome_ttl = tonumber(ARGV[4])
+local outcome_ttl = finite_number(ARGV[4])
 if outcome_ttl == nil or outcome_ttl < 1 or outcome_ttl > EXPIRY_CEILING_SECS or outcome_ttl ~= math.floor(outcome_ttl) then
     return redis.error_reply('outcome_register: outcome_ttl_s must be a positive integer no greater than 2147483647')
 end

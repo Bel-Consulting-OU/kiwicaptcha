@@ -91,7 +91,7 @@ final class StepUpContext
         if ($path === '' || $path[0] !== '/' || \strlen($path) > 512) {
             return false;
         }
-        if (str_contains($path, '\\') || str_contains($path, '?') || str_contains($path, '#')) {
+        if (str_contains($path, '\\') || str_contains($path, '?') || str_contains($path, '#') || str_contains($path, '%')) {
             return false;
         }
         if (preg_match('/[\x00-\x1F\x7F]/', $path) === 1) {

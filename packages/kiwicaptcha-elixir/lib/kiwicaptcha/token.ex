@@ -129,7 +129,7 @@ defmodule Kiwicaptcha.Token do
 
     with {:ok, peeled} <- peel_suffixes(parts),
          {:ok, fields} <- check_core(peeled) do
-      telemetry_result = Kiwicaptcha.Json.decode(fields.telemetry_str)
+      telemetry_result = Kiwicaptcha.Json.decode_telemetry(fields.telemetry_str)
 
       with {:ok, parsed} <- telemetry_result,
            true <- is_map(parsed) and not Map.has_key?(parsed, :__struct__),

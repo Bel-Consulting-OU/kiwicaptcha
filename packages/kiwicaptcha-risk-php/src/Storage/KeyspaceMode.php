@@ -143,12 +143,19 @@ enum KeyspaceMode: string
     public const MERGE_STALENESS_MS = 1000;
 
     /**
-     * The two hex characters of the identifier's first byte: the family
-     * prefix that disperses one dimension over 256 slots. Identifiers
-     * are lowercase hex pseudonyms per the store's validation contract.
+     * The family prefix that disperses one dimension over its slots: the
+     * first two UTF-8 characters of the identifier, which are the first
+     * two bytes for the lowercase hex pseudonyms the validation contract
+     * requires. Character-based truncation keeps a multi-byte character
+     * whole, so both cores derive the same family tag for every valid
+     * UTF-8 identifier instead of splitting a code point at byte two.
      */
     public static function idPrefix(string $hexId): string
     {
+        if (preg_match('/^.{1,2}/us', $hexId, $matches) === 1) {
+            return $matches[0];
+        }
+
         return substr($hexId, 0, 2);
     }
 

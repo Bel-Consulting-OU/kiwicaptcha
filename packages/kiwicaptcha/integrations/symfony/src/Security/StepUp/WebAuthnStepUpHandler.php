@@ -464,7 +464,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
-        $payload = (string) $request->request->get(self::CREDENTIAL_FIELD, '');
+        $payload = $this->fieldString($request, self::CREDENTIAL_FIELD);
         if ($payload === '') {
             $payload = (string) $request->getContent();
         }
@@ -721,7 +721,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
             return StepUpResult::failed('step_up_enrollment_requires_session_step_up', $challenge->id);
         }
-        $payload = (string) $request->request->get(self::CREDENTIAL_FIELD, '');
+        $payload = $this->fieldString($request, self::CREDENTIAL_FIELD);
         if ($payload === '') {
             $payload = (string) $request->getContent();
         }
@@ -773,6 +773,14 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         }
 
         return StepUpResult::succeeded(false, false);
+    }
+
+    /** One submitted string field, or '' for an absent/non-string value. */
+    private function fieldString(Request $request, string $key): string
+    {
+        $value = $request->request->all()[$key] ?? '';
+
+        return \is_string($value) ? $value : '';
     }
 
     /** The configured primary origin's host, or '' when unconfigured. */
@@ -870,7 +878,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
      */
     private function challengeOfRequest(Request $request, int $now): StepUpChallenge|StepUpChallengeExpired|null
     {
-        $ticket = (string) $request->request->get(self::TICKET_FIELD, '');
+        $ticket = $this->fieldString($request, self::TICKET_FIELD);
         if ($ticket === '') {
             return null;
         }

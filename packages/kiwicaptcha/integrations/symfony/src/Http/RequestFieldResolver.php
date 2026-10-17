@@ -31,28 +31,9 @@ final class RequestFieldResolver
      */
     public static function string(Request $request, string $field): ?string
     {
-        $found = [];
-        self::collect($request->request->all(), $field, $found, self::MAX_DEPTH);
-        if ($found === []) {
-            // The payload bag merges JSON bodies too; fall back to it
-            // for clients that posted nested JSON.
-            try {
-                self::collect($request->getPayload()->all(), $field, $found, self::MAX_DEPTH);
-            } catch (\Throwable) {
-                // No payload bag: the form body is the only source.
-            }
-        }
-        if ($found === []) {
-            return null;
-        }
-        $distinct = array_values(array_unique($found));
-        if (\count($distinct) !== 1) {
-            // Two different values under one name: deterministic null,
-            // never a guess.
-            return null;
-        }
+        $values = self::resolveMany($request, [$field]);
 
-        return $distinct[0];
+        return $values[$field] ?? null;
     }
 
     /**
@@ -66,9 +47,8 @@ final class RequestFieldResolver
     public static function targetFields(Request $request, array $fields): array
     {
         $resolved = [];
-        foreach ($fields as $name) {
-            $value = self::string($request, $name);
-            if ($value !== null && $value !== '') {
+        foreach (self::resolveMany($request, $fields) as $name => $value) {
+            if ($value !== '') {
                 $resolved[$name] = $value;
             }
         }
@@ -77,20 +57,85 @@ final class RequestFieldResolver
     }
 
     /**
-     * @param array<mixed>          $data
-     * @param array<int, string>    $found
+     * Resolve every requested field in at most one walk of each
+     * payload bag. The walk collects string values for all wanted
+     * names at once, so the cost is linear in the payload plus the
+     * requested field count rather than one full walk per field.
+     *
+     * @param list<string> $fields
+     *
+     * @return array<string, string>
      */
-    private static function collect(array $data, string $field, array &$found, int $depth): void
+    private static function resolveMany(Request $request, array $fields): array
+    {
+        $wanted = [];
+        foreach ($fields as $field) {
+            $wanted[$field] = true;
+        }
+        $found = [];
+        self::collect($request->request->all(), $wanted, $found, self::MAX_DEPTH);
+        $missing = [];
+        foreach ($fields as $field) {
+            if (!isset($found[$field])) {
+                $missing[$field] = true;
+            }
+        }
+        if ($missing !== []) {
+            // The payload bag merges JSON bodies too; fall back to it
+            // for clients that posted nested JSON.
+            try {
+                self::collect($request->getPayload()->all(), $missing, $found, self::MAX_DEPTH);
+            } catch (\Throwable) {
+                // No payload bag: the form body is the only source.
+            }
+        }
+        $resolved = [];
+        foreach ($fields as $field) {
+            if (!isset($found[$field])) {
+                continue;
+            }
+            $values = $found[$field];
+            if (\count($values) === 1) {
+                $resolved[$field] = $values[0];
+                continue;
+            }
+            $distinct = array_values(array_unique($values));
+            if (\count($distinct) !== 1) {
+                // Two different values under one name: deterministic
+                // null, never a guess.
+                continue;
+            }
+            $resolved[$field] = $distinct[0];
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * @param array<mixed>             $data
+     * @param array<string, true>      $wanted
+     * @param array<string, list<string>> $found
+     */
+    private static function collect(array $data, array $wanted, array &$found, int $depth): void
     {
         foreach ($data as $key => $value) {
-            if ($key === $field) {
+            if (\is_string($key) && isset($wanted[$key])) {
                 if (\is_string($value)) {
-                    $found[] = $value;
+                    $found[$key][] = $value;
+                    continue;
+                }
+                if ($depth > 0 && \is_array($value)) {
+                    // For this field the match already decided the
+                    // lookup, so its name stays blocked below; every
+                    // other wanted field still descends.
+                    $nested = $wanted;
+                    unset($nested[$key]);
+                    self::collect($value, $nested, $found, $depth - 1);
                 }
                 continue;
             }
             if ($depth > 0 && \is_array($value)) {
-                self::collect($value, $field, $found, $depth - 1);
+                self::collect($value, $wanted, $found, $depth - 1);
             }
         }
     }

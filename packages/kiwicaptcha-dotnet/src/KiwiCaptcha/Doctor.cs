@@ -185,7 +185,10 @@ public static class Doctor
         var payload = Canonical.CanonicalPayload(2, nonce, "doctor", "", now, expires,
             "sha256", 1, 1, 1, 1, salt, 0, "", 1, "", "", 1, "", 0, "", "", false);
         var signature = Canonical.SignPayloadV2(payload, secret, "");
-        var challenge = payload + "." + signature;
+        // The challenge wire is base64(canonical) "." signature: the
+        // embedded payload must be the canonical bytes the fields
+        // reconstruct, never the raw canonical text.
+        var challenge = Convert.ToBase64String(Encoding.UTF8.GetBytes(payload)) + "." + signature;
         return new ChallengeRecord
         {
             Nonce = nonce,

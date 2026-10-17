@@ -312,12 +312,23 @@ public sealed record SolutionToken
         {
             throw new DecodeException(DecodeErrMalformed);
         }
-        var counter = CanonicalDecimal(counterStr);
-        if (counter < 0)
+        // The syntax gate and the length gate are separate rejections,
+        // the reference decoder's order: a nine digit spelling is a
+        // counter-ceiling rejection even when it is too large for a
+        // native long, never a generic syntax rejection.
+        if (!IsDigits(counterStr) || (counterStr.Length > 1 && counterStr[0] == '0'))
         {
             throw new DecodeException(DecodeErrInvalidCounter);
         }
-        if (counterStr.Length > 8 || counter >= Kiwi.MaxSolverCounter)
+        if (counterStr.Length > 8)
+        {
+            throw new DecodeException(DecodeErrInvalidCount);
+        }
+        if (!long.TryParse(counterStr, out var counter))
+        {
+            throw new DecodeException(DecodeErrInvalidCounter);
+        }
+        if (counter >= Kiwi.MaxSolverCounter)
         {
             throw new DecodeException(DecodeErrInvalidCount);
         }
@@ -329,6 +340,13 @@ public sealed record SolutionToken
         if (duration > Kiwi.MaxDurationMs)
         {
             throw new DecodeException(DecodeErrInvalidDur);
+        }
+        // A lone surrogate escape is replaced with U+FFFD by the
+        // runtime JSON reader, while the reference decoder rejects the
+        // token; reject it here so every host reads one value.
+        if (HasUnpairedSurrogateEscape(telemetryStr))
+        {
+            throw new DecodeException(DecodeErrMalformed);
         }
         JsonObject telemetry;
         try
@@ -400,6 +418,107 @@ public sealed record SolutionToken
             return -1;
         }
         return long.TryParse(s, out var value) ? value : -1;
+    }
+
+    /// <summary>
+    /// True when a JSON string literal carries a \u escape that encodes
+    /// an unpaired surrogate. Escaped backslashes are skipped, so the
+    /// literal text \\ud800 is not an escape. Malformed escapes are
+    /// left to the JSON parser.
+    /// </summary>
+    internal static bool HasUnpairedSurrogateEscape(string text)
+    {
+        var inString = false;
+        var i = 0;
+        while (i < text.Length)
+        {
+            var c = text[i];
+            if (!inString)
+            {
+                if (c == '"')
+                {
+                    inString = true;
+                }
+                i++;
+                continue;
+            }
+            if (c == '"')
+            {
+                inString = false;
+                i++;
+                continue;
+            }
+            if (c != '\\')
+            {
+                i++;
+                continue;
+            }
+            if (i + 1 >= text.Length)
+            {
+                return false;
+            }
+            if (text[i + 1] != 'u')
+            {
+                i += 2;
+                continue;
+            }
+            if (i + 5 >= text.Length)
+            {
+                return false;
+            }
+            var unit = ParseHex4(text, i + 2);
+            if (unit < 0)
+            {
+                return false;
+            }
+            if (unit is >= 0xd800 and <= 0xdbff)
+            {
+                if (i + 11 < text.Length && text[i + 6] == '\\' && text[i + 7] == 'u')
+                {
+                    var low = ParseHex4(text, i + 8);
+                    if (low is >= 0xdc00 and <= 0xdfff)
+                    {
+                        i += 12;
+                        continue;
+                    }
+                }
+                return true;
+            }
+            if (unit is >= 0xdc00 and <= 0xdfff)
+            {
+                return true;
+            }
+            i += 6;
+        }
+        return false;
+    }
+
+    private static int ParseHex4(string text, int offset)
+    {
+        var value = 0;
+        for (var i = 0; i < 4; i++)
+        {
+            var c = text[offset + i];
+            int digit;
+            if (c is >= '0' and <= '9')
+            {
+                digit = c - '0';
+            }
+            else if (c is >= 'a' and <= 'f')
+            {
+                digit = c - 'a' + 10;
+            }
+            else if (c is >= 'A' and <= 'F')
+            {
+                digit = c - 'A' + 10;
+            }
+            else
+            {
+                return -1;
+            }
+            value = value * 16 + digit;
+        }
+        return value;
     }
 
     internal static bool IsHexN(string s, int n)
@@ -597,6 +716,25 @@ public static class Canonical
         return dot < 0 ? "" : challenge[(dot + 1)..];
     }
 
+    /// <summary>
+    /// True when the challenge's payload segment (everything before the
+    /// final dot) is the canonical standard base64 of exactly canonical.
+    /// Challenge writers emit base64(canonical) || "." || signature, so
+    /// a segment that decodes to anything else is a malformed record
+    /// whose client-visible payload disagrees with the signed fields.
+    /// </summary>
+    public static bool ChallengePayloadMatches(string challenge, string canonical)
+    {
+        var dot = challenge.LastIndexOf('.');
+        if (dot < 0)
+        {
+            return false;
+        }
+        var decoded = B64CanonicalDecode(challenge[..dot]);
+        return decoded is not null
+            && decoded.AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(canonical));
+    }
+
     /// <summary>The legacy v1 binding value: the sha256 hex of secret plus ip.</summary>
     public static string HashIpV1(string ip, string secret) =>
         Hex(Sha256(Encoding.UTF8.GetBytes(secret + ip)));
@@ -782,19 +920,23 @@ public static class Canonical
     public static bool VerifyRecordSignature(ChallengeRecord record, string secretKey, string tenantId)
     {
         var commitsMac = SignedCanonicalCommitsRecordMeta(record.Challenge);
-        string expected;
+        // Reconstruct the canonical once: the signature authenticates
+        // these bytes, and the client-visible payload segment must be
+        // exactly those bytes. Comparing only the last dot-segment
+        // would leave the embedded payload unauthenticated, so a party
+        // able to rewrite the challenge string could make the browser
+        // solve a payload that disagrees with the signed fields.
+        string canonical;
         if (record.ProtocolVersion == 1)
         {
-            expected = SignPayloadV1(
-                LegacyV1Payload(record.Nonce, record.Scope, record.BindingTag, record.IssuedAt),
-                secretKey);
+            canonical = LegacyV1Payload(
+                record.Nonce, record.Scope, record.BindingTag, record.IssuedAt);
         }
         else
         {
-            string payload;
             try
             {
-                payload = CanonicalPayloadChecked(
+                canonical = CanonicalPayloadChecked(
                     record.ProtocolVersion, record.Nonce, record.Scope, record.BindingTag,
                     record.IssuedAt, record.ExpiresAt, record.Algorithm, record.MKib, record.T,
                     record.P, record.TargetBits, record.Salt, record.MinDurationMs, record.Region,
@@ -806,8 +948,14 @@ public static class Canonical
             {
                 return false;
             }
-            expected = SignPayloadV2(payload, secretKey, tenantId);
         }
+        if (!ChallengePayloadMatches(record.Challenge, canonical))
+        {
+            return false;
+        }
+        var expected = record.ProtocolVersion == 1
+            ? SignPayloadV1(canonical, secretKey)
+            : SignPayloadV2(canonical, secretKey, tenantId);
         if (!ConstantTimeEquals(expected, SignatureFromChallenge(record.Challenge)))
         {
             return false;

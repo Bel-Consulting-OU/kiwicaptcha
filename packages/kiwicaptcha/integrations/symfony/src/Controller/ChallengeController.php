@@ -117,9 +117,11 @@ final class ChallengeController
      * Headers carrying client identity or forwarding trust: each must
      * appear at most once, since intermediaries pick different values on
      * duplicates. A duplicate gets 400 `DUPLICATE_HEADER` before any
-     * header-derived identity is trusted.
+     * header-derived identity is trusted. The host family and the method
+     * override join the forwarding family here, so no ambiguous routing
+     * or method input survives the gate.
      */
-    private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip', 'content-type', 'content-encoding'];
+    private const SECURITY_SINGULAR_HEADERS = ['origin', 'forwarded', 'x-forwarded-for', 'x-real-ip', 'x-forwarded-host', 'x-forwarded-proto', 'x-http-method-override', 'host', 'content-type', 'content-encoding'];
 
     /**
      * Hard ceiling for the challenge request body: the language is tiny, so
@@ -4111,6 +4113,17 @@ final class ChallengeController
     {
         $parts = parse_url($origin);
         if (!\is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+            return null;
+        }
+        // An Origin is a scheme, a host and a port only (RFC 6454). A
+        // value carrying credentials, a path, a query or a fragment is
+        // not an origin; a parser that strips those components could
+        // disagree with one that treats the value as a URL, so it is
+        // refused rather than normalized.
+        if (isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])) {
+            return null;
+        }
+        if (isset($parts['path']) && $parts['path'] !== '') {
             return null;
         }
         $scheme = strtolower((string) $parts['scheme']);

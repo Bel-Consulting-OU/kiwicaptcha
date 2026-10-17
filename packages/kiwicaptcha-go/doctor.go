@@ -74,7 +74,10 @@ func doctorSelfCheckRecord() (*ChallengeRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	challenge := payload + "." + signature
+	// The challenge wire is base64(canonical) "." signature: the
+	// embedded payload must be the canonical bytes the fields
+	// reconstruct, never the raw canonical text.
+	challenge := base64.StdEncoding.EncodeToString([]byte(payload)) + "." + signature
 	prefix := challenge + "|" + salt + "|"
 	return &ChallengeRecord{
 		Nonce:           nonce,

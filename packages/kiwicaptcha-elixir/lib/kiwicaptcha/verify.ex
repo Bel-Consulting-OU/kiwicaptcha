@@ -1030,45 +1030,52 @@ defmodule Kiwicaptcha.Verify do
   def verify_record_signature(options, record, secret_key) do
     commits_mac = Kiwicaptcha.Canonical.signed_canonical_commits_record_meta?(record.challenge)
 
-    expected =
+    # Reconstruct the canonical once: the signature authenticates these
+    # bytes, and the client-visible payload segment must be exactly
+    # those bytes. Comparing only the last dot-segment would leave the
+    # embedded payload unauthenticated, so a party able to rewrite the
+    # challenge string could make the browser solve a payload that
+    # disagrees with the signed fields.
+    canonical =
       if record.protocol_version == 1 do
-        Kiwicaptcha.Canonical.sign_payload_v1(
-          Enum.join([record.nonce, record.scope, record.binding_tag, record.issued_at], "|"),
-          secret_key
-        )
+        Enum.join([record.nonce, record.scope, record.binding_tag, record.issued_at], "|")
       else
-        Kiwicaptcha.Canonical.sign_payload_v2(
-          Kiwicaptcha.Canonical.canonical_payload(%Kiwicaptcha.Canonical.Args{
-            protocol_version: record.protocol_version,
-            nonce: record.nonce,
-            scope: record.scope,
-            binding_tag: record.binding_tag,
-            issued_at: record.issued_at,
-            expires_at: record.expires_at,
-            algorithm: record.algorithm,
-            m_kib: record.m_kib,
-            t: record.t,
-            p: record.p,
-            target_bits: record.target_bits,
-            salt: record.salt,
-            min_duration_ms: record.min_duration_ms,
-            region: record.region,
-            policy_version: record.policy_version || 1,
-            request_binding: record.request_binding,
-            issuer: record.issuer,
-            kid: record.kid || 1,
-            decoy_field: record.decoy_field,
-            execution_version: record.execution_version,
-            execution_commitment: record.execution_commitment,
-            rsw_modulus_sha256: record.rsw_modulus_sha256,
-            server_mac_committed: commits_mac
-          }),
-          secret_key,
-          options.tenant_id
-        )
+        Kiwicaptcha.Canonical.canonical_payload(%Kiwicaptcha.Canonical.Args{
+          protocol_version: record.protocol_version,
+          nonce: record.nonce,
+          scope: record.scope,
+          binding_tag: record.binding_tag,
+          issued_at: record.issued_at,
+          expires_at: record.expires_at,
+          algorithm: record.algorithm,
+          m_kib: record.m_kib,
+          t: record.t,
+          p: record.p,
+          target_bits: record.target_bits,
+          salt: record.salt,
+          min_duration_ms: record.min_duration_ms,
+          region: record.region,
+          policy_version: record.policy_version || 1,
+          request_binding: record.request_binding,
+          issuer: record.issuer,
+          kid: record.kid || 1,
+          decoy_field: record.decoy_field,
+          execution_version: record.execution_version,
+          execution_commitment: record.execution_commitment,
+          rsw_modulus_sha256: record.rsw_modulus_sha256,
+          server_mac_committed: commits_mac
+        })
       end
 
-    if Kiwicaptcha.Mac.timing_safe_equals(expected, signature_from_challenge(record.challenge)) do
+    expected =
+      if record.protocol_version == 1 do
+        Kiwicaptcha.Canonical.sign_payload_v1(canonical, secret_key)
+      else
+        Kiwicaptcha.Canonical.sign_payload_v2(canonical, secret_key, options.tenant_id)
+      end
+
+    if challenge_payload_matches?(record.challenge, canonical) and
+         Kiwicaptcha.Mac.timing_safe_equals(expected, signature_from_challenge(record.challenge)) do
       key = Kiwicaptcha.Mac.server_state_key(secret_key, options.tenant_id)
 
       meta =
@@ -1090,9 +1097,32 @@ defmodule Kiwicaptcha.Verify do
   end
 
   defp signature_from_challenge(challenge) do
-    case String.split(challenge, ".", parts: 2) do
-      [_payload, sig] -> sig
-      [whole] -> whole
+    # The tag is the segment after the last dot, the extraction every
+    # other host applies. A challenge with no dot carries no tag (the
+    # empty string), never the whole challenge.
+    case String.split(challenge, ".") do
+      [_whole] -> ""
+      parts -> List.last(parts)
+    end
+  end
+
+  # True when the challenge's payload segment (everything before the
+  # final dot) is the canonical standard base64 of exactly canonical.
+  # Challenge writers emit base64(canonical) || "." || signature, so a
+  # segment that decodes to anything else is a malformed record whose
+  # client-visible payload disagrees with the signed fields.
+  defp challenge_payload_matches?(challenge, canonical) do
+    case String.split(challenge, ".", trim: false) do
+      [_whole] ->
+        false
+
+      parts ->
+        encoded = parts |> Enum.drop(-1) |> Enum.join(".")
+
+        case Kiwicaptcha.B64.decode_std(encoded) do
+          {:ok, decoded} -> decoded == canonical
+          :error -> false
+        end
     end
   end
 

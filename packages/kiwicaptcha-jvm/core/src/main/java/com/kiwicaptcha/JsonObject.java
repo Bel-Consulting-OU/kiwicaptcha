@@ -234,7 +234,7 @@ public final class JsonObject {
         }
 
         JsonObject parseObjectBody(int depth) {
-            if (depth > 32) {
+            if (depth >= Kiwi.MAX_TELEMETRY_DEPTH) {
                 throw new IllegalArgumentException("json nesting too deep");
             }
             expect('{');
@@ -269,7 +269,7 @@ public final class JsonObject {
         }
 
         List<Object> parseArray(int depth) {
-            if (depth > 32) {
+            if (depth >= Kiwi.MAX_TELEMETRY_DEPTH) {
                 throw new IllegalArgumentException("json nesting too deep");
             }
             expect('[');

@@ -1,8 +1,15 @@
 import { createHash } from 'node:crypto';
+import { canonicalPayload, signPayloadV2 } from './canonical.js';
 import { MIN_SECRET_BYTES } from './keys.js';
 import type { StoreAdapter } from './store.js';
 import type { RswVerifierConfig } from './verify.js';
 import { Rsw } from './rsw.js';
+
+/** The fixed self-check key of the local store probe; it never leaves the process. */
+const DOCTOR_SELF_CHECK_SECRET = Buffer.from(
+  'kiwicaptcha-doctor-self-check-secret-0000',
+  'utf8',
+);
 
 /**
  * The doctor: the deployment self-check of the shared server-SDK
@@ -84,6 +91,34 @@ async function probeStore(store: StoreAdapter): Promise<DoctorCheck> {
   const probe = createHash('sha256').update(String(Date.now())).digest();
   const nonce = probe.toString('base64');
   const now = Math.floor(Date.now() / 1000);
+  const salt = probe.subarray(0, 16).toString('base64');
+  const canonical = canonicalPayload({
+    protocolVersion: 2,
+    nonce,
+    scope: 'doctor',
+    bindingTag: '',
+    issuedAt: now,
+    expiresAt: now + 120,
+    algorithm: 'sha256',
+    mKib: 0,
+    t: 1,
+    p: 1,
+    targetBits: 1,
+    salt,
+    minDurationMs: 0,
+    region: null,
+    policyVersion: 1,
+    requestBinding: null,
+    issuer: null,
+    kid: 1,
+    decoyField: null,
+    executionVersion: null,
+    executionCommitment: null,
+    rswModulusSha256: null,
+    serverMacCommitted: false,
+  });
+  const signature = signPayloadV2(canonical, DOCTOR_SELF_CHECK_SECRET, null);
+  const challenge = Buffer.from(canonical, 'utf8').toString('base64') + '.' + signature;
   const record = {
     nonce,
     scope: 'doctor',
@@ -95,9 +130,9 @@ async function probeStore(store: StoreAdapter): Promise<DoctorCheck> {
     t: 1,
     p: 1,
     targetBits: 1,
-    salt: probe.subarray(0, 16).toString('base64'),
-    prefix: `${nonce}.`,
-    challenge: `${nonce}.sig`,
+    salt,
+    prefix: `${challenge}|${salt}|`,
+    challenge,
     minDurationMs: 0,
     issuedAtNs: 0,
     protocolVersion: 2,

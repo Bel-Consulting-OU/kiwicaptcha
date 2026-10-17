@@ -132,12 +132,19 @@ impl ShardedDimension {
     }
 }
 
-/// The two hex characters of the identifier's first byte: the family
-/// prefix that disperses one dimension over 256 slots. Identifiers are
-/// lowercase hex pseudonyms per the store's validation contract, so the
-/// prefix is always ASCII and the byte slice is always even.
+/// The family prefix that disperses one dimension over its slots: the
+/// first two UTF-8 characters of the identifier, which are the first two
+/// bytes for the lowercase hex pseudonyms the validation contract
+/// requires. Character-based truncation keeps a multi-byte character
+/// whole, so both cores derive the same family tag for every valid UTF-8
+/// identifier instead of splitting a code point at byte two.
 pub fn id_prefix(hex_id: &str) -> &str {
-    &hex_id[..hex_id.len().min(2)]
+    let mut chars = hex_id.char_indices();
+    let _ = chars.next();
+    match chars.next() {
+        Some((index, ch)) => &hex_id[..index + ch.len_utf8()],
+        None => hex_id,
+    }
 }
 
 /// FNV-1a 32-bit over the event id bytes: `hash = (hash ^ byte) * prime`

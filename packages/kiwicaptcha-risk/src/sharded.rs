@@ -243,6 +243,12 @@ struct BatchUnit {
 struct MergeCache {
     per_shard: [AtomicI64; 16],
     at_ms: AtomicU64,
+    /// The highest merged pressure observed since the last refresh. The
+    /// level ratchet runs once per staleness window; a short burst can
+    /// peak and leak back below an entry threshold inside that window.
+    /// Feeding the ratchet the window's peak keeps the documented
+    /// emergency tripwire from missing the burst, at no extra Redis call.
+    peak_gp: AtomicI64,
 }
 
 impl MergeCache {
@@ -250,6 +256,7 @@ impl MergeCache {
         MergeCache {
             per_shard: std::array::from_fn(|_| AtomicI64::new(0)),
             at_ms: AtomicU64::new(0),
+            peak_gp: AtomicI64::new(0),
         }
     }
 
@@ -538,6 +545,8 @@ impl ShardedRedisRiskStateStore {
     /// independent counter.
     fn record_shard_sum(&self, shard: u8, sum: i64) {
         self.merge.per_shard[usize::from(shard)].store(sum, Ordering::Relaxed);
+        let window_sum: i64 = self.merge.snapshot().iter().sum();
+        self.merge.peak_gp.fetch_max(window_sum, Ordering::Relaxed);
     }
 
     /// The merge batch: one read-only scope invocation per shard (every
@@ -570,14 +579,17 @@ impl ShardedRedisRiskStateStore {
             merged_gp += per_shard[shard];
         }
         // The level/cooldown ratchet on the merged pressure, then publish
-        // for the hot path.
+        // for the hot path. The window's peak feeds the ratchet, then the
+        // next window starts from the refreshed merged value.
+        let peak_gp = self.merge.peak_gp.swap(merged_gp, Ordering::Relaxed);
+        let hysteresis_gp = merged_gp.max(peak_gp);
         let hyst_key = hysteresis_key(ns);
         let mut hyst_eval = redis_crate::cmd("EVALSHA");
         hyst_eval
             .arg(self.hysteresis_script.get_hash())
             .arg(1)
             .arg(&hyst_key)
-            .arg(merged_gp)
+            .arg(hysteresis_gp)
             .arg(self.options.saturations[8])
             .arg(self.options.hysteresis_ms);
         let replies = self.dispatch(vec![BatchUnit {
@@ -813,7 +825,8 @@ impl ShardedRedisRiskStateStore {
             // map never shifts between the assessment's read and the
             // outcome bridge's write; the marker key rides along
             // untouched.
-            let mut keys = crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded).to_vec();
+            let mut keys =
+                crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded).to_vec();
             keys.push(crate::keyspace::target_failure_marker_key(
                 ns,
                 target,
@@ -878,17 +891,31 @@ impl ShardedRedisRiskStateStore {
                 _ => ("read", "", ""),
             };
             if records_failure {
-                let keys = crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded);
+                let mut keys =
+                    crate::keyspace::target_state_keys(ns, target, KeyspaceMode::Sharded).to_vec();
+                // The report event id rides the same per-report marker
+                // target_failure.lua maintains, so a report delivered
+                // through both the assessment and the outcome bridge
+                // books one failure.
+                keys.push(crate::keyspace::target_failure_marker_key(
+                    ns,
+                    target,
+                    &o.event_id,
+                    KeyspaceMode::Sharded,
+                ));
                 let mut eval = redis_crate::cmd("EVALSHA");
                 eval.arg(self.target_script.get_hash())
-                    .arg(3)
+                    .arg(4)
                     .arg(&keys[0])
                     .arg(&keys[1])
                     .arg(&keys[2])
+                    .arg(&keys[3])
                     .arg(op)
                     .arg(source_element)
                     .arg(asn_element)
-                    .arg(self.options.target_ttl_secs);
+                    .arg(self.options.target_ttl_secs)
+                    .arg(o.event_id.as_str())
+                    .arg(self.options.dedupe_ttl_secs);
                 let replies = self.dispatch(vec![BatchUnit {
                     endpoint: self.endpoint_for_key(&keys[0]),
                     eval,
@@ -1699,7 +1726,13 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
     ) -> Result<bool, RiskStoreError> {
         // The decision-id key family (the same key the assessment path's
         // consolidated registration writes), so confirm/correct resolve
-        // the same ledger in both modes.
+        // the same ledger in both modes. The identifier follows the same
+        // key-safety rule as the classic store.
+        if !RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "decision_id is not a safe Redis key component".to_string(),
+            ));
+        }
         let key = crate::keyspace::outcome_ledger_key(&self.encoded_namespace, decision_id);
         let mut eval = redis_crate::cmd("EVALSHA");
         eval.arg(self.outcome_register_script.get_hash())
@@ -1724,6 +1757,11 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
     }
 
     fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
+        if !RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "decision_id is not a safe Redis key component".to_string(),
+            ));
+        }
         let key = crate::keyspace::outcome_ledger_key(&self.encoded_namespace, decision_id);
         let mut eval = redis_crate::cmd("EVALSHA");
         eval.arg(self.outcome_confirm_script.get_hash())
@@ -1753,6 +1791,11 @@ impl RiskStateStore for ShardedRedisRiskStateStore {
     }
 
     fn correct_outcome(&self, decision_id: &str, legitimate: bool) -> Result<bool, RiskStoreError> {
+        if !RedisRiskStateStore::valid_key_component(decision_id) {
+            return Err(RiskStoreError::InvalidIdentifier(
+                "decision_id is not a safe Redis key component".to_string(),
+            ));
+        }
         let key = crate::keyspace::outcome_ledger_key(&self.encoded_namespace, decision_id);
         let mut eval = redis_crate::cmd("EVALSHA");
         eval.arg(self.outcome_correct_script.get_hash())
@@ -1857,6 +1900,12 @@ impl ShardedRedisRiskStateStore {
         key: &str,
         tag: &str,
     ) -> Result<Option<String>, RiskStoreError> {
+        if tag.len() > 64 {
+            return Err(RiskStoreError::InvalidIdentifier(format!(
+                "session tag must be at most 64 bytes (got {})",
+                tag.len()
+            )));
+        }
         let endpoint = &self.endpoints[self.endpoint_for_key(key)];
         let ttl: i64 = self.options.session_ttl_secs.try_into().unwrap_or(i64::MAX);
         endpoint.pool.with_connection(&endpoint.client, |conn| {

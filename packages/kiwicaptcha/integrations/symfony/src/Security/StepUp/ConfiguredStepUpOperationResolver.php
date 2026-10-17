@@ -57,13 +57,11 @@ final class ConfiguredStepUpOperationResolver implements StepUpOperationResolver
         if ($fields === []) {
             throw new \InvalidArgumentException(sprintf('The scope "%s" carries no protected-content recipe (risk.scopes.%s.operation_content_fields)', $scope, $scope));
         }
-        $contents = [];
+        $contents = RequestFieldResolver::targetFields($request, $fields);
         foreach ($fields as $field) {
-            $value = RequestFieldResolver::string($request, $field);
-            if ($value === null || trim($value) === '') {
+            if (!isset($contents[$field]) || trim($contents[$field]) === '') {
                 throw new \InvalidArgumentException(sprintf('The protected content field "%s" resolved to no value for the scope "%s"', $field, $scope));
             }
-            $contents[$field] = $value;
         }
         $principal = null;
         try {

@@ -12,9 +12,9 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     16 (KEYS[1..16])
---   max Redis calls:      32 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
---                           3 GET + 4 SET + 2 PFADD + 2 PFCOUNT +
+--   max keys touched:     17 (KEYS[1..17])
+--   max Redis calls:      34 (1 TIME + 9 HMGET + 5 HSET + 4 EXPIRE +
+--                           4 GET + 5 SET + 2 PFADD + 2 PFCOUNT +
 --                           1 PEXPIRE — every call is fixed-cost; no
 --                           KEYS/SCAN/EVAL nesting, no iteration over
 --                           attacker-sized collections; the HLL
@@ -56,6 +56,12 @@
 --            source on a target failure (target family tag)
 --   KEYS[16] target asn-spread HyperLogLog — PFADD of the failing asn
 --            bucket on a target failure (target family tag)
+--   KEYS[17] OPTIONAL per-report target-failure dedupe marker, on the
+--            same hash tag as KEYS[14..16]. The canonical
+--            target_failure.lua writes the same marker, so one report
+--            event id books one target failure whichever report path
+--            reaches the state first. A caller that passes no 17th key
+--            keeps the previous semantics (absent marker = no claim).
 --
 -- ARGV:
 --   [1]  event             RiskEventKind int (1..22)
@@ -223,23 +229,60 @@ end
 -- ── Numeric argument validation BEFORE any write. ──
 -- Redis does not roll back: a missing or non-numeric numeric ARGV used
 -- to error mid-transition AFTER the dedupe marker was written, losing
--- the event and refusing an identical retry as a duplicate. Validate
--- every numeric slot up front, before the first write.
+-- the event and refusing an identical retry as a duplicate. A value
+-- that passes a bare tonumber() check but is NaN or infinite can abort
+-- a later arithmetic or cjson step after the first write, so every
+-- numeric slot is validated as a FINITE number here. Event ids, scopes,
+-- capability flags and saturations carry their exact integer contract.
+local function finite_number(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
 -- Required numeric slots: a missing value would reach a nil comparison
 -- mid-transition, so it is refused here.
 for _, i in ipairs({1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}) do
-    if tonumber(ARGV[i]) == nil then
-        return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric')
+    if finite_number(ARGV[i]) == nil then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be a finite number')
     end
 end
 -- Optional numeric slots (registration/outcome fields): callers that do
 -- not request the feature legitimately omit trailing arguments, so a
 -- missing slot is left to the feature-specific checks below; any slot
--- that IS present must be numeric, or it would error after a write.
-for _, i in ipairs({26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47}) do
-    if ARGV[i] ~= nil and ARGV[i] ~= '' and tonumber(ARGV[i]) == nil then
-        return redis.error_reply('assess_v2: ARGV['..i..'] must be numeric when present')
+-- that IS present must be finite, or it would error after a write.
+for _, i in ipairs({26, 27, 28, 30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 52, 53}) do
+    if ARGV[i] ~= nil and ARGV[i] ~= '' and finite_number(ARGV[i]) == nil then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be a finite number when present')
     end
+end
+local event_arg = finite_number(ARGV[1])
+if event_arg ~= math.floor(event_arg) or event_arg < 1 or event_arg > 22 then
+    return redis.error_reply('assess_v2: event must be an integer within 1..22')
+end
+local scope_arg = finite_number(ARGV[2])
+if scope_arg ~= math.floor(scope_arg) then
+    return redis.error_reply('assess_v2: scope must be an integer')
+end
+local hysteresis_arg = finite_number(ARGV[7])
+if hysteresis_arg < 1 or hysteresis_arg ~= math.floor(hysteresis_arg) then
+    return redis.error_reply('assess_v2: hysteresis_ms must be a positive integer')
+end
+for _, i in ipairs({8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}) do
+    local saturation = finite_number(ARGV[i])
+    if saturation < 1 or saturation ~= math.floor(saturation) then
+        return redis.error_reply('assess_v2: ARGV['..i..'] must be a positive integer saturation')
+    end
+end
+-- Capability flags are exactly the canonical 0/1 strings: a malformed
+-- flag must not silently read as "absent", which would drop state.
+if ARGV[19] ~= '0' and ARGV[19] ~= '1' then
+    return redis.error_reply('assess_v2: has_session must be 0 or 1')
+end
+if ARGV[20] ~= '0' and ARGV[20] ~= '1' then
+    return redis.error_reply('assess_v2: has_principal must be 0 or 1')
 end
 if ARGV[25] and ARGV[25] ~= '' and ttl_out_of_bounds(tonumber(ARGV[27])) then
     return redis.error_reply('assess_v2: outcome_ttl_s must be a positive integer no greater than 2147483647 (a persistent outcome ledger is not admissible)')
@@ -449,10 +492,13 @@ if ARGV[4] ~= '' then
     end
 end
 
-local event = tonumber(ARGV[1])
-local scope = tonumber(ARGV[2])
-local has_session = tonumber(ARGV[19]) == 1
-local has_principal = tonumber(ARGV[20]) == 1
+local event = event_arg
+local scope = scope_arg
+local has_session = ARGV[19] == '1'
+local has_principal = ARGV[20] == '1'
+-- The optional per-report target dedupe marker. An older caller passes
+-- only the sixteen keys and keeps the previous semantics.
+local target_marker = KEYS[17]
 
 -- ── Source: update current epoch, read ±1 for boundary continuity. ──
 local src = read_state(KEYS[1], now)
@@ -647,18 +693,32 @@ if has_target then
         ts = ts + leaked * LEAK_MS
     end
     if event == 11 and not is_duplicate then
-        fails = fails + 1
-        if ts == 0 then ts = now end
-        redis.call('HSET', KEYS[14], 'ts', ts, 'fails', fails, 'last_ms', now)
-        redis.call('HSETNX', KEYS[14], 'first_ms', now)
-        redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
-        if ARGV[49] and ARGV[49] ~= '' then
-            redis.call('PFADD', KEYS[15], ARGV[49])
-            redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[51]) * 1000)
+        -- One report event id books one target failure. The marker is
+        -- the same key target_failure.lua writes, so a report delivered
+        -- through both paths is booked once. The claim is written LAST,
+        -- after the effect it claims: an abort can only allow one extra
+        -- booking, never suppress an unbooked report.
+        local target_duplicate = false
+        if target_marker and ARGV[4] ~= '' and redis.call('GET', target_marker) then
+            target_duplicate = true
         end
-        if ARGV[50] and ARGV[50] ~= '' then
-            redis.call('PFADD', KEYS[16], ARGV[50])
-            redis.call('PEXPIRE', KEYS[16], tonumber(ARGV[51]) * 1000)
+        if not target_duplicate then
+            fails = fails + 1
+            if ts == 0 then ts = now end
+            redis.call('HSET', KEYS[14], 'ts', ts, 'fails', fails, 'last_ms', now)
+            redis.call('HSETNX', KEYS[14], 'first_ms', now)
+            redis.call('PEXPIRE', KEYS[14], tonumber(ARGV[51]) * 1000)
+            if ARGV[49] and ARGV[49] ~= '' then
+                redis.call('PFADD', KEYS[15], ARGV[49])
+                redis.call('PEXPIRE', KEYS[15], tonumber(ARGV[51]) * 1000)
+            end
+            if ARGV[50] and ARGV[50] ~= '' then
+                redis.call('PFADD', KEYS[16], ARGV[50])
+                redis.call('PEXPIRE', KEYS[16], tonumber(ARGV[51]) * 1000)
+            end
+            if target_marker then
+                redis.call('SET', target_marker, '1', 'EX', dedupe_ttl)
+            end
         end
     end
     target_failures = fails

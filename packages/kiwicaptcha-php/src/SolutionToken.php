@@ -72,6 +72,16 @@ final class SolutionToken
     public const MAX_DURATION_MS = 3_600_000;
 
     /**
+     * Maximum nesting depth of the telemetry object. The register value
+     * is protocol/limits.json `token_max_telemetry_depth`; the same
+     * ceiling is enforced by every hosted decoder. A deeper object is
+     * outside the wire language, so its token is malformed. PHP's
+     * json_decode depth counts the outer value as one level, hence the
+     * +1 when the limit is passed.
+     */
+    public const MAX_TELEMETRY_DEPTH = 32;
+
+    /**
      * @param array<string, mixed> $telemetry
      * @param string|null          $executionDigest 64-lowercase-hex execution
      *                                              digest, or null for the
@@ -282,8 +292,13 @@ final class SolutionToken
         // Telemetry must be a JSON object in both implementations ({} for
         // an off widget, {v,mode,me,ke,...} otherwise). json_decode in
         // object mode distinguishes {} from []/"x"/123/null; array mode
-        // cannot.
-        $telemetry = json_decode($telemetryStr, false);
+        // cannot. The depth ceiling is part of the wire language: PHP's
+        // decoder would otherwise accept up to 511 levels while the
+        // strictest hosts stopped at the register value, so the same
+        // token would decode on one host and reject on another.
+        // json_decode's depth argument counts the outer value as a
+        // level, so the register ceiling maps to MAX_TELEMETRY_DEPTH + 1.
+        $telemetry = json_decode($telemetryStr, false, self::MAX_TELEMETRY_DEPTH + 1);
         if (!\is_object($telemetry)) {
             throw DecodeError::malformed();
         }

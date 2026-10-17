@@ -105,11 +105,14 @@ final class StepUpController
         if ($rawPrincipal === null || $rawPrincipal === '') {
             return self::plain('No principal is resolvable for this request; step-up is refused.', Response::HTTP_FORBIDDEN);
         }
-        $returnPath = $request->query->get('return_to');
+        $returnPath = $this->queryScalar($request, 'return_to');
+        if ($returnPath !== null && !\is_string($returnPath)) {
+            return self::plain('The return path must be an absolute same-site path.', Response::HTTP_UNPROCESSABLE_ENTITY);
+        }
         if (\is_string($returnPath) && $returnPath !== '' && !StepUpContext::isSafeReturnPath($returnPath)) {
             return self::plain('The return path must be an absolute same-site path.', Response::HTTP_UNPROCESSABLE_ENTITY);
         }
-        $reason = $request->query->get('reason');
+        $reason = $this->queryScalar($request, 'reason');
         if (!\is_string($reason) || $reason === '') {
             $reason = self::DEFAULT_REASON;
         }
@@ -228,7 +231,7 @@ final class StepUpController
             );
         }
         if ($result->status === StepUpResultStatus::Succeeded) {
-            $returnPath = $request->query->get('return_to');
+            $returnPath = $this->queryScalar($request, 'return_to');
             if (\is_string($returnPath) && $returnPath !== '' && StepUpContext::isSafeReturnPath($returnPath)) {
                 return new RedirectResponse($returnPath, Response::HTTP_SEE_OTHER);
             }
@@ -504,13 +507,26 @@ final class StepUpController
     }
 
     /**
+     * One scalar query value, read without the typed accessor: an
+     * array-shaped occurrence reads as non-scalar input the caller
+     * refuses, never as an exception from the parameter bag.
+     */
+    private function queryScalar(Request $request, string $key): mixed
+    {
+        return $request->query->all()[$key] ?? null;
+    }
+
+    /**
      * The handler of the request: the explicit handler query name, or
      * the configured default. A malformed or unknown name is refused
      * (fail-closed), never defaulted.
      */
     private function handler(Request $request): StepUpHandlerInterface
     {
-        $name = $request->query->get('handler');
+        $name = $this->queryScalar($request, 'handler');
+        if ($name !== null && !\is_string($name)) {
+            throw new \InvalidArgumentException('The handler name must be 1-64 chars of [a-z0-9_]');
+        }
         if (\is_string($name) && $name !== '' && preg_match('/^[a-z0-9_]{1,64}$/D', $name) !== 1) {
             throw new \InvalidArgumentException('The handler name must be 1-64 chars of [a-z0-9_]');
         }
@@ -524,7 +540,7 @@ final class StepUpController
      */
     private function mode(Request $request): string
     {
-        $mode = $request->query->get('mode');
+        $mode = $this->queryScalar($request, 'mode');
         if (\is_string($mode) && $mode !== '') {
             return $mode === StepUpContext::MODE_JSON ? StepUpContext::MODE_JSON : StepUpContext::MODE_HTML;
         }

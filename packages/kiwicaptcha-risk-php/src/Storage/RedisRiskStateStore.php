@@ -72,6 +72,15 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     public const MAX_BUCKET_TRUST_DELTA = 100_000;
 
     /**
+     * The largest accepted caller identifier in bytes. Identifiers are
+     * interpolated into Redis keys; an unbounded value would let one
+     * report mint a multi-megabyte key. Production callers pass 32/64
+     * hex pseudonyms and short decision ids, so the ceiling is far above
+     * every contract value while keeping one key bounded.
+     */
+    public const MAX_KEY_COMPONENT_BYTES = 4096;
+
+    /**
      * The largest accepted TTL in seconds (10 years). Values above it are
      * refused at construction: Redis rejects an expire value beyond its
      * ceiling at request time, and a script that had already written the
@@ -609,6 +618,23 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     }
 
     /**
+     * Refuses a session tag value over the 64-byte contract bound the
+     * consolidated script enforces. The direct record surface and the
+     * consolidated assessment are interchangeable, so a value one
+     * accepts must never make the other reject the whole request.
+     */
+    private static function assertSessionTag(string $name, string $tag): void
+    {
+        if (strlen($tag) > 64) {
+            throw new \InvalidArgumentException(sprintf(
+                '%s must be at most 64 bytes (got %d)',
+                $name,
+                strlen($tag),
+            ));
+        }
+    }
+
+    /**
      * Refuses a mark dimension outside the five contract dimensions: an
      * unknown dimension would silently address a key family nothing ever
      * reads.
@@ -636,6 +662,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     public function sessionFirstContextTag(string $sessionId, string $tag): ?string
     {
         self::assertKeySafeIdentifier('sessionId', $sessionId);
+        self::assertSessionTag('tag', $tag);
         $key = "{kiwi:{$this->namespace}}:risk:ctx:{$sessionId}";
         try {
             $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
@@ -666,6 +693,7 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     public function sessionFirstTlsTag(string $sessionId, string $tag): ?string
     {
         self::assertKeySafeIdentifier('sessionId', $sessionId);
+        self::assertSessionTag('tag', $tag);
         $key = "{kiwi:{$this->namespace}}:risk:tls:{$sessionId}";
         try {
             $set = $this->client->set($key, $tag, 'EX', $this->sessionTtlSecs, 'NX');
@@ -793,8 +821,11 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
         $keys[] = $registration !== null
             ? $this->ledgerKey($registration->decisionId)
             : "{kiwi:{$this->namespace}}:risk:ledger:unused";
-        if ($registration !== null && $registration->targetId !== null && $registration->targetId !== '') {
-            foreach ($this->targetStateKeys($registration->targetId) as $k) {
+        $targetId = $registration !== null && $registration->targetId !== null && $registration->targetId !== ''
+            ? $registration->targetId
+            : null;
+        if ($targetId !== null) {
+            foreach ($this->targetStateKeys($targetId) as $k) {
                 $keys[] = $k;
             }
         } else {
@@ -802,6 +833,14 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
             $keys[] = "{kiwi:{$this->namespace}}:risk:tgt:src:unused";
             $keys[] = "{kiwi:{$this->namespace}}:risk:tgt:asn:unused";
         }
+        // KEYS[17]: the per-report target-failure dedupe marker. The
+        // canonical target_failure.lua writes the identical key, so one
+        // report event id books one failure no matter which report path
+        // reaches the state first. Always present so the key positions
+        // never shift; a target-less assessment passes an unused slot.
+        $keys[] = $targetId !== null
+            ? KeyspaceMode::targetFailureMarkerKey($this->namespace, $targetId, $observation->eventId, KeyspaceMode::Legacy)
+            : "{kiwi:{$this->namespace}}:risk:tgt:dd:unused";
         $this->assertSameSlot($keys);
 
         $args = [...$this->observationArgs($observation), $contextTag ?? '', $tlsTag ?? ''];
@@ -1009,6 +1048,14 @@ final class RedisRiskStateStore implements RiskStateStoreInterface, SessionConte
     {
         if (preg_match('/^[0-9a-f]{32}$/', $value) === 1) {
             return;
+        }
+        if (strlen($value) > self::MAX_KEY_COMPONENT_BYTES) {
+            throw new \InvalidArgumentException(sprintf(
+                '%s must be at most %d bytes (got %d): an unbounded identifier would mint an unbounded Redis key',
+                $name,
+                self::MAX_KEY_COMPONENT_BYTES,
+                strlen($value),
+            ));
         }
         if ($value === '' || preg_match('//u', $value) !== 1
             || preg_match('/[\x00-\x1f\x7f:}]|\xc2[\x80-\x9f]|\xe2\x80[\xa8\xa9]/', $value) === 1) {

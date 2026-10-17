@@ -286,6 +286,12 @@ final class RedisRiskStateStoreTest extends TestCase
         $store = $this->store();
         $eventId = str_repeat('7', 32);
 
+        // The bucket's timestamp is written inside the first call, so the
+        // possible elapsed window starts at the clock read BEFORE it, not
+        // after it: bracketing from the post-call read under-estimates the
+        // decay by the call's own post-script delay, which a loaded
+        // machine turns into a one-tick boundary failure.
+        $tBeforeFirst = $this->redisNowMs();
         $first = $store->observe($this->observation($eventId));
         self::assertSame(125, $first->sourceFast);
         self::assertFalse($store->lastIsDuplicate());
@@ -302,7 +308,7 @@ final class RedisRiskStateStoreTest extends TestCase
             250,
             8000,
             $tBeforeDup - $tAfterFirst,
-            $tAfterDup - $tAfterFirst,
+            $tAfterDup - $tBeforeFirst,
         );
         self::assertGreaterThanOrEqual($min, $duplicate->sourceFast, 'duplicate must return the decayed current signals');
         self::assertLessThanOrEqual($max, $duplicate->sourceFast);
@@ -319,7 +325,7 @@ final class RedisRiskStateStoreTest extends TestCase
             250,
             8000,
             $tBeforeThird - $tAfterFirst,
-            $tAfterThird - $tAfterFirst,
+            $tAfterThird - $tBeforeFirst,
         );
         self::assertGreaterThanOrEqual($min, $third->sourceFast);
         self::assertLessThanOrEqual($max, $third->sourceFast);

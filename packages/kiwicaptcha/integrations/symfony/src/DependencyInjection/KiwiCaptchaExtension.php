@@ -4202,6 +4202,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ],
         ];
         $scopeIds = [];
+        $usedScopeIds = [];
         $postSolveScopes = [];
         foreach ($riskConfig['scopes'] as $name => $spec) {
             $id = $spec['id'] ?? (crc32($name) & 0x7fffffff);
@@ -4212,7 +4213,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $id,
                 ));
             }
-            if (isset($scopeIds[$name]) || \in_array($id, $scopeIds, true)) {
+            if (isset($scopeIds[$name]) || isset($usedScopeIds[$id])) {
                 throw new \InvalidArgumentException(sprintf(
                     'kiwi_captcha.risk.scopes[%s]: risk scope id %d collides with another scope — set explicit, unique "id" values',
                     $name,
@@ -4220,6 +4221,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ));
             }
             $scopeIds[$name] = $id;
+            $usedScopeIds[$id] = true;
             $postSolveScopes[$name] = $spec['post_solve_check'];
             $policyConfig['scopes'][$id] = [
                 'base_risk' => $spec['base_risk'],
@@ -4263,9 +4265,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      */
     private function reserveUnknownScopeId(array $scopeIds): int
     {
-        $used = array_values($scopeIds);
+        $used = [];
+        foreach ($scopeIds as $id) {
+            $used[$id] = true;
+        }
         for ($id = 0xFFFFFFFF; $id >= 1; --$id) {
-            if (!\in_array($id, $used, true)) {
+            if (!isset($used[$id])) {
                 return $id;
             }
         }

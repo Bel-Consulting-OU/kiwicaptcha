@@ -184,7 +184,10 @@ function kiwiMatrixChallenge(): void
             return;
         }
     }
-    $scope = isset($payload['scope']) && $payload['scope'] !== '' ? (string) $payload['scope'] : 'default';
+    // Absent or null means the documented default; an explicitly
+    // empty string is a malformed identifier and is refused below,
+    // never silently promoted to the default scope.
+    $scope = array_key_exists('scope', $payload) && $payload['scope'] !== null ? (string) $payload['scope'] : 'default';
     $requestBinding = isset($payload['request_binding']) && $payload['request_binding'] !== ''
         ? (string) $payload['request_binding']
         : null;

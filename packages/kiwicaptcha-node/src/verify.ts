@@ -294,7 +294,12 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
     // gate entirely.
     if (
       config.enforceTelemetry &&
-      (Object.keys(token.telemetry).length === 0 || scoreTelemetry(token.telemetry, token.durationMs)) &&
+      (Object.keys(token.telemetry).length === 0 ||
+        scoreTelemetry(
+          token.telemetry,
+          token.durationMs,
+          token.telemetryEtFloatSpellings,
+        )) &&
       runtime.kind !== 'consumed'
     ) {
       return invalid(VerifyErrorCode.TelemetryRejected);
@@ -378,7 +383,12 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   // original solve, replay-exempt, deletion only for a pending record.
   if (
     config.enforceTelemetry &&
-    (Object.keys(token.telemetry).length === 0 || scoreTelemetry(token.telemetry, token.durationMs)) &&
+    (Object.keys(token.telemetry).length === 0 ||
+      scoreTelemetry(
+        token.telemetry,
+        token.durationMs,
+        token.telemetryEtFloatSpellings,
+      )) &&
     runtime.kind !== 'consumed'
   ) {
     let cleanup: Awaited<ReturnType<StoreAdapter['deleteIfPending']>>;
@@ -884,41 +894,47 @@ export function verifyRecordSignature(
   secretKey: Buffer,
 ): boolean {
   const commitsMac = signedCanonicalCommitsRecordMeta(record.challenge);
+  // Reconstruct the canonical once: the signature authenticates these
+  // bytes, and the client-visible payload segment must be exactly
+  // those bytes. Comparing only the last dot-segment would leave the
+  // embedded payload unauthenticated, so a party able to rewrite the
+  // challenge string could make the browser solve a payload that
+  // disagrees with the signed fields.
+  const canonical =
+    record.protocolVersion === 1
+      ? `${record.nonce}|${record.scope}|${record.bindingTag}|${record.issuedAt}`
+      : canonicalPayload({
+          protocolVersion: record.protocolVersion,
+          nonce: record.nonce,
+          scope: record.scope,
+          bindingTag: record.bindingTag,
+          issuedAt: record.issuedAt,
+          expiresAt: record.expiresAt,
+          algorithm: record.algorithm,
+          mKib: record.mKib,
+          t: record.t,
+          p: record.p,
+          targetBits: record.targetBits,
+          salt: record.salt,
+          minDurationMs: record.minDurationMs,
+          region: record.region,
+          policyVersion: record.policyVersion ?? 1,
+          requestBinding: record.requestBinding,
+          issuer: record.issuer,
+          kid: record.kid ?? 1,
+          decoyField: record.decoyField,
+          executionVersion: record.executionVersion,
+          executionCommitment: record.executionCommitment,
+          rswModulusSha256: record.rswModulusSha256,
+          serverMacCommitted: commitsMac,
+        });
+  if (!challengePayloadMatches(record.challenge, canonical)) {
+    return false;
+  }
   const expected =
     record.protocolVersion === 1
-      ? signPayloadV1(
-          `${record.nonce}|${record.scope}|${record.bindingTag}|${record.issuedAt}`,
-          secretKey,
-        )
-      : signPayloadV2(
-          canonicalPayload({
-            protocolVersion: record.protocolVersion,
-            nonce: record.nonce,
-            scope: record.scope,
-            bindingTag: record.bindingTag,
-            issuedAt: record.issuedAt,
-            expiresAt: record.expiresAt,
-            algorithm: record.algorithm,
-            mKib: record.mKib,
-            t: record.t,
-            p: record.p,
-            targetBits: record.targetBits,
-            salt: record.salt,
-            minDurationMs: record.minDurationMs,
-            region: record.region,
-            policyVersion: record.policyVersion ?? 1,
-            requestBinding: record.requestBinding,
-            issuer: record.issuer,
-            kid: record.kid ?? 1,
-            decoyField: record.decoyField,
-            executionVersion: record.executionVersion,
-            executionCommitment: record.executionCommitment,
-            rswModulusSha256: record.rswModulusSha256,
-            serverMacCommitted: commitsMac,
-          }),
-          secretKey,
-          config.tenantId,
-        );
+      ? signPayloadV1(canonical, secretKey)
+      : signPayloadV2(canonical, secretKey, config.tenantId);
   if (!timingSafeEqualsHex(expected, signatureFromChallenge(record.challenge))) {
     return false;
   }
@@ -944,6 +960,22 @@ export function verifyRecordSignature(
 function signatureFromChallenge(challenge: string): string {
   const pos = challenge.lastIndexOf('.');
   return pos === -1 ? '' : challenge.slice(pos + 1);
+}
+
+/**
+ * True when the challenge's payload segment (everything before the
+ * final dot) is the canonical standard base64 of exactly `canonical`.
+ * Challenge writers emit base64(canonical) || "." || signature, so a
+ * segment that decodes to anything else is a malformed record whose
+ * client-visible payload disagrees with the signed fields.
+ */
+function challengePayloadMatches(challenge: string, canonical: string): boolean {
+  const pos = challenge.lastIndexOf('.');
+  if (pos === -1) {
+    return false;
+  }
+  const decoded = decodeStdBase64(challenge.slice(0, pos));
+  return decoded !== null && decoded.equals(Buffer.from(canonical, 'utf8'));
 }
 
 /** Select the signature secret for a record (kid set or legacy secret). */

@@ -13,6 +13,13 @@ module KiwiCaptcha
     # Hard ceiling for the client-reported duration (telemetry only).
     MAX_DURATION_MS = 3_600_000
 
+    # Maximum nesting depth of the telemetry object, the
+    # protocol/limits.json `token_max_telemetry_depth` register row. The
+    # JSON parser's own default (100) is host-specific slack; the
+    # register value is the contract, so the 33rd nested container is
+    # outside the wire language.
+    MAX_TELEMETRY_DEPTH = 32
+
     DECODE_CODES = %i[
       invalid_base64 invalid_utf8 malformed invalid_counter
       counter_exceeds_solver_maximum invalid_duration
@@ -42,6 +49,22 @@ module KiwiCaptcha
       return false if segment.empty? || !CANONICAL_DECIMAL.match?(segment)
 
       segment.length == 1 || !segment.start_with?('0')
+    end
+
+    # Reject any decoded string that is not valid UTF-8. The JSON
+    # parser turns an unpaired surrogate escape into such a string.
+    def reject_invalid_strings(value)
+      case value
+      when Hash
+        value.each do |key, item|
+          reject_invalid_strings(key)
+          reject_invalid_strings(item)
+        end
+      when Array
+        value.each { |item| reject_invalid_strings(item) }
+      when String
+        raise DecodeError, :malformed unless value.valid_encoding?
+      end
     end
 
     def encode(token)
@@ -126,11 +149,25 @@ module KiwiCaptcha
       raise DecodeError, :invalid_duration if duration_ms > MAX_DURATION_MS
 
       begin
-        parsed = JSON.parse(telemetry_str)
+        # Duplicate keys resolve to the last value, the reference
+        # decoder's resolution. The options are explicit so a future
+        # json gem default cannot silently change the wire language:
+        # max_nesting pins the register depth ceiling (32 containers
+        # accepted, 33 rejected) instead of the gem's host-only default.
+        parsed = JSON.parse(
+          telemetry_str,
+          allow_duplicate_key: true,
+          max_nesting: MAX_TELEMETRY_DEPTH
+        )
       rescue JSON::ParserError
         raise DecodeError, :malformed
       end
       raise DecodeError, :malformed unless parsed.is_a?(Hash)
+
+      # A lone low surrogate escape decodes to a string with invalid
+      # UTF-8 bytes, while the reference decoder rejects the token;
+      # reject it here so every host reads one value.
+      reject_invalid_strings(parsed)
 
       if execution_digest && !EXECUTION_DIGEST_SHAPE.match?(execution_digest)
         raise DecodeError, :malformed

@@ -150,7 +150,10 @@ def _self_check_record() -> ChallengeRecord:
         kid=1,
     )
     signature = sign_payload_v2(canonical, secret.decode("ascii"), None)
-    challenge = canonical + "." + signature
+    # The challenge wire is base64(canonical) "." signature: the
+    # embedded payload must be the canonical bytes the fields
+    # reconstruct, never the raw canonical text.
+    challenge = base64.b64encode(canonical.encode("ascii")).decode("ascii") + "." + signature
     prefix = challenge + "|" + salt + "|"
     return ChallengeRecord(
         nonce=nonce,

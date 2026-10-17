@@ -79,6 +79,14 @@ public final class Kiwi {
     /** Hard ceiling for the client reported token duration. */
     public static final int MAX_DURATION_MS = 3_600_000;
 
+    /**
+     * Maximum nesting depth of the telemetry object, the
+     * protocol/limits.json {@code token_max_telemetry_depth} register
+     * row. The scalar level is zero, so the 32nd nested container is
+     * accepted and the 33rd is refused.
+     */
+    public static final int MAX_TELEMETRY_DEPTH = 32;
+
     /** Decoded nonce length in bytes. */
     public static final int NONCE_B64_BYTES = 32;
 
