@@ -56,6 +56,15 @@ declare(strict_types=1);
  *     2. A partial sweep must never read as complete. Exit 0 means
  *     every key in the keyspace was serialized in full.
  *
+ *     The reads are pipelined in batches of {@see D314_PIPELINE_KEYS}
+ *     keys: one round trip for the batch's TYPE replies, one for their
+ *     first reads, one for their whole-value reads, then one per page
+ *     round for the large hashes and sets. Every decision is still made
+ *     per key from that key's own reply, and the line order stays the
+ *     sorted key order, so the dump bytes and the summary are what the
+ *     per-key walk produced. Pipelining only removes the wait between
+ *     keys; it never merges two keys into one decision.
+ *
  * Exit codes: 0 for a complete sweep or a driven flow; 2 with uncovered
  * keys, each named in the JSON summary with its reason; 3 on a boot or
  * flow failure in identity mode.
@@ -254,9 +263,48 @@ function d314Json(mixed $value): string
 }
 
 /**
+ * Keys per pipelined batch. The batch bounds the memory a round trip may
+ * hold (a batch of replies) and the window between a key's TYPE and its
+ * read; the campaign's keyspace is dominated by small state hashes, so
+ * 512 keeps both well inside the process budget while cutting the round
+ * trips by two orders of magnitude.
+ */
+const D314_PIPELINE_KEYS = 512;
+
+/**
+ * One pipelined round trip: queue every unit's raw command and return the
+ * replies in submission order, one per unit. A reply that is an error
+ * reply makes the pipeline throw, exactly like the unpipelined
+ * executeCommand path, so a failed read still aborts the sweep instead of
+ * being read as data.
+ *
+ * @param list<array{cmd: string, args: array<int, string>}> $units
+ *
+ * @return list<mixed>
+ */
+function d314Pipeline(\Predis\Client $client, array $units): array
+{
+    if ($units === []) {
+        // An empty batch reads nothing: no round trip, and no dependency
+        // on the client library's empty-pipeline handling.
+        return [];
+    }
+
+    return $client->pipeline(static function ($pipe) use ($units): void {
+        foreach ($units as $unit) {
+            $pipe->executeCommand(new \Predis\Command\RawCommand($unit['cmd'], $unit['args']));
+        }
+    });
+}
+
+/**
  * The complete keyspace sweep. Returns the summary document; writes one
  * line per covered key to $outFile. Every key the sweep cannot prove it
  * serialized in full lands in the uncovered list with its reason.
+ *
+ * The walk reads the keyspace in batches through {@see d314DumpBatch}: the
+ * key set, the sort order, the per-key classification and the line bytes
+ * are unchanged, only the waits between keys are gone.
  */
 function d314Dump(string $redisUrl, string $outFile): array
 {
@@ -290,10 +338,155 @@ function d314Dump(string $redisUrl, string $outFile): array
         'types' => [],
         'bytes' => 0,
     ];
-    foreach ($keys as $key) {
+    foreach (array_chunk($keys, D314_PIPELINE_KEYS) as $batch) {
+        d314DumpBatch($client, $batch, $handle, $summary);
+    }
+    fclose($handle);
+
+    return $summary;
+}
+
+/**
+ * One batch of the sweep. Four pipelined phases, then the classification
+ * pass that writes the batch's lines in the batch's key order:
+ *
+ *   1. TYPE for every key: one round trip, one reply per key.
+ *   2. The first read of each key, dispatched on that key's own TYPE
+ *      reply (GET, HLEN, LRANGE, SCARD, ZRANGE, XLEN, XRANGE, or the
+ *      EXISTS that confirms a vanished key): one round trip.
+ *   3. The whole-value read of each hash, set and (already in phase 2)
+ *      stream the phase-1 length left under the paging bound: one round
+ *      trip.
+ *   4. The HSCAN/SSCAN cursor walk of the over-bound hashes and sets,
+ *      one round trip per page round for every paged key of the batch
+ *      together. Each key's pages are merged in cursor order into the
+ *      same field map and member list the per-key walk built.
+ *
+ * Nothing is decided in the read phases. Every reply is kept per key and
+ * the classification pass then applies the untouched per-key rules, so a
+ * key's fate depends on its own replies and never on its neighbours.
+ *
+ * @param list<string>                                                                       $batch
+ * @param resource                                                                           $handle
+ * @param array{keys: int, covered: int, uncovered: list<array<string, mixed>>, vanished: list<array<string, mixed>>, truncated: list<array<string, mixed>>, types: array<string, int>, bytes: int} $summary
+ */
+function d314DumpBatch(\Predis\Client $client, array $batch, $handle, array &$summary): void
+{
+    $typeUnits = [];
+    foreach ($batch as $key) {
+        $typeUnits[] = ['cmd' => 'TYPE', 'args' => [$key]];
+    }
+    $typeReplies = d314Pipeline($client, $typeUnits);
+    $type = [];
+    foreach ($batch as $i => $key) {
+        $type[$i] = strtolower((string) ($typeReplies[$i] ?? ''));
+    }
+
+    $units = [];
+    foreach ($batch as $i => $key) {
+        switch ($type[$i]) {
+            case 'none':
+            case '':
+                $units[] = ['cmd' => 'EXISTS', 'args' => [$key], 'i' => $i, 'slot' => 'exists'];
+                break;
+            case 'string':
+                $units[] = ['cmd' => 'GET', 'args' => [$key], 'i' => $i, 'slot' => 'value'];
+                break;
+            case 'hash':
+                $units[] = ['cmd' => 'HLEN', 'args' => [$key], 'i' => $i, 'slot' => 'len'];
+                break;
+            case 'list':
+                $units[] = ['cmd' => 'LRANGE', 'args' => [$key, '0', '-1'], 'i' => $i, 'slot' => 'value'];
+                break;
+            case 'set':
+                $units[] = ['cmd' => 'SCARD', 'args' => [$key], 'i' => $i, 'slot' => 'len'];
+                break;
+            case 'zset':
+                $units[] = ['cmd' => 'ZRANGE', 'args' => [$key, '0', '-1', 'WITHSCORES'], 'i' => $i, 'slot' => 'value'];
+                break;
+            case 'stream':
+                $units[] = ['cmd' => 'XLEN', 'args' => [$key], 'i' => $i, 'slot' => 'len'];
+                $units[] = ['cmd' => 'XRANGE', 'args' => [$key, '-', '+', 'COUNT', '1000'], 'i' => $i, 'slot' => 'value'];
+                break;
+            default:
+                // A module type or a type this list does not know: no read
+                // is issued, and the classification pass names it
+                // uncovered.
+                break;
+        }
+    }
+    $got = [];
+    foreach (d314Pipeline($client, $units) as $n => $reply) {
+        $got[$units[$n]['i']][$units[$n]['slot']] = $reply;
+    }
+    unset($units);
+
+    $units = [];
+    foreach ($batch as $i => $key) {
+        if ($type[$i] === 'hash' && (int) ($got[$i]['len'] ?? 0) <= 4096) {
+            $units[] = ['cmd' => 'HGETALL', 'args' => [$key], 'i' => $i, 'slot' => 'flat'];
+        } elseif ($type[$i] === 'set' && (int) ($got[$i]['len'] ?? 0) <= 4096) {
+            $units[] = ['cmd' => 'SMEMBERS', 'args' => [$key], 'i' => $i, 'slot' => 'members'];
+        }
+    }
+    foreach (d314Pipeline($client, $units) as $n => $reply) {
+        $got[$units[$n]['i']][$units[$n]['slot']] = $reply;
+    }
+    unset($units);
+
+    // The paged keys: one round trip per page round across the batch. A
+    // hash page is field/value pairs merged into the field map; a set
+    // page is a flat member list appended to the member list.
+    $paged = [];
+    foreach ($batch as $i => $key) {
+        if ($type[$i] === 'hash' && (int) ($got[$i]['len'] ?? 0) > 4096) {
+            $paged[$i] = ['cmd' => 'HSCAN', 'cursor' => '0', 'first' => true, 'fields' => []];
+        } elseif ($type[$i] === 'set' && (int) ($got[$i]['len'] ?? 0) > 4096) {
+            $paged[$i] = ['cmd' => 'SSCAN', 'cursor' => '0', 'first' => true, 'members' => []];
+        }
+    }
+    while ($paged !== []) {
+        $units = [];
+        foreach ($paged as $i => $state) {
+            if ($state['first'] || $state['cursor'] !== '0') {
+                $units[] = ['cmd' => $state['cmd'], 'args' => [$batch[$i], $state['cursor'], 'COUNT', '1000'], 'i' => $i, 'slot' => 'scan'];
+            }
+        }
+        if ($units === []) {
+            break;
+        }
+        foreach (d314Pipeline($client, $units) as $n => $reply) {
+            $i = $units[$n]['i'];
+            $reply = (array) $reply;
+            $page = (array) ($reply[1] ?? []);
+            if ($paged[$i]['cmd'] === 'HSCAN') {
+                for ($j = 0; $j + 1 < count($page); $j += 2) {
+                    $paged[$i]['fields'][(string) $page[$j]] = (string) $page[$j + 1];
+                }
+            } else {
+                foreach ($page as $member) {
+                    $paged[$i]['members'][] = (string) $member;
+                }
+            }
+            $paged[$i]['cursor'] = (string) ($reply[0] ?? '0');
+            $paged[$i]['first'] = false;
+        }
+        $done = true;
+        foreach ($paged as $state) {
+            if ($state['first'] || $state['cursor'] !== '0') {
+                $done = false;
+                break;
+            }
+        }
+        if ($done) {
+            break;
+        }
+    }
+
+    foreach ($batch as $i => $key) {
         $summary['keys']++;
-        $type = strtolower((string) $cmd('TYPE', [$key]));
-        if ($type === 'none' || $type === '') {
+        $typeName = $type[$i];
+        if ($typeName === 'none' || $typeName === '') {
             // The key no longer exists. The keyspace is live: the
             // issuance limiter's counters carry a minute-long TTL and the
             // flow itself writes while the sweep walks, so a key
@@ -302,8 +495,8 @@ function d314Dump(string $redisUrl, string $outFile): array
             // confirmed with a second EXISTS before the key is counted,
             // and every vanished key is reported, so a sweep can still
             // never claim to have covered a key it did not read.
-            if ((int) $cmd('EXISTS', [$key]) === 1) {
-                $summary['uncovered'][] = ['key' => $key, 'type' => $type === '' ? 'none' : $type, 'reason' => 'vanished_between_scan_and_type'];
+            if ((int) ($got[$i]['exists'] ?? 0) === 1) {
+                $summary['uncovered'][] = ['key' => $key, 'type' => $typeName === '' ? 'none' : $typeName, 'reason' => 'vanished_between_scan_and_type'];
 
                 continue;
             }
@@ -311,61 +504,49 @@ function d314Dump(string $redisUrl, string $outFile): array
 
             continue;
         }
-        $summary['types'][$type] = ($summary['types'][$type] ?? 0) + 1;
+        $summary['types'][$typeName] = ($summary['types'][$typeName] ?? 0) + 1;
         $payload = null;
         $truncated = false;
-        switch ($type) {
+        switch ($typeName) {
             case 'string':
-                $value = $cmd('GET', [$key]);
+                $value = $got[$i]['value'] ?? null;
                 if ($value !== null) {
                     $payload = d314Json((string) $value);
                 }
                 break;
             case 'hash':
                 $fields = [];
-                if ((int) $cmd('HLEN', [$key]) <= 4096) {
-                    $flat = (array) $cmd('HGETALL', [$key]);
-                    for ($i = 0; $i + 1 < count($flat); $i += 2) {
-                        $fields[(string) $flat[$i]] = (string) $flat[$i + 1];
+                if ((int) ($got[$i]['len'] ?? 0) <= 4096) {
+                    $flat = (array) ($got[$i]['flat'] ?? []);
+                    for ($j = 0; $j + 1 < count($flat); $j += 2) {
+                        $fields[(string) $flat[$j]] = (string) $flat[$j + 1];
                     }
                 } else {
                     // A large hash is paged, never HGETALL'd whole: HSCAN
-                    // walks every field in bounded batches.
-                    $cursor = '0';
-                    do {
-                        $reply = $cmd('HSCAN', [$key, $cursor, 'COUNT', '1000']);
-                        $cursor = (string) $reply[0];
-                        $flat = (array) $reply[1];
-                        for ($i = 0; $i + 1 < count($flat); $i += 2) {
-                            $fields[(string) $flat[$i]] = (string) $flat[$i + 1];
-                        }
-                    } while ($cursor !== '0');
+                    // walked every field in bounded batches.
+                    $fields = $paged[$i]['fields'] ?? [];
                 }
                 $payload = d314Json((object) $fields);
                 break;
             case 'list':
-                $payload = d314Json(array_map('strval', (array) $cmd('LRANGE', [$key, '0', '-1'])));
+                $payload = d314Json(array_map('strval', (array) ($got[$i]['value'] ?? [])));
                 break;
             case 'set':
-                $members = [];
-                if ((int) $cmd('SCARD', [$key]) <= 4096) {
-                    $members = array_map('strval', (array) $cmd('SMEMBERS', [$key]));
+                if ((int) ($got[$i]['len'] ?? 0) <= 4096) {
+                    $members = array_map('strval', (array) ($got[$i]['members'] ?? []));
                 } else {
-                    $cursor = '0';
-                    do {
-                        $reply = $cmd('SSCAN', [$key, $cursor, 'COUNT', '1000']);
-                        $cursor = (string) $reply[0];
-                        $members = array_merge($members, array_map('strval', (array) $reply[1]));
-                    } while ($cursor !== '0');
+                    // A large set is paged, never SMEMBERS'd whole: SSCAN
+                    // walked every member in bounded batches.
+                    $members = $paged[$i]['members'] ?? [];
                 }
                 sort($members, SORT_STRING);
                 $payload = d314Json($members);
                 break;
             case 'zset':
-                $flat = (array) $cmd('ZRANGE', [$key, '0', '-1', 'WITHSCORES']);
+                $flat = (array) ($got[$i]['value'] ?? []);
                 $scored = [];
-                for ($i = 0; $i + 1 < count($flat); $i += 2) {
-                    $scored[(string) $flat[$i]] = (string) $flat[$i + 1];
+                for ($j = 0; $j + 1 < count($flat); $j += 2) {
+                    $scored[(string) $flat[$j]] = (string) $flat[$j + 1];
                 }
                 $payload = d314Json((object) $scored);
                 break;
@@ -373,14 +554,14 @@ function d314Dump(string $redisUrl, string $outFile): array
                 // The bounded read: COUNT 1000 entries. A longer stream is
                 // recorded as truncated and counted uncovered, so the
                 // bound can never pass as a complete dump.
-                $length = (int) $cmd('XLEN', [$key]);
+                $length = (int) ($got[$i]['len'] ?? 0);
                 $entries = [];
-                foreach ((array) $cmd('XRANGE', [$key, '-', '+', 'COUNT', '1000']) as $entry) {
+                foreach ((array) ($got[$i]['value'] ?? []) as $entry) {
                     $entry = (array) $entry;
                     $fields = [];
                     $flat = array_map('strval', (array) ($entry[1] ?? []));
-                    for ($i = 0; $i + 1 < count($flat); $i += 2) {
-                        $fields[$flat[$i]] = $flat[$i + 1];
+                    for ($j = 0; $j + 1 < count($flat); $j += 2) {
+                        $fields[$flat[$j]] = $flat[$j + 1];
                     }
                     $entries[(string) ($entry[0] ?? '')] = (object) $fields;
                 }
@@ -394,25 +575,22 @@ function d314Dump(string $redisUrl, string $outFile): array
                 // A module type or a type Redis grows beyond this list:
                 // the sweep cannot serialize it, so it must not claim it
                 // did.
-                $summary['uncovered'][] = ['key' => $key, 'type' => $type, 'reason' => 'unserializable_type'];
+                $summary['uncovered'][] = ['key' => $key, 'type' => $typeName, 'reason' => 'unserializable_type'];
                 continue 2;
         }
         if ($payload === null) {
             // The value vanished between TYPE and the read.
-            $summary['uncovered'][] = ['key' => $key, 'type' => $type, 'reason' => 'vanished_between_type_and_read'];
+            $summary['uncovered'][] = ['key' => $key, 'type' => $typeName, 'reason' => 'vanished_between_type_and_read'];
             continue;
         }
-        $line = d314Json($key) . "\t" . $type . "\t" . $payload . "\n";
+        $line = d314Json($key) . "\t" . $typeName . "\t" . $payload . "\n";
         fwrite($handle, $line);
         $summary['bytes'] += strlen($line);
         $summary['covered']++;
         if ($truncated) {
-            $summary['uncovered'][] = ['key' => $key, 'type' => $type, 'reason' => 'stream_truncated_at_bound'];
+            $summary['uncovered'][] = ['key' => $key, 'type' => $typeName, 'reason' => 'stream_truncated_at_bound'];
         }
     }
-    fclose($handle);
-
-    return $summary;
 }
 
 $mode = $argv[1] ?? '';

@@ -17,7 +17,10 @@ use PHPUnit\Framework\TestCase;
  * classification. Every case
  * embeds a pinned program blob (the fixed key and nonce of the
  * cross-language vectors) and a concrete trace literal, so the
- * verdicts are structural. The companion Rust test in
+ * verdicts are structural. The geometry boundary block pins the
+ * ceiling alongside the shapes a host number type would otherwise
+ * round, saturate or overflow, and one case pins the depth walk
+ * against a cyclic parent map. The companion Rust test in
  * tests/execution_mutation_fuzz.rs consumes the same embedded corpus
  * and must land on the same classification for every case.
  */
@@ -186,6 +189,78 @@ final class ExecutionDifferentialCorpusTest extends TestCase
             'trace' => 'dcreate(bHMzQmpuUmVUb3ZGTg==);dset(eHpvYQ==);dappend(1);dcreate(V012dkl2Vw==);dattr(ZGF0YS1raXdp);dappend(1);dchild(aEoxOWY4a0N5b2R4);dchild(YkdPQ21TUg==);u8c(0);obs(19,10);u8r(10);u8w(230);evreal(kiwi-ev:span);dsib(2);ddepth(2);evreal(kiwi-ev:span);sreal(cd9e8bb6200d6f874d25e6c520fcf5355622e04f4fb2f9140f48775369a8decb);sreal(cd9e8bb6200d6f874d25e6c520fcf5355622e04f4fb2f9140f48775369a8decb);add(4231826189)garbage',
             'expected' => 'execution_mismatch',
         ],
+
+        [
+            'name' => 'geom-small-valid',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,1);geom(0,1);geom(0,1);geom(0,1);geom(0,1);geom(0,1)',
+            'expected' => 'valid',
+        ],
+
+        [
+            'name' => 'geom-ceiling-exact',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(4096,4096);geom(4096,4096);geom(4096,4096);geom(4096,4096);geom(4096,4096);geom(4096,4096)',
+            'expected' => 'valid',
+        ],
+
+        [
+            'name' => 'geom-above-ceiling',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(4097,1);geom(4097,1);geom(4097,1);geom(4097,1);geom(4097,1);geom(4097,1)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
+            'name' => 'geom-past-2p53',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(9007199254740993,1);geom(9007199254740992,1);geom(9007199254740992,1);geom(9007199254740992,1);geom(9007199254740992,1);geom(9007199254740992,1)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
+            'name' => 'geom-40-digit',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111);geom(0,1111111111111111111111111111111111111111)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
+            'name' => 'geom-negative',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(-1,1);geom(-1,1);geom(-1,1);geom(-1,1);geom(-1,1);geom(-1,1)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
+            'name' => 'geom-fractional',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,1.5);geom(0,1.5);geom(0,1.5);geom(0,1.5);geom(0,1.5);geom(0,1.5)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
+            'name' => 'geom-non-numeric',
+            'version' => 6,
+            'program' => 'AQpwZXJmLXNjb3BlC3BlcmYtYWN0aW9uBggQAA9wZXJmbm9kZTAxMjM0NTYSHQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2HQ9wZXJmbm9kZTAxMjM0NTYdD3BlcmZub2RlMDEyMzQ1Nh0PcGVyZm5vZGUwMTIzNDU2',
+            'trace' => 'dcreate(cGVyZm5vZGUwMTIzNDU2);dappend(1);geom(0,abc);geom(0,abc);geom(0,abc);geom(0,abc);geom(0,abc);geom(0,abc)',
+            'expected' => 'execution_mismatch',
+        ],
+
+        [
+            'name' => 'depth-walk-cycle',
+            'version' => 6,
+            'program' => 'AQVzY29wZQxjeWNsZS1hY3Rpb24GCBAABEJCQkIjAARBQUFBIwAEQkJCQiQEQUFBQQAAAAAAAAAAAQAAAAAAAAAAAgAAAAAAAAAAAwAAAAAAAAAABA==',
+            'trace' => 'dcreate(QkJCQg==);dchild(QUFBQQ==);dchild(QkJCQg==);ddepth(2);add(1);add(2);add(3);add(4)',
+            'expected' => 'execution_mismatch',
+        ],
     ];
 
     public function testCorpusVerdictsMatchTheExpectedClassifications(): void
@@ -195,7 +270,7 @@ final class ExecutionDifferentialCorpusTest extends TestCase
         self::assertSame(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION, $maxVersion, 'the manifest register ceiling at HEAD');
 
         $cases = self::CORPUS;
-        self::assertCount(19, $cases, 'the embedded corpus is pinned to 19 cases');
+        self::assertCount(28, $cases, 'the embedded corpus is pinned to 28 cases');
         foreach ($cases as $case) {
             $version = $case['version'];
             self::assertGreaterThanOrEqual(1, $version, $case['name'].' version below the floor');

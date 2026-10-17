@@ -33,7 +33,11 @@ import {
 } from '../src/verify.js';
 import { SOLVER_MAX_HASHES, MAX_DURATION_MS } from '../src/token.js';
 import { RSW_T_MAX, RSW_T_MIN, RSW_MODULUS_BYTES, RSW_PROOF_HEX_LENGTH } from '../src/rsw.js';
-import { EXECUTION_MAX_PROGRAM_BASE64, EXECUTION_MAX_VERSION } from '../src/execution.js';
+import {
+  EXECUTION_GEOMETRY_MAX_PX,
+  EXECUTION_MAX_PROGRAM_BASE64,
+  EXECUTION_MAX_VERSION,
+} from '../src/execution.js';
 import { timingSafeEqualsHex } from '../src/mac.js';
 
 /**
@@ -53,6 +57,7 @@ test('the shared limits register matches the Node constants', () => {
   assert.equal(limits['rsw_t_max'], RSW_T_MAX);
   assert.equal(limits['execution_max_program_base64'], EXECUTION_MAX_PROGRAM_BASE64);
   assert.equal(limits['execution_max_version'], EXECUTION_MAX_VERSION);
+  assert.equal(limits['execution_max_geometry_px'], EXECUTION_GEOMETRY_MAX_PX);
   assert.equal(limits['argon2_max_m_kib'], MAX_ARGON_MEMORY_KIB);
   assert.equal(limits['argon2_max_t_verification'], MAX_ARGON_TIME);
   // Verifier-side bounds the register derives from the cores.

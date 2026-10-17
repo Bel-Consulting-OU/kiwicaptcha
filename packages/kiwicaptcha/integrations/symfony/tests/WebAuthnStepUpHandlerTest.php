@@ -54,6 +54,8 @@ final class WebAuthnStepUpHandlerTest extends TestCase
 
     private ?WebAuthnCredentialRegistry $registry = null;
 
+    private ?FakeWebAuthnRedis $fakeRedis = null;
+
     private int $now = 1700000000;
 
     protected function setUp(): void
@@ -61,6 +63,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $this->store = new ArrayStepUpChallengeStore($this->clock());
         $this->reporter = new SpyOutcomeReporter();
         $this->registry = null;
+        $this->fakeRedis = null;
     }
 
     public function testTheNoLibraryPathRefusesWithTheActionableMessage(): void
@@ -355,6 +358,66 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         self::assertCount($credited, $this->reporter->reports, 'a replay never credits again');
     }
 
+    public function testTheAllowListLookupReadsOneBatchedRoundTrip(): void
+    {
+        $handler = $this->handler();
+        $this->enroll($handler, 'cred-A', 0);
+        $redis = $this->fakeRedis();
+        $redis->batches = 0;
+        $redis->batchedKeys = [];
+
+        $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+
+        // The lookup reads the discovered records in one pipelined
+        // batch: one read per discovered key, in discovery order. The
+        // ceremony therefore pays two store round trips whatever the
+        // deployment's enrolled credential count.
+        self::assertSame(1, $redis->batches, 'the allow-list lookup is one pipelined batch');
+        self::assertSame(
+            [$this->credentialKey('cred-A')],
+            $redis->batchedKeys,
+            'the batch carries one read per discovered credential key',
+        );
+        self::assertSame(0, $redis->unservedCommands, 'every lookup read rides the batch, never a silently ignored call');
+        self::assertSame(
+            [WebAuthnTestVectors::base64Url('cred-A')],
+            array_column($document['public_key']['allowCredentials'], 'id'),
+            'the ceremony allow-list carries the batched record',
+        );
+    }
+
+    public function testTheAllowListKeepsTheBatchOrderAndSkipsUnreadableRecords(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        $registry->saveCredentialSource($this->record('cred-A', self::PRINCIPAL, 1));
+        $registry->saveCredentialSource($this->record('cred-B', str_repeat('9', 32), 2));
+        $registry->saveCredentialSource($this->record('cred-C', self::PRINCIPAL, 3));
+        // One record whose bytes never deserialize, one empty value, and
+        // one record gone between the discovery call and the batch read:
+        // the lookup answers the readable records and skips the rest.
+        $redis->values[$this->credentialKey('cred-BROKEN')] = '{not-json';
+        $redis->values[$this->credentialKey('cred-EMPTY')] = '';
+        $redis->values[$this->credentialKey('cred-GONE')] = 'value';
+        $redis->expired[$this->credentialKey('cred-GONE')] = true;
+        $redis->batches = 0;
+
+        $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
+
+        self::assertSame(1, $redis->batches, 'the lookup is one pipelined batch');
+        self::assertSame(
+            array_keys($redis->values),
+            $redis->batchedKeys,
+            'the batch carries one read per discovered record, in discovery order',
+        );
+        self::assertSame(
+            ['cred-A', 'cred-C'],
+            array_map(static fn (\Webauthn\CredentialRecord $record): string => $record->publicKeyCredentialId, $found),
+            'the principal records come back in the batch order with the unreadable ones skipped',
+        );
+    }
+
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void
     {
         // The enrollment precondition: a completed step-up for the same
@@ -398,10 +461,39 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     private function registry(): WebAuthnCredentialRegistry
     {
         if ($this->registry === null) {
-            $this->registry = new WebAuthnCredentialRegistry(new FakeWebAuthnRedis(), 'tests:webauthn:');
+            $this->fakeRedis = new FakeWebAuthnRedis();
+            $this->registry = new WebAuthnCredentialRegistry($this->fakeRedis, 'tests:webauthn:');
         }
 
         return $this->registry;
+    }
+
+    private function fakeRedis(): FakeWebAuthnRedis
+    {
+        $this->registry();
+
+        return $this->fakeRedis;
+    }
+
+    /** The store key the registry derives from a credential id. */
+    private function credentialKey(string $credentialId): string
+    {
+        return 'tests:webauthn:credential:'.hash('sha256', $credentialId);
+    }
+
+    private function record(string $credentialId, string $userHandle, int $counter): \Webauthn\CredentialRecord
+    {
+        return \Webauthn\CredentialRecord::create(
+            $credentialId,
+            'public-key',
+            [],
+            'none',
+            new \Webauthn\TrustPath\EmptyTrustPath(),
+            \Symfony\Component\Uid\Uuid::fromString('00000000-0000-0000-0000-000000000000'),
+            'key-material',
+            $userHandle,
+            $counter,
+        );
     }
 
     private function clock(): \Closure
@@ -623,14 +715,38 @@ final class WebAuthnTestVectors
 }
 
 /**
- * The in-memory stand-in for the registry's Redis surface: the three
- * commands the credential registry issues (GET, SETEX, KEYS), backed
- * by one string table.
+ * The in-memory stand-in for the registry's Redis surface: the commands
+ * the credential registry issues (GET, SETEX, KEYS) and the pipelined
+ * batch it reads records through, backed by one string table.
+ *
+ * The batch arm models the real client's answer: the queued reads run
+ * against the table and answer in queue order. A batch queuing no read
+ * or a command the store cannot answer throws, so a lookup shape this
+ * double no longer models can never pass the suite as a silent no-op.
  */
 final class FakeWebAuthnRedis implements \Predis\ClientInterface
 {
     /** @var array<string, string> */
     public array $values = [];
+
+    /** Keys the store answers null for: the record gone between the
+     * discovery call and the batched read.
+     *
+     * @var array<string, true>
+     */
+    public array $expired = [];
+
+    /** The pipelined batches served, one per lookup. */
+    public int $batches = 0;
+
+    /** The keys of the most recent batch, in queue order.
+     *
+     * @var list<string>
+     */
+    public array $batchedKeys = [];
+
+    /** The calls no arm answered. */
+    public int $unservedCommands = 0;
 
     public function setex($key, $ttl, $value)
     {
@@ -641,7 +757,12 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
 
     public function get($key)
     {
-        return $this->values[(string) $key] ?? null;
+        $key = (string) $key;
+        if (isset($this->expired[$key])) {
+            return null;
+        }
+
+        return $this->values[$key] ?? null;
     }
 
     public function keys($pattern)
@@ -649,6 +770,32 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
         $regex = '/^'.strtr(preg_quote((string) $pattern, '/'), ['\\*' => '.*', '\\?' => '.']).'$/';
 
         return array_values(array_filter(array_keys($this->values), static fn ($key) => preg_match($regex, (string) $key) === 1));
+    }
+
+    /**
+     * The batched read: the callable queues reads on the pipeline and
+     * the batch answers them in queue order, the way the real client
+     * answers a pipelined batch.
+     */
+    public function pipeline(...$arguments): array
+    {
+        $callable = $arguments[0] ?? null;
+        if (!\is_callable($callable)) {
+            throw new \RuntimeException('the registry fixture serves the callable pipeline form only');
+        }
+        $pending = new FakeWebAuthnPipeline();
+        $callable($pending);
+        if ($pending->keys === []) {
+            throw new \RuntimeException('the registry fixture refuses a batch that queues no read');
+        }
+        $this->batches++;
+        $this->batchedKeys = $pending->keys;
+        $responses = [];
+        foreach ($pending->keys as $key) {
+            $responses[] = $this->get($key);
+        }
+
+        return $responses;
     }
 
     public function getProfile(): \Predis\Profile\ProfileInterface
@@ -700,7 +847,38 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
             'GET' => $this->get((string) ($arguments[0] ?? '')),
             'SETEX' => $this->setex((string) ($arguments[0] ?? ''), (int) ($arguments[1] ?? 0), (string) ($arguments[2] ?? '')),
             'KEYS' => $this->keys((string) ($arguments[0] ?? '')),
-            default => null,
+            default => $this->unserved($method),
         };
+    }
+
+    /** An unmodelled call: no arm answers it, and the count shows it. */
+    private function unserved($method): mixed
+    {
+        $this->unservedCommands++;
+
+        return null;
+    }
+}
+
+/**
+ * The queue a batched registry read runs on: it records the keys the
+ * registry queues and refuses every command that is not the read the
+ * registry batches, so a shape the double does not model fails loudly.
+ */
+final class FakeWebAuthnPipeline
+{
+    /** @var list<string> */
+    public array $keys = [];
+
+    public function get($key): self
+    {
+        $this->keys[] = (string) $key;
+
+        return $this;
+    }
+
+    public function __call($method, $arguments): mixed
+    {
+        throw new \RuntimeException('the registry fixture batches reads only, saw: '.$method);
     }
 }

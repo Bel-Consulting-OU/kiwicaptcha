@@ -164,6 +164,24 @@ final class ExecutionChallengeGenerator
     public const MIN_OPS = 8;
     public const MAX_OPS = 24;
 
+    /**
+     * The ceiling of every geometry entry field in CSS pixels. A
+     * geometry probe measures a node laid out inside the sandboxed
+     * execution document, so a real offset or height stays far below
+     * this bound. The ceiling closes the field: without it the
+     * accepted value would depend on the host number type (a cast, a
+     * float or a bounded integer), which is exactly the cross-runtime
+     * split the register forbids.
+     */
+    public const MAX_GEOMETRY_PX = 4096;
+
+    /**
+     * The ancestor-walk step ceiling of the depth probe. A hand-crafted
+     * child record can make the parent map self-referential, so the
+     * walk stops at this count and refuses instead of spinning.
+     */
+    private const MAX_DEPTH_WALK_STEPS = 4096;
+
     /** The fixed attribute-name list of the DOM ops (never contains 'id'). */
     public const ATTR_NAMES = ['data-kiwi', 'data-a', 'data-b', 'title', 'data-x'];
 
@@ -869,16 +887,25 @@ final class ExecutionChallengeGenerator
             }
             $pos += \strlen($name) + 1;
             if ($op === self::OP_DOM_GEOMETRY) {
-                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                // The layout offsets are construction-order positions:
+                // each is non-negative, at most the register ceiling
+                // and monotonic (never below the previous entry's
+                // offset). The entry grammar is the exact digit run of
+                // the PHP, Rust and node walkers alike.
+                $top = self::readTraceInt($trace, $pos, self::MAX_GEOMETRY_PX);
+                if ($top === null || substr($trace, $pos, 1) !== ',') {
                     return null;
                 }
-                $top = (int) $m[1];
-                $height = (int) $m[2];
+                ++$pos;
+                $height = self::readTraceInt($trace, $pos, self::MAX_GEOMETRY_PX);
+                if ($height === null || substr($trace, $pos, 1) !== ')') {
+                    return null;
+                }
+                ++$pos;
                 if ($height < 1 || $top < $prevTop) {
                     return null;
                 }
                 $prevTop = $top;
-                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_POINT) {
                 $topTag = $construction !== [] ? 'div' : 'none';
                 if (substr($trace, $pos, \strlen($topTag) + 1) !== $topTag.')') {
@@ -897,12 +924,15 @@ final class ExecutionChallengeGenerator
                 // interpreter's own script element, so a constructed
                 // node's real sibling index is its append rank plus
                 // one (deterministic across engines).
-                if ($expectedRank === null
-                    || preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1
-                    || (int) $m[1] !== $expectedRank + self::SRCDOC_PREEXISTING_BODY_ELEMENTS) {
+                if ($expectedRank === null) {
                     return null;
                 }
-                $pos += \strlen($m[0]);
+                $expected = $expectedRank + self::SRCDOC_PREEXISTING_BODY_ELEMENTS;
+                $value = self::readTraceInt($trace, $pos, $expected);
+                if ($value !== $expected || substr($trace, $pos, 1) !== ')') {
+                    return null;
+                }
+                ++$pos;
             } elseif ($op === self::OP_DOM_DEPTH) {
                 // The depth probe: the number of ancestor elements up
                 // to (excluding) the document body, derived from the
@@ -910,14 +940,24 @@ final class ExecutionChallengeGenerator
                 // parentElement walk over the program-built tree.
                 $depth = 0;
                 $cursorId = $operands['id'] ?? null;
+                $guard = 0;
                 while ($cursorId !== null && isset($parent[$cursorId])) {
+                    // A hand-crafted child record can make the parent
+                    // map self-referential, so the walk stops at a
+                    // bounded step count instead of spinning forever
+                    // (the same guard the Rust and node walkers carry).
+                    if ($guard >= self::MAX_DEPTH_WALK_STEPS) {
+                        return null;
+                    }
+                    ++$guard;
                     ++$depth;
                     $cursorId = $parent[$cursorId];
                 }
-                if (preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1 || (int) $m[1] !== $depth) {
+                $value = self::readTraceInt($trace, $pos, $depth);
+                if ($value !== $depth || substr($trace, $pos, 1) !== ')') {
                     return null;
                 }
-                $pos += \strlen($m[0]);
+                ++$pos;
             } elseif ($op === self::OP_DOM_OBSERVE) {
                 // The causal observe entry obs(<dst>,<h>): the walker
                 // validates the grammar and the bounds, requires the
@@ -925,18 +965,25 @@ final class ExecutionChallengeGenerator
                 // replays the reported height into its own u8 state so
                 // every later checksum/read entry is exact-compared
                 // against the observed byte (whole-trace coherence).
-                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                if (!isset($docIds[$operands['id']])) {
                     return null;
                 }
-                $dst = (int) $m[1];
-                $observed = (int) $m[2];
-                if (!isset($docIds[$operands['id']]) || $dst !== $operands['idx'] || $observed < 1 || $observed > 255) {
+                $dst = self::readTraceInt($trace, $pos, $operands['idx']);
+                if ($dst === null || substr($trace, $pos, 1) !== ',') {
+                    return null;
+                }
+                ++$pos;
+                $observed = self::readTraceInt($trace, $pos, 255);
+                if ($observed === null || substr($trace, $pos, 1) !== ')') {
+                    return null;
+                }
+                ++$pos;
+                if ($dst !== $operands['idx'] || $observed < 1) {
                     return null;
                 }
                 if ($dst < \count($u8)) {
                     $u8[$dst] = $observed;
                 }
-                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_URL_CANON) {
                 // The URL-canon entry is the one browser-observed value
                 // of the version-5 rung: it is pinned to the SHA-256 of
@@ -960,19 +1007,23 @@ final class ExecutionChallengeGenerator
                 if (!isset($docIds[$operands['id']])) {
                     return null;
                 }
-                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                [$fsLo, $fsHi, $hLo, $hHi] = self::cssGeomEnvelope((int) $operands['seed']);
+                $fs = self::readTraceInt($trace, $pos, $fsHi);
+                if ($fs === null || substr($trace, $pos, 1) !== ',') {
                     return null;
                 }
-                $fs = (int) $m[1];
-                $height = (int) $m[2];
-                [$fsLo, $fsHi, $hLo, $hHi] = self::cssGeomEnvelope((int) $operands['seed']);
-                if ($fs < $fsLo || $fs > $fsHi || $height < $hLo || $height > $hHi) {
+                ++$pos;
+                $height = self::readTraceInt($trace, $pos, $hHi);
+                if ($height === null || substr($trace, $pos, 1) !== ')') {
+                    return null;
+                }
+                ++$pos;
+                if ($fs < $fsLo || $height < $hLo) {
                     return null;
                 }
                 if ($operands['cell'] < \count($u8)) {
                     $u8[$operands['cell']] = $height;
                 }
-                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_MUT_ORDER) {
                 // The mutation delivery-order envelope: the exact
                 // record-type sequence (attributes, then the childList
@@ -1021,20 +1072,28 @@ final class ExecutionChallengeGenerator
                 if (!isset($docIds[$operands['id']])) {
                     return null;
                 }
-                if (preg_match('/\G(\d+),(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                [$tExact, $rectsLo, $rectsHi] = self::rangeOrderEnvelope((int) $operands['b0'], (int) $operands['b1']);
+                $t = self::readTraceInt($trace, $pos, $tExact);
+                if ($t === null || substr($trace, $pos, 1) !== ',') {
                     return null;
                 }
-                [$tExact, $rectsLo, $rectsHi] = self::rangeOrderEnvelope((int) $operands['b0'], (int) $operands['b1']);
-                $t = (int) $m[1];
-                $rects = (int) $m[2];
-                $selCount = (int) $m[3];
-                if ($t !== $tExact || $rects < $rectsLo || $rects > $rectsHi || $selCount !== 1) {
+                ++$pos;
+                $rects = self::readTraceInt($trace, $pos, $rectsHi);
+                if ($rects === null || substr($trace, $pos, 1) !== ',') {
+                    return null;
+                }
+                ++$pos;
+                $selCount = self::readTraceInt($trace, $pos, 1);
+                if ($selCount === null || substr($trace, $pos, 1) !== ')') {
+                    return null;
+                }
+                ++$pos;
+                if ($t !== $tExact || $rects < $rectsLo || $selCount !== 1) {
                     return null;
                 }
                 if ($operands['cell'] < \count($u8)) {
                     $u8[$operands['cell']] = $rects;
                 }
-                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_INT_OBS) {
                 // The intersection envelope: the observer must have
                 // delivered its initial entry, the quantized ratio must
@@ -1045,14 +1104,23 @@ final class ExecutionChallengeGenerator
                 if (!isset($docIds[$operands['id']])) {
                     return null;
                 }
-                if (preg_match('/\G(\d+),(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                [$qLo, $qHi, $t0Pct] = self::intObsEnvelope((int) $operands['seed']);
+                $fired = self::readTraceInt($trace, $pos, 1);
+                if ($fired === null || substr($trace, $pos, 1) !== ',') {
                     return null;
                 }
-                $fired = (int) $m[1];
-                $q = (int) $m[2];
-                $isInt = (int) $m[3];
-                [$qLo, $qHi, $t0Pct] = self::intObsEnvelope((int) $operands['seed']);
-                if ($fired !== 1 || $q < $qLo || $q > $qHi) {
+                ++$pos;
+                $q = self::readTraceInt($trace, $pos, $qHi);
+                if ($q === null || substr($trace, $pos, 1) !== ',') {
+                    return null;
+                }
+                ++$pos;
+                $isInt = self::readTraceInt($trace, $pos, 1);
+                if ($isInt === null || substr($trace, $pos, 1) !== ')') {
+                    return null;
+                }
+                ++$pos;
+                if ($fired !== 1 || $q < $qLo) {
                     return null;
                 }
                 if ($q >= $t0Pct + 2 && $isInt !== 1) {
@@ -1064,7 +1132,6 @@ final class ExecutionChallengeGenerator
                 if ($operands['cell'] < \count($u8)) {
                     $u8[$operands['cell']] = $q;
                 }
-                $pos += \strlen($m[0]);
             } else {
                 $simEntry = $sim.')';
                 if (substr($trace, $pos, \strlen($simEntry)) !== $simEntry) {
@@ -1176,6 +1243,29 @@ final class ExecutionChallengeGenerator
         $t0Pct = [0, 25, 50, 75][$seed % 4] * 1;
 
         return [max(0, $qExp - 2), min(100, $qExp + 2), $t0Pct];
+    }
+
+    /**
+     * Read one numeric trace field at $pos: a non-empty run of ASCII
+     * digits whose exact value is at most $ceiling. The position moves
+     * past the digit run; null when the field is absent, carries any
+     * other byte, or exceeds the ceiling. A value above the ceiling is
+     * refused before the caller compares it, so a field past the host
+     * integer range never reads as a saturated in-range number. The
+     * Rust and node walkers share the shape and the ceiling rule.
+     */
+    private static function readTraceInt(string $trace, int &$pos, int $ceiling): ?int
+    {
+        if (preg_match('/\G(\d+)/', $trace, $m, 0, $pos) !== 1) {
+            return null;
+        }
+        $value = (int) $m[1];
+        if ($value > $ceiling) {
+            return null;
+        }
+        $pos += \strlen($m[1]);
+
+        return $value;
     }
 
     /**
