@@ -57,3 +57,7 @@ tools/redteam/fuzz/*.log
 # Elixir writes this beside the working directory when a run crashes;
 # it is diagnostic output, never source.
 erl_crash.dump
+
+# Raw certifying-run payloads stay local; tools/client-perf/results/baseline.json
+# is the committed evidence record.
+tools/client-perf/results/physical-*.json
