@@ -35,7 +35,7 @@ jobs:
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -49,7 +49,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -67,15 +67,15 @@ jobs:
 
         '
     - name: add-the-exact-crates.io-version---and-check--no-path--no-g
-      run: "RUST_VERSION=\"${KIWICAPTCHA_RISK_VERSION:?set KIWICAPTCHA_RISK_VERSION}\"\nexport RUST_VERSION\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke\"\n# `=X.Y.Z` is the only requirement that cannot resolve to a\n# newer compatible release: a caret requirement would accept\n# 1.7.1 for a requested 1.7.0 and the smoke would still pass.\ncargo add \"$CRATE@=$RUST_VERSION\"\ncargo check\ncargo tree -p \"$CRATE\" --depth 0\n# Read the\
-        \ resolution back: exactly one package of that name,\n# the requested version, a crates.io registry source, and no\n# path/git replacement (a replacement has source null).\ncargo metadata --format-version 1 > \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\"\npython3 - \"$CRATE\" \"$RUST_VERSION\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\" <<'PY'\nimport json\nimport sys\n\ncrate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]\nmeta = json.load(open(path))\nnamed = [p for p in meta['packages'] if p['name'] == crate]\nexact = [p for p in named if p['version'] == want]\nassert len(exact) == 1, (\n    f'{crate}@{want} must resolve to exactly one package, got '\n    f'{[p[\"version\"] for p in named]}'\n)\nsource = exact[0].get('source') or ''\nassert source.startswith('registry+') and 'crates.io' in source, (\n    f'{crate}@{want} resolved from {source!r}, not the crates.io registry'\n)\nprint(f'cargo smoke: verified {crate}@{want} from {source}')\nPY\necho\
-        \ \"cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io\"\n"
+      run: "RUST_VERSION=\"${KIWICAPTCHA_RISK_VERSION:?set KIWICAPTCHA_RISK_VERSION}\"\nexport RUST_VERSION\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke\"\n# `=X.Y.Z` is the only requirement that cannot resolve to a\n# newer compatible release: a caret requirement would accept\n# 1.7.1 for a requested 1.7.0 and the smoke would still pass.\ncargo add \"$CRATE@=$RUST_VERSION\"\ncargo check\ncargo tree -p \"\
+        $CRATE\" --depth 0\n# Read the resolution back: exactly one package of that name,\n# the requested version, a crates.io registry source, and no\n# path/git replacement (a replacement has source null).\ncargo metadata --format-version 1 > \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\"\npython3 - \"$CRATE\" \"$RUST_VERSION\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\" <<'PY'\nimport json\nimport sys\n\ncrate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]\nmeta = json.load(open(path))\nnamed = [p for p in meta['packages'] if p['name'] == crate]\nexact = [p for p in named if p['version'] == want]\nassert len(exact) == 1, (\n    f'{crate}@{want} must resolve to exactly one package, got '\n    f'{[p[\"version\"] for p in named]}'\n)\nsource = exact[0].get('source') or ''\nassert source.startswith('registry+') and 'crates.io' in source, (\n    f'{crate}@{want} resolved from {source!r}, not the crates.io registry'\n)\nprint(f'cargo smoke: verified {crate}@{want}\
+        \ from {source}')\nPY\necho \"cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io\"\n"
     - name: risk-init-an-empty-crate-in-a-temp-dir--no-repo-checkout
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -89,7 +89,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -107,9 +107,9 @@ jobs:
 
         '
     - name: risk-add-the-exact-crates.io-version---and-check--no-path--no-g
-      run: "RUST_VERSION=\"${KIWICAPTCHA_RISK_VERSION:?set KIWICAPTCHA_RISK_VERSION}\"\nexport RUST_VERSION\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke\"\n# `=X.Y.Z` is the only requirement that cannot resolve to a\n# newer compatible release: a caret requirement would accept\n# 1.7.1 for a requested 1.7.0 and the smoke would still pass.\ncargo add \"$CRATE@=$RUST_VERSION\"\ncargo check\ncargo tree -p \"$CRATE\" --depth 0\n# Read the\
-        \ resolution back: exactly one package of that name,\n# the requested version, a crates.io registry source, and no\n# path/git replacement (a replacement has source null).\ncargo metadata --format-version 1 > \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\"\npython3 - \"$CRATE\" \"$RUST_VERSION\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\" <<'PY'\nimport json\nimport sys\n\ncrate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]\nmeta = json.load(open(path))\nnamed = [p for p in meta['packages'] if p['name'] == crate]\nexact = [p for p in named if p['version'] == want]\nassert len(exact) == 1, (\n    f'{crate}@{want} must resolve to exactly one package, got '\n    f'{[p[\"version\"] for p in named]}'\n)\nsource = exact[0].get('source') or ''\nassert source.startswith('registry+') and 'crates.io' in source, (\n    f'{crate}@{want} resolved from {source!r}, not the crates.io registry'\n)\nprint(f'cargo smoke: verified {crate}@{want} from {source}')\nPY\necho\
-        \ \"cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io\"\n"
+      run: "RUST_VERSION=\"${KIWICAPTCHA_RISK_VERSION:?set KIWICAPTCHA_RISK_VERSION}\"\nexport RUST_VERSION\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke\"\n# `=X.Y.Z` is the only requirement that cannot resolve to a\n# newer compatible release: a caret requirement would accept\n# 1.7.1 for a requested 1.7.0 and the smoke would still pass.\ncargo add \"$CRATE@=$RUST_VERSION\"\ncargo check\ncargo tree -p \"\
+        $CRATE\" --depth 0\n# Read the resolution back: exactly one package of that name,\n# the requested version, a crates.io registry source, and no\n# path/git replacement (a replacement has source null).\ncargo metadata --format-version 1 > \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\"\npython3 - \"$CRATE\" \"$RUST_VERSION\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-cargo-smoke/meta.json\" <<'PY'\nimport json\nimport sys\n\ncrate, want, path = sys.argv[1], sys.argv[2], sys.argv[3]\nmeta = json.load(open(path))\nnamed = [p for p in meta['packages'] if p['name'] == crate]\nexact = [p for p in named if p['version'] == want]\nassert len(exact) == 1, (\n    f'{crate}@{want} must resolve to exactly one package, got '\n    f'{[p[\"version\"] for p in named]}'\n)\nsource = exact[0].get('source') or ''\nassert source.startswith('registry+') and 'crates.io' in source, (\n    f'{crate}@{want} resolved from {source!r}, not the crates.io registry'\n)\nprint(f'cargo smoke: verified {crate}@{want}\
+        \ from {source}')\nPY\necho \"cargo smoke: $CRATE@$RUST_VERSION resolved and checked from crates.io\"\n"
     image: rust:1.96
     env:
       CRATE: kiwicaptcha-risk
@@ -119,14 +119,14 @@ jobs:
     runtime: container
     steps:
     - name: install-the-symfony-cli--versioned-release--sha256-pinned
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncurl -fsSL -o /tmp/symfony-cli.tar.gz \\\n  \"https://github.com/symfony-cli/symfony-cli/releases/download/v${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz\"\necho \"${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz\" | sha256sum -c -\n# The binary lands in the shared workspace, never the step\n# container's HOME: every later step is a fresh container and\n# reaches it by absolute path. No GitHub-only state variables.\nmkdir\
-        \ -p \"$CI_WORKSPACE/.ci-run-tmp/bin\"\ntar -xzf /tmp/symfony-cli.tar.gz -C \"$CI_WORKSPACE/.ci-run-tmp/bin\" symfony\n\"$CI_WORKSPACE/.ci-run-tmp/bin/symfony\" --version\n# php:8.3-cli ships neither composer nor unzip: the phar is\n# pinned below, and every composer-running step installs unzip\n# (composer's ZipDownloader needs it, the image ships no ext-zip).\ncurl -fsSL -o \"$CI_WORKSPACE/.ci-run-tmp/bin/composer\" \\\n  \"https://github.com/composer/composer/releases/download/${COMPOSER_VERSION}/composer.phar\"\necho \"${COMPOSER_SHA256}  $CI_WORKSPACE/.ci-run-tmp/bin/composer\" | sha256sum -c -\nchmod +x \"$CI_WORKSPACE/.ci-run-tmp/bin/composer\"\n\"$CI_WORKSPACE/.ci-run-tmp/bin/composer\" --version\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncurl -fsSL -o /tmp/symfony-cli.tar.gz \\\n  \"https://github.com/symfony-cli/symfony-cli/releases/download/v${SYMFONY_CLI_VERSION}/symfony-cli_linux_amd64.tar.gz\"\necho \"${SYMFONY_CLI_SHA256}  /tmp/symfony-cli.tar.gz\" | sha256sum -c -\n# The binary lands in the shared workspace, never the step\n# container's HOME: every later step is a fresh container and\n# reaches it by absolute path. No GitHub-only\
+        \ state variables.\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/bin\"\ntar -xzf /tmp/symfony-cli.tar.gz -C \"$CI_WORKSPACE/.ci-run-tmp/bin\" symfony\n\"$CI_WORKSPACE/.ci-run-tmp/bin/symfony\" --version\n# php:8.3-cli ships neither composer nor unzip: the phar is\n# pinned below, and every composer-running step installs unzip\n# (composer's ZipDownloader needs it, the image ships no ext-zip).\ncurl -fsSL -o \"$CI_WORKSPACE/.ci-run-tmp/bin/composer\" \\\n  \"https://github.com/composer/composer/releases/download/${COMPOSER_VERSION}/composer.phar\"\necho \"${COMPOSER_SHA256}  $CI_WORKSPACE/.ci-run-tmp/bin/composer\" | sha256sum -c -\nchmod +x \"$CI_WORKSPACE/.ci-run-tmp/bin/composer\"\n\"$CI_WORKSPACE/.ci-run-tmp/bin/composer\" --version\n"
     - name: create-the-empty-lts-application----webapp
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -140,7 +140,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -164,7 +164,7 @@ jobs:
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -178,7 +178,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -202,7 +202,7 @@ jobs:
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -216,7 +216,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -236,13 +236,13 @@ jobs:
 
         '
     - name: write-the-documented-minimum-configuration--secret--public-url--redis-dsn
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\n{\n  echo \"KIWI_SECRET_KEY=${KIWI_SECRET_KEY}\"\n  echo \"KIWI_PUBLIC_URL=http://127.0.0.1:8000\"\n  echo \"KIWI_REDIS_DSN=redis://redis:6379/0\"\n} >> .env.local\ncat .env.local\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\n{\n  echo \"KIWI_SECRET_KEY=${KIWI_SECRET_KEY}\"\n  echo \"KIWI_PUBLIC_URL=http://127.0.0.1:8000\"\n  echo \"KIWI_REDIS_DSN=redis://redis:6379/0\"\n} >> .env.local\ncat .env.local\n"
     - name: kiwicaptcha-doctor-must-exit-cleanly-on-the-documented-minim
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -256,7 +256,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -274,17 +274,18 @@ jobs:
 
         '
     - name: the-flex-recipe-delivered-the-starter-config-and-the-routes
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\ntest -f config/packages/kiwicaptcha.yaml \\\n  || { echo \"the Flex recipe has not been applied (checklist steps 4-5 outstanding)\"; exit 1; }\nphp bin/console debug:router | grep -q kiwicaptcha \\\n  || { echo \"the recipe's kiwicaptcha routes are missing\"; exit 1; }\necho \"recipe config + routes present\"\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\ntest -f config/packages/kiwicaptcha.yaml \\\n  || { echo \"the Flex recipe has not been applied (checklist steps 4-5 outstanding)\"; exit 1; }\nphp bin/console debug:router | grep -q kiwicaptcha \\\n  || { echo \"the recipe's kiwicaptcha routes are missing\"; exit 1; }\necho \"recipe config + routes present\"\
+        \n"
     - name: add-the-demo-page--form-widget--to-the-smoke-application
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\nmkdir -p src/Form src/Controller templates\ncat > src/Form/CaptchaDemoType.php <<'PHP'\n<?php\n\nnamespace App\\Form;\n\nuse BelConsulting\\KiwiCaptchaBundle\\Form\\Type\\KiwiCaptchaType;\nuse Symfony\\Component\\Form\\AbstractType;\nuse Symfony\\Component\\Form\\FormBuilderInterface;\n\nfinal class CaptchaDemoType extends AbstractType\n\
-        {\n    public function buildForm(FormBuilderInterface $builder, array $options): void\n    {\n        $builder->add('captcha', KiwiCaptchaType::class, ['scope' => 'login']);\n    }\n}\nPHP\ncat > src/Form/CaptchaDemoInput.php <<'PHP'\n<?php\n\nnamespace App\\Form;\n\nuse Symfony\\Component\\Validator\\Constraints as Assert;\n\nfinal class CaptchaDemoInput\n{\n    #[Assert\\NotBlank]\n    public ?string $captcha = null;\n}\nPHP\ncat > src/Controller/CaptchaDemoController.php <<'PHP'\n<?php\n\nnamespace App\\Controller;\n\nuse App\\Form\\CaptchaDemoInput;\nuse App\\Form\\CaptchaDemoType;\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\nuse Symfony\\Component\\HttpFoundation\\Request;\nuse Symfony\\Component\\HttpFoundation\\Response;\nuse Symfony\\Component\\Routing\\Attribute\\Route;\n\nfinal class CaptchaDemoController extends AbstractController\n{\n    #[Route('/captcha-demo', name: 'captcha_demo', methods: ['GET', 'POST'])]\n    public function __invoke(Request\
-        \ $request): Response\n    {\n        $form = $this->createForm(CaptchaDemoType::class, new CaptchaDemoInput());\n        $form->handleRequest($request);\n        $result = null;\n        if ($form->isSubmitted()) {\n            $result = json_encode([\n                'ok' => $form->isValid(),\n                'errors' => array_map(\n                    static fn ($violation): string => (string) $violation->getMessage(),\n                    iterator_to_array($form->getErrors(true)),\n                ),\n            ], JSON_THROW_ON_ERROR);\n        }\n\n        return $this->render('captcha_demo.html.twig', ['form' => $form, 'result' => $result]);\n    }\n}\nPHP\ncat > templates/captcha_demo.html.twig <<'TWIG'\n<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>KiwiCaptcha smoke</title></head>\n<body{% if result %} data-result=\"{{ result|e('html_attr') }}\"{% endif %}>\n{{ form_start(form) }}\n{{ form_widget(form) }}\n<button id=\"demo-submit\" type=\"submit\"\
-        >Verify</button>\n{{ form_end(form) }}\n</body>\n</html>\nTWIG\ncat > config/packages/kiwicaptcha_widget.yaml <<'YAML'\ntwig:\n    form_themes:\n        - '@KiwiCaptcha/form_div_layout.html.twig'\nYAML\nphp bin/console cache:clear\nphp bin/console debug:router | grep -q captcha_demo\necho \"demo page wired\"\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\nmkdir -p src/Form src/Controller templates\ncat > src/Form/CaptchaDemoType.php <<'PHP'\n<?php\n\nnamespace App\\Form;\n\nuse BelConsulting\\KiwiCaptchaBundle\\Form\\Type\\KiwiCaptchaType;\nuse Symfony\\Component\\Form\\AbstractType;\nuse Symfony\\Component\\Form\\FormBuilderInterface;\n\nfinal class CaptchaDemoType\
+        \ extends AbstractType\n{\n    public function buildForm(FormBuilderInterface $builder, array $options): void\n    {\n        $builder->add('captcha', KiwiCaptchaType::class, ['scope' => 'login']);\n    }\n}\nPHP\ncat > src/Form/CaptchaDemoInput.php <<'PHP'\n<?php\n\nnamespace App\\Form;\n\nuse Symfony\\Component\\Validator\\Constraints as Assert;\n\nfinal class CaptchaDemoInput\n{\n    #[Assert\\NotBlank]\n    public ?string $captcha = null;\n}\nPHP\ncat > src/Controller/CaptchaDemoController.php <<'PHP'\n<?php\n\nnamespace App\\Controller;\n\nuse App\\Form\\CaptchaDemoInput;\nuse App\\Form\\CaptchaDemoType;\nuse Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;\nuse Symfony\\Component\\HttpFoundation\\Request;\nuse Symfony\\Component\\HttpFoundation\\Response;\nuse Symfony\\Component\\Routing\\Attribute\\Route;\n\nfinal class CaptchaDemoController extends AbstractController\n{\n    #[Route('/captcha-demo', name: 'captcha_demo', methods: ['GET', 'POST'])]\n    public\
+        \ function __invoke(Request $request): Response\n    {\n        $form = $this->createForm(CaptchaDemoType::class, new CaptchaDemoInput());\n        $form->handleRequest($request);\n        $result = null;\n        if ($form->isSubmitted()) {\n            $result = json_encode([\n                'ok' => $form->isValid(),\n                'errors' => array_map(\n                    static fn ($violation): string => (string) $violation->getMessage(),\n                    iterator_to_array($form->getErrors(true)),\n                ),\n            ], JSON_THROW_ON_ERROR);\n        }\n\n        return $this->render('captcha_demo.html.twig', ['form' => $form, 'result' => $result]);\n    }\n}\nPHP\ncat > templates/captcha_demo.html.twig <<'TWIG'\n<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>KiwiCaptcha smoke</title></head>\n<body{% if result %} data-result=\"{{ result|e('html_attr') }}\"{% endif %}>\n{{ form_start(form) }}\n{{ form_widget(form) }}\n<button id=\"\
+        demo-submit\" type=\"submit\">Verify</button>\n{{ form_end(form) }}\n</body>\n</html>\nTWIG\ncat > config/packages/kiwicaptcha_widget.yaml <<'YAML'\ntwig:\n    form_themes:\n        - '@KiwiCaptcha/form_div_layout.html.twig'\nYAML\nphp bin/console cache:clear\nphp bin/console debug:router | grep -q captcha_demo\necho \"demo page wired\"\n"
     - name: application-journey-and-reinstall-cycle
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\n# php:8.3-cli ships no node/npm and no unzip; the e2e leg and\n# the reinstall cycle install them from the Debian archive\n# inside this step's own container.\napt-get update >/dev/null && apt-get install -y --no-install-recommends nodejs npm unzip >/dev/null\n\"$CI_WORKSPACE/.ci-run-tmp/bin/symfony\" serve --no-tls --port=8000 --daemon\n\
-        for _ in $(seq 1 60); do\n  if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then\n    echo \"application server answering on 127.0.0.1:8000\"\n    exit 0\n  fi\n  sleep 1\ndone\necho \"application server did not answer in 60 s\" >&2\nexit 1\n\n\nset -eu\nnpm init -y > /dev/null\nnpm install --no-audit --no-fund playwright@1.62.1 > /dev/null\nnpx playwright install --with-deps chromium > /dev/null\ncat > e2e.mjs <<'JS'\nimport { chromium } from 'playwright';\n\nconst base = 'http://127.0.0.1:8000';\nconst browser = await chromium.launch();\nconst page = await browser.newPage();\npage.on('console', (message) => console.log('[browser]', message.type(), message.text()));\nawait page.goto(`${base}/captcha-demo`, { waitUntil: 'load' });\nawait page.waitForSelector('.kiwi-widget[data-state=\"verified\"]', { timeout: 180000 });\nconst token = await page.locator('input[data-kiwi-token]').first().inputValue();\nif (!token) {\n  throw new Error('the widget reached verified without\
-        \ writing a token');\n}\nawait page.click('#demo-submit');\nawait page.waitForFunction(() => document.body.dataset.result !== undefined, { timeout: 60000 });\nconst result = JSON.parse(await page.evaluate(() => document.body.dataset.result));\nif (result.ok !== true) {\n  throw new Error(`server-side verification refused the token: ${JSON.stringify(result)}`);\n}\nconsole.log(`issue -> solve -> verify OK (token bytes: ${token.length})`);\nawait browser.close();\nJS\nnode e2e.mjs\n\n\nset -eu cd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\" export PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\ncomposer remove bel-consulting/kiwicaptcha-symfony --no-interaction\ncomposer require \"bel-consulting/kiwicaptcha-symfony:${KIWICAPTCHA_BUNDLE_VERSION:?KIWICAPTCHA_BUNDLE_VERSION must be provided}\" --no-interaction --no-progress\nphp bin/console about\nphp bin/console kiwicaptcha:doctor\ncomposer update bel-consulting/kiwicaptcha-symfony --no-interaction --no-progress\nphp bin/console about\nphp\
-        \ bin/console kiwicaptcha:doctor\ncurl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null\necho \"uninstall -> reinstall -> update cycle OK (boot, doctor and demo page after each step)\"\n\n\nset -eu cd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\" export PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/kiwicaptcha-wasm.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-driver.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-risk.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-telemetry.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-locales.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-compat.js\necho \"bundle assets present in the installed package\"\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\"\nexport PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\n# php:8.3-cli ships no node/npm and no unzip; the e2e leg and\n# the reinstall cycle install them from the Debian archive\n# inside this step's own container.\napt-get update >/dev/null && apt-get install -y --no-install-recommends nodejs npm unzip >/dev/null\n\"$CI_WORKSPACE/.ci-run-tmp/bin/symfony\"\
+        \ serve --no-tls --port=8000 --daemon\nfor _ in $(seq 1 60); do\n  if curl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null; then\n    echo \"application server answering on 127.0.0.1:8000\"\n    exit 0\n  fi\n  sleep 1\ndone\necho \"application server did not answer in 60 s\" >&2\nexit 1\n\n\nset -eu\nnpm init -y > /dev/null\nnpm install --no-audit --no-fund playwright@1.62.1 > /dev/null\nnpx playwright install --with-deps chromium > /dev/null\ncat > e2e.mjs <<'JS'\nimport { chromium } from 'playwright';\n\nconst base = 'http://127.0.0.1:8000';\nconst browser = await chromium.launch();\nconst page = await browser.newPage();\npage.on('console', (message) => console.log('[browser]', message.type(), message.text()));\nawait page.goto(`${base}/captcha-demo`, { waitUntil: 'load' });\nawait page.waitForSelector('.kiwi-widget[data-state=\"verified\"]', { timeout: 180000 });\nconst token = await page.locator('input[data-kiwi-token]').first().inputValue();\nif (!token) {\n  throw new\
+        \ Error('the widget reached verified without writing a token');\n}\nawait page.click('#demo-submit');\nawait page.waitForFunction(() => document.body.dataset.result !== undefined, { timeout: 60000 });\nconst result = JSON.parse(await page.evaluate(() => document.body.dataset.result));\nif (result.ok !== true) {\n  throw new Error(`server-side verification refused the token: ${JSON.stringify(result)}`);\n}\nconsole.log(`issue -> solve -> verify OK (token bytes: ${token.length})`);\nawait browser.close();\nJS\nnode e2e.mjs\n\n\nset -eu cd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\" export PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\ncomposer remove bel-consulting/kiwicaptcha-symfony --no-interaction\ncomposer require \"bel-consulting/kiwicaptcha-symfony:${KIWICAPTCHA_BUNDLE_VERSION:?KIWICAPTCHA_BUNDLE_VERSION must be provided}\" --no-interaction --no-progress\nphp bin/console about\nphp bin/console kiwicaptcha:doctor\ncomposer update bel-consulting/kiwicaptcha-symfony --no-interaction\
+        \ --no-progress\nphp bin/console about\nphp bin/console kiwicaptcha:doctor\ncurl -fsS http://127.0.0.1:8000/captcha-demo > /dev/null\necho \"uninstall -> reinstall -> update cycle OK (boot, doctor and demo page after each step)\"\n\n\nset -eu cd \"$CI_WORKSPACE/.ci-run-tmp/kiwi-smoke\" export PATH=\"$CI_WORKSPACE/.ci-run-tmp/bin:$PATH\"\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/kiwicaptcha-wasm.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-driver.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-risk.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-telemetry.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-locales.js\ntest -s vendor/bel-consulting/kiwicaptcha-symfony/Resources/public/widget-compat.js\necho \"bundle assets present in the installed package\"\n"
     image: php:8.3-cli
     env:
       SYMFONY_CLI_VERSION: 5.20.0
@@ -301,11 +302,11 @@ jobs:
     runtime: container
     steps:
     - name: perf-latency-quiet
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server\n# The replica fixture boots its own master and replica, so the\n# step image needs the server binary: the fenced redis service\n# feeds the --redis modes, not perf-wait-replica.php.\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\
-        \nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\n(cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)\n(cd packages/kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)\n\n\nset -eu\nphp -r '\n  require \"packages/kiwicaptcha-php/vendor/autoload.php\";\n  $url = getenv(\"KC_REDIS_URL\") ?: \"redis://redis:6399\";\n  $client = new Predis\\Client($url, [\"timeout\" => 5.0, \"read_write_timeout\" => 5.0]);\n  $client->ping();\n  echo \"manual-benchmark preflight: Redis answers at $url\\n\";\n'\n\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency\"\n\nphp packages/kiwicaptcha/tools/perf-bench.php --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-array.json\"\
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server\n# The replica fixture boots its own master and replica, so the\n# step image needs the server binary: the fenced redis service\n# feeds the --redis modes, not perf-wait-replica.php.\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer',\
+        \ '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\n(cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)\n(cd packages/kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)\n\n\nset -eu\nphp -r '\n  require \"packages/kiwicaptcha-php/vendor/autoload.php\";\n  $url = getenv(\"KC_REDIS_URL\") ?: \"redis://redis:6399\";\n  $client = new Predis\\Client($url, [\"timeout\" => 5.0, \"read_write_timeout\" => 5.0]);\n  $client->ping();\n  echo \"manual-benchmark preflight: Redis answers at $url\\n\";\n'\n\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency\"\n\nphp packages/kiwicaptcha/tools/perf-bench.php --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-array.json\"\
         \n\nphp packages/kiwicaptcha/tools/perf-bench.php --redis --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-redis.json\"\n\nphp packages/kiwicaptcha/tools/perf-bench.php --argon --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-argon.json\"\n\nphp packages/kiwicaptcha/tools/perf-bench-risk.php --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-risk-inmemory.json\"\n\nphp packages/kiwicaptcha/tools/perf-bench-risk.php --redis --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-bench-risk-redis.json\"\n\nphp packages/kiwicaptcha/tools/perf-wait.php --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-wait.json\"\n\nphp packages/kiwicaptcha/tools/perf-wait-replica.php --json-out \"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency/perf-wait-replica.json\""
     - name: publish-timing-records
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -u\ndir=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency\"\nfound=0\nfor record in \"$dir\"/*.json; do\n  [ -f \"$record\" ] || continue\n  found=1\n  echo \"=== $record ===\"\n  cat \"$record\"\ndone\n[ \"$found\" = \"1\" ] || echo \"no timing records were written\"\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -u\ndir=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-perf-latency\"\nfound=0\nfor record in \"$dir\"/*.json; do\n  [ -f \"$record\" ] || continue\n  found=1\n  echo \"=== $record ===\"\n  cat \"$record\"\ndone\n[ \"$found\" = \"1\" ] || echo \"no timing records were written\"\n"
     image: php:8.3-cli
     env:
       KC_REDIS_URL: redis://redis:6399
@@ -320,13 +321,13 @@ jobs:
     runtime: container
     steps:
     - name: resolve-the-base-ref--previous-release-commit-by-ref
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nbase=\"${LATENCY_BASE_REF:-head~1}\"\ngit fetch origin \"$base\" --tags 2>/dev/null || true\nif ! git rev-parse --verify -q \"$base\" >/dev/null 2>&1; then\n  echo \"base ref $base does not resolve\" >&2\n  exit 1\nfi\necho \"$base\" > .ci-run-tmp/base-ref\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nbase=\"${LATENCY_BASE_REF:-head~1}\"\ngit fetch origin \"$base\" --tags 2>/dev/null || true\nif ! git rev-parse --verify -q \"$base\" >/dev/null 2>&1; then\n  echo \"base ref $base does not resolve\" >&2\n  exit 1\nfi\necho \"$base\" > .ci-run-tmp/base-ref\n"
     - name: check-out-the-base-tree--same-session--same-host
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -340,7 +341,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -362,7 +363,7 @@ jobs:
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -376,7 +377,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -392,7 +393,7 @@ jobs:
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -406,7 +407,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
@@ -418,22 +419,22 @@ jobs:
 
         composer install --no-interaction --prefer-dist'
     - name: record-the-host-state--machine-identity--governor--load--ver
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\"\nevidence=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/host-evidence.txt\"\n{\n  echo \"captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"head_sha=$(git rev-parse HEAD)\"\n  echo \"base_ref=$BASE_REF\"\n  echo \"uname=$(uname -a)\"\n  echo \"nproc=$(nproc 2>/dev/null || true)\"\n  echo \"php=$(php -r 'echo PHP_VERSION;')\"\n  if command -v redis-cli >/dev/null 2>&1; then\n \
-        \   echo \"redis=$(redis-cli -u \"$KC_REDIS_URL\" INFO server 2>/dev/null | sed -n 's/^redis_version://p' | tr -d '\\r')\"\n  fi\n  if [ -r /proc/cpuinfo ]; then\n    echo \"cpu_model=$(awk -F: '/model name/ { gsub(/^ +/, \"\", $2); print $2; exit }' /proc/cpuinfo)\"\n  fi\n  if command -v lscpu >/dev/null 2>&1; then\n    lscpu | sed -n 's/^ *\\(Model name\\|CPU(s)\\|CPU max MHz\\|CPU min MHz\\|Thread(s) per core\\|Core(s) per socket\\): */lscpu_\\1=/p'\n  fi\n  for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do\n    [ -r \"$cpu\" ] || continue\n    echo \"$cpu=$(cat \"$cpu\")\"\n  done\n  echo \"uptime=$(uptime 2>/dev/null || true)\"\n  echo \"loadavg=$(cat /proc/loadavg 2>/dev/null || true)\"\n} | tee \"$evidence\"\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\"\nevidence=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/host-evidence.txt\"\n{\n  echo \"captured_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"head_sha=$(git rev-parse HEAD)\"\n  echo \"base_ref=$BASE_REF\"\n  echo \"uname=$(uname -a)\"\n  echo \"nproc=$(nproc 2>/dev/null || true)\"\n  echo \"php=$(php -r 'echo PHP_VERSION;')\"\n  if command -v redis-cli\
+        \ >/dev/null 2>&1; then\n    echo \"redis=$(redis-cli -u \"$KC_REDIS_URL\" INFO server 2>/dev/null | sed -n 's/^redis_version://p' | tr -d '\\r')\"\n  fi\n  if [ -r /proc/cpuinfo ]; then\n    echo \"cpu_model=$(awk -F: '/model name/ { gsub(/^ +/, \"\", $2); print $2; exit }' /proc/cpuinfo)\"\n  fi\n  if command -v lscpu >/dev/null 2>&1; then\n    lscpu | sed -n 's/^ *\\(Model name\\|CPU(s)\\|CPU max MHz\\|CPU min MHz\\|Thread(s) per core\\|Core(s) per socket\\): */lscpu_\\1=/p'\n  fi\n  for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do\n    [ -r \"$cpu\" ] || continue\n    echo \"$cpu=$(cat \"$cpu\")\"\n  done\n  echo \"uptime=$(uptime 2>/dev/null || true)\"\n  echo \"loadavg=$(cat /proc/loadavg 2>/dev/null || true)\"\n} | tee \"$evidence\"\n"
     - name: host-warm-up-runs--both-trees--discarded--settles-governor
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nfor _ in 1 2; do\n  for root in \"$CI_WORKSPACE/base\" \"$CI_WORKSPACE\"; do\n    (cd \"$root\" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true\n  done\ndone\necho \"warm-up runs done (base and head, two interleaved passes)\"\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nfor _ in 1 2; do\n  for root in \"$CI_WORKSPACE/base\" \"$CI_WORKSPACE\"; do\n    (cd \"$root\" && php packages/kiwicaptcha/tools/perf-bench.php) >/dev/null 2>&1 || true\n  done\ndone\necho \"warm-up runs done (base and head, two interleaved passes)\"\n"
     - name: balanced-repeated-benchmark-runs--balanced-alternating-order
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nrepeats=\"${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"${LATENCY_REGRESSION_MODES:-array}\"\nif (( repeats < 2 || repeats % 2 != 0 )); then\n  echo \"LATENCY_REGRESSION_REPEATS must be an even count >= 2 for a balanced balanced alternating order (got $repeats)\" >&2\n  exit 1\nfi\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head\"\nfor mode in $modes; do\n  case \"$mode\" in\n\
-        \    array) flags=() ;;\n    redis) flags=(--redis) ;;\n    argon) flags=(--argon) ;;\n    *) echo \"unknown LATENCY_REGRESSION_MODES entry: $mode\" >&2; exit 1 ;;\n  esac\n  for ((repeat = 1; repeat <= repeats; repeat++)); do\n    if (( repeat % 2 == 1 )); then order=(base head); else order=(head base); fi\n    for side in \"${order[@]}\"; do\n      if [ \"$side\" = base ]; then\n        root=\"$CI_WORKSPACE/base\"\n        out=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base/$mode-$repeat.log\"\n      else\n        root=\"$CI_WORKSPACE\"\n        out=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head/$mode-$repeat.log\"\n      fi\n      (cd \"$root\" && php packages/kiwicaptcha/tools/perf-bench.php \"${flags[@]}\") >\"$out\" 2>&1 || true\n      echo \"$side $mode repeat $repeat (order $repeat%2): $(sed -n 's/perf-bench: \\(SHA-256 [a-z]*\\|Argon2id admission\\) issuance.*/bench line recorded/p' \"$out\" || true)\"\n    done\n  done\ndone\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nrepeats=\"${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"${LATENCY_REGRESSION_MODES:-array}\"\nif (( repeats < 2 || repeats % 2 != 0 )); then\n  echo \"LATENCY_REGRESSION_REPEATS must be an even count >= 2 for a balanced balanced alternating order (got $repeats)\" >&2\n  exit 1\nfi\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base\" \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head\"\nfor mode in $modes;\
+        \ do\n  case \"$mode\" in\n    array) flags=() ;;\n    redis) flags=(--redis) ;;\n    argon) flags=(--argon) ;;\n    *) echo \"unknown LATENCY_REGRESSION_MODES entry: $mode\" >&2; exit 1 ;;\n  esac\n  for ((repeat = 1; repeat <= repeats; repeat++)); do\n    if (( repeat % 2 == 1 )); then order=(base head); else order=(head base); fi\n    for side in \"${order[@]}\"; do\n      if [ \"$side\" = base ]; then\n        root=\"$CI_WORKSPACE/base\"\n        out=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/base/$mode-$repeat.log\"\n      else\n        root=\"$CI_WORKSPACE\"\n        out=\"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/head/$mode-$repeat.log\"\n      fi\n      (cd \"$root\" && php packages/kiwicaptcha/tools/perf-bench.php \"${flags[@]}\") >\"$out\" 2>&1 || true\n      echo \"$side $mode repeat $repeat (order $repeat%2): $(sed -n 's/perf-bench: \\(SHA-256 [a-z]*\\|Argon2id admission\\) issuance.*/bench line recorded/p' \"$out\" || true)\"\n    done\n  done\ndone\n"
     - name: compare-base-vs-head--paired-distributions--balanced-order
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nrepeats=\"${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"${LATENCY_REGRESSION_MODES:-array}\"\nrel_max=\"${LATENCY_REGRESSION_MAX_REL_PCT:-20}\"\nabs_max=\"${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}\"\nspread_max=\"${LATENCY_REGRESSION_MAX_SPREAD:-10}\"\nbash tools/ci/latency-compare.sh \\\n  \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\" \"$repeats\" \"$modes\" \"$rel_max\" \"$abs_max\" \"$spread_max\"\nif [ -f \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/ambiguous\"\
-        \ ]; then\n  {\n    echo \"Latency regression: ambiguous\"\n    echo \"\"\n    echo \"An over-threshold signal without paired-distribution agreement was recorded.\"\n    echo \"It is non-blocking; re-run on the quiet runner before concluding. Evidence: kiwi-latency-evidence.\"\n  } >>\"$CI_WORKSPACE/.ci-run-tmp/step-summary.txt\"\nfi\n"
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${CI_REPO:-${KIWI_REPO:-}}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nrepeats=\"${LATENCY_REGRESSION_REPEATS:-6}\"\nmodes=\"${LATENCY_REGRESSION_MODES:-array}\"\nrel_max=\"${LATENCY_REGRESSION_MAX_REL_PCT:-20}\"\nabs_max=\"${LATENCY_REGRESSION_MAX_ABS_MS:-0.5}\"\nspread_max=\"${LATENCY_REGRESSION_MAX_SPREAD:-10}\"\nbash tools/ci/latency-compare.sh \\\n  \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency\" \"$repeats\" \"$modes\" \"$rel_max\" \"$abs_max\" \"$spread_max\"\nif [\
+        \ -f \"$CI_WORKSPACE/.ci-run-tmp/kiwi-latency/ambiguous\" ]; then\n  {\n    echo \"Latency regression: ambiguous\"\n    echo \"\"\n    echo \"An over-threshold signal without paired-distribution agreement was recorded.\"\n    echo \"It is non-blocking; re-run on the quiet runner before concluding. Evidence: kiwi-latency-evidence.\"\n  } >>\"$CI_WORKSPACE/.ci-run-tmp/step-summary.txt\"\nfi\n"
     - name: reverse-order-validation-note
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
 
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+        CI_COMMIT_SHA="${CI_COMMIT_SHA:-${KIWI_GIT_SHA:-}}"
 
         CI_COMMIT_BEFORE_SHA=""
 
@@ -447,7 +448,7 @@ jobs:
 
         case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
 
-        CI_REPO="${KIWI_REPO:-}"
+        CI_REPO="${CI_REPO:-${KIWI_REPO:-}}"
 
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
