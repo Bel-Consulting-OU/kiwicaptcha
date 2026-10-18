@@ -7,26 +7,27 @@ concurrency:
   group: ${{ repo.full_name }}:${{ git.branch }}
   cancel_in_progress: true
 jobs:
-  lint-repo:
-    name: lint-repo
+  lint:
+    name: lint
     runtime: container
-    image: alpine:3.20
     steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\napk add --no-cache bash git gawk ripgrep coreutils jq python3 py3-yaml\nset -eu\nKIWI_HDR='# KiwiCaptcha'\nAPEX_HDR='# ApexM''ail'\ngrep -q \"^$KIWI_HDR\" README.md\n! grep -q \"^$APEX_HDR\" README.md\ngrep -q 'packages/kiwicaptcha' README.md\ngrep -q '\"name\": \"bel-consulting/kiwicaptcha-symfony\"' packages/kiwicaptcha/integrations/symfony/composer.json\ngrep -q '^name = \"kiwicaptcha\"' packages/kiwicaptcha/Cargo.toml\nwhile IFS= read -r asset; do\n  [ -n \"$asset\"\
-        \ ] || continue\n  test -f \"packages/kiwicaptcha-wasm/assets/$asset\"\ndone < packages/kiwicaptcha-wasm/release-assets.txt\ntest -f tests/browser/compat-capabilities.json\nfor d in kiwicaptcha kiwicaptcha-php kiwicaptcha-wasm kiwicaptcha-risk kiwicaptcha-risk-php; do\n  test ! -d \"$d\"\ndone\necho \"product identity OK\"\n\nset -eu\ncmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \\\n  packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md\necho \"accessibility documents byte-identical\"\n\nset -eu\n# Kiwi-CI jobs run in isolated workspaces, so GitHub-only state\n# variables (GITHUB_PATH, GITHUB_ENV, GITHUB_OUTPUT) never exist\n# here and writing them has always been a silent no-op or an\n# unbound-variable crash under set -u. The lint refuses any new\n# occurrence so the class of bug stays dead.\nif rg -n '\\$\\{?GITHUB_(PATH|ENV|OUTPUT)' .kiwi/ ; then\n  echo \"workflow lint: GitHub-only state variables in .kiwi/ (see above)\" >&2\n  exit 1\nfi\necho \"workflow lint:\
-        \ no GitHub-only state variables in the Kiwi pipelines\"\n# The aggregate gate must name only jobs that exist in one of the\n# Kiwi pipeline files; a renamed or deleted job would otherwise\n# leave the gate waiting on a dependency the engine cannot build.\npython3 - <<'KIWI_LINT'\nimport glob\nimport sys\nimport yaml\njobs = {}\nfor path in sorted(glob.glob('.kiwi/*.yaml')):\n    doc = yaml.safe_load(open(path))\n    if not isinstance(doc, dict) or not isinstance(doc.get('jobs'), dict):\n        sys.exit(f'{path}: no jobs map')\n    for key in doc['jobs']:\n        jobs.setdefault(key, []).append(path)\ngate = yaml.safe_load(open('.kiwi/pipeline.yaml'))['jobs']['promotion-gate']\nmissing = [dep for dep in gate.get('needs', []) if dep not in jobs]\nif missing:\n    sys.exit(f'promotion-gate needs unknown jobs: {missing}')\nprint(f'workflow lint: {len(jobs)} Kiwi jobs, every gate dependency exists')\nKIWI_LINT\n# SECURITY.md's solver protocol id is machine-checked against\n# the canonical\
-        \ constant, never hand-maintained.\nCANONICAL_ID=$(sed -n 's/.*\"worker_protocol_id\": *\"\\([^\"]*\\)\".*/\\1/p' protocol/limits.json)\n[ -n \"$CANONICAL_ID\" ] || { echo \"workflow lint: no worker_protocol_id in protocol/limits.json\" >&2; exit 1; }\ngrep -q \"current \\`$CANONICAL_ID\\` solver protocol id\" SECURITY.md || {\n  echo \"workflow lint: SECURITY.md names a stale solver protocol id (canonical: $CANONICAL_ID)\" >&2\n  exit 1\n}\necho \"workflow lint: SECURITY.md protocol id matches the canonical constant ($CANONICAL_ID)\"\n\nsh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh\nsh packages/kiwicaptcha/tools/verify-error-code-parity.sh\nbash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt\nset -eu\nbase=\"${CI_COMMIT_BEFORE_SHA:-}\"\nif [ -z \"$base\" ] || [ \"$base\" = \"0000000000000000000000000000000000000000\" ]; then\n  if [ \"${CI_PIPELINE_EVENT:-}\" = \"pull_request\" ] && [ -n \"${CI_COMMIT_TARGET_SHA:-}\"\
-        \ ]; then\n    base=\"$CI_COMMIT_TARGET_SHA\"\n  else\n    # A manual pipeline has no before-SHA and the clone is\n    # shallow (depth 1, tree-filtered): deepen to the parent\n    # commit so the integrity diff has a real base.\n    git fetch --depth=2 --no-filter origin \"$CI_COMMIT_SHA\" >/dev/null 2>&1 || true\n    base=\"$(git rev-parse --verify HEAD^ 2>/dev/null || true)\"\n  fi\nfi\n[ -n \"$base\" ] || { echo \"baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)\" >&2; exit 1; }\ngit cat-file -e \"$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt\" 2>/dev/null \\\n  || { echo \"no baseline file at $base\" >&2; exit 1; }\ngit show \"$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt\" > /tmp/base-baseline.txt\nwhile IFS= read -r entry; do\n  entry=\"${entry#\"${entry%%[![:space:]]*}\"}\"\n  entry=\"${entry%%#*}\"\n  entry=\"${entry%\"${entry##*[![:space:]]}\"}\"\n  [ -n \"$entry\" ] || continue\n  if awk -v p=\"$entry\" '!/^TOTAL[ \\t]/ &&\
-        \ $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then\n    echo \"stale adoption manifest entry: $entry already has a baseline row\" >&2\n    exit 1\n  fi\ndone < packages/kiwicaptcha/tools/docs-lint-adopted.txt\nbash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity /tmp/base-baseline.txt\n\nbash tools/ci/version-prose-lint.sh\ngit checkout -- tools/redteam/target 2>/dev/null || true\nbash tools/ci/release-asset-contract.sh\nbash tools/ci/protocol-manifest-check.sh\nbash tools/ci/limits-parity-check.sh\nbash tools/ci/deploy-image-pin-check.sh\nbash tools/ci/release-governance-fixture.sh\nset -eu\ncount=0\nfor path in protocol/risk-v1/*.lua; do\n  f=$(basename \"$path\")\n  count=$((count + 1))\n  test -f \"protocol/risk-v1/$f\"\n  test -f \"packages/kiwicaptcha-risk/resources/$f\"\n  test -f \"packages/kiwicaptcha-risk-php/resources/$f\"\n  cmp -s \"protocol/risk-v1/$f\" \"packages/kiwicaptcha-risk/resources/$f\"\n  cmp -s \"protocol/risk-v1/$f\" \"\
-        packages/kiwicaptcha-risk-php/resources/$f\"\ndone\ntest \"$count\" -ge 21\necho \"all $count canonical Lua copies byte-identical\"\n\n\nset -eu\nPATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|(^|[^A-Za-z0-9_])(?-i:P[0-3])([^A-Za-z0-9_-]|$)|ApexMa''il'\nif rg -n -i \\\n  --glob '!CHANGELOG*' \\\n  --glob '!**/CHANGELOG*' \\\n  --glob '!**/vendor/**' \\\n  --glob '!**/node_modules/**' \\\n  --glob '!**/target/**' --glob '!**/deps/**' \\\n  \"$PATTERN\" \\\n  packages tests README.md SECURITY.md .github/workflows .kiwi; then\n  echo \"internal-history commentary found in product source/docs\" >&2\n  exit 1\nfi\necho \"doc hygiene OK\""
-    shell: sh
-  lint-workflow:
-    name: lint-workflow
-    runtime: container
-    image: alpine:3.20
-    steps:
-    - name: commands
+    - name: lint-repo
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\napk add --no-cache bash git gawk ripgrep coreutils jq\n\nset -eu\nKIWI_HDR='# KiwiCaptcha'\nAPEX_HDR='# ApexM''ail'\ngrep -q \"^$KIWI_HDR\" README.md\n! grep -q \"^$APEX_HDR\" README.md\ngrep -q 'packages/kiwicaptcha' README.md\ngrep -q '\"name\": \"bel-consulting/kiwicaptcha-symfony\"' packages/kiwicaptcha/integrations/symfony/composer.json\ngrep -q '^name = \"kiwicaptcha\"' packages/kiwicaptcha/Cargo.toml\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  test -f \"packages/kiwicaptcha-wasm/assets/$asset\"\
+        \ndone < packages/kiwicaptcha-wasm/release-assets.txt\ntest -f tests/browser/compat-capabilities.json\nfor d in kiwicaptcha kiwicaptcha-php kiwicaptcha-wasm kiwicaptcha-risk kiwicaptcha-risk-php; do\n  test ! -d \"$d\"\ndone\necho \"product identity OK\"\n\n\nset -eu\ncmp packages/kiwicaptcha-wasm/ACCESSIBILITY.md \\\n  packages/kiwicaptcha/integrations/symfony/Resources/ACCESSIBILITY.md\necho \"accessibility documents byte-identical\"\n\n\nset -eu\n# The Woodpecker lanes are container-per-step: GitHub-only state\n# variables (GITHUB_PATH, GITHUB_ENV, GITHUB_OUTPUT) never exist\n# here and writing them has always been a silent no-op or an\n# unbound-variable crash under set -u. The lint refuses any new\n# occurrence so the class of bug stays dead.\nif rg -n 'GITHUB_(PATH|ENV|OUTPUT)' .woodpecker/ ; then\n  echo \"workflow lint: GitHub-only state variables in .woodpecker/ (see above)\" >&2\n  exit 1\nfi\necho \"workflow lint: no GitHub-only state variables in the Woodpecker lanes\"\
+        \n# The promotion gate waits on every depends_on entry; a renamed\n# or deleted lane would leave it waiting forever with no signal\n# (a required-check block, fail-closed but silent). Every entry\n# must name an existing workflow file.\nfor dep in $(sed -n '/^depends_on:/,/^steps:/p' .woodpecker/promotion-gate.yml | sed -n 's/^  - //p'); do\n  [ -n \"$dep\" ] || continue\n  test -f \".woodpecker/$dep.yml\" || {\n    echo \"workflow lint: promotion-gate depends on $dep, but .woodpecker/$dep.yml does not exist\" >&2\n    exit 1\n  }\ndone\necho \"workflow lint: every promotion-gate dependency names an existing lane\"\n# SECURITY.md's solver protocol id is machine-checked against\n# the canonical constant, never hand-maintained.\nCANONICAL_ID=$(sed -n 's/.*\"worker_protocol_id\": *\"\\([^\"]*\\)\".*/\\1/p' protocol/limits.json)\n[ -n \"$CANONICAL_ID\" ] || { echo \"workflow lint: no worker_protocol_id in protocol/limits.json\" >&2; exit 1; }\ngrep -q \"current \\`$CANONICAL_ID\\` solver\
+        \ protocol id\" SECURITY.md || {\n  echo \"workflow lint: SECURITY.md names a stale solver protocol id (canonical: $CANONICAL_ID)\" >&2\n  exit 1\n}\necho \"workflow lint: SECURITY.md protocol id matches the canonical constant ($CANONICAL_ID)\"\n\n\nsh packages/kiwicaptcha/tools/docs-lint-one-shot-test.sh\n\nsh packages/kiwicaptcha/tools/verify-error-code-parity.sh\n\nbash packages/kiwicaptcha/tools/docs-lint.sh --source --baseline packages/kiwicaptcha/tools/docs-lint-baseline.txt\n\nset -eu\nbase=\"${CI_COMMIT_BEFORE_SHA:-}\"\nif [ -z \"$base\" ] || [ \"$base\" = \"0000000000000000000000000000000000000000\" ]; then\n  if [ \"${CI_PIPELINE_EVENT:-}\" = \"pull_request\" ] && [ -n \"${CI_COMMIT_TARGET_SHA:-}\" ]; then\n    base=\"$CI_COMMIT_TARGET_SHA\"\n  else\n    # A manual pipeline has no before-SHA and the clone is\n    # shallow (depth 1, tree-filtered): deepen to the parent\n    # commit so the integrity diff has a real base.\n    git fetch --depth=2 --no-filter origin \"$CI_COMMIT_SHA\"\
+        \ >/dev/null 2>&1 || true\n    base=\"$(git rev-parse --verify HEAD^ 2>/dev/null || true)\"\n  fi\nfi\n[ -n \"$base\" ] || { echo \"baseline integrity needs a comparison base (before-SHA, target-SHA or HEAD^)\" >&2; exit 1; }\ngit cat-file -e \"$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt\" 2>/dev/null \\\n  || { echo \"no baseline file at $base\" >&2; exit 1; }\ngit show \"$base:packages/kiwicaptcha/tools/docs-lint-baseline.txt\" > /tmp/base-baseline.txt\nwhile IFS= read -r entry; do\n  entry=\"${entry#\"${entry%%[![:space:]]*}\"}\"\n  entry=\"${entry%%#*}\"\n  entry=\"${entry%\"${entry##*[![:space:]]}\"}\"\n  [ -n \"$entry\" ] || continue\n  if awk -v p=\"$entry\" '!/^TOTAL[ \\t]/ && $2 == p { found = 1 } END { exit !found }' /tmp/base-baseline.txt; then\n    echo \"stale adoption manifest entry: $entry already has a baseline row\" >&2\n    exit 1\n  fi\ndone < packages/kiwicaptcha/tools/docs-lint-adopted.txt\nbash packages/kiwicaptcha/tools/docs-lint.sh --source --integrity\
+        \ /tmp/base-baseline.txt\n\n\nbash tools/ci/version-prose-lint.sh\n\ngit checkout -- . 2>/dev/null || true\nbash tools/ci/release-asset-contract.sh\n\nbash tools/ci/protocol-manifest-check.sh\n\nbash tools/ci/limits-parity-check.sh\n\nbash tools/ci/deploy-image-pin-check.sh\n\nbash tools/ci/release-governance-fixture.sh\n\nset -eu\ncount=0\nfor path in protocol/risk-v1/*.lua; do\n  f=$(basename \"$path\")\n  count=$((count + 1))\n  test -f \"protocol/risk-v1/$f\"\n  test -f \"packages/kiwicaptcha-risk/resources/$f\"\n  test -f \"packages/kiwicaptcha-risk-php/resources/$f\"\n  cmp -s \"protocol/risk-v1/$f\" \"packages/kiwicaptcha-risk/resources/$f\"\n  cmp -s \"protocol/risk-v1/$f\" \"packages/kiwicaptcha-risk-php/resources/$f\"\ndone\ntest \"$count\" -ge 21\necho \"all $count canonical Lua copies byte-identical\"\n\n\nset -eu\nPATTERN='audit( round)? #[0-9]''+''|audit roun''d''|(^|[^A-Za-z])round[- ]?[0-9]''+''|(^|[^A-Za-z0-9_])(?-i:P[0-3])([^A-Za-z0-9_-]|$)|ApexMa''il'\nif rg -n\
+        \ -i \\\n  --glob '!CHANGELOG*' \\\n  --glob '!**/CHANGELOG*' \\\n  --glob '!**/vendor/**' \\\n  --glob '!**/node_modules/**' \\\n  --glob '!**/target/**' --glob '!**/deps/**' \\\n  \"$PATTERN\" \\\n  packages tests README.md SECURITY.md .github/workflows .woodpecker; then\n  echo \"internal-history commentary found in product source/docs\" >&2\n  exit 1\nfi\necho \"doc hygiene OK\"\n"
+    - name: storage-lua-parity
+      run: 'apk add --no-cache python3
+
+
+        python3 tools/ci/storage-lua-parity-check.py
+
+
+        python3 tools/ci/storage-lua-parity-check.py --assert'
+    - name: lint-workflow
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
@@ -39,7 +40,7 @@ jobs:
 
         CI_PIPELINE_EVENT="push"
 
-        CI_WORKSPACE="${KIWI_WORKSPACE:-$PWD}"
+        CI_WORKSPACE="$PWD"
 
         CI_COMMIT_TAG=""
 
@@ -50,6 +51,7 @@ jobs:
         export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
         apk add --no-cache bash curl tar
+
 
         set -eu
 
@@ -67,35 +69,23 @@ jobs:
 
         echo "${ACTIONLINT_SHA256}  actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
 
-        tar -xzf "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
+        tar --no-same-owner -xzf "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint
 
         /tmp/actionlint -version
 
         cd "$CI_WORKSPACE"
 
-        /tmp/actionlint -color=false .github/workflows/*.yml'
-    shell: sh
-  storage-lua-parity:
-    name: storage-lua-parity
-    runtime: container
+        /tmp/actionlint -color=false .github/workflows/*.yml
+
+        '
     image: alpine:3.20
-    steps:
-    - name: commands
-      run: 'apk add --no-cache python3
-
-        python3 tools/ci/storage-lua-parity-check.py
-
-        python3 tools/ci/storage-lua-parity-check.py --assert'
     shell: sh
   composer-contracts:
     name: composer-contracts
     runtime: container
     image: composer:2.9
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: composer-contracts
       run: 'set -eu
 
         composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha-php
@@ -104,77 +94,105 @@ jobs:
 
         composer validate --strict --no-check-publish --working-dir=packages/kiwicaptcha/integrations/symfony
 
-        (cd packages/kiwicaptcha-php && bash ../kiwicaptcha/tools/check-psr4.sh)'
+        (cd packages/kiwicaptcha-php && bash ../kiwicaptcha/tools/check-psr4.sh)
+
+        '
     shell: bash
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-8.1:
     name: php-core-8.1
     runtime: container
     image: php:8.1-cli
+    steps:
+    - name: php-core-8.1
+      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit\n"
+    shell: bash
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-8.2:
     name: php-core-8.2
     runtime: container
     image: php:8.2-cli
+    steps:
+    - name: php-core-8.2
+      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit\n"
+    shell: bash
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-8.3:
     name: php-core-8.3
     runtime: container
     image: php:8.3-cli
+    steps:
+    - name: php-core-8.3
+      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit\n"
+    shell: bash
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-8.4:
     name: php-core-8.4
     runtime: container
     image: php:8.4-cli
+    steps:
+    - name: php-core-8.4
+      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit\n"
+    shell: bash
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-8.5:
     name: php-core-8.5
     runtime: container
     image: php:8.5-cli
+    steps:
+    - name: php-core-8.5
+      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit\n"
+    shell: bash
     services:
     - name: redis
       image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+  php-nightly-8.6:
+    name: php-nightly-8.6
+    runtime: container
+    image: php:8.6-rc-cli
     steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd packages/kiwicaptcha-php\ncomposer validate --strict\nbash ../kiwicaptcha/tools/check-psr4.sh\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\nvendor/bin/phpunit"
+    - name: php-nightly-8.6
+      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset +e\n(\n  *php_core_suite\n)\nstatus=$?\necho \"php 8.6 pre-release probe finished with status $status (non-gating; the stable lanes above are the evidence)\"\nexit 0\n"
     shell: bash
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-no-gmp:
     name: php-core-no-gmp
     runtime: container
     image: php:8.3-cli
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: php-core-no-gmp
       run: 'set -eu
 
         apt-get update -qq
 
         apt-get install -y -qq unzip git
+
 
 
         set -eu
@@ -190,6 +208,7 @@ jobs:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
         rm -f /tmp/composer-setup.php
+
 
 
         set -eu
@@ -200,21 +219,21 @@ jobs:
 
         composer install --no-interaction --prefer-dist
 
-        php ../../tools/ci/no-gmp-verify.php'
+        php ../../tools/ci/no-gmp-verify.php
+
+        '
     shell: bash
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   php-core-real-redis:
     name: php-core-real-redis
     runtime: container
     image: php:8.3-cli
-    env:
-      KC_REDIS_URL: redis://redis:6379
-      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
-      TEST_REDIS_URL: redis://redis:6379
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: php-core-real-redis
       run: 'set -eu
 
         apt-get update -qq
@@ -222,6 +241,7 @@ jobs:
         apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
 
         docker-php-ext-install -j"$(nproc)" gmp sodium pcntl posix
+
 
 
         set -eu
@@ -239,6 +259,7 @@ jobs:
         rm -f /tmp/composer-setup.php
 
 
+
         set -eu
 
         cd packages/kiwicaptcha-php
@@ -247,31 +268,25 @@ jobs:
 
         (cd ../kiwicaptcha/integrations/symfony && composer install --no-interaction --prefer-dist --no-scripts)
 
-        vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"'
+        vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+
+        '
     shell: bash
-  php-nightly-8.6:
-    name: php-nightly-8.6
-    runtime: container
-    image: php:8.6-rc-cli
+    env:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset +e\n(\n  *php_core_suite\n)\nstatus=$?\necho \"php 8.6 pre-release probe finished with status $status (non-gating; the stable lanes above are the evidence)\"\nexit 0"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   phpredis-siteverify:
     name: phpredis-siteverify
     runtime: container
     image: php:8.3-cli
-    env:
-      KC_REDIS_URL: redis://redis:6379
-      TEST_REDIS_URL: redis://redis:6379
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: phpredis-siteverify
       run: 'set -eu
 
         apt-get update -qq
@@ -283,6 +298,7 @@ jobs:
         pecl install redis && docker-php-ext-enable redis
 
 
+
         set -eu
 
         EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
@@ -298,6 +314,7 @@ jobs:
         rm -f /tmp/composer-setup.php
 
 
+
         set -eu
 
         cd packages/kiwicaptcha/integrations/symfony
@@ -306,78 +323,169 @@ jobs:
 
         php -r ''if (!extension_loaded("redis")) { fwrite(STDERR, "redis extension missing\n"); exit(1); } echo "phpredis OK\n";''
 
-        vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"'
+        vendor/bin/phpunit --filter "SiteVerifyTest|SiteVerifyConcurrencyTest"
+
+        '
     shell: bash
-  symfony-6.4-php8.2:
-    name: symfony-6.4-php8.2
-    runtime: container
-    image: php:8.2-cli
     env:
       KC_REDIS_URL: redis://redis:6379
       TEST_REDIS_URL: redis://redis:6379
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\"\
-        \ = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\ncomposer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.*\
-        \ --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*\nvendor/bin/phpunit"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   symfony-7x-php8.2:
     name: symfony-7x-php8.2
     runtime: container
     image: php:8.2-cli
+    steps:
+    - name: symfony-7x-php8.2
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] ||\
+        \ { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\nvendor/bin/phpunit\n"
+    shell: bash
     env:
       KC_REDIS_URL: redis://redis:6379
       TEST_REDIS_URL: redis://redis:6379
     services:
     - name: redis
       image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+  symfony-6.4-php8.2:
+    name: symfony-6.4-php8.2
+    runtime: container
+    image: php:8.2-cli
     steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\"\
-        \ = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\nvendor/bin/phpunit"
+    - name: symfony-6.4-php8.2
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] ||\
+        \ { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\ncomposer update --no-interaction --with symfony/framework-bundle:6.4.* --with symfony/http-kernel:6.4.* --with symfony/http-foundation:6.4.* --with symfony/validator:6.4.* --with symfony/form:6.4.* --with symfony/config:6.4.* --with symfony/dependency-injection:6.4.*\
+        \ --with symfony/twig-bridge:6.4.* --with symfony/routing:6.4.* --with symfony/cache:6.4.* --with symfony/property-info:6.4.* --with symfony/error-handler:6.4.*\nvendor/bin/phpunit\n"
     shell: bash
+    env:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   symfony-8x-php8.4:
     name: symfony-8x-php8.4
     runtime: container
     image: php:8.4-cli
+    steps:
+    - name: symfony-8x-php8.4
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] ||\
+        \ { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\ncomposer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*\nvendor/bin/phpunit\n"
+    shell: bash
     env:
       KC_REDIS_URL: redis://redis:6379
       TEST_REDIS_URL: redis://redis:6379
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\"\
-        \ = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\ncomposer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*\nvendor/bin/phpunit"
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   symfony-8x-php8.5:
     name: symfony-8x-php8.5
     runtime: container
     image: php:8.5-cli
+    steps:
+    - name: symfony-8x-php8.5
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] ||\
+        \ { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\ncomposer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*\nvendor/bin/phpunit\n"
+    shell: bash
     env:
       KC_REDIS_URL: redis://redis:6379
       TEST_REDIS_URL: redis://redis:6379
     services:
     - name: redis
       image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+  risk-php:
+    name: risk-php
+    runtime: container
+    image: php:8.3-cli
     steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev libsodium-dev unzip git\ndocker-php-ext-install -j\"$(nproc)\" gmp sodium\npecl install redis && docker-php-ext-enable redis\n\nset -eu\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\"\
-        \ = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\n# The repository does not commit composer.lock; the install\n# resolves and writes it first so the locked audit has a lock.\ncomposer install --no-interaction --prefer-dist\nfor i in 1 2 3 4 5; do\n  if composer audit --locked; then\n    break\n  fi\n  echo \"composer audit attempt $i failed \u2014 retrying in 30s\" >&2\n  sleep 30\ndone\ncomposer audit --locked\n\nset -eu\ncd \"$CI_WORKSPACE/packages/kiwicaptcha/integrations/symfony\"\ncomposer install --no-interaction --prefer-dist\ncomposer update --no-interaction --with symfony/framework-bundle:8.1.* --with symfony/http-kernel:8.1.* --with symfony/http-foundation:8.1.* --with symfony/validator:8.1.* --with symfony/form:8.1.*\nvendor/bin/phpunit"
+    - name: risk-php
+      run: 'set -eu
+
+        apt-get update -qq
+
+        apt-get install -y -qq libgmp-dev unzip git
+
+        docker-php-ext-install -j"$(nproc)" gmp
+
+
+
+        set -eu
+
+        EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
+
+        php -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
+
+        ACTUAL="$(php -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
+
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+
+        rm -f /tmp/composer-setup.php
+
+
+
+        set -eu
+
+        cd packages/kiwicaptcha-risk-php
+
+        composer install --no-interaction --prefer-dist
+
+        vendor/bin/phpunit
+
+        '
     shell: bash
+    env:
+      KC_REDIS_URL: redis://redis:6379
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+  risk-rust:
+    name: risk-rust
+    runtime: container
+    image: rust:1.96
+    steps:
+    - name: risk-rust
+      run: 'set -eu
+
+        apt-get update -qq && apt-get install -y -qq git
+
+        rustup component add rustfmt clippy || true
+
+        cd packages/kiwicaptcha-risk
+
+        cargo fmt --check
+
+        cargo clippy --all-targets -- -D warnings
+
+        cargo test
+
+        '
+    shell: bash
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   risk-parity:
     name: risk-parity
     runtime: container
     image: php:8.3-cli
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: risk-parity
       run: 'set -eu
 
         apt-get update -qq
@@ -397,6 +505,7 @@ jobs:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
         rm -f /tmp/composer-setup.php
+
 
 
         set -eu
@@ -422,6 +531,7 @@ jobs:
         . "$HOME/.cargo/env"
 
 
+
         set -eu
 
         cd packages/kiwicaptcha-risk-php
@@ -438,100 +548,20 @@ jobs:
 
         test "$PHP_HASH" = "$RUST_HASH"
 
-        echo "risk protocol parity hashes identical"'
+        echo "risk protocol parity hashes identical"
+
+        '
     shell: bash
-  risk-php:
-    name: risk-php
-    runtime: container
-    image: php:8.3-cli
-    env:
-      KC_REDIS_URL: redis://redis:6379
     services:
     - name: redis
       image: redis:7-alpine
-    steps:
-    - name: commands
-      run: 'set -eu
-
-        apt-get update -qq
-
-        apt-get install -y -qq libgmp-dev unzip git
-
-        docker-php-ext-install -j"$(nproc)" gmp
-
-
-        set -eu
-
-        EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
-
-        php -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
-
-        ACTUAL="$(php -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
-
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
-
-        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
-
-        rm -f /tmp/composer-setup.php
-
-
-        set -eu
-
-        cd packages/kiwicaptcha-risk-php
-
-        composer install --no-interaction --prefer-dist
-
-        vendor/bin/phpunit'
-    shell: bash
-  risk-rust:
-    name: risk-rust
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+  rust:
+    name: rust
     runtime: container
-    image: rust:1.96
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
-      run: 'set -eu
-
-        apt-get update -qq && apt-get install -y -qq git
-
-        rustup component add rustfmt clippy || true
-
-        cd packages/kiwicaptcha-risk
-
-        cargo fmt --check
-
-        cargo clippy --all-targets -- -D warnings
-
-        cargo test'
-    shell: bash
-  rust-redis-verify:
-    name: rust-redis-verify
-    runtime: container
-    image: rust:1.96
-    env:
-      KC_REDIS_URL: redis://redis:6379
-    services:
-    - name: redis
-      image: redis:7-alpine
-    steps:
-    - name: commands
-      run: 'set -eu
-
-        apt-get update -qq && apt-get install -y -qq git
-
-        cargo test --features redis --test redis_verify'
-    shell: bash
-  rust-workspace:
-    name: rust-workspace
-    runtime: container
-    image: rust:1.96
-    services:
-    - name: redis
-      image: redis:7-alpine
-    steps:
-    - name: commands
+    - name: rust-workspace
       run: 'set -eu
 
         apt-get update -qq && apt-get install -y -qq git
@@ -551,6 +581,7 @@ jobs:
         cargo package --locked --manifest-path packages/kiwicaptcha/Cargo.toml
 
 
+
         set -eu
 
         cd packages/kiwicaptcha-wasm
@@ -558,70 +589,36 @@ jobs:
         cargo build --target wasm32-unknown-unknown
 
 
+
         set -eu
 
         cargo install cargo-audit --version 0.22.2 --locked
 
-        cargo audit'
-    shell: bash
-  browser-a11y-three-engines:
-    name: browser-a11y-three-engines
-    runtime: container
-    image: mcr.microsoft.com/playwright:v1.62.1-noble
-    steps:
-    - name: commands
+        cargo audit
+
+        '
+    - name: rust-redis-verify
       run: 'set -eu
 
-        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq && apt-get install -y -qq git
 
-        apt-get update -qq
+        cargo test --features redis --test redis_verify
 
-        apt-get install -y -qq software-properties-common
-
-        add-apt-repository -y ppa:ondrej/php >/dev/null
-
-        apt-get update -qq
-
-        apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
-
-        EXPECTED="$(php8.3 -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
-
-        php8.3 -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
-
-        ACTUAL="$(php8.3 -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
-
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
-
-        php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
-
-        rm -f /tmp/composer-setup.php
-
-
-        set -eu
-
-        cd packages/kiwicaptcha-php
-
-        composer install --no-interaction --prefer-dist
-
-        cd ../kiwicaptcha/integrations/symfony
-
-        composer install --no-interaction --prefer-dist --no-scripts
-
-
-        set -eu
-
-        cd tests/browser
-
-        npm ci --no-audit --no-fund
-
-        npx playwright test --config=playwright.a11y.config.mjs'
+        '
+    image: rust:1.96
+    env:
+      KC_REDIS_URL: redis://redis:6379
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
     shell: bash
-  browser-native-chromium:
-    name: browser-native-chromium
+  browser:
+    name: browser
     runtime: container
-    image: mcr.microsoft.com/playwright:v1.62.1-noble
     steps:
-    - name: commands
+    - name: browser-native-chromium
       run: 'set -eu
 
         export DEBIAN_FRONTEND=noninteractive
@@ -651,6 +648,7 @@ jobs:
         rm -f /tmp/composer-setup.php
 
 
+
         set -eu
 
         cd packages/kiwicaptcha-php
@@ -662,27 +660,73 @@ jobs:
         composer install --no-interaction --prefer-dist --no-scripts
 
 
+
         set -eu
 
         cd tests/browser
 
         npm ci --no-audit --no-fund
 
-        npx playwright test'
+        npx playwright test
+
+        '
+    - name: browser-a11y-three-engines
+      run: 'set -eu
+
+        export DEBIAN_FRONTEND=noninteractive
+
+        apt-get update -qq
+
+        apt-get install -y -qq software-properties-common
+
+        add-apt-repository -y ppa:ondrej/php >/dev/null
+
+        apt-get update -qq
+
+        apt-get install -y -qq php8.3-cli php8.3-gmp php8.3-sodium php8.3-mbstring php8.3-xml php8.3-curl unzip git
+
+        EXPECTED="$(php8.3 -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
+
+        php8.3 -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
+
+        ACTUAL="$(php8.3 -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
+
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+
+        php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+
+        rm -f /tmp/composer-setup.php
+
+
+
+        set -eu
+
+        cd packages/kiwicaptcha-php
+
+        composer install --no-interaction --prefer-dist
+
+        cd ../kiwicaptcha/integrations/symfony
+
+        composer install --no-interaction --prefer-dist --no-scripts
+
+
+
+        set -eu
+
+        cd tests/browser
+
+        npm ci --no-audit --no-fund
+
+        npx playwright test --config=playwright.a11y.config.mjs
+
+        '
+    image: mcr.microsoft.com/playwright:v1.62.1-noble
     shell: bash
-  real-redis-concurrency:
-    name: real-redis-concurrency
+  redis-lanes:
+    name: redis-lanes
     runtime: container
-    image: php:8.2-cli
-    env:
-      KC_REDIS_URL: tcp://redis:6379
-      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
-      TEST_REDIS_URL: tcp://redis:6379
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: real-redis-concurrency
       run: 'set -eu
 
         apt-get update -qq
@@ -692,6 +736,7 @@ jobs:
         docker-php-ext-install -j"$(nproc)" gmp sodium
 
 
+
         set -eu
 
         EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
@@ -705,6 +750,7 @@ jobs:
         php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
         rm -f /tmp/composer-setup.php
+
 
 
         set -eu
@@ -713,62 +759,49 @@ jobs:
 
         composer install --no-interaction --prefer-dist
 
-        vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"'
-    shell: bash
-  php-core-redis8:
-    name: php-core-redis8
-    runtime: container
-    image: php:8.3-cli
+        vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
+
+        '
+    image: php:8.2-cli
     env:
-      KC_REDIS_URL: redis://redis:6379
+      KC_REDIS_URL: tcp://redis:6379
+      TEST_REDIS_URL: tcp://redis:6379
       KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
-      TEST_REDIS_URL: redis://redis:6379
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+    shell: bash
+  risk-rust-redis8:
+    name: risk-rust-redis8
+    runtime: container
+    image: rust:1.96
+    steps:
+    - name: risk-rust-redis8
+      run: 'set -eu
+
+        apt-get update -qq && apt-get install -y -qq git
+
+        cd packages/kiwicaptcha-risk
+
+        cargo test
+
+        '
+    shell: bash
+    env:
+      RISK_REDIS_URL: redis://redis:6379
     services:
     - name: redis
       image: redis:8-alpine
-    steps:
-    - name: commands
-      run: 'set -eu
-
-        apt-get update -qq
-
-        apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
-
-        docker-php-ext-install -j"$(nproc)" gmp sodium pcntl posix
-
-        EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
-
-        php -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
-
-        ACTUAL="$(php -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
-
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
-
-        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
-
-        rm -f /tmp/composer-setup.php
-
-
-        set -eu
-
-        cd packages/kiwicaptcha-php
-
-        composer install --no-interaction --prefer-dist
-
-        vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"'
-      continue_on_error: true
-    shell: bash
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   risk-php-redis8:
     name: risk-php-redis8
     runtime: container
     image: php:8.3-cli
-    env:
-      RISK_REDIS_URL: tcp://redis:6379
-    services:
-    - name: redis
-      image: redis:8-alpine
     steps:
-    - name: commands
+    - name: risk-php-redis8
       run: 'set -eu
 
         apt-get update -qq
@@ -790,48 +823,77 @@ jobs:
         rm -f /tmp/composer-setup.php
 
 
+
         set -eu
 
         cd packages/kiwicaptcha-risk-php
 
         composer install --no-interaction --prefer-dist
 
-        vendor/bin/phpunit'
-      continue_on_error: true
+        vendor/bin/phpunit
+
+        '
     shell: bash
-  risk-rust-redis8:
-    name: risk-rust-redis8
-    runtime: container
-    image: rust:1.96
     env:
-      RISK_REDIS_URL: redis://redis:6379
+      RISK_REDIS_URL: tcp://redis:6379
     services:
     - name: redis
       image: redis:8-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
+  php-core-redis8:
+    name: php-core-redis8
+    runtime: container
+    image: php:8.3-cli
     steps:
-    - name: commands
+    - name: php-core-redis8
       run: 'set -eu
 
-        apt-get update -qq && apt-get install -y -qq git
+        apt-get update -qq
 
-        cd packages/kiwicaptcha-risk
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git redis-server redis-tools
 
-        cargo test'
-      continue_on_error: true
+        docker-php-ext-install -j"$(nproc)" gmp sodium pcntl posix
+
+        EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
+
+        php -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
+
+        ACTUAL="$(php -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
+
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+
+        rm -f /tmp/composer-setup.php
+
+
+
+        set -eu
+
+        cd packages/kiwicaptcha-php
+
+        composer install --no-interaction --prefer-dist
+
+        vendor/bin/phpunit --filter "FailoverPromotionStateLossRealRedisTest|WorkerDeathMatrixRealRedisTest|RedisClusterTopologyTest|RedisSentinelFailoverTest"
+
+        '
     shell: bash
+    env:
+      KC_REDIS_URL: redis://redis:6379
+      TEST_REDIS_URL: redis://redis:6379
+      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+    services:
+    - name: redis
+      image: redis:8-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   symfony-redis8:
     name: symfony-redis8
     runtime: container
     image: php:8.3-cli
-    env:
-      KC_REDIS_URL: tcp://redis:6379
-      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
-      TEST_REDIS_URL: tcp://redis:6379
-    services:
-    - name: redis
-      image: redis:8-alpine
     steps:
-    - name: commands
+    - name: symfony-redis8
       run: 'set -eu
 
         apt-get update -qq
@@ -853,15 +915,26 @@ jobs:
         rm -f /tmp/composer-setup.php
 
 
+
         set -eu
 
         cd packages/kiwicaptcha/integrations/symfony
 
         composer install --no-interaction --prefer-dist
 
-        vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"'
-      continue_on_error: true
+        vendor/bin/phpunit --filter "RealRedis|ProtocolV3UpgradeTimelineWalkTest"
+
+        '
     shell: bash
+    env:
+      KC_REDIS_URL: tcp://redis:6379
+      TEST_REDIS_URL: tcp://redis:6379
+      KIWI_REQUIRE_REAL_REDIS_TESTS: '1'
+    services:
+    - name: redis
+      image: redis:8-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
   interop:
     name: interop
     runtime: container
@@ -900,13 +973,16 @@ jobs:
         KC_PHP_RECORD=../../.ci-cross-language/php-rsw.json KC_PHP_ALGO=rsw php tests/CrossLanguageIssue.php
 
 
+
         set -eu
 
         test -s .ci-cross-language/php-sha.json
 
         test -s .ci-cross-language/php-argon.json
 
-        test -s .ci-cross-language/php-rsw.json'
+        test -s .ci-cross-language/php-rsw.json
+
+        '
     - name: cross-language-rust-verify
       run: 'set -eu
 
@@ -917,6 +993,7 @@ jobs:
         docker-php-ext-install -j"$(nproc)" gmp sodium
 
 
+
         set -eu
 
         cd /tmp
@@ -934,13 +1011,16 @@ jobs:
         . "$HOME/.cargo/env"
 
 
+
         set -eu
 
         KC_PHP_RECORD=.ci-cross-language/php-sha.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
 
         KC_PHP_RECORD=.ci-cross-language/php-argon.json cargo test --test cross_language rust_verifies_php_issued_record -- --nocapture
 
-        KC_PHP_RSW_RECORD=.ci-cross-language/php-rsw.json cargo test --test cross_language rust_verifies_php_issued_rsw_record -- --nocapture'
+        KC_PHP_RSW_RECORD=.ci-cross-language/php-rsw.json cargo test --test cross_language rust_verifies_php_issued_rsw_record -- --nocapture
+
+        '
     - name: cross-language-rust-issue-and-redis
       run: 'set -eu
 
@@ -951,6 +1031,7 @@ jobs:
         docker-php-ext-install -j"$(nproc)" gmp sodium
 
 
+
         set -eu
 
         cd /tmp
@@ -966,6 +1047,7 @@ jobs:
         ./rustup-init -y --default-toolchain 1.96.0 --profile minimal
 
         . "$HOME/.cargo/env"
+
 
 
         set -eu
@@ -984,7 +1066,9 @@ jobs:
 
         cargo test --features redis --test cross_language redis_v4_execution_interop_with_php -- --nocapture
 
-        cargo test --features redis --test cross_language redis_rsw_interop_with_php -- --nocapture'
+        cargo test --features redis --test cross_language redis_rsw_interop_with_php -- --nocapture
+
+        '
     - name: cross-language-php-verify
       run: 'set -eu
 
@@ -1007,6 +1091,7 @@ jobs:
         rm -f /tmp/composer-setup.php
 
 
+
         set -eu
 
         cd packages/kiwicaptcha-php
@@ -1021,7 +1106,9 @@ jobs:
 
         KC_RUST_RECORD=../../.ci-cross-language/rust-v4.json php tests/CrossLanguageVerify.php
 
-        KC_RUST_RECORD=../../.ci-cross-language/rust-v4.json KC_RUST_EXPECT_TAMPER=1 php tests/CrossLanguageVerify.php'
+        KC_RUST_RECORD=../../.ci-cross-language/rust-v4.json KC_RUST_EXPECT_TAMPER=1 php tests/CrossLanguageVerify.php
+
+        '
     image: php:8.3-cli
     env:
       KC_REDIS_URL: redis://redis:6379
@@ -1029,49 +1116,28 @@ jobs:
     services:
     - name: redis
       image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
     shell: bash
-  build-reproducibility:
-    name: build-reproducibility
+  compat-build:
+    name: compat-build
     runtime: container
+    steps:
+    - name: symfony-assets-parity
+      run: "set -eu\napt-get update -qq && apt-get install -y -qq git\nwhile IFS= read -r f; do\n  [ -n \"$f\" ] || continue\n  cmp -s \"packages/kiwicaptcha-wasm/assets/$f\" \\\n    \"packages/kiwicaptcha/resources/$f\" \\\n    || { echo \"stale $f in packages/kiwicaptcha/resources \u2014 run packages/kiwicaptcha-wasm/build.sh\" >&2; exit 1; }\ndone < packages/kiwicaptcha-wasm/release-assets.txt\nwhile IFS= read -r f; do\n  [ -n \"$f\" ] || continue\n  cmp -s \"packages/kiwicaptcha-wasm/assets/$f\" \\\n    \"packages/kiwicaptcha/integrations/symfony/Resources/public/$f\" \\\n    || { echo \"stale $f in the Symfony bundle \u2014 run bin/sync-assets.sh\" >&2; exit 1; }\ndone < packages/kiwicaptcha-wasm/release-assets.txt\necho \"generated copies byte-identical to the canonical assets\"\n\n\nset -eu\ncargo run --locked --manifest-path packages/kiwicaptcha-wasm/tools/embed-worker/Cargo.toml -- --check\n"
+    - name: build-reproducibility
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq git nodejs npm\nrustup target add wasm32-unknown-unknown\ncd packages/kiwicaptcha-wasm\n# First clean strict build.\nbash build.sh\nmkdir -p \"$CI_WORKSPACE/.ci-build-repro/repro-a\"\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  cp \"assets/$asset\" \"$CI_WORKSPACE/.ci-build-repro/repro-a/\"\ndone < release-assets.txt\n# Second clean strict build with fresh cache and target.\ncargo clean\nrm -rf pkg\nrm -rf \"$HOME/.cache/kiwicaptcha-wasm\"\
+        \nbash build.sh\nmkdir -p \"$CI_WORKSPACE/.ci-build-repro/repro-b\"\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  cp \"assets/$asset\" \"$CI_WORKSPACE/.ci-build-repro/repro-b/\"\ndone < release-assets.txt\n# Byte-compare the two builds over the canonical manifest.\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  cmp \"$CI_WORKSPACE/.ci-build-repro/repro-a/$asset\" \"$CI_WORKSPACE/.ci-build-repro/repro-b/$asset\" \\\n    || { echo \"independent builds differ on $asset\" >&2; exit 1; }\n  sha256sum \"$CI_WORKSPACE/.ci-build-repro/repro-a/$asset\"\ndone < release-assets.txt\nrm -rf \"$CI_WORKSPACE/.ci-build-repro\"\necho \"two clean isolated strict builds produce identical asset hashes\"\n"
     image: rust:1.96
-    steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq git nodejs npm\nrustup target add wasm32-unknown-unknown\ncd packages/kiwicaptcha-wasm\n# First clean strict build.\nbash build.sh\nmkdir -p \"$CI_WORKSPACE/.ci-build-repro/repro-a\"\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  cp \"assets/$asset\" \"$CI_WORKSPACE/.ci-build-repro/repro-a/\"\ndone < release-assets.txt\n# Second clean strict build with fresh cache and target.\ncargo clean\nrm -rf pkg\n\
-        rm -rf \"$HOME/.cache/kiwicaptcha-wasm\"\nbash build.sh\nmkdir -p \"$CI_WORKSPACE/.ci-build-repro/repro-b\"\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  cp \"assets/$asset\" \"$CI_WORKSPACE/.ci-build-repro/repro-b/\"\ndone < release-assets.txt\n# Byte-compare the two builds over the canonical manifest.\nwhile IFS= read -r asset; do\n  [ -n \"$asset\" ] || continue\n  cmp \"$CI_WORKSPACE/.ci-build-repro/repro-a/$asset\" \"$CI_WORKSPACE/.ci-build-repro/repro-b/$asset\" \\\n    || { echo \"independent builds differ on $asset\" >&2; exit 1; }\n  sha256sum \"$CI_WORKSPACE/.ci-build-repro/repro-a/$asset\"\ndone < release-assets.txt\nrm -rf \"$CI_WORKSPACE/.ci-build-repro\"\necho \"two clean isolated strict builds produce identical asset hashes\""
-    shell: bash
-  symfony-assets-parity:
-    name: symfony-assets-parity
-    runtime: container
-    image: rust:1.96
-    steps:
-    - name: commands
-      run: "set -eu\napt-get update -qq && apt-get install -y -qq git\nwhile IFS= read -r f; do\n  [ -n \"$f\" ] || continue\n  cmp -s \"packages/kiwicaptcha-wasm/assets/$f\" \\\n    \"packages/kiwicaptcha/resources/$f\" \\\n    || { echo \"stale $f in packages/kiwicaptcha/resources \u2014 run packages/kiwicaptcha-wasm/build.sh\" >&2; exit 1; }\ndone < packages/kiwicaptcha-wasm/release-assets.txt\nwhile IFS= read -r f; do\n  [ -n \"$f\" ] || continue\n  cmp -s \"packages/kiwicaptcha-wasm/assets/$f\" \\\n    \"packages/kiwicaptcha/integrations/symfony/Resources/public/$f\" \\\n    || { echo \"stale $f in the Symfony bundle \u2014 run bin/sync-assets.sh\" >&2; exit 1; }\ndone < packages/kiwicaptcha-wasm/release-assets.txt\necho \"generated copies byte-identical to the canonical assets\"\n\nset -eu\ncargo run --locked --manifest-path packages/kiwicaptcha-wasm/tools/embed-worker/Cargo.toml -- --check"
-    shell: bash
-  perf-budget:
-    name: perf-budget
-    runtime: container
-    image: php:8.3-cli
-    env:
-      KC_REDIS_URL: redis://redis:6399
-    services:
-    - name: redis
-      image: redis:7-alpine
-    steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev unzip git brotli curl python3\ndocker-php-ext-install -j\"$(nproc)\" gmp\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\"\
-        \ >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n# The Node runtime is fetched from its versioned dist path and\n# verified against the published SHASUMS256.txt entry.\nNODE_VERSION=v22.14.0\ncd /tmp\ncurl -sSfO \"https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz\"\ncurl -sSfO \"https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt\"\ngrep \"node-${NODE_VERSION}-linux-x64.tar.xz\\$\" SHASUMS256.txt | sha256sum -c -\ntar -xJf \"node-${NODE_VERSION}-linux-x64.tar.xz\" -C /usr/local --strip-components=1\ncd \"$CI_WORKSPACE\"\n\nset -eu\n(cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)\n(cd packages/kiwicaptcha-risk-php && composer install --no-interaction --prefer-dist)\nbash packages/kiwicaptcha/tools/perf-budget.sh\nnode tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json || echo gate_failed > \"$CI_WORKSPACE/.ci-perf-gate-failed\"\
-        \n\nset -eu\n# The diagnostic benchmark steps are advisory timing runs: every\n# one records its percentiles, and the workflow still fails only\n# on the recorded release-baseline gate, exactly like the\n# primary perf-budget job.\nphp packages/kiwicaptcha/tools/perf-bench.php\nphp packages/kiwicaptcha/tools/perf-bench.php --redis\nphp packages/kiwicaptcha/tools/perf-bench.php --argon\nphp packages/kiwicaptcha/tools/perf-bench-risk.php\nphp packages/kiwicaptcha/tools/perf-bench-risk.php --redis\nphp packages/kiwicaptcha/tools/perf-wait.php\nphp packages/kiwicaptcha/tools/perf-wait-replica.php\nif [ -f \"$CI_WORKSPACE/.ci-perf-gate-failed\" ]; then\n  echo \"release-baseline evidence gate rejected the committed baseline; the diagnostic steps still ran\" >&2\n  exit 1\nfi\necho \"release-baseline evidence gate passed; the diagnostic steps above ran\""
     shell: bash
   validator-mutation-suites:
     name: validator-mutation-suites
     runtime: container
-    image: node:22-bookworm
-    services:
-    - name: redis
-      image: redis:7-alpine
+    image: node:22-alpine
     steps:
-    - name: commands
+    - name: validator-mutation-suites
       run: 'apk add --no-cache bash git
+
 
         set -eu
 
@@ -1088,91 +1154,46 @@ jobs:
         cd ../..
 
 
+
         node tools/ci/test-validate-release-baseline.mjs
+
 
         node tools/ci/test-validate-autofill-qualification.mjs
 
+
         node tools/ci/test-validate-accessibility-qualification.mjs
 
+
         bash tools/ci/latency-compare-test.sh'
-    shell: bash
-  android-unit-tests:
-    name: android-unit-tests
-    runtime: container
-    image: ghcr.io/cirruslabs/android-sdk:36
-    steps:
-    - name: commands
-      run: 'set -eu
-
-        cd packages/kiwicaptcha-android
-
-        ./gradlew testDebugUnitTest --console=plain --no-daemon'
-    shell: bash
-  n1-compat:
-    name: n1-compat
+    shell: sh
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6399 --save "" --appendonly no
+  perf-budget:
+    name: perf-budget
     runtime: container
     image: php:8.3-cli
     steps:
-    - name: commands
-      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
-
-        # imported scripts read.
-
-        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
-
-        CI_COMMIT_BEFORE_SHA=""
-
-        CI_COMMIT_TARGET_SHA=""
-
-        CI_PIPELINE_EVENT="push"
-
-        CI_WORKSPACE="${KIWI_WORKSPACE:-$PWD}"
-
-        CI_COMMIT_TAG=""
-
-        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
-
-        CI_REPO="${KIWI_REPO:-}"
-
-        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
-
-        set -eu
-
-        apt-get update -qq
-
-        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
-
-        docker-php-ext-install -j"$(nproc)" gmp sodium
-
-        EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
-
-        php -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
-
-        ACTUAL="$(php -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
-
-        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
-
-        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
-
-        rm -f /tmp/composer-setup.php
-
-
-        set -eu
-
-        git -C "$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1 2>/dev/null || true
-
-        git -C "$CI_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
-
-        bash tools/ci/n1-compat.sh /tmp/kiwi-n1
-
-        git -C "$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1'
+    - name: perf-budget
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq libgmp-dev unzip git brotli curl python3\ndocker-php-ext-install -j\"$(nproc)\" gmp\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\n\
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\nrm -f /tmp/composer-setup.php\n# The Node runtime is fetched from its versioned dist path and\n# verified against the published SHASUMS256.txt entry.\nNODE_VERSION=v22.14.0\ncd /tmp\ncurl -sSfO \"https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz\"\ncurl -sSfO \"https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt\"\ngrep \"node-${NODE_VERSION}-linux-x64.tar.xz\\$\" SHASUMS256.txt | sha256sum -c -\ntar -xJf \"node-${NODE_VERSION}-linux-x64.tar.xz\" -C /usr/local --strip-components=1\ncd \"$CI_WORKSPACE\"\n\n\nset -eu\n(cd packages/kiwicaptcha-php && composer install --no-interaction --prefer-dist)\n(cd packages/kiwicaptcha-risk-php && composer install --no-interaction --prefer-dist)\nbash packages/kiwicaptcha/tools/perf-budget.sh\nnode tools/ci/validate-release-baseline.mjs tools/client-perf/results/baseline.json || echo gate_failed > \"$CI_WORKSPACE/.ci-perf-gate-failed\"\n\
+        \n\nset -eu\n# The diagnostic benchmark steps are advisory timing runs: every\n# one records its percentiles, and the workflow still fails only\n# on the recorded release-baseline gate, exactly like the\n# primary perf-budget job.\nphp packages/kiwicaptcha/tools/perf-bench.php\nphp packages/kiwicaptcha/tools/perf-bench.php --redis\nphp packages/kiwicaptcha/tools/perf-bench.php --argon\nphp packages/kiwicaptcha/tools/perf-bench-risk.php\nphp packages/kiwicaptcha/tools/perf-bench-risk.php --redis\nphp packages/kiwicaptcha/tools/perf-wait.php\nphp packages/kiwicaptcha/tools/perf-wait-replica.php\nif [ -f \"$CI_WORKSPACE/.ci-perf-gate-failed\" ]; then\n  echo \"release-baseline evidence gate rejected the committed baseline; the diagnostic steps still ran\" >&2\n  exit 1\nfi\necho \"release-baseline evidence gate passed; the diagnostic steps above ran\"\n"
     shell: bash
+    env:
+      KC_REDIS_URL: redis://redis:6399
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6399 --save "" --appendonly no
   package-cargo:
     name: package-cargo
     runtime: container
     image: rust:1.96
     steps:
-    - name: commands
+    - name: package-cargo
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
@@ -1185,7 +1206,7 @@ jobs:
 
         CI_PIPELINE_EVENT="push"
 
-        CI_WORKSPACE="${KIWI_WORKSPACE:-$PWD}"
+        CI_WORKSPACE="$PWD"
 
         CI_COMMIT_TAG=""
 
@@ -1202,6 +1223,7 @@ jobs:
         cd packages/kiwicaptcha-risk
 
         cargo package --list | grep -q ''resources/risk-v1.lua'' || { echo ''resources/risk-v1.lua missing from the .crate''; exit 1; }
+
 
 
         set -eu
@@ -1227,41 +1249,170 @@ jobs:
         cargo check
 
 
+
         set -eu
 
         cargo test -p kiwicaptcha --example quickstart
 
 
+
         set -eu
 
-        cargo package --locked'
+        cargo package --locked
+
+        '
     shell: bash
   package-composer:
     name: package-composer
     runtime: container
     image: php:8.3-cli
     steps:
-    - name: commands
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq unzip git\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin\
-        \ --filename=composer\nrm -f /tmp/composer-setup.php\n\nset -eu\nclean=\"$CI_WORKSPACE/.ci-composer-clean\"\nrm -rf \"$clean\"\nmkdir -p \"$clean/packages\"\ncp -r packages/kiwicaptcha-php \"$clean/packages/\"\ncp -r packages/kiwicaptcha-risk-php \"$clean/packages/\"\nrm -rf \"$clean\"/packages/*/vendor \"$clean\"/packages/*/composer.lock\ncd \"$clean\"\ncomposer init --no-interaction --name=ci/smoke\ncomposer config repositories.php '{\"type\": \"path\", \"url\": \"'\"$clean\"'/packages/kiwicaptcha-php\", \"options\": {\"versions\": {\"kiwicaptcha/kiwicaptcha-php\": \"1.0.0\"}}}'\ncomposer config repositories.risk '{\"type\": \"path\", \"url\": \"'\"$clean\"'/packages/kiwicaptcha-risk-php\", \"options\": {\"versions\": {\"kiwicaptcha/kiwicaptcha-risk-php\": \"1.0.0\"}}}'\ncomposer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist\ntest -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \\\n  || { echo 'risk-v1.lua not\
-        \ shipped in the published package'; exit 1; }\nphp -r 'require \"vendor/autoload.php\"; $s = new KiwiCaptcha\\Risk\\Storage\\RedisRiskStateStore(new Predis\\Client(), \"smoke\"); echo \"OK\\n\";'\nrm -rf \"$clean\""
+    - name: package-composer
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\napt-get update -qq\napt-get install -y -qq unzip git\nEXPECTED=\"$(php -r 'copy(\"https://composer.github.io/installer.sig\", \"php://stdout\");')\"\nphp -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"\nACTUAL=\"$(php -r \"echo hash_file('sha384', '/tmp/composer-setup.php');\")\"\n[ \"$EXPECTED\" = \"$ACTUAL\" ] || { echo \"composer installer checksum mismatch\" >&2; exit 1; }\nphp /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer\n\
+        rm -f /tmp/composer-setup.php\n\n\nset -eu\nclean=\"$CI_WORKSPACE/.ci-composer-clean\"\nrm -rf \"$clean\"\nmkdir -p \"$clean/packages\"\ncp -r packages/kiwicaptcha-php \"$clean/packages/\"\ncp -r packages/kiwicaptcha-risk-php \"$clean/packages/\"\nrm -rf \"$clean\"/packages/*/vendor \"$clean\"/packages/*/composer.lock\ncd \"$clean\"\ncomposer init --no-interaction --name=ci/smoke\ncomposer config repositories.php '{\"type\": \"path\", \"url\": \"'\"$clean\"'/packages/kiwicaptcha-php\", \"options\": {\"versions\": {\"kiwicaptcha/kiwicaptcha-php\": \"1.0.0\"}}}'\ncomposer config repositories.risk '{\"type\": \"path\", \"url\": \"'\"$clean\"'/packages/kiwicaptcha-risk-php\", \"options\": {\"versions\": {\"kiwicaptcha/kiwicaptcha-risk-php\": \"1.0.0\"}}}'\ncomposer require kiwicaptcha/kiwicaptcha-php kiwicaptcha/kiwicaptcha-risk-php --no-interaction --prefer-dist\ntest -f vendor/kiwicaptcha/kiwicaptcha-risk-php/resources/risk-v1.lua \\\n  || { echo 'risk-v1.lua not shipped in the published\
+        \ package'; exit 1; }\nphp -r 'require \"vendor/autoload.php\"; $s = new KiwiCaptcha\\Risk\\Storage\\RedisRiskStateStore(new Predis\\Client(), \"smoke\"); echo \"OK\\n\";'\nrm -rf \"$clean\"\n"
+    shell: bash
+  n1-compat:
+    name: n1-compat
+    runtime: container
+    image: php:8.3-cli
+    steps:
+    - name: n1-compat
+      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
+
+        # imported scripts read.
+
+        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+
+        CI_COMMIT_BEFORE_SHA=""
+
+        CI_COMMIT_TARGET_SHA=""
+
+        CI_PIPELINE_EVENT="push"
+
+        CI_WORKSPACE="$PWD"
+
+        CI_COMMIT_TAG=""
+
+        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
+
+        CI_REPO="${KIWI_REPO:-}"
+
+        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
+
+        set -eu
+
+        apt-get update -qq
+
+        apt-get install -y -qq libgmp-dev libsodium-dev unzip git
+
+        docker-php-ext-install -j"$(nproc)" gmp sodium
+
+        EXPECTED="$(php -r ''copy("https://composer.github.io/installer.sig", "php://stdout");'')"
+
+        php -r "copy(''https://getcomposer.org/installer'', ''/tmp/composer-setup.php'');"
+
+        ACTUAL="$(php -r "echo hash_file(''sha384'', ''/tmp/composer-setup.php'');")"
+
+        [ "$EXPECTED" = "$ACTUAL" ] || { echo "composer installer checksum mismatch" >&2; exit 1; }
+
+        php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+
+        rm -f /tmp/composer-setup.php
+
+
+
+        set -eu
+
+        git -C "$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1 2>/dev/null || true
+
+        git -C "$CI_WORKSPACE" worktree add /tmp/kiwi-n1 b32ec01e
+
+        bash tools/ci/n1-compat.sh /tmp/kiwi-n1
+
+        git -C "$CI_WORKSPACE" worktree remove --force /tmp/kiwi-n1
+
+        '
+    shell: bash
+  android-unit-tests:
+    name: android-unit-tests
+    runtime: container
+    image: ghcr.io/cirruslabs/android-sdk:36
+    steps:
+    - name: android-unit-tests
+      run: 'set -eu
+
+        cd packages/kiwicaptcha-android
+
+        ./gradlew testDebugUnitTest --console=plain --no-daemon
+
+        '
     shell: bash
   docker-deploy:
     name: docker-deploy
     runtime: native
     steps:
     - name: docker-build-the-deploy-image
-      run: 'set -eu
+      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
-        mkdir -p .ci-run-tmp
+        # imported scripts read.
 
-        docker build -f deploy/Dockerfile -t kiwicaptcha/reference-deployment .'
-    - name: write-a-fresh-random-secret-to-deploy-.env
-      run: 'true
+        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+
+        CI_COMMIT_BEFORE_SHA=""
+
+        CI_COMMIT_TARGET_SHA=""
+
+        CI_PIPELINE_EVENT="push"
+
+        CI_WORKSPACE="$PWD"
+
+        CI_COMMIT_TAG=""
+
+        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
+
+        CI_REPO="${KIWI_REPO:-}"
+
+        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
 
         set -eu
 
-        mkdir -p .ci-run-tmp
+
+        mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+
+
+        docker build -f deploy/Dockerfile -t kiwicaptcha/reference-deployment .'
+    - name: write-a-fresh-random-secret-to-deploy-.env
+      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
+
+        # imported scripts read.
+
+        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+
+        CI_COMMIT_BEFORE_SHA=""
+
+        CI_COMMIT_TARGET_SHA=""
+
+        CI_PIPELINE_EVENT="push"
+
+        CI_WORKSPACE="$PWD"
+
+        CI_COMMIT_TAG=""
+
+        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
+
+        CI_REPO="${KIWI_REPO:-}"
+
+        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
+
+        true
+
+
+        set -eu
+
+
+        mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+
 
         set -eu
 
@@ -1280,16 +1431,40 @@ jobs:
         printf ''VALKEY_PASSWORD=%s\n'' "$(openssl rand -hex 16)" >> deploy/.env
 
         printf ''KIWI_TTL_SECS=300\n'' >> deploy/.env'
-    - name: docker-compose-up-valkey-captcha
-      run: 'set -eu
+    - name: docker-compose-up--valkey---captcha
+      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
-        mkdir -p .ci-run-tmp
+        # imported scripts read.
+
+        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+
+        CI_COMMIT_BEFORE_SHA=""
+
+        CI_COMMIT_TARGET_SHA=""
+
+        CI_PIPELINE_EVENT="push"
+
+        CI_WORKSPACE="$PWD"
+
+        CI_COMMIT_TAG=""
+
+        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
+
+        CI_REPO="${KIWI_REPO:-}"
+
+        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
+
+        set -eu
+
+
+        mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+
 
         docker compose up -d'
-    - name: retry-healthz-until-200
-      run: "true\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt\"\n    exit 0\n  fi\n  sleep 2\ndone\ndocker compose ps\ndocker compose logs captcha\necho \"healthz never answered 200 within 120s\" >&2\nexit 1"
-    - name: post-challenge-and-capture-the-challenge-document
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\ncurl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge.json -X POST -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\"}' http://$CAPTCHA_HOST:8080/challenge"
+    - name: retry--healthz-until-200
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt\"\n    exit 0\n  fi\n  sleep 2\ndone\ndocker compose ps\ndocker compose logs captcha\necho \"healthz never answered 200 within 120s\" >&2\nexit 1\n"
+    - name: post--challenge-and-capture-the-challenge-document
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncurl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge.json -X POST -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\"}' http://$CAPTCHA_HOST:8080/challenge\n"
     - name: solve-the-sha-256-proof-inside-the-captcha-container
       run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
@@ -1303,7 +1478,7 @@ jobs:
 
         CI_PIPELINE_EVENT="push"
 
-        CI_WORKSPACE="${KIWI_WORKSPACE:-$PWD}"
+        CI_WORKSPACE="$PWD"
 
         CI_COMMIT_TAG=""
 
@@ -1315,9 +1490,12 @@ jobs:
 
         true
 
+
         set -eu
 
-        mkdir -p .ci-run-tmp
+
+        mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+
 
         set -eu
 
@@ -1328,70 +1506,183 @@ jobs:
         test -s $CI_WORKSPACE/.ci-run-tmp/token.txt
 
         printf ''%s'' "$(tr -d ''\r\n'' < $CI_WORKSPACE/.ci-run-tmp/token.txt)" > $CI_WORKSPACE/.ci-run-tmp/token-clean.txt'
-    - name: post-verify-with-the-solved-token-success
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nTOKEN=\"$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://$CAPTCHA_HOST:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify1.json\nphp -r 'exit(json_decode(file_get_contents(getenv(\"CI_WORKSPACE\").\"/.ci-run-tmp/verify1.json\"\
-        ), true)[\"ok\"] === true ? 0 : 1);'"
-    - name: post-the-same-verify-again-replay-rejection
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nTOKEN=\"$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://$CAPTCHA_HOST:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/replay.json\n# shellcheck disable=SC2016 # PHP variables inside single-quoted code\nphp -r '$d = json_decode(file_get_contents(getenv(\"\
-        CI_WORKSPACE\").\"/.ci-run-tmp/replay.json\"), true); exit($d[\"ok\"] === false && $d[\"code\"] === \"already_consumed\" ? 0 : 1);'"
-    - name: f1-algorithm-ownership-table-sha256-profile-rows
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nchallenge_row() {  # $1 = request body; asserts a 200 challenge\n  curl -fsS -X POST -H 'Content-Type: application/json' \\\n    -d \"$1\" http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n}\nchallenge_row '{\"scope\":\"login\"}'\ngrep -q '\"algorithm\":\"sha256\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\nchallenge_row '{\"\
-        scope\":\"login\",\"algorithm\":\"sha256\"}'\ngrep -q '\"algorithm\":\"sha256\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n# The field stays accepted but only validated: a nonsense value\n# is refused with a 422 before any issuance.\nSTATUS=\"$(curl -sS -o $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json -w '%{http_code}' -X POST \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\",\"algorithm\":\"nonsense\"}' \\\n  http://$CAPTCHA_HOST:8080/challenge)\"\ntest \"$STATUS\" = \"422\"\ngrep -q '\"code\":\"INVALID_ALGORITHM\"' $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json"
-    - name: f1-algorithm-ownership-table-argon2id-profile-rows
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)\"\ntest -n \"$SECRET\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'KIWI_ALGORITHM=argon2id\\n'\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\
-        \n  printf 'KIWI_TTL_SECS=300\\n'\n} > deploy/.env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt under the argon2id profile\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://$CAPTCHA_HOST:8080/healthz)\" = \"200\"\nfor body in '{\"scope\":\"login\"}' '{\"scope\":\"login\",\"algorithm\":\"argon2id\"}' \\\n  '{\"scope\":\"login\",\"algorithm\":\"sha256\"}'; do\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n  grep -q '\"algorithm\":\"argon2id\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\ndone"
-    - name: f1-algorithm-ownership-table-rsw-profile-rows
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)\"\ntest -n \"$SECRET\"\n# The committed rsw fixture pair (packages/kiwicaptcha-php\n# tests/Support/RswFixture.php) supplies the trapdoor values\n# for the CI-only profile rows; the containers php reads them.\ndocker compose cp packages/kiwicaptcha-php/tests/Support/RswFixture.php \\\n  captcha:/tmp/RswFixture.php\n\
-        MODULUS_N=\"$(docker compose exec -T captcha php -r \\\n  'require \"/tmp/RswFixture.php\"; echo \\KiwiCaptcha\\Tests\\Support\\RswFixture::MODULUS_N_B64;')\"\nLAMBDA=\"$(docker compose exec -T captcha php -r \\\n  'require \"/tmp/RswFixture.php\"; echo \\KiwiCaptcha\\Tests\\Support\\RswFixture::LAMBDA_B64;')\"\ntest -n \"$MODULUS_N\"\ntest -n \"$LAMBDA\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'KIWI_ALGORITHM=rsw\\n'\n  printf 'KIWI_RSW_MODULUS_N=%s\\n' \"$MODULUS_N\"\n  printf 'KIWI_RSW_LAMBDA=%s\\n' \"$LAMBDA\"\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n  printf 'KIWI_TTL_SECS=300\\n'\n} > deploy/.env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt under\
-        \ the rsw profile\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://$CAPTCHA_HOST:8080/healthz)\" = \"200\"\nfor body in '{\"scope\":\"login\",\"algorithm\":\"sha256\"}' \\\n  '{\"scope\":\"login\",\"algorithm\":\"argon2id\"}'; do\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n  grep -q '\"algorithm\":\"rsw\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\ndone"
-    - name: f1-table-done-restore-the-default-sha256-profile
-      run: "true\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)\"\ntest -n \"$SECRET\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n  printf 'KIWI_TTL_SECS=300\\n'\n} > deploy/.env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt after the profile restore\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://$CAPTCHA_HOST:8080/healthz)\" = \"200\""
-    - name: f2-request-binding-table-real-verify-one-challenge-per-ro
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nissue() {  # $1 = issue binding (empty = unbound)\n  local body='{\"scope\":\"login\"}'\n  if [ -n \"$1\" ]; then\n    body=\"{\\\"scope\\\":\\\"login\\\",\\\"request_binding\\\":\\\"$1\\\"}\"\n  fi\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json\n\
+    - name: post--verify-with-the-solved-token--success
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nTOKEN=\"$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://$CAPTCHA_HOST:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify1.json\nphp -r 'exit(json_decode(file_get_contents(getenv(\"CI_WORKSPACE\").\"/.ci-run-tmp/verify1.json\"\
+        ), true)[\"ok\"] === true ? 0 : 1);'\n"
+    - name: post-the-same--verify-again--replay-rejection
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nTOKEN=\"$(cat $CI_WORKSPACE/.ci-run-tmp/token-clean.txt)\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://$CAPTCHA_HOST:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/replay.json\n# shellcheck disable=SC2016 # PHP variables inside single-quoted code\nphp -r '$d =\
+        \ json_decode(file_get_contents(getenv(\"CI_WORKSPACE\").\"/.ci-run-tmp/replay.json\"), true); exit($d[\"ok\"] === false && $d[\"code\"] === \"already_consumed\" ? 0 : 1);'\n"
+    - name: f1-algorithm-ownership-table--sha256-profile-rows
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nchallenge_row() {  # $1 = request body; asserts a 200 challenge\n  curl -fsS -X POST -H 'Content-Type: application/json' \\\n    -d \"$1\" http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n}\nchallenge_row '{\"scope\":\"login\"}'\ngrep -q '\"algorithm\":\"sha256\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\nchallenge_row\
+        \ '{\"scope\":\"login\",\"algorithm\":\"sha256\"}'\ngrep -q '\"algorithm\":\"sha256\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n# The field stays accepted but only validated: a nonsense value\n# is refused with a 422 before any issuance.\nSTATUS=\"$(curl -sS -o $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json -w '%{http_code}' -X POST \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\",\"algorithm\":\"nonsense\"}' \\\n  http://$CAPTCHA_HOST:8080/challenge)\"\ntest \"$STATUS\" = \"422\"\ngrep -q '\"code\":\"INVALID_ALGORITHM\"' $CI_WORKSPACE/.ci-run-tmp/f1-invalid.json\n"
+    - name: f1-algorithm-ownership-table--argon2id-profile-rows
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)\"\ntest -n \"$SECRET\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'KIWI_ALGORITHM=argon2id\\n'\n  printf 'VALKEY_PASSWORD=%s\\\
+        n' \"$VALKEY_PASSWORD\"\n  printf 'KIWI_TTL_SECS=300\\n'\n} > deploy/.env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt under the argon2id profile\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://$CAPTCHA_HOST:8080/healthz)\" = \"200\"\nfor body in '{\"scope\":\"login\"}' '{\"scope\":\"login\",\"algorithm\":\"argon2id\"}' \\\n  '{\"scope\":\"login\",\"algorithm\":\"sha256\"}'; do\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n  grep -q '\"algorithm\":\"argon2id\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\ndone\n"
+    - name: f1-algorithm-ownership-table--rsw-profile-rows
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)\"\ntest -n \"$SECRET\"\n# The committed rsw fixture pair (packages/kiwicaptcha-php\n# tests/Support/RswFixture.php) supplies the trapdoor values\n# for the CI-only profile rows; the containers php reads them.\ndocker compose cp packages/kiwicaptcha-php/tests/Support/RswFixture.php \\\n \
+        \ captcha:/tmp/RswFixture.php\nMODULUS_N=\"$(docker compose exec -T captcha php -r \\\n  'require \"/tmp/RswFixture.php\"; echo \\KiwiCaptcha\\Tests\\Support\\RswFixture::MODULUS_N_B64;')\"\nLAMBDA=\"$(docker compose exec -T captcha php -r \\\n  'require \"/tmp/RswFixture.php\"; echo \\KiwiCaptcha\\Tests\\Support\\RswFixture::LAMBDA_B64;')\"\ntest -n \"$MODULUS_N\"\ntest -n \"$LAMBDA\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'KIWI_ALGORITHM=rsw\\n'\n  printf 'KIWI_RSW_MODULUS_N=%s\\n' \"$MODULUS_N\"\n  printf 'KIWI_RSW_LAMBDA=%s\\n' \"$LAMBDA\"\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n  printf 'KIWI_TTL_SECS=300\\n'\n} > deploy/.env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered\
+        \ 200 on attempt $attempt under the rsw profile\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://$CAPTCHA_HOST:8080/healthz)\" = \"200\"\nfor body in '{\"scope\":\"login\",\"algorithm\":\"sha256\"}' \\\n  '{\"scope\":\"login\",\"algorithm\":\"argon2id\"}'; do\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\n  grep -q '\"algorithm\":\"rsw\"' $CI_WORKSPACE/.ci-run-tmp/f1-challenge.json\ndone\n"
+    - name: f1-table-done--restore-the-default-sha256-profile
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nSECRET=\"$(sed -n 's/^KIWI_SECRET_KEY=//p' deploy/.env | head -1)\"\nVALKEY_PASSWORD=\"$(sed -n 's/^VALKEY_PASSWORD=//p' deploy/.env | head -1)\"\ntest -n \"$SECRET\"\ntest -n \"$VALKEY_PASSWORD\"\n{\n  printf 'KIWI_SECRET_KEY=%s\\n' \"$SECRET\"\n  printf 'KIWI_SHA_TARGET_BITS=8\\n'\n  printf 'VALKEY_PASSWORD=%s\\n' \"$VALKEY_PASSWORD\"\n  printf 'KIWI_TTL_SECS=300\\\
+        n'\n} > deploy/.env\ndocker compose up -d --force-recreate captcha\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt after the profile restore\"\n    break\n  fi\n  sleep 1\ndone\ntest \"$(curl -sS -o /dev/null -w '%{http_code}' http://$CAPTCHA_HOST:8080/healthz)\" = \"200\"\n"
+    - name: f2-request-binding-table--real--verify--one-challenge-per-ro
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nissue() {  # $1 = issue binding (empty = unbound)\n  local body='{\"scope\":\"login\"}'\n  if [ -n \"$1\" ]; then\n    body=\"{\\\"scope\\\":\\\"login\\\",\\\"request_binding\\\":\\\"$1\\\"}\"\n  fi\n  curl -fsS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/challenge > $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json\n\
         \  docker compose cp $CI_WORKSPACE/.ci-run-tmp/f2-challenge.json captcha:/tmp/f2-challenge.json\n  docker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php \\\n    /tmp/f2-challenge.json > $CI_WORKSPACE/.ci-run-tmp/f2-token.txt\n  test -s $CI_WORKSPACE/.ci-run-tmp/f2-token.txt\n  tr -d '\\r\\n' < $CI_WORKSPACE/.ci-run-tmp/f2-token.txt > $CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt\n  sleep 0.15\n}\nverify() {  # $1 = presented binding (empty = absent)\n  local token\n  token=\"$(cat $CI_WORKSPACE/.ci-run-tmp/f2-token-clean.txt)\"\n  local body=\"{\\\"token\\\":\\\"$token\\\",\\\"scope\\\":\\\"login\\\"}\"\n  if [ -n \"$1\" ]; then\n    body=\"{\\\"token\\\":\\\"$token\\\",\\\"scope\\\":\\\"login\\\",\\\"request_binding\\\":\\\"$1\\\"}\"\n  fi\n  curl -sS -X POST -H 'Content-Type: application/json' -d \"$body\" \\\n    http://$CAPTCHA_HOST:8080/verify > $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n}\n# Issue bound to txn-A, verify with txn-A -> success.\nissue txn-A\n\
         verify txn-A\ngrep -q '\"ok\":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue bound to txn-A, verify with txn-B -> request_binding_mismatch.\nissue txn-A\nverify txn-B\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue bound to txn-A, verify with no binding -> request_binding_mismatch.\nissue txn-A\nverify ''\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue unbound, verify with no binding -> success.\nissue ''\nverify ''\ngrep -q '\"ok\":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Issue unbound, verify with txn-A -> request_binding_mismatch.\n# The mismatch is the core verifiers own hard cheap-phase\n# verdict, which retires the pending record (one-shot\n# anti-oracle semantics): the same token is then gone.\nissue ''\nverify txn-A\ngrep -q '\"\
         ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify ''\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"record_not_found\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# Correct binding, second redemption -> already_consumed.\nissue txn-A\nverify txn-A\ngrep -q '\"ok\":true' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify txn-A\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"already_consumed\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n# One-shot row: a wrong-binding attempt is a hard cheap-phase\n# verdict that retires the pending record, so the same token\n# can never be re-tried against the correct binding. The\n# pinned core outcome of the corrected retry is\n# record_not_found (verified locally against the real core on\n# PHP 8.5: the mismatch answers first, then the record is\n# gone). No adapter-level preflight\
-        \ may keep the record\n# alive for a free retry oracle.\nissue txn-A\nverify txn-B\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify txn-A\ncat $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -Eq '\"code\":\"(record_not_found|already_consumed)\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json"
+        \ may keep the record\n# alive for a free retry oracle.\nissue txn-A\nverify txn-B\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"code\":\"request_binding_mismatch\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\nverify txn-A\ncat $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -q '\"ok\":false' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\ngrep -Eq '\"code\":\"(record_not_found|already_consumed)\"' $CI_WORKSPACE/.ci-run-tmp/f2-verify.json\n"
     - name: restart-the-captcha-container
-      run: 'set -eu
+      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
-        mkdir -p .ci-run-tmp
+        # imported scripts read.
+
+        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+
+        CI_COMMIT_BEFORE_SHA=""
+
+        CI_COMMIT_TARGET_SHA=""
+
+        CI_PIPELINE_EVENT="push"
+
+        CI_WORKSPACE="$PWD"
+
+        CI_COMMIT_TAG=""
+
+        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
+
+        CI_REPO="${KIWI_REPO:-}"
+
+        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
+
+        set -eu
+
+
+        mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+
 
         docker compose restart captcha'
-    - name: retry-healthz-after-the-restart
-      run: "true\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt after the restart\"\n    exit 0\n  fi\n  sleep 2\ndone\ndocker compose logs captcha\necho \"healthz never answered 200 after the restart\" >&2\nexit 1"
-    - name: issue-solve-and-verify-again-against-the-persistent-store
-      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\nset -eu\nmkdir -p .ci-run-tmp\nset -eu\ncurl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\"}' http://$CAPTCHA_HOST:8080/challenge\ndocker compose cp $CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json\ndocker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json > $CI_WORKSPACE/.ci-run-tmp/token2.txt\n\
-        TOKEN2=\"$(tr -d '\\r\\n' < $CI_WORKSPACE/.ci-run-tmp/token2.txt)\"\ntest -n \"$TOKEN2\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN2\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://$CAPTCHA_HOST:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify2.json\nphp -r 'exit(json_decode(file_get_contents(getenv(\"CI_WORKSPACE\").\"/.ci-run-tmp/verify2.json\"), true)[\"ok\"] === true ? 0 : 1);'"
+    - name: retry--healthz-after-the-restart
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\nfor attempt in $(seq 1 60); do\n  if curl -fsS -o /dev/null http://$CAPTCHA_HOST:8080/healthz; then\n    echo \"healthz answered 200 on attempt $attempt after the restart\"\n    exit 0\n  fi\n  sleep 2\ndone\ndocker compose logs captcha\necho \"healthz never answered 200 after the restart\" >&2\nexit 1\n"
+    - name: issue--solve-and-verify-again-against-the-persistent-store
+      run: "# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\ntrue\n\nexport CAPTCHA_HOST=\"$(ip route | awk '/^default/{print $3}')\"\n\nset -eu\n\nmkdir -p \"$CI_WORKSPACE/.ci-run-tmp\"\n\nset -eu\ncurl -fsS -o $CI_WORKSPACE/.ci-run-tmp/challenge2.json -X POST -H 'Content-Type: application/json' \\\n  -d '{\"scope\":\"login\"}' http://$CAPTCHA_HOST:8080/challenge\ndocker compose cp $CI_WORKSPACE/.ci-run-tmp/challenge2.json captcha:/tmp/challenge2.json\ndocker compose exec -T captcha php /srv/kiwicaptcha/deploy/app/solve.php /tmp/challenge2.json >\
+        \ $CI_WORKSPACE/.ci-run-tmp/token2.txt\nTOKEN2=\"$(tr -d '\\r\\n' < $CI_WORKSPACE/.ci-run-tmp/token2.txt)\"\ntest -n \"$TOKEN2\"\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  -d \"{\\\"token\\\":\\\"$TOKEN2\\\",\\\"scope\\\":\\\"login\\\"}\" \\\n  http://$CAPTCHA_HOST:8080/verify | tee $CI_WORKSPACE/.ci-run-tmp/verify2.json\nphp -r 'exit(json_decode(file_get_contents(getenv(\"CI_WORKSPACE\").\"/.ci-run-tmp/verify2.json\"), true)[\"ok\"] === true ? 0 : 1);'\n"
     - name: docker-compose-down
-      run: 'set -eu
+      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
 
-        mkdir -p .ci-run-tmp
+        # imported scripts read.
+
+        CI_COMMIT_SHA="${KIWI_GIT_SHA:-}"
+
+        CI_COMMIT_BEFORE_SHA=""
+
+        CI_COMMIT_TARGET_SHA=""
+
+        CI_PIPELINE_EVENT="push"
+
+        CI_WORKSPACE="$PWD"
+
+        CI_COMMIT_TAG=""
+
+        case "${KIWI_GIT_REF:-}" in refs/tags/*) CI_COMMIT_TAG="${KIWI_GIT_REF#refs/tags/}";; esac
+
+        CI_REPO="${KIWI_REPO:-}"
+
+        export CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO
+
+        set -eu
+
+
+        mkdir -p "$CI_WORKSPACE/.ci-run-tmp"
+
 
         docker compose down'
       if: always()
     env:
-      COMPOSE_ENV_FILES: deploy/.env
       COMPOSE_FILE: deploy/docker-compose.yml
+      COMPOSE_ENV_FILES: deploy/.env
+    shell: bash
+  go:
+    name: go
+    runtime: container
+    image: golang:1.26-bookworm
+    steps:
+    - name: go
+      run: "set -eu\ncd packages/kiwicaptcha-go\ngo vet ./...\ngo test -race ./...\nfor d in integrations/*/; do\n  echo \"== $d\"\n  (cd \"$d\" && go test ./...)\ndone\n"
+    shell: bash
+  python:
+    name: python
+    runtime: container
+    image: python:3.12-bookworm
+    steps:
+    - name: python
+      run: 'set -eu
+
+        python3 -m pip install --upgrade pip
+
+        python3 -m pip install argon2-cffi
+
+        cd packages/kiwicaptcha-python-sdk
+
+        python3 -m unittest discover -s tests -v
+
+        '
+    shell: bash
+  jvm:
+    name: jvm
+    runtime: container
+    image: maven:3.9-eclipse-temurin-17
+    steps:
+    - name: jvm
+      run: 'set -eu
+
+        cd packages/kiwicaptcha-jvm
+
+        mvn -B -ntp test
+
+        '
     shell: bash
   dotnet:
     name: dotnet
     runtime: container
     image: mcr.microsoft.com/dotnet/sdk:8.0
     steps:
-    - name: commands
+    - name: dotnet
       run: 'set -eu
 
         cd packages/kiwicaptcha-dotnet
 
-        dotnet test KiwiCaptcha.sln --nologo'
+        dotnet test KiwiCaptcha.sln --nologo
+
+        '
+    shell: bash
+  ruby:
+    name: ruby
+    runtime: container
+    image: ruby:4.0-bookworm
+    steps:
+    - name: ruby
+      run: 'set -eu
+
+        apt-get update -qq
+
+        apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev libffi-dev pkg-config
+
+        cd packages/kiwicaptcha-ruby
+
+        bundle config set --local path vendor/bundle
+
+        bundle install --jobs 4 --retry 3
+
+        bundle exec rake test
+
+        '
     shell: bash
   elixir:
     name: elixir
     runtime: container
     image: elixir:1.18-otp-27
     steps:
-    - name: commands
+    - name: elixir
       run: 'set -eu
 
         apt-get update -qq
@@ -1406,92 +1697,39 @@ jobs:
 
         mix deps.get
 
-        mix test'
-    shell: bash
-  go:
-    name: go
-    runtime: container
-    image: golang:1.26-bookworm
-    steps:
-    - name: commands
-      run: "set -eu\ncd packages/kiwicaptcha-go\ngo vet ./...\ngo test -race ./...\nfor d in integrations/*/; do\n  echo \"== $d\"\n  (cd \"$d\" && go test ./...)\ndone"
-    shell: bash
-  jvm:
-    name: jvm
-    runtime: container
-    image: maven:3.9-eclipse-temurin-17
-    steps:
-    - name: commands
-      run: 'set -eu
+        mix test
 
-        cd packages/kiwicaptcha-jvm
-
-        mvn -B -ntp test'
+        '
     shell: bash
   node:
     name: node
     runtime: container
     image: node:22-bookworm
     steps:
-    - name: commands
+    - name: node
       run: 'set -eu
 
         cd packages/kiwicaptcha-node
 
         npm ci --no-audit --no-fund
 
-        npm test'
+        npm test
+
+        '
     shell: bash
-  python:
-    name: python
+  wrappers:
+    name: wrappers
     runtime: container
-    image: python:3.12-bookworm
     steps:
-    - name: commands
-      run: 'set -eu
-
-        python3 -m pip install --upgrade pip
-
-        python3 -m pip install argon2-cffi
-
-        cd packages/kiwicaptcha-python-sdk
-
-        python3 -m unittest discover -s tests -v'
-    shell: bash
-  ruby:
-    name: ruby
-    runtime: container
-    image: ruby:4.0-bookworm
-    steps:
-    - name: commands
-      run: 'set -eu
-
-        apt-get update -qq
-
-        apt-get install -y -qq libargon2-dev libsodium-dev libsqlite3-dev libffi-dev pkg-config
-
-        cd packages/kiwicaptcha-ruby
-
-        bundle config set --local path vendor/bundle
-
-        bundle install --jobs 4 --retry 3
-
-        bundle exec rake test'
-    shell: bash
-  client-core-and-adapters:
-    name: client-core-and-adapters
-    runtime: container
+    - name: client-core-and-adapters
+      run: "set -eu\ncd packages/kiwicaptcha-client-core\nnpm ci --no-audit --no-fund\nnpm run build\nnpm test\ncd ../..\nfor p in kiwicaptcha-react kiwicaptcha-vue kiwicaptcha-svelte \\\n         kiwicaptcha-solid kiwicaptcha-angular kiwicaptcha-react-native; do\n  echo \"== $p\"\n  (cd \"packages/$p\" && npm ci --no-audit --no-fund && npm test)\ndone\nfor p in kiwicaptcha-react kiwicaptcha-vue kiwicaptcha-svelte \\\n         kiwicaptcha-solid kiwicaptcha-angular; do\n  echo \"== build $p\"\n  (cd \"packages/$p\" && npm run build)\ndone\ncd packages/kiwicaptcha-react-native\nnpm run typecheck\n"
     image: node:22-bookworm
-    steps:
-    - name: commands
-      run: "set -eu\ncd packages/kiwicaptcha-client-core\nnpm ci --no-audit --no-fund\nnpm run build\nnpm test\ncd ../..\nfor p in kiwicaptcha-react kiwicaptcha-vue kiwicaptcha-svelte \\\n         kiwicaptcha-solid kiwicaptcha-angular kiwicaptcha-react-native; do\n  echo \"== $p\"\n  (cd \"packages/$p\" && npm ci --no-audit --no-fund && npm test)\ndone\nfor p in kiwicaptcha-react kiwicaptcha-vue kiwicaptcha-svelte \\\n         kiwicaptcha-solid kiwicaptcha-angular; do\n  echo \"== build $p\"\n  (cd \"packages/$p\" && npm run build)\ndone\ncd packages/kiwicaptcha-react-native\nnpm run typecheck"
     shell: bash
-  platform-suites:
-    name: platform-suites
+  platform-integrations:
+    name: platform-integrations
     runtime: container
-    image: php:8.3-cli
     steps:
-    - name: commands
+    - name: platform-suites
       run: 'set -eu
 
         apt-get update -qq
@@ -1505,22 +1743,19 @@ jobs:
         ln -sf /usr/bin/nodejs /usr/local/bin/node 2>/dev/null || true
 
 
+
         set -eu
 
-        sh integrations-platforms/tests/run-all.sh'
+        sh integrations-platforms/tests/run-all.sh
+
+        '
+    image: php:8.3-cli
     shell: bash
-  verifier-redis-and-core-lanes:
-    name: verifier-redis-and-core-lanes
+  verifier-redis:
+    name: verifier-redis
     runtime: container
-    image: rust:1.96
-    env:
-      RISK_REDIS_URL: redis://redis:6379
-      TEST_REDIS_URL: redis://redis:6379
-    services:
-    - name: redis
-      image: redis:7-alpine
     steps:
-    - name: commands
+    - name: verifier-redis-and-core-lanes
       run: 'set -eu
 
         apt-get update -qq
@@ -1528,9 +1763,11 @@ jobs:
         apt-get install -y -qq redis-server redis-tools nodejs
 
 
+
         set -eu
 
         cargo test -p kiwicaptcha-verifier --features redis-store
+
 
 
         set -eu
@@ -1540,6 +1777,7 @@ jobs:
         cargo test -p kiwicaptcha --features redis --test hkdf_cache
 
 
+
         set -eu
 
         cargo build -p kiwicaptcha-verifier --features test-fixtures
@@ -1547,9 +1785,11 @@ jobs:
         ./target/debug/kiwicaptcha-verifier exec-evidence --help >/dev/null
 
 
+
         set -eu
 
         bash tools/failover/runbook-test.sh
+
 
 
         set -eu
@@ -1558,24 +1798,38 @@ jobs:
 
         node --test packages/kiwicaptcha-wasm/tests/host-surface.test.mjs
 
-        node packages/kiwicaptcha-wasm/tests/prototype-pollution.test.mjs'
+        node packages/kiwicaptcha-wasm/tests/prototype-pollution.test.mjs
+
+        '
+    image: rust:1.96
+    env:
+      TEST_REDIS_URL: redis://redis:6379
+      RISK_REDIS_URL: redis://redis:6379
+    services:
+    - name: redis
+      image: redis:7-alpine
+      command:
+      - redis-server --port 6379 --save "" --appendonly no
     shell: bash
-  flutter-test:
-    name: flutter-test
+  flutter:
+    name: flutter
     runtime: container
-    image: ghcr.io/cirruslabs/flutter:stable
     steps:
-    - name: commands
+    - name: flutter-test
       run: 'set -eu
 
         cd packages/kiwicaptcha-flutter
 
-        flutter test'
+        flutter test
+
+        '
+    image: ghcr.io/cirruslabs/flutter:stable
     shell: bash
   wasm-host:
     name: wasm-host
     runtime: container
     image: rust:1.96
+    shell: bash
     steps:
     - name: toolchain
       run: apt-get update -qq && apt-get install -y -qq nodejs npm git
@@ -1585,83 +1839,77 @@ jobs:
       run: node --test packages/kiwicaptcha-wasm/tests/host-surface.test.mjs
     - name: prototype pollution
       run: node packages/kiwicaptcha-wasm/tests/prototype-pollution.test.mjs
-    shell: bash
   ios:
     name: ios
     runtime: native
+    shell: bash
     steps:
     - name: swift build
       run: cd packages/kiwicaptcha-ios && swift build
     - name: parse the XCTest target
       run: cd packages/kiwicaptcha-ios && swiftc -parse Tests/KiwiCaptchaTests/KiwiCaptchaTests.swift
-    shell: bash
   feature-inventory:
     name: feature-inventory
     runtime: container
     image: node:22-bookworm
+    shell: bash
     steps:
     - name: inventory
       run: node tools/ci/feature-inventory-check.mjs
-    shell: bash
   promotion-gate:
     name: promotion-gate
     runtime: container
     image: alpine:3.20
+    shell: sh
     needs:
-    - lint-repo
-    - lint-workflow
-    - storage-lua-parity
+    - lint
     - composer-contracts
     - php-core-8.1
     - php-core-8.2
     - php-core-8.3
     - php-core-8.4
     - php-core-8.5
+    - php-nightly-8.6
     - php-core-no-gmp
     - php-core-real-redis
-    - php-nightly-8.6
     - phpredis-siteverify
-    - symfony-6.4-php8.2
     - symfony-7x-php8.2
+    - symfony-6.4-php8.2
     - symfony-8x-php8.4
     - symfony-8x-php8.5
-    - risk-parity
     - risk-php
     - risk-rust
-    - rust-redis-verify
-    - rust-workspace
-    - browser-a11y-three-engines
-    - browser-native-chromium
-    - real-redis-concurrency
-    - php-core-redis8
-    - risk-php-redis8
+    - risk-parity
+    - rust
+    - browser
+    - redis-lanes
     - risk-rust-redis8
+    - risk-php-redis8
+    - php-core-redis8
     - symfony-redis8
     - interop
-    - build-reproducibility
-    - symfony-assets-parity
-    - perf-budget
+    - compat-build
     - validator-mutation-suites
-    - android-unit-tests
-    - n1-compat
+    - perf-budget
     - package-cargo
     - package-composer
+    - n1-compat
+    - android-unit-tests
     - docker-deploy
-    - dotnet
-    - elixir
     - go
-    - jvm
-    - node
     - python
+    - jvm
+    - dotnet
     - ruby
-    - client-core-and-adapters
-    - platform-suites
-    - verifier-redis-and-core-lanes
-    - flutter-test
+    - elixir
+    - node
+    - wrappers
+    - platform-integrations
+    - verifier-redis
+    - flutter
     - wasm-host
     - ios
     - feature-inventory
     steps:
     - name: gate
       run: 'echo "promotion-gate: every job in needs finished green for $KIWI_GIT_SHA"'
-    shell: sh

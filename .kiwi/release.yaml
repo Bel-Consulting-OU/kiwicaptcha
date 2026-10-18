@@ -15,13 +15,23 @@ jobs:
     - name: release toolchain
       run: apt-get update -qq && apt-get install -y -qq git curl ca-certificates nodejs npm
     - name: preflight-tag-ruleset
-      run: "GITHUB_REPOSITORY=\"${GITHUB_REPOSITORY:-${KIWI_REPO_FULL:-}}\"\nexport GITHUB_REPOSITORY\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\ntrue\nruleset_id=\"20868582\"\nif ! ruleset_json=\"$(curl -fsS -H \"Authorization: Bearer $GITHUB_TOKEN\" -H \"Accept: application/vnd.github+json\" \"https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id\")\"; then\n  echo \"refusing to release: cannot read the v* tag ruleset $ruleset_id (ruleset preflight fails closed on 403/404/unreadable)\" >&2\n  exit\
-        \ 1\nfi\nprintf '%s\\n' \"$ruleset_json\" | bash \"$CI_WORKSPACE/tools/ci/tag-ruleset-check.sh\" \"$ruleset_id\""
+      run: "GITHUB_REPOSITORY=\"${GITHUB_REPOSITORY:-${KIWI_REPO_FULL:-}}\"\nexport GITHUB_REPOSITORY\nGITHUB_TOKEN=\"${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}\"\nGH_TOKEN=\"$GITHUB_TOKEN\"\nexport GITHUB_TOKEN GH_TOKEN\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\ntrue\nruleset_id=\"20868582\"\nif ! ruleset_json=\"$(curl -fsS -H \"Authorization: Bearer $GITHUB_TOKEN\" -H \"Accept: application/vnd.github+json\" \"https://api.github.com/repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id\")\"; then\n  echo \"refusing to release: cannot\
+        \ read the v* tag ruleset $ruleset_id (ruleset preflight fails closed on 403/404/unreadable)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$ruleset_json\" | bash \"$CI_WORKSPACE/tools/ci/tag-ruleset-check.sh\" \"$ruleset_id\"\n"
+      secrets:
+      - github_token
     - name: gate-authorization
-      run: "GITHUB_REPOSITORY=\"${GITHUB_REPOSITORY:-${KIWI_REPO_FULL:-}}\"\nexport GITHUB_REPOSITORY\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"${KIWI_WORKSPACE:-$PWD}\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\ntrue\ntag=\"${CI_COMMIT_TAG:?a tag event is required}\"\nif curl -fsS -H \"Authorization: Bearer $GITHUB_TOKEN\" -H \"Accept: application/vnd.github+json\" \"https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag\" >/dev/null 2>&1; then\n  echo \"refusing to publish: release $tag already exists (releases are immutable)\" >&2\n  exit 1\nfi\necho \"release $tag\
-        \ does not exist yet\"\n\nset -eu\n# The GitHub gate proves exact-tag CI and authorized-HEAD\n# equality through the Actions API; in Kiwi-CI the tag\n# pipeline itself is the exact-tag CI run, and the annotated\n# signed tag check is portable.\ngit fetch --tags --force >/dev/null 2>&1 || true\ntest \"$(git cat-file -t \"$CI_COMMIT_TAG\")\" = \"tag\" \\\n  || { echo \"refusing to release: $CI_COMMIT_TAG must be an annotated tag\" >&2; exit 1; }\necho \"$CI_COMMIT_TAG is an annotated tag at $(git rev-parse \"$CI_COMMIT_TAG^{commit}\")\""
+      run: "GITHUB_REPOSITORY=\"${GITHUB_REPOSITORY:-${KIWI_REPO_FULL:-}}\"\nexport GITHUB_REPOSITORY\nGITHUB_TOKEN=\"${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}\"\nGH_TOKEN=\"$GITHUB_TOKEN\"\nexport GITHUB_TOKEN GH_TOKEN\n# Map Kiwi's native run metadata onto the legacy variable names the\n# imported scripts read.\nCI_COMMIT_SHA=\"${KIWI_GIT_SHA:-}\"\nCI_COMMIT_BEFORE_SHA=\"\"\nCI_COMMIT_TARGET_SHA=\"\"\nCI_PIPELINE_EVENT=\"push\"\nCI_WORKSPACE=\"$PWD\"\nCI_COMMIT_TAG=\"\"\ncase \"${KIWI_GIT_REF:-}\" in refs/tags/*) CI_COMMIT_TAG=\"${KIWI_GIT_REF#refs/tags/}\";; esac\nCI_REPO=\"${KIWI_REPO:-}\"\nexport CI_COMMIT_SHA CI_COMMIT_BEFORE_SHA CI_COMMIT_TARGET_SHA CI_PIPELINE_EVENT CI_WORKSPACE CI_COMMIT_TAG CI_REPO\nset -eu\ntrue\ntag=\"${CI_COMMIT_TAG:?a tag event is required}\"\nif curl -fsS -H \"Authorization: Bearer $GITHUB_TOKEN\" -H \"Accept: application/vnd.github+json\" \"https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$tag\" >/dev/null 2>&1; then\n  echo \"refusing to\
+        \ publish: release $tag already exists (releases are immutable)\" >&2\n  exit 1\nfi\necho \"release $tag does not exist yet\"\n\n\nset -eu\n# The GitHub gate proves exact-tag CI and authorized-HEAD\n# equality through the Actions API; in Kiwi-CI the tag\n# pipeline itself is the exact-tag CI run, and the annotated\n# signed tag check is portable.\ngit fetch --tags --force >/dev/null 2>&1 || true\ntest \"$(git cat-file -t \"$CI_COMMIT_TAG\")\" = \"tag\" \\\n  || { echo \"refusing to release: $CI_COMMIT_TAG must be an annotated tag\" >&2; exit 1; }\necho \"$CI_COMMIT_TAG is an annotated tag at $(git rev-parse \"$CI_COMMIT_TAG^{commit}\")\"\n"
+      secrets:
+      - github_token
     - name: strict-build
-      run: 'set -eu
+      run: 'GITHUB_TOKEN="${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}"
+
+        GH_TOKEN="$GITHUB_TOKEN"
+
+        export GITHUB_TOKEN GH_TOKEN
+
+        set -eu
 
         apt-get update -qq
 
@@ -31,11 +41,19 @@ jobs:
 
         cd packages/kiwicaptcha-wasm
 
-        bash build.sh'
+        bash build.sh
+
+        '
     - name: committed-bytes-equal
-      run: "set -eu\ntrue\ncd packages/kiwicaptcha-wasm\ngit diff --exit-code -- \\\n  assets/kiwicaptcha-wasm.js \\\n  assets/kiwi-worker.js \\\n  assets/execution-interpreter.js \\\n  assets/widget-driver.js \\\n  assets/widget-risk.js \\\n  assets/widget-telemetry.js \\\n  assets/widget-locales.js \\\n  assets/widget-compat.js \\\n  assets/widget-shims.js \\\n  assets/widget.css\necho \"strict rebuild == committed/browser-tested assets\""
+      run: "GITHUB_TOKEN=\"${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}\"\nGH_TOKEN=\"$GITHUB_TOKEN\"\nexport GITHUB_TOKEN GH_TOKEN\nset -eu\ntrue\ncd packages/kiwicaptcha-wasm\ngit diff --exit-code -- \\\n  assets/kiwicaptcha-wasm.js \\\n  assets/kiwi-worker.js \\\n  assets/execution-interpreter.js \\\n  assets/widget-driver.js \\\n  assets/widget-risk.js \\\n  assets/widget-telemetry.js \\\n  assets/widget-locales.js \\\n  assets/widget-compat.js \\\n  assets/widget-shims.js \\\n  assets/widget.css\necho \"strict rebuild == committed/browser-tested assets\"\n"
     - name: release-manifest
-      run: 'set -eu
+      run: 'GITHUB_TOKEN="${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}"
+
+        GH_TOKEN="$GITHUB_TOKEN"
+
+        export GITHUB_TOKEN GH_TOKEN
+
+        set -eu
 
         apt-get update -qq
 
@@ -43,9 +61,17 @@ jobs:
 
         cd packages/kiwicaptcha-wasm
 
-        ( cd assets && sha256sum kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js webauthn-ceremony.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )'
+        ( cd assets && sha256sum kiwicaptcha-wasm.js kiwi-worker.js widget-driver.js widget-risk.js widget-telemetry.js widget-locales.js widget-compat.js widget-shims.js webauthn-ceremony.js widget.css execution-interpreter.js > SHA256SUMS && node ../tools/sri-hashes.mjs > SRI.txt && cat SHA256SUMS && cat SRI.txt )
+
+        '
     - name: release-asset-contract
-      run: '# Map Kiwi''s native run metadata onto the legacy variable names the
+      run: 'GITHUB_TOKEN="${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}"
+
+        GH_TOKEN="$GITHUB_TOKEN"
+
+        export GITHUB_TOKEN GH_TOKEN
+
+        # Map Kiwi''s native run metadata onto the legacy variable names the
 
         # imported scripts read.
 
@@ -57,7 +83,7 @@ jobs:
 
         CI_PIPELINE_EVENT="push"
 
-        CI_WORKSPACE="${KIWI_WORKSPACE:-$PWD}"
+        CI_WORKSPACE="$PWD"
 
         CI_COMMIT_TAG=""
 
@@ -71,25 +97,51 @@ jobs:
 
         true
 
-        bash "$CI_WORKSPACE/tools/ci/release-asset-contract.sh"'
+        bash "$CI_WORKSPACE/tools/ci/release-asset-contract.sh"
+
+        '
     - name: release-baseline-gate
-      run: 'set -eu
+      run: 'GITHUB_TOKEN="${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}"
+
+        GH_TOKEN="$GITHUB_TOKEN"
+
+        export GITHUB_TOKEN GH_TOKEN
+
+        set -eu
 
         true
 
-        node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json'
+        node tools/ci/validate-release-baseline.mjs --release tools/client-perf/results/baseline.json
+
+        '
     - name: autofill-qualification-gate
-      run: 'set -eu
+      run: 'GITHUB_TOKEN="${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}"
+
+        GH_TOKEN="$GITHUB_TOKEN"
+
+        export GITHUB_TOKEN GH_TOKEN
+
+        set -eu
 
         true
 
-        node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json'
+        node tools/ci/validate-autofill-qualification.mjs tests/browser/qualification/autofill-matrix.json
+
+        '
     - name: accessibility-qualification-gate
-      run: 'set -eu
+      run: 'GITHUB_TOKEN="${GITHUB_TOKEN:-${KIWI_SECRET_GITHUB_TOKEN:-}}"
+
+        GH_TOKEN="$GITHUB_TOKEN"
+
+        export GITHUB_TOKEN GH_TOKEN
+
+        set -eu
 
         true
 
-        node tools/ci/validate-accessibility-qualification.mjs tests/browser/qualification/accessibility-matrix.json'
+        node tools/ci/validate-accessibility-qualification.mjs tests/browser/qualification/accessibility-matrix.json
+
+        '
     image: rust:1.96
     env:
       WASM_OPT_STRICT: '1'

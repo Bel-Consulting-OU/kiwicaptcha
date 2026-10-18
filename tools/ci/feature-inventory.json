@@ -10,7 +10,7 @@
         "Cargo.toml",
         "tests"
       ],
-      "kiwi_job": "rust-workspace"
+      "kiwi_job": "rust"
     },
     {
       "path": "packages/kiwicaptcha-risk",
@@ -150,7 +150,7 @@
         "Cargo.toml",
         "tests"
       ],
-      "kiwi_job": "verifier-redis-and-core-lanes"
+      "kiwi_job": "verifier-redis"
     },
     {
       "path": "packages/kiwicaptcha-solver",
@@ -160,7 +160,7 @@
         "Cargo.toml",
         "tests"
       ],
-      "kiwi_job": "rust-workspace"
+      "kiwi_job": "rust"
     },
     {
       "path": "packages/kiwicaptcha-client-core",
@@ -170,7 +170,7 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-react",
@@ -180,7 +180,7 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-vue",
@@ -190,7 +190,7 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-svelte",
@@ -200,7 +200,7 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-solid",
@@ -210,7 +210,7 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-angular",
@@ -220,7 +220,7 @@
         "package.json",
         "src/*.spec.ts"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-react-native",
@@ -230,7 +230,7 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "client-core-and-adapters"
+      "kiwi_job": "wrappers"
     },
     {
       "path": "packages/kiwicaptcha-ios",
@@ -250,7 +250,7 @@
         "pubspec.yaml",
         "test"
       ],
-      "kiwi_job": "flutter-test"
+      "kiwi_job": "flutter"
     }
   ],
   "surfaces": [
@@ -259,7 +259,7 @@
       "lane": "ci",
       "ci_job": "platform-integrations",
       "runner": "integrations-platforms/tests/run-all.sh",
-      "kiwi_job": "platform-suites"
+      "kiwi_job": "platform-integrations"
     },
     {
       "path": "deploy",
@@ -285,7 +285,7 @@
       "lane": "ci",
       "ci_job": "repo-sanity",
       "runner": "tools/ci",
-      "kiwi_job": "lint-repo"
+      "kiwi_job": "lint"
     },
     {
       "path": "tools/dogfood",
@@ -298,7 +298,7 @@
       "lane": "ci",
       "ci_job": "verifier-redis",
       "runner": "tools/failover/runbook-test.sh",
-      "kiwi_job": "verifier-redis-and-core-lanes"
+      "kiwi_job": "verifier-redis"
     },
     {
       "path": "tools/redteam",
@@ -311,7 +311,7 @@
       "lane": "ci",
       "ci_job": "rust",
       "runner": "tools/rsw-keygen/tests/cli.rs",
-      "kiwi_job": "rust-workspace"
+      "kiwi_job": "rust"
     },
     {
       "path": "recipes-contrib",
@@ -325,7 +325,7 @@
       "lane": "ci",
       "ci_job": "lua-parity",
       "runner": "protocol/risk-v1",
-      "kiwi_job": "storage-lua-parity"
+      "kiwi_job": "lint"
     }
   ],
   "protocols": {
