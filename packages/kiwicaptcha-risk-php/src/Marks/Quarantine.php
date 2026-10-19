@@ -65,7 +65,7 @@ final class Quarantine
     /**
      * True when the identity's live mark set is spam-only: at least one
      * in-TTL own mark and every in-TTL own mark of the spam kind. The
-     * stage uses this to keep the Argon64 floor a non-spam treatment: a
+     * stage uses this to keep the Rsw floor a non-spam treatment: a
      * spam-only identity above the Allow band keeps its plain action.
      */
     public static function spamOnly(MarksView $view, int $nowMs, int $markTtlMs): bool

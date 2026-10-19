@@ -91,6 +91,14 @@ def run_gate(transport)
   gate.call(request_env)
 end
 
+# run_gate with request overrides: the token-ambiguity cases post
+# different header/cookie shapes than the default request.
+def run_gate_conflict(env_overrides)
+  gate = KiwiSignupGate.new(APP_OK)
+  gate.define_singleton_method(:transport) { |_request| { status: 200, body: '{"success":true}' } }
+  gate.call(request_env.merge(env_overrides.compact))
+end
+
 # A failed challenge is a definitive 403.
 status, _headers, body = run_gate(->(_r) { { status: 200, body: '{"success":false}' } })
 check("failed challenge denies 403", status == 403)
@@ -109,6 +117,30 @@ check("upstream 5xx answers 503", status == 503)
 # A successful verdict passes to the app.
 status, = run_gate(->(_r) { { status: 200, body: '{"success":true}' } })
 check("verified passes to the app", status == 200)
+
+# The token authority rule: a request carrying two distinct token
+# values refuses with the typed code before any verification.
+status, _headers, body = run_gate_conflict(
+  "HTTP_X_KIWI_TOKEN" => "tok\nother",
+  "HTTP_COOKIE" => nil,
+)
+check("repeated header lines conflict answers 403", status == 403)
+check("repeated header lines conflict body", body.first.include?("token_source_conflict"))
+
+status, _headers, body = run_gate_conflict(
+  "HTTP_X_KIWI_TOKEN" => "tok",
+  "HTTP_COOKIE" => "kiwi_token=other",
+)
+check("header vs cookie conflict answers 403", status == 403)
+check("header vs cookie conflict body", body.first.include?("token_source_conflict"))
+
+# The same value carried by both sources is one distinct value and
+# verifies through to the app.
+status, = run_gate_conflict(
+  "HTTP_X_KIWI_TOKEN" => "tok",
+  "HTTP_COOKIE" => "kiwi_token=tok",
+)
+check("same token in header and cookie passes to the app", status == 200)
 
 puts "middleware_disposition_test: #{$checks - $failures}/#{$checks} passed"
 exit($failures.zero? ? 0 : 1)

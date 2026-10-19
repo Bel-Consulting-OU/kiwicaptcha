@@ -17,14 +17,47 @@ def check(name, condition)
   warn "FAIL: #{name}"
 end
 
-# Token extraction.
-check("header token", KiwiCaptcha::Verifier.extract_token(
+# Token resolution: the collect/distinct/conflict authority rule.
+check("header token", KiwiCaptcha::Verifier.resolve_token(
   headers: { "HTTP_X_KIWI_TOKEN" => " hdr " }, cookies: {}
-) == "hdr")
-check("cookie token", KiwiCaptcha::Verifier.extract_token(
+) == { token: "hdr", code: nil })
+check("cookie token", KiwiCaptcha::Verifier.resolve_token(
   headers: {}, cookies: { "kiwi_token" => "c" }
-) == "c")
-check("no token is nil", KiwiCaptcha::Verifier.extract_token(headers: {}, cookies: {}).nil?)
+) == { token: "c", code: nil })
+check("no token", KiwiCaptcha::Verifier.resolve_token(
+  headers: {}, cookies: {}
+) == { token: nil, code: nil })
+check("blank header and cookie are no token", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "  " }, cookies: { "kiwi_token" => "" }
+) == { token: nil, code: nil })
+
+# The ambiguity matrix: zero distinct values pass nothing, one distinct
+# value verifies however many sources carry it, two distinct values
+# conflict with the typed code before any verification.
+check("header a cookie a verifies", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a" }, cookies: { "kiwi_token" => "a" }
+) == { token: "a", code: nil })
+check("header a cookie b conflicts", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a" }, cookies: { "kiwi_token" => "b" }
+) == { token: nil, code: :token_source_conflict })
+check("two distinct header lines conflict", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a\nb" }, cookies: {}
+) == { token: nil, code: :token_source_conflict })
+check("two header lines carrying the same value verify", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a\na" }, cookies: {}
+) == { token: "a", code: nil })
+check("a comma-joined header line splits into values", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a, b" }, cookies: {}
+) == { token: nil, code: :token_source_conflict })
+check("a comma-joined header line with one value verifies", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a, a" }, cookies: {}
+) == { token: "a", code: nil })
+check("distinct values across the comma split and the cookie conflict", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => "a\n a" }, cookies: { "kiwi_token" => "b" }
+) == { token: nil, code: :token_source_conflict })
+check("whitespace-padded equal values are one distinct value", KiwiCaptcha::Verifier.resolve_token(
+  headers: { "HTTP_X_KIWI_TOKEN" => " a " }, cookies: { "kiwi_token" => "a " }
+) == { token: "a", code: nil })
 
 # Client ip.
 check("peer ip untrusted", KiwiCaptcha::Verifier.client_ip(

@@ -1,22 +1,32 @@
-import { NativeModules } from "react-native";
 import {
   KiwiSolveError,
   type KiwiChallenge,
   type KiwiSolution,
   type NativeKiwiSolver,
 } from "./types.js";
+import { NATIVE_MODULE_NAME, nativeSolver } from "./native.js";
 import { hex, leadingZeroBits, sha256 } from "./sha256.js";
 import { base64Decode } from "./validate.js";
+
+export { NATIVE_MODULE_NAME, nativeSolver };
 
 /**
  * Solver dispatch.
  *
+ * A linked native module (shipped in this package: android/ and ios/,
+ * resolved by src/native.ts) handles every challenge: the solve runs on
+ * a native thread, never a WebView, never the JS thread. The module
+ * implements the exact shared contract, so its answers are
+ * byte-identical to the pure-TS loop.
+ *
  * Difficulty ceiling of the pure fallback: a sha256 challenge at or
  * below this many bits may run on the JS thread through the optional
  * quick-crypto peer (or the bundled pure-TS SHA-256), because the
- * expected work stays in the hundreds of hashes. Anything harder, and
- * every argon2id or rsw challenge, goes to the native module: the solve
- * runs on a native thread, never a WebView, never the JS thread.
+ * expected work stays in the hundreds of hashes. The fallback runs when
+ * no module is linked (the default, fail-closed otherwise) or when the
+ * native solve of an in-window sha256 challenge failed (the same
+ * profile retried, never a weaker one). Anything harder, and every
+ * argon2id or rsw challenge, is native-or-refused.
  */
 export const LOW_DIFFICULTY_MAX_BITS = 8;
 
@@ -94,11 +104,6 @@ function loadQuickCrypto(): typeof quickCrypto {
 /** Exposed for tests: force the next require attempt. */
 export function resetQuickCryptoCache(): void {
   quickCrypto = undefined;
-}
-
-/** The react-native bridge module, or null when the app has none. */
-export function nativeSolver(): NativeKiwiSolver | null {
-  return (NativeModules.KiwiCaptchaSolver as NativeKiwiSolver | undefined) ?? null;
 }
 
 function utf8(value: string): Uint8Array {
@@ -223,20 +228,39 @@ export async function solve(
   challenge: KiwiChallenge,
   options: SolveOptions = {},
 ): Promise<KiwiSolution> {
+  const solver = nativeSolver();
+  if (solver) {
+    // Prefer the native module whenever it is linked: the shipped
+    // module runs the exact shared contract (same preimage order, same
+    // counter, docs/NATIVE.md), so answers are byte-identical to the
+    // pure-TS loop while the solve stays off the JS thread.
+    try {
+      return await solveNative(challenge, solver, options.onProgress);
+    } catch (nativeError) {
+      // The one permitted degradation: a sha256 challenge inside the
+      // low-difficulty window may fall back to the pure-TS loop — the
+      // same profile, the same search, never a weaker one. Everything
+      // else (above-ceiling sha256, argon2id, rsw) stays fail-closed.
+      if (challenge.algorithm === "sha256" && challenge.targetBits <= LOW_DIFFICULTY_MAX_BITS) {
+        const low = solveSha256Low(challenge, options.onProgress);
+        if (low) return low;
+      }
+      // Both paths refused or failed; the native refusal is the more
+      // precise error.
+      throw nativeError;
+    }
+  }
+  // No native module linked: the pure-TS loop is the default for
+  // low-difficulty sha256; everything else is fail-closed.
   if (challenge.algorithm === "sha256" && challenge.targetBits <= LOW_DIFFICULTY_MAX_BITS) {
     const low = solveSha256Low(challenge, options.onProgress);
     if (low) return low;
-    // The window missed: fail closed to the native module (same
-    // profile, never a weaker one).
+    // The window missed and there is no module to fail closed to.
   }
-  const solver = nativeSolver();
-  if (!solver) {
-    throw new KiwiSolveError(
-      "solver-unavailable",
-      challenge.algorithm === "sha256"
-        ? `target_bits ${challenge.targetBits} is above the low-difficulty ceiling ${LOW_DIFFICULTY_MAX_BITS} and no KiwiCaptchaSolver native module is linked`
-        : "this profile needs the KiwiCaptchaSolver native module, which is not linked",
-    );
-  }
-  return solveNative(challenge, solver, options.onProgress);
+  throw new KiwiSolveError(
+    "solver-unavailable",
+    challenge.algorithm === "sha256"
+      ? `target_bits ${challenge.targetBits} is above the low-difficulty ceiling ${LOW_DIFFICULTY_MAX_BITS} and no ${NATIVE_MODULE_NAME} native module is linked`
+      : `this profile needs the ${NATIVE_MODULE_NAME} native module, which is not linked`,
+  );
 }

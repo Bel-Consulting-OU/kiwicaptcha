@@ -160,12 +160,13 @@ fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
 
 /// The risk model generation implemented by this package.
 ///
-/// Monotonically increasing (never reset). 17 is the current model
-/// generation: 16 prior generations covered the fixed-point score
+/// Monotonically increasing (never reset). 19 is the current model
+/// generation: the prior generations covered the fixed-point score
 /// contract, class-normalized calibration, the random-sample resolution
-/// gate, the outcome ledger and the rate-of-change clamp; this revision
-/// adds the non-finite guards and the local-limiter warm-up
-/// ramp to the model's behavior surface.
+/// gate, the outcome ledger, the rate-of-change clamp, the non-finite
+/// guards and the local-limiter warm-up ramp; this revision adds the
+/// first-class rsw rung to the decision ladder (between argon64 and
+/// step-up: the default bands, the marks floor, the priced band table).
 ///
 /// Every [`RiskDecision`] carries the revision it was computed under
 /// (`model_revision`, exposed in the decision's public JSON — bounded,
@@ -173,7 +174,7 @@ fn reject_out_of_range_ppm(ppm: Option<u32>) -> Result<(), RiskError> {
 /// fleets during a rollout. A model revision that materially affects
 /// security requires a `policy_version` bump in the operator policy
 /// snapshot (see [`crate::policy::RiskPolicy`]).
-pub const RISK_MODEL_REVISION: u32 = 18;
+pub const RISK_MODEL_REVISION: u32 = 19;
 
 /// Immutable risk decision produced by the engine.
 ///
@@ -4615,7 +4616,7 @@ mod tests {
         // policy_version, model_revision, global_level, retry_after_ms,
         // band.
         assert_eq!(json.as_object().unwrap().len(), 9);
-        assert_eq!(json["model_revision"], 18);
+        assert_eq!(json["model_revision"], 19);
     }
 
     #[test]
@@ -5509,7 +5510,7 @@ mod tests {
         // assessment floors at the maximum rung with its reason, while the
         // unwired engine keeps the plain action for the same request.
         let escalated = wired.assess_pre_issue(ctx(), None).unwrap();
-        assert_eq!(escalated.action, RiskAction::Argon64);
+        assert_eq!(escalated.action, RiskAction::Rsw);
         assert!(escalated.has_reason(RiskReason::MarkedIdentity));
         let untouched = plain_engine.assess_pre_issue(ctx(), None).unwrap();
         assert_eq!(untouched.action, RiskAction::Allow);

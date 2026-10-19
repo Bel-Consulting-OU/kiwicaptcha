@@ -244,7 +244,8 @@ fn rung_at_rank(rank: u8) -> RiskAction {
         4 => RiskAction::Argon16,
         5 => RiskAction::Argon32,
         6 => RiskAction::Argon64,
-        7 => RiskAction::StepUp,
+        7 => RiskAction::Rsw,
+        8 => RiskAction::StepUp,
         _ => RiskAction::Deny,
     }
 }
@@ -320,6 +321,8 @@ mod tests {
         let out = apply(plain(500), true);
         assert_eq!(out.action, RiskAction::Argon16);
         let out = apply(plain(900), true);
+        assert_eq!(out.action, RiskAction::Rsw);
+        let out = apply(plain(940), true);
         assert_eq!(out.action, RiskAction::StepUp);
     }
 
@@ -327,7 +330,7 @@ mod tests {
     fn escalation_never_blocks() {
         // StepUp stays StepUp and Deny never deepens: the raise caps at
         // the interactive step-up.
-        let out = apply(plain(950), true);
+        let out = apply(plain(965), true);
         assert_eq!(out.action, RiskAction::StepUp);
         let deny = plain(990);
         let out = apply(deny.clone(), true);

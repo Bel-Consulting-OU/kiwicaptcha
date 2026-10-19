@@ -35,8 +35,8 @@ use kiwicaptcha_risk::{RiskDecision, RiskEngine};
 use crate::config::{Rung, ScopePlan};
 
 /// The risk engine's ladder action for a configured rung. The rsw rung
-/// has no ladder entry (the risk ladder tops out at argon64), so the
-/// policy floor for an rsw scope is the strongest challenge rung.
+/// is the ladder's own maximum challenge rung, so an rsw scope's policy
+/// floor is exactly the rsw action.
 fn risk_action_of(rung: Rung) -> RiskAction {
     match rung {
         Rung::Sha16 => RiskAction::Sha16,
@@ -45,21 +45,27 @@ fn risk_action_of(rung: Rung) -> RiskAction {
         Rung::Argon16 => RiskAction::Argon16,
         Rung::Argon32 => RiskAction::Argon32,
         Rung::Argon64 => RiskAction::Argon64,
-        Rung::Rsw => RiskAction::Argon64,
+        Rung::Rsw => RiskAction::Rsw,
     }
 }
 
 /// The rung a ladder action issues at. StepUp has no challenge rung: the
-/// sidecar issues its strongest challenge and carries the step-up
-/// disposition in the response for the application to answer.
-fn rung_of_action(action: RiskAction) -> Option<Rung> {
+/// sidecar issues its strongest always-servable challenge and carries the
+/// step-up disposition in the response for the application to answer. An
+/// rsw decision issues the real time-lock rung when the deployment
+/// configured the trapdoor; without one it resolves to the step-up grade
+/// (the disposition still carries the true rsw action), never a weaker
+/// silent rung.
+fn rung_of_action(action: RiskAction, rsw_configured: bool) -> Option<Rung> {
     match action {
         RiskAction::Sha16 => Some(Rung::Sha16),
         RiskAction::Sha18 => Some(Rung::Sha18),
         RiskAction::Sha20 => Some(Rung::Sha20),
         RiskAction::Argon16 => Some(Rung::Argon16),
         RiskAction::Argon32 => Some(Rung::Argon32),
-        RiskAction::Argon64 | RiskAction::StepUp => Some(Rung::Argon64),
+        RiskAction::Argon64 => Some(Rung::Argon64),
+        RiskAction::Rsw if rsw_configured => Some(Rung::Rsw),
+        RiskAction::Rsw | RiskAction::StepUp => Some(Rung::Argon64),
         RiskAction::Allow | RiskAction::Deny => None,
     }
 }
@@ -78,13 +84,14 @@ pub fn scope_id(name: &str) -> u32 {
 
 /// Compose the configured scope rung with a decision's ladder action: the
 /// risk ladder only ever raises. StepUp issues the strongest challenge
-/// rung; Allow keeps the configuration.
-pub fn compose_rung(base: Rung, action: RiskAction) -> Rung {
+/// rung; Allow keeps the configuration. `rsw_configured` reports whether
+/// the deployment carries the rsw trapdoor (an rsw scope rung or the
+/// configured pair), so an rsw decision issues the time-lock rung only
+/// where it is servable.
+pub fn compose_rung(base: Rung, action: RiskAction, rsw_configured: bool) -> Rung {
     match action {
-        RiskAction::Allow => base,
-        RiskAction::Deny => base,
-        RiskAction::StepUp => Rung::Argon64,
-        other => match rung_of_action(other) {
+        RiskAction::Allow | RiskAction::Deny => base,
+        other => match rung_of_action(other, rsw_configured) {
             Some(rung) if risk_action_of(rung).rank() > risk_action_of(base).rank() => rung,
             _ => base,
         },
@@ -353,13 +360,37 @@ mod tests {
 
     #[test]
     fn compose_rung_only_raises() {
-        assert_eq!(compose_rung(Rung::Sha18, RiskAction::Allow), Rung::Sha18);
-        assert_eq!(compose_rung(Rung::Sha18, RiskAction::Sha20), Rung::Sha20);
         assert_eq!(
-            compose_rung(Rung::Argon16, RiskAction::Sha20),
+            compose_rung(Rung::Sha18, RiskAction::Allow, false),
+            Rung::Sha18
+        );
+        assert_eq!(
+            compose_rung(Rung::Sha18, RiskAction::Sha20, false),
+            Rung::Sha20
+        );
+        assert_eq!(
+            compose_rung(Rung::Argon16, RiskAction::Sha20, false),
             Rung::Argon16
         );
-        assert_eq!(compose_rung(Rung::Sha16, RiskAction::StepUp), Rung::Argon64);
+        assert_eq!(
+            compose_rung(Rung::Sha16, RiskAction::StepUp, false),
+            Rung::Argon64
+        );
+        // An rsw decision issues the time-lock rung when the trapdoor is
+        // configured; without one it resolves to the step-up grade and
+        // never weakens a configured rsw scope.
+        assert_eq!(
+            compose_rung(Rung::Argon64, RiskAction::Rsw, true),
+            Rung::Rsw
+        );
+        assert_eq!(
+            compose_rung(Rung::Argon64, RiskAction::Rsw, false),
+            Rung::Argon64
+        );
+        assert_eq!(
+            compose_rung(Rung::Rsw, RiskAction::StepUp, false),
+            Rung::Rsw
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\MetricsCounterStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\OutcomeTrustGateInterface;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\CountingAuthOutcomeWindow;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\SpyOutcomeReporter;
 use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
 use KiwiCaptcha\Risk\Outcomes\Outcome;
@@ -393,6 +394,98 @@ final class KiwiOutcomeBridgeSubscriberTest extends TestCase
 
         self::assertCount(0, $this->reporter->reports, 'a resolving passport is the success event\'s business, not a failure report');
         self::assertSame('resolved-user', (string) $request->attributes->get('_kiwi_outcome_target'));
+    }
+
+    public function testOneFailedLoginWritesTheWindowExactlyOncePerKeyAcrossCheckPassportAndLoginFailure(): void
+    {
+        // The user-not-found shape: the CheckPassport lane observes the
+        // badge resolution error first, then the framework's catch
+        // dispatches the LoginFailureEvent of the same request. One
+        // failed login must land exactly one window failure per window
+        // key: the session window was double-counted when this lane
+        // also wrote it (the report itself dedupes, the window did not).
+        $window = new CountingAuthOutcomeWindow();
+        $session = $this->sessionCookie();
+        $request = $this->request(
+            ['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_ADDR' => '198.51.100.7', 'REMOTE_PORT' => '54321'],
+            ['__Host-kiwi-session' => $session],
+        );
+        $badge = new UserBadge(self::CANARY_USERNAME, static function (string $identifier): object {
+            throw new UsernameNotFoundException();
+        });
+        $dispatcher = $this->dispatcher($this->subscriber(targetFieldConfigured: true, authWindow: $window));
+
+        $dispatcher->dispatch(new CheckPassportEvent(new Passport([UserBadge::class => $badge]), $request), CheckPassportEvent::class);
+        $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $request), LoginFailureEvent::class);
+
+        $sessionKey = $this->identity->sessionId($session);
+        $principalKey = $this->identity->principalId(TargetIdentifierNormalizer::normalize(self::CANARY_USERNAME));
+        $failures = $window->failureKeys();
+        self::assertCount(2, $failures, 'one failed login writes the session window and the principal window once each');
+        self::assertSame(1, \count(array_keys($failures, $sessionKey, true)), 'the session window counts one failed login exactly once, never twice');
+        self::assertSame(1, \count(array_keys($failures, $principalKey, true)), 'the principal window counts one failed login exactly once');
+        self::assertSame([], $window->successKeys(), 'a failed login writes no success');
+
+        // The outcomes report keeps its own contract: two lane reports
+        // of one request collapse onto one idempotency key.
+        self::assertCount(2, $this->reporter->reports);
+        self::assertSame(
+            $this->reporter->reports[0]['idempotencyKey'],
+            $this->reporter->reports[1]['idempotencyKey'],
+            'the two failure lanes of one request collapse onto one report',
+        );
+    }
+
+    public function testPlainBadCredentialsWriteTheWindowExactlyOncePerKey(): void
+    {
+        // The password-wrong shape: the badge resolves, no CheckPassport
+        // error fires, and the LoginFailure lane alone writes the window.
+        $window = new CountingAuthOutcomeWindow();
+        $session = $this->sessionCookie();
+        $request = $this->request(
+            ['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_ADDR' => '198.51.100.7', 'REMOTE_PORT' => '54321'],
+            ['__Host-kiwi-session' => $session],
+            ['_security.last_username' => self::CANARY_USERNAME],
+        );
+        $dispatcher = $this->dispatcher($this->subscriber(targetFieldConfigured: true, authWindow: $window));
+
+        $dispatcher->dispatch(new LoginFailureEvent(new UsernameNotFoundException(), $request), LoginFailureEvent::class);
+
+        $failures = $window->failureKeys();
+        self::assertCount(2, $failures);
+        self::assertCount(2, array_unique($failures), 'each window key is written exactly once by one failed login');
+        self::assertContains($this->identity->sessionId($session), $failures);
+        self::assertContains($this->identity->principalId(TargetIdentifierNormalizer::normalize(self::CANARY_USERNAME)), $failures);
+        self::assertCount(1, $this->reporter->reports, 'one failed login books one report');
+    }
+
+    public function testOneSuccessfulLoginWritesTheWindowOncePerKeyAndCheckPassportWritesNothing(): void
+    {
+        $window = new CountingAuthOutcomeWindow();
+        $session = $this->sessionCookie();
+        $request = $this->request(
+            ['REQUEST_TIME_FLOAT' => 1234567890.5, 'REMOTE_ADDR' => '198.51.100.7', 'REMOTE_PORT' => '54321'],
+            ['__Host-kiwi-session' => $session],
+        );
+        $badge = new UserBadge('resolved-user', static fn (string $identifier): object => new class {
+            public function getUserIdentifier(): string
+            {
+                return 'resolved-user';
+            }
+        });
+        $dispatcher = $this->dispatcher($this->subscriber(targetFieldConfigured: true, authWindow: $window));
+
+        $dispatcher->dispatch(new CheckPassportEvent(new Passport([UserBadge::class => $badge]), $request), CheckPassportEvent::class);
+        $dispatcher->dispatch(new LoginSuccessEvent($request, $this->user(self::CANARY_USERNAME)), LoginSuccessEvent::class);
+
+        $sessionKey = $this->identity->sessionId($session);
+        $principalKey = $this->identity->principalId(TargetIdentifierNormalizer::normalize(self::CANARY_USERNAME));
+        $successes = $window->successKeys();
+        self::assertCount(2, $successes, 'one successful login writes the session window and the principal window once each');
+        self::assertSame([$sessionKey, $principalKey], $successes, 'the session and principal windows are written once, in that order');
+        self::assertSame([], $window->failureKeys(), 'a successful login writes no failure');
+        self::assertCount(1, $this->reporter->reports, 'one successful login books one report');
+        self::assertSame(Outcome::AuthenticationSuccess, $this->reporter->reports[0]['outcome']);
     }
 
     public function testCheckPassportWithoutRequestUsesTheRequestStack(): void

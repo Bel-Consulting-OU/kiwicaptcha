@@ -57,9 +57,11 @@ flow continues.
 ## Server-side helper (forked Authentik only)
 
 `kiwi_verify.py` remains available for deployments that fork Authentik
-and write their own stage: token extraction, the trusted-proxy IP
-walk, the sidecar-style `/verify` request and the decision table, all
-framework-free and unit-tested. Stock Authentik needs no custom code.
+and write their own stage: token resolution (the shared
+collect-and-agree authority rule, refusing
+`token_source_conflict`), the trusted-proxy IP walk, the sidecar-style
+`/verify` request and the decision table, all framework-free and
+unit-tested. Stock Authentik needs no custom code.
 
 ## Test status
 
@@ -67,9 +69,9 @@ Both suites are plain `python3` and run here:
 
 - `tests/test_captcha_stage.py` (14 checks): the stock-stage field
   derivation and fail-closed refusal of ambiguous inputs.
-- `tests/test_kiwi_verify.py` (24 checks): extraction, ip binding, the
-  wire request, the decision table and `verify()` over a stubbed
-  transport.
+- `tests/test_kiwi_verify.py` (50 checks): token resolution (the
+  collect/distinct/conflict matrix), ip binding, the wire request, the
+  decision table and `verify()` over a stubbed transport.
 
 Exercising the stage inside a running Authentik (flow editor, admin
 API) needs a server, which this repository does not ship.

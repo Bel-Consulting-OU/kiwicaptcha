@@ -90,8 +90,10 @@ final class RedisChainedChallengeStateStore implements TransactionalChainedChall
     /** The obligation id: HMAC-SHA256 of the transaction triple, hex. */
     private const OBLIGATION_PATTERN = '/^[0-9a-f]{64}$/D';
 
-    /** The chainable PoW actions (Sha16..Argon64 — never StepUp/Deny). */
-    private const CHAINABLE_ACTIONS = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64'];
+    /** The chainable challenge actions (Sha16..Rsw — never StepUp/Deny;
+     * an rsw demand is servable only where the trapdoor is configured —
+     * the enforcement mapping resolves it to StepUp otherwise). */
+    private const CHAINABLE_ACTIONS = ['sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64', 'rsw'];
 
     private const STATES = ['available', 'reserved', 'issued', 'verified', 'completed', 'step_up_required', 'denied'];
 
@@ -1008,7 +1010,7 @@ LUA;
         // hash of the random chain id, no obligation key is written), so
         // the strict v2 decode stays satisfied.
         if ($requiredAction === null || !\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
-            throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
+            throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Rsw) is required to create a chain record');
         }
         $requestBinding = $requestBinding !== '' ? $requestBinding : null;
         $this->setWithTtl(
@@ -1048,7 +1050,7 @@ LUA;
             throw new \InvalidArgumentException('obligationId must be 64 lowercase hex characters');
         }
         if (!\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
-            throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Argon64) is required to create a chain record');
+            throw new \InvalidArgumentException('a chainable requiredAction (Sha16..Rsw) is required to create a chain record');
         }
         $requestBinding = $requestBinding !== '' ? $requestBinding : null;
         $ttl = max(1, $ttlSecs);
@@ -1639,7 +1641,7 @@ LUA;
         }
         $requiredAction = $rec['requiredAction'] ?? null;
         if (!\is_string($requiredAction) || !\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
-            throw new MalformedChainedChallengeStateException('chain record requiredAction must be a chainable PoW action (Sha16..Argon64)');
+            throw new MalformedChainedChallengeStateException('chain record requiredAction must be a chainable challenge action (Sha16..Rsw)');
         }
         $requiredRank = $rec['requiredRank'] ?? null;
         if (!\is_int($requiredRank) || $requiredRank !== RiskAction::from($requiredAction)->rank()) {

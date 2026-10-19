@@ -19,3 +19,12 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # The native solver core is an FFI plugin: no platform channel code,
+  # just the packaged libkiwicaptcha_solver binary per platform (the
+  # android/build.gradle cargo-ndk plan and the ios podspec staticlib).
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true

@@ -259,7 +259,7 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
 
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Replication topology', $display, 'fail_closed with a single-node direct client must pass the topology check');
-        self::assertStringContainsString('replay_durability "fail_closed"', $display, 'the PASS must note the posture');
+        self::assertStringContainsString('replay_durability "fail_closed"', $display, 'the passing report must note the posture');
     }
 
     public function testOperatorManagedSentinelAggregateCompilesAndTheDoctorPasses(): void
@@ -273,7 +273,7 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Replication topology', $display, 'operator_managed with an aggregate must pass the topology check');
         self::assertStringContainsString('replay_durability "operator_managed"', $display);
-        self::assertStringContainsString('owns promotion eligibility', $display, 'the PASS must keep the operator contract note');
+        self::assertStringContainsString('owns promotion eligibility', $display, 'the passing report must keep the operator contract note');
         self::assertStringNotContainsString('[WARN] Replication topology', $display);
     }
 
@@ -322,8 +322,8 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('[PASS] HA authority', $display);
         self::assertStringContainsString('pinned master|0123456789abcdef0123456789abcdef01234567', $display, 'the doctor names the pinned identity');
         self::assertStringContainsString('replay_durability "operator_managed" is mechanically enforced', $display);
-        self::assertStringContainsString('per-authority pins', $display, 'the PASS states the per-authority pin enforcement');
-        self::assertStringContainsString('zero-stale security-final', $display, 'the PASS states the zero-stale security-final enforcement');
+        self::assertStringContainsString('per-authority pins', $display, 'the passing report states the per-authority pin enforcement');
+        self::assertStringContainsString('zero-stale security-final', $display, 'the passing report states the zero-stale security-final enforcement');
         self::assertStringContainsString('connection-generation cache invalidation', $display, 'the PASS states the connection-generation invalidation');
         self::assertStringContainsString('operator-initialized bootstrap', $display, 'the PASS states the operator-initialized bootstrap');
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
@@ -944,8 +944,11 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $tester->execute([]);
 
         $display = $tester->getDisplay();
-        self::assertStringContainsString('[WARN] RSW time-lock', $display);
-        self::assertStringContainsString('the fields are inert until the algorithm flips to rsw', $display);
+        // The pre-staged pair arms the adaptive rsw rung on any
+        // algorithm: the doctor reports the armed posture as a passing row and
+        // names the baseline issuance algorithm it does not flip.
+        self::assertStringContainsString('[PASS] RSW time-lock', $display);
+        self::assertStringContainsString('the adaptive rsw rung issues sequential time-lock challenges', $display);
         self::assertStringNotContainsString(self::failTag().' RSW time-lock', $display);
     }
 

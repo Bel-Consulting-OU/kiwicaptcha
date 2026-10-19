@@ -33,10 +33,17 @@ class KiwiSignupGate
     return @app.call(env) unless gate?(env)
 
     request = Rack::Request.new(env)
-    token = KiwiCaptcha::Verifier.extract_token(
+    # The token authority rule: every non-empty value from every source
+    # (header lines and the cookie) must agree; two distinct values
+    # refuse the request with the typed code before anything is
+    # verified.
+    resolution = KiwiCaptcha::Verifier.resolve_token(
       headers: env,
       cookies: request.cookies,
     )
+    return denied("token_source_conflict") if resolution[:code] == :token_source_conflict
+
+    token = resolution[:token]
     return denied("missing-input-response") if token.nil?
 
     result = KiwiCaptcha::Verifier.decide(

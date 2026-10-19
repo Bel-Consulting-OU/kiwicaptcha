@@ -1,8 +1,10 @@
 /*
- * kiwicaptcha_solver.h — the cbindgen-style C ABI contract of the Rust
- * wrapper crate around packages/kiwicaptcha-solver.
+ * kiwicaptcha_solver.h — the C ABI contract of the native solver core,
+ * implemented by the FFI crate at packages/kiwicaptcha-flutter/native
+ * (crate kiwicaptcha-ffi, library name kiwicaptcha_solver) and
+ * consumed by lib/src/ffi_bindings.dart.
  *
- * BUILD (the artifact the Dart FFI loads):
+ * BUILD (the artifact the Dart FFI loads; run in native/):
  *   cargo build --release
  *   # Android: cargo-ndk for each ABI
  *   cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o app/src/main/jniLibs build --release
@@ -11,7 +13,11 @@
  *
  * The library name is libkiwicaptcha_solver.{so,a}; the Dart side opens
  * it via DynamicLibrary.open('libkiwicaptcha_solver.so') on Android and
- * DynamicLibrary.process() on iOS.
+ * DynamicLibrary.process() on iOS (the staticlib is force-loaded into
+ * the app image). The ABI's proof is the integration test
+ * native/tests/abi.rs: it dlopens the built cdylib, solves the shared
+ * golden PHP vectors through these exact symbols and verifies each
+ * solution with the workspace core verifier.
  *
  * CONTRACT
  * ========

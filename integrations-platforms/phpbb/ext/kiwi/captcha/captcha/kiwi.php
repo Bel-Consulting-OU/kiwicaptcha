@@ -33,6 +33,9 @@ class kiwi
     /** @var int the failed attempts on this session */
     protected $attempts = 0;
 
+    /** @var ?string the typed refusal code of the last confirm() */
+    protected $last_code = null;
+
     public function __construct(\phpbb\config\config $config, client $client)
     {
         $this->config = $config;
@@ -61,17 +64,20 @@ class kiwi
     }
 
     /**
-     * Verify the submitted challenge. The token arrives in any shim
-     * response field (the native kiwi__token and the incumbent
-     * aliases), the header or the cookie.
+     * Verify the submitted challenge. The token authority rule decides
+     * first: the collected source values must agree, and a
+     * token_source_conflict refusal counts as a failed confirmation
+     * with the typed code exposed through get_last_code().
      */
     public function confirm(): bool
     {
-        $token = kiwi::extract_token(
+        $resolution = kiwi::resolve_token(
             (array) ($_SERVER ?? []),
             (array) ($_POST ?? []),
             (array) ($_COOKIE ?? [])
         );
+        $this->last_code = $resolution['code'];
+        $token = $resolution['token'];
         if ($token === null) {
             ++$this->attempts;
 
@@ -90,6 +96,16 @@ class kiwi
         }
 
         return true;
+    }
+
+    /**
+     * The typed refusal code of the last confirm(): null, or the
+     * corpus code token_source_conflict when the request carried two
+     * or more distinct token values.
+     */
+    public function get_last_code(): ?string
+    {
+        return $this->last_code;
     }
 
     public function get_attempt_count(): int
@@ -148,30 +164,83 @@ class kiwi
     }
 
     /**
-     * The first present token: header, form fields (native and
-     * incumbent), JSON body, cookie.
+     * The token authority rule (the shared decision corpus): every
+     * non-empty value is collected from all sources — the X-Kiwi-Token
+     * header (php merges repeated header lines into one comma-joined
+     * value; the token alphabet has no comma, so the split loses
+     * nothing), the shim form fields (a repeated form key arrives as an
+     * array) and the kiwi_token cookie — repeated values included. One
+     * distinct value verifies however many sources carry it; two or
+     * more distinct values refuse with the typed
+     * token_source_conflict code before any token is verified, so a
+     * trusted gateway's header can never be shadowed by an
+     * attacker-controlled form field or cookie.
      *
      * @param array<string, mixed> $server
      * @param array<string, mixed> $post
      * @param array<string, mixed> $cookie
+     *
+     * @return array{token: ?string, code: ?string} the single distinct
+     *         token, or the typed refusal code
+     *         (token_source_conflict) with a null token
      */
-    public static function extract_token(array $server, array $post, array $cookie): ?string
+    public static function resolve_token(array $server, array $post, array $cookie): array
     {
+        $distinct = [];
+        foreach (self::token_candidates($server, $post, $cookie) as $candidate) {
+            $candidate = trim((string) $candidate);
+            if ($candidate === '') {
+                continue;
+            }
+            $distinct[$candidate] = true;
+            if (count($distinct) > 1) {
+                return ['token' => null, 'code' => 'token_source_conflict'];
+            }
+        }
+        if ($distinct === []) {
+            return ['token' => null, 'code' => null];
+        }
+
+        return ['token' => (string) array_key_first($distinct), 'code' => null];
+    }
+
+    /**
+     * Every raw token candidate of the closed source list: the header
+     * lines (comma-split), the shim form fields (string or array) and
+     * the kiwi_token cookie.
+     *
+     * @param array<string, mixed> $server
+     * @param array<string, mixed> $post
+     * @param array<string, mixed> $cookie
+     *
+     * @return list<string>
+     */
+    protected static function token_candidates(array $server, array $post, array $cookie): array
+    {
+        $candidates = [];
         $header = $server['HTTP_X_KIWI_TOKEN'] ?? null;
-        if (is_string($header) && trim($header) !== '') {
-            return trim($header);
+        if (is_string($header)) {
+            foreach (explode(',', $header) as $part) {
+                $candidates[] = $part;
+            }
         }
         foreach (['kiwi__token', 'g-recaptcha-response', 'h-captcha-response', 'cf-turnstile-response', 'frc-captcha-solution', 'altcha'] as $field) {
             $value = $post[$field] ?? null;
-            if (is_string($value) && trim($value) !== '') {
-                return trim($value);
+            if (is_string($value)) {
+                $candidates[] = $value;
+            } elseif (is_array($value)) {
+                foreach ($value as $item) {
+                    if (is_string($item)) {
+                        $candidates[] = $item;
+                    }
+                }
             }
         }
         $cookie_token = $cookie['kiwi_token'] ?? null;
-        if (is_string($cookie_token) && trim($cookie_token) !== '') {
-            return trim($cookie_token);
+        if (is_string($cookie_token)) {
+            $candidates[] = $cookie_token;
         }
 
-        return null;
+        return $candidates;
     }
 }

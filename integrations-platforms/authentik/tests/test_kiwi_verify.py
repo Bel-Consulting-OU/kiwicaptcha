@@ -10,10 +10,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kiwi_verify import (  # noqa: E402
+    MALFORMED_TOKEN,
+    TOKEN_SOURCE_CONFLICT,
     build_request,
     client_ip,
     decide,
-    extract_token,
+    resolve_token,
     verify,
 )
 
@@ -29,15 +31,62 @@ def check(name, condition):
         print(f"FAIL: {name}", file=sys.stderr)
 
 
-# Token extraction.
-check("header token", extract_token(" hdr ", {}, {}) == "hdr")
-check("native form token", extract_token(None, {"kiwi__token": "n"}, {}) == "n")
-check("incumbent form token", extract_token(None, {"cf-turnstile-response": "cf"}, {}) == "cf")
-check("json body namespaced token", extract_token(None, {}, {}, '{"kiwi_token":"jt"}') == "jt")
-check("json body captcha_response token", extract_token(None, {}, {}, '{"captcha_response":"cr"}') == "cr")
-check("json body bare token field is ignored", extract_token(None, {}, {}, '{"token":"app-secret"}') is None)
-check("cookie token", extract_token(None, {}, {"kiwi_token": "ck"}) == "ck")
-check("missing token is None", extract_token(None, {}, {}) is None)
+# Token resolution: the collect/distinct/conflict authority rule.
+check("header token", resolve_token(" hdr ", {}, {}) == {"token": "hdr"})
+check("native form token", resolve_token(None, {"kiwi__token": "n"}, {}) == {"token": "n"})
+check("incumbent form token", resolve_token(None, {"cf-turnstile-response": "cf"}, {}) == {"token": "cf"})
+check("json body namespaced token", resolve_token(None, {}, {}, '{"kiwi_token":"jt"}') == {"token": "jt"})
+check("json body captcha_response token", resolve_token(None, {}, {}, '{"captcha_response":"cr"}') == {"token": "cr"})
+check(
+    "json body bare token field is ignored",
+    resolve_token(None, {}, {}, '{"token":"app-secret"}') == {"code": MALFORMED_TOKEN},
+)
+check("cookie token", resolve_token(None, {}, {"kiwi_token": "ck"}) == {"token": "ck"})
+check("missing token is malformed_token", resolve_token(None, {}, {}) == {"code": MALFORMED_TOKEN})
+check("blank values are no token", resolve_token("  ", {"kiwi__token": ""}, {"kiwi_token": ""}) == {"code": MALFORMED_TOKEN})
+
+# The ambiguity matrix: zero distinct values pass nothing, one distinct
+# value verifies however many sources carry it, two or more distinct
+# values refuse with the typed token_source_conflict code before any
+# verification.
+check("header a form b conflicts", resolve_token("a", {"kiwi__token": "b"}, {}) == {"code": TOKEN_SOURCE_CONFLICT})
+check("header a cookie b conflicts", resolve_token("a", {}, {"kiwi_token": "b"}) == {"code": TOKEN_SOURCE_CONFLICT})
+check(
+    "form a json b conflicts",
+    resolve_token(None, {"kiwi__token": "a"}, {}, '{"kiwi_token":"b"}') == {"code": TOKEN_SOURCE_CONFLICT},
+)
+check(
+    "json a cookie b conflicts",
+    resolve_token(None, {}, {"kiwi_token": "b"}, '{"kiwi_token":"a"}') == {"code": TOKEN_SOURCE_CONFLICT},
+)
+check(
+    "two distinct repeated header lines conflict",
+    resolve_token(["a", "b"], {}, {}) == {"code": TOKEN_SOURCE_CONFLICT},
+)
+check(
+    "a comma-joined header line splits into values",
+    resolve_token("a, b", {}, {}) == {"code": TOKEN_SOURCE_CONFLICT},
+)
+check(
+    "an array-valued form param with distinct values conflicts",
+    resolve_token(None, {"kiwi__token": ["a", "b"]}, {}) == {"code": TOKEN_SOURCE_CONFLICT},
+)
+check(
+    "same token in every source verifies",
+    resolve_token("a", {"kiwi__token": "a"}, {"kiwi_token": "a"}) == {"token": "a"},
+)
+check(
+    "same value twice in the header verifies",
+    resolve_token(["a", "a"], {}, {}) == {"token": "a"},
+)
+check(
+    "same value as a repeated form array verifies",
+    resolve_token(None, {"kiwi__token": ["a", "a"]}, {}) == {"token": "a"},
+)
+check(
+    "whitespace-padded equal values are one distinct value",
+    resolve_token(" a ", {"kiwi__token": "a "}, {"kiwi_token": " a"}) == {"token": "a"},
+)
 
 # Ip binding.
 check("peer ip untrusted", client_ip("10.9.9.9", "1.2.3.4, 10.0.0.1") == "10.9.9.9")

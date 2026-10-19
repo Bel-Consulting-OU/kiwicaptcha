@@ -9,9 +9,9 @@ import org.keycloak.provider.ProviderConfigProperty;
 /**
  * The plain-JDK test of the factory surface: the flow-editor
  * requirement choices (REQUIRED, ALTERNATIVE, DISABLED) and the
- * config properties (verify URL, bearer, scope, trust-proxy switch).
- * It needs the Keycloak SPI jars on the classpath, unlike the pure
- * KiwiVerifyClientTest; see README.md for the command.
+ * config properties (verify URL, bearer, scope, trusted-proxy CIDR
+ * list). It needs the Keycloak SPI jars on the classpath, unlike the
+ * pure KiwiVerifyClientTest; see README.md for the command.
  */
 public final class KiwiAuthenticatorFactoryTest {
 
@@ -42,12 +42,12 @@ public final class KiwiAuthenticatorFactoryTest {
         check("bearer is configurable", property(properties, KiwiAuthenticator.CONFIG_BEARER) != null);
         check("scope is configurable", property(properties, KiwiAuthenticator.CONFIG_SCOPE) != null);
 
-        ProviderConfigProperty trustProxy = property(properties, KiwiAuthenticator.CONFIG_TRUST_PROXY);
-        check("trust-proxy switch is configurable", trustProxy != null);
-        check("trust-proxy switch is boolean",
-                trustProxy != null && ProviderConfigProperty.BOOLEAN_TYPE.equals(trustProxy.getType()));
-        check("trust-proxy switch defaults off",
-                trustProxy != null && "false".equals(String.valueOf(trustProxy.getDefaultValue())));
+        ProviderConfigProperty trustCidrs = property(properties, KiwiAuthenticator.CONFIG_TRUST_PROXY_CIDRS);
+        check("trusted-proxy cidrs are configurable", trustCidrs != null);
+        check("trusted-proxy cidrs are a string list",
+                trustCidrs != null && ProviderConfigProperty.STRING_TYPE.equals(trustCidrs.getType()));
+        check("trusted-proxy cidrs default to trust nobody",
+                trustCidrs != null && "".equals(String.valueOf(trustCidrs.getDefaultValue())));
 
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);

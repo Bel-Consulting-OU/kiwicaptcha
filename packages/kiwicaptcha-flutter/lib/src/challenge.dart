@@ -9,6 +9,8 @@ enum KiwiAlgorithm { sha256, argon2id, rsw }
 class KiwiLimits {
   static const int maxHashes = 20000000;
   static const int shaMaxTargetBits = 20;
+  static const int argonMaxTargetBits = 10;
+  static const int argonMaxMibKib = 65536;
   static const int rswTMin = 10000;
   static const int rswTMax = 300000;
   static const int maxDurationMs = 3600000;

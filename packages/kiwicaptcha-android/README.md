@@ -10,6 +10,9 @@ solve, pack the wire token; your backend runs siteverify.
 
 - `KiwiSolver` / `KiwiToken` / `KiwiBase64` / `KiwiChallenge` — the
   solver core, dependency-free pure Kotlin.
+- `Argon2id` / `Blake2b` (`src/main/java`) — the vetted pure-Java
+  Argon2id stack, a byte-identical port of the JVM SDK's sources
+  (RFC 9106-pinned; the Java sources compile into the Kotlin module).
 - `KiwiClient` — the challenge POST (HttpURLConnection) and the
   siteverify body builder.
 - `KiwiCaptchaView` — the classic View (state label, progress, Retry).
@@ -48,18 +51,43 @@ val token = KiwiToken.encode(challenge, solution)
 (protocol/limits.json) before any work is spent. SHA-256 comes from
 `java.security.MessageDigest`; the rsw time lock from
 `java.math.BigInteger` (T sequential `modPow(2, n)` squarings), pinned
-to an externally computed vector in the tests. Argon2id is fail-closed:
-the JVM platform ships no vetted Argon2 and this package refuses a
-home-grown memory-hard function (link BouncyCastle or a native library
-and extend `KiwiSolver` to lift it). Execution-armed challenges are
-refused outright — the browser interpreter is outside the native path.
+to an externally computed vector in the tests. Argon2id runs on the
+pure-Java implementation shipped in `src/main/java` (the same vetted
+sources and shared vectors the JVM SDK carries — RFC 9106 input set,
+reference-build differential tags, and the libsodium lanes-one golden
+vector), so the official Android client solves every rung the adaptive
+risk engine can issue.
+
+The argon2id client contract mirrors the Rust and Flutter solvers:
+
+- preimage: `Argon2id(prefix || decimal(counter), salt, m_kib, t, p)`
+  with a 32-byte tag, `salt` the decoded base64 — the same derivation
+  the server verifier re-runs;
+- difficulty `target_bits` 1..=10, `m_kib` 8..=65536 KiB (and at least
+  `8 * p`), `t` 3..=6, `p` = 1; anything else is refused with the typed
+  `DifficultyBeyondCap` / `UnsupportedArgon2Params` errors;
+- the search is bounded by `KiwiLimits.MAX_HASHES` (20,000,000) like
+  every other SDK solver and ends in the typed `Exhausted` error naming
+  the attempted count.
+
+Memory envelope: each derivation allocates the profile's working
+memory, up to 64 MiB at the `argon64` ceiling (`m_kib` × 1024 bytes in
+`long[]` blocks, no extra copies). The search allocates it per
+derivation, so peak heap on a device stays around the challenge's own
+memory cost; run the solve off the main thread (the widget already
+does). Execution-armed challenges are refused outright — the browser
+interpreter is outside the native path.
 
 ## Tests
 
-`src/test/kotlin` holds the JVM unit tests: the SHA-256 vectors, the
-known search counter for a fixed challenge, the token grammar bytes,
-the rsw external vector, the validation refusals, the JSON reader, the
-siteverify body, and the base64 round trip.
+`src/test` holds the JVM unit tests: the BLAKE2b/Argon2id shared
+vectors (`Argon2idTest`, the same pins the JVM SDK carries), the
+solver-level argon tests (a known winning counter, the wire token
+pack, the exhaustion branch, the caps refusals, and a solve at the
+64 MiB memory ceiling), the SHA-256 vectors, the known search counter
+for a fixed challenge, the token grammar bytes, the rsw external
+vector, the validation refusals, the JSON reader, the siteverify body,
+and the base64 round trip.
 
 Run them with the pinned wrapper (AGP 8.13 needs Gradle up to 9.5):
 

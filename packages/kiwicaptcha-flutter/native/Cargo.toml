@@ -1,0 +1,38 @@
+[package]
+name = "kiwicaptcha-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "KiwiCaptcha Flutter FFI core: the C ABI of libkiwicaptcha_solver the Dart bindings load"
+license = "MIT"
+repository = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+keywords = ["captcha", "proof-of-work", "ffi", "flutter", "kiwicaptcha"]
+categories = ["cryptography", "external-ffi-bindings"]
+
+# The library FILE name is the ABI name the Dart side loads:
+# libkiwicaptcha_solver.{so,dylib} / kiwicaptcha_solver.dll. The package
+# id stays `kiwicaptcha-ffi` so the workspace keeps it distinct from the
+# automation solver crate `kiwicaptcha-solver`.
+[lib]
+name = "kiwicaptcha_solver"
+crate-type = ["cdylib", "staticlib"]
+
+[features]
+default = ["argon"]
+# Compiled out (`--no-default-features`), kiwi_solve_argon2id answers
+# KIWI_ERR_ARGON_UNAVAILABLE (3) — the exact code the Dart bindings
+# surface as KiwiRefusal.argonUnavailable.
+argon = ["dep:argon2"]
+
+[dependencies]
+# The sharing spine: the protocol caps, the rsw base derivation and the
+# 512-hex proof rendering come from the workspace core crate, so this
+# ABI can never drift from the verifier it must satisfy.
+kiwicaptcha = { version = "1.7.0", path = "../../kiwicaptcha" }
+sha2 = "0.10"
+argon2 = { version = "0.5", optional = true }
+num-bigint = "0.4"
+
+[dev-dependencies]
+base64 = "0.22"
+libloading = "0.8"
+serde_json = "1"

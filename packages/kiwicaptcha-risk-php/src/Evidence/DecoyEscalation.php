@@ -85,7 +85,8 @@ final class DecoyEscalation
             4 => RiskAction::Argon16,
             5 => RiskAction::Argon32,
             6 => RiskAction::Argon64,
-            7 => RiskAction::StepUp,
+            7 => RiskAction::Rsw,
+            8 => RiskAction::StepUp,
             default => RiskAction::Deny,
         };
     }

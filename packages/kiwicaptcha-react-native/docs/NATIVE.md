@@ -1,28 +1,58 @@
-# Native solver module contract
+# Native solver modules
 
-The `@kiwicaptcha/react-native` package performs every proof of work on
-a native thread. There is no WebView and no JavaScript-thread search
-above the low-difficulty ceiling. This document is the contract the
-iOS and Android modules implement; the JS side reads them through the
-React Native bridge as `NativeModules.KiwiCaptchaSolver`.
+The `@kiwicaptcha/react-native` package ships real native modules for
+both platforms, in this package:
 
-The algorithm, caps and token grammar are shared with the reference
-implementations, never forked: `packages/kiwicaptcha-solver` (Rust) is
-the normative solver, `protocol/limits.json` the normative caps.
+- `android/` — Kotlin. `KiwiSolverPackage` (a classic `ReactPackage`)
+  registers `KiwiCaptchaSolverModule`, which runs the SHA-256 search
+  over `java.security.MessageDigest` on the module's own background
+  executor.
+- `ios/` — Swift + a tiny Obj-C bridge. `KiwiCaptchaSolver`
+  (`@objc(KiwiCaptchaSolver)`) runs the SHA-256 search over CryptoKit on
+  a serial background queue; `KiwiCaptchaSolverBridge.m` registers it
+  with `RCT_EXTERN_MODULE`, and `KiwiCaptchaSolver.podspec` is the pod.
+- `src/native.ts` — the JS resolver that finds the module;
+  `src/solve.ts` — the dispatch described below.
+
+Every proof of work runs on a native thread when the module is linked.
+There is no WebView, and no JavaScript-thread search above the
+low-difficulty ceiling. The algorithm, caps and token grammar are
+shared with the reference implementations, never forked:
+`packages/kiwicaptcha-solver` (Rust) is the normative solver,
+`protocol/limits.json` the normative caps. The exact native behavior is
+pinned by the Jest suite (`test/native-contract.test.ts`), which runs a
+pure-JS mirror of the native loop against the shared vector.
 
 ## JS-side lookup
 
 ```ts
-import { NativeModules } from "react-native";
-const solver = NativeModules.KiwiCaptchaSolver; // may be undefined
+import { nativeSolver, NATIVE_MODULE_NAME } from "@kiwicaptcha/react-native";
+// NATIVE_MODULE_NAME === "KiwiCaptchaSolver"
 ```
 
-A missing module is a fail-closed condition: argon2id and rsw reject
-with `KiwiSolveError` (`refusal: "solver-unavailable"`), and sha256
-above the low-difficulty ceiling (8 bits) rejects the same way. sha256
-at or below 8 bits runs in JS through the optional
-`react-native-quick-crypto` peer (or the bundled pure-TS SHA-256) and
-never needs the module.
+`nativeSolver()` consults `TurboModuleRegistry` first (the New
+Architecture, including the legacy-module interop proxy RN 0.74+
+serves classic `ReactPackage` modules through) and then
+`NativeModules.KiwiCaptchaSolver` (the classic bridge). Both names are
+the single bridge name `KiwiCaptchaSolver`, which is what both native
+modules register under.
+
+The solved-path split, exactly:
+
+1. **Module linked** — every validated challenge goes native. sha256
+   challenges are solved natively (background thread/queue, never the
+   JS thread). argon2id and rsw are refused by the module with the
+   `UNSUPPORTED_ALGORITHM` code, and the JS side rejects with
+   `KiwiSolveError` (`refusal: "solver-unavailable"`). If the native
+   solve of a sha256 challenge inside the low-difficulty window
+   (8 bits or fewer) fails, the dispatch retries the same profile on
+   the JS thread — never a weaker one.
+2. **No module linked** — the pure-TS loop is the default for sha256
+   at or below the low-difficulty ceiling (8 bits), through the
+   optional `react-native-quick-crypto` peer or the bundled pure-TS
+   SHA-256. Everything else fails closed: `KiwiSolveError` with
+   `refusal: "solver-unavailable"`, naming the missing
+   `KiwiCaptchaSolver` module honestly.
 
 ## Module interface
 
@@ -40,21 +70,44 @@ of the `KiwiSolution` shape:
 {
   "counter": 45,
   "durationMs": 120,
-  "hashHex": "00f9718e...6982",
-  "rswProof": null
+  "hashHex": "00f9718e...6982"
 }
 ```
 
-`counter` is the winning search counter (0 for rsw), `durationMs` the
-wall-clock solve duration, `hashHex` the winning 64-hex digest
-(informational), `rswProof` the 512-hex final value for rsw solves and
-`null` otherwise. The promise rejects (or answers a JSON object with an
-`error` key) when the challenge is refused; the JS side maps every
-rejection to `solver-unavailable`.
+`counter` is the winning search counter, `durationMs` the wall-clock
+solve duration, `hashHex` the winning 64-hex digest (informational).
+The promise rejects with a typed code when the challenge is refused;
+the JS side maps every rejection to `solver-unavailable`. The codes:
+`MALFORMED`, `DIFFICULTY_BEYOND_CAP`, `UNSUPPORTED_ALGORITHM`,
+`EXECUTION_UNSUPPORTED`, `EXHAUSTED` (the 20,000,000-hash search window
+closed without a winner).
+
+## The pinned solve contract
+
+The native loop is byte-identical to the pure-TS fallback (same
+counter, same digest), because it is the same algorithm:
+
+- preimage: `prefix || decimal(counter) || salt` — the prefix and the
+  ASCII decimal counter as bytes, the salt as its decoded base64
+  bytes, counter starting at 0;
+- winner: the first counter whose SHA-256 digest shows at least
+  `targetBits` leading zero bits (big-endian bit order);
+- bounds: 1 <= targetBits <= 20, at most 20,000,000 hashes
+  (`protocol/limits.json` `solver_max_hashes`), then the typed
+  `EXHAUSTED` refusal;
+- refusals before any work: an `execution_program`-armed challenge
+  (`EXECUTION_UNSUPPORTED`), a broken nonce/prefix/salt
+  (`MALFORMED`), difficulty above the shared cap
+  (`DIFFICULTY_BEYOND_CAP`), and any non-sha256 algorithm in this
+  module (`UNSUPPORTED_ALGORITHM`).
+
+The shared vector pins all of it: prefix `kiwi|login|`, salt
+`AAECAw==`, targetBits 8 → counter 45, hashHex
+`00f9718e2a0397b3ca8fe75c44499fccee788e243173dadea546bd4e45af6982`.
 
 ## Optional progress channel
 
-A module may additionally implement:
+Both modules additionally implement:
 
 ```
 KiwiCaptchaSolver.solveWithProgress(
@@ -64,15 +117,17 @@ KiwiCaptchaSolver.solveWithProgress(
 ```
 
 When present, the JS side dispatches there and forwards the reports
-(same JSON answer shape). The module must report at its own bounded
-cadence, never once per hash; the JS side additionally enforces a
-100 ms wall-clock floor and drops duplicate counts, so the bridge can
-never flood the JS thread. When the method is absent, `solve` is used
-and the caller still receives the start (`attempted: 0`) and final
-(winning counter + 1, or `t` for rsw) reports. `AcquireTokenOptions.onProgress`
-receives the same `{ attempted }` shape.
+(same JSON answer shape). The module reports at its own bounded
+cadence — at most one report per 1024 attempts AND per 100 ms, plus
+the winning report, never once per hash — and the JS side additionally
+enforces a 100 ms wall-clock floor and drops duplicate counts, so the
+bridge can never flood the JS thread. When the method is absent,
+`solve` is used and the caller still receives the start
+(`attempted: 0`) and final (winning counter + 1) reports.
+`AcquireTokenOptions.onProgress` receives the same `{ attempted }`
+shape.
 
-## Caps the module must enforce
+## Caps the module enforces
 
 The module re-checks the client contract before spending work, exactly
 like the Rust solver does. Refuse, never degrade:
@@ -81,71 +136,85 @@ like the Rust solver does. Refuse, never degrade:
 - prefix: 1..=4096 bytes. salt: decodable base64, 1..=512 chars.
 - sha256: 1 <= targetBits <= 20; search `prefix || decimal(counter) ||
   salt` (counter from 0), cap 20,000,000 hashes.
-- argon2id: 1 <= targetBits <= 10, m_kib in 8..=65536 with
-  m_kib >= 8 * p, t in 3..=6, p == 1; password `prefix ||
-  decimal(counter)`, the issued salt and parameters.
-- rsw: t in 10000..=300000, p == 1, m_kib == 0, modulus exactly 256
-  bytes with the top bit set and the low bit odd; T sequential modular
-  squarings of SHA-256(prefix || nonce) mod n.
+- argon2id / rsw: not implemented in this package's native modules —
+  refused with `UNSUPPORTED_ALGORITHM` (see the Argon2id status below).
 - `execution_program` present: refuse. The browser interpreter is
   outside the native path.
 
-## iOS module (Swift)
+## Argon2id status, per platform
 
-```swift
-@objc(KiwiCaptchaSolver)
-final class KiwiCaptchaSolver: NSObject {
-  @objc(solve:resolver:rejecter:)
-  func solve(
-    _ challengeJson: String,
-    resolver resolve: @escaping RCTPromiseResolveBlock,
-    rejecter reject: @escaping RCTPromiseRejectBlock
-  ) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let solution = try KiwiSolver().solve(challengeJson: challengeJson)
-        resolve(String(data: JSONEncoder().encode(solution), encoding: .utf8))
-      } catch {
-        reject("solve_failed", String(describing: error), nil)
-      }
-    }
-  }
-}
-```
+- **`packages/kiwicaptcha-ios` (SwiftPM)**: implements Argon2id —
+  the vendored reference C implementation (phc-winner-argon2, the
+  `CArgon2` target), never a home-grown memory-hard function. The old
+  "iOS argon2id is fail-closed" claim is obsolete.
+- **`packages/kiwicaptcha-android` (JVM/Android library)**: argon2id
+  is fail-closed (no vetted JVM implementation ships with Android;
+  link BouncyCastle or a native library to lift it).
+- **This package's native modules (`android/`, `ios/`)**: SHA-256
+  only. Argon2id and rsw are refused with the typed
+  `UNSUPPORTED_ALGORITHM` code, and the JS orchestration surfaces
+  `solver-unavailable` — there is no JS Argon2 implementation in the
+  React Native package to fall back to either. An app that needs
+  argon2id on iOS links the SwiftPM package above; the honest refusal
+  is the failure mode everywhere else.
 
-The solve core is `packages/kiwicaptcha-ios` (SwiftPM): SHA-256 via
-CryptoKit, rsw via its internal bignum, argon2id fail-closed (the
-iOS package refuses argon2id honestly rather than shipping a weak
-implementation; link a vetted C implementation to lift that).
+## Android integration (Gradle)
 
-## Android module (Kotlin)
+Autolinking (React Native 0.73+): nothing to do. The CLI scans the
+library's `android/` sources for the `ReactPackage` and adds
+`KiwiSolverPackage` to the app.
+
+Manual, if autolinking is disabled:
 
 ```kotlin
-class KiwiCaptchaSolverModule(reactContext: ReactApplicationContext) :
-  ReactContextBaseJavaModule(reactContext) {
-  override fun getName() = "KiwiCaptchaSolver"
-
-  @ReactMethod
-  fun solve(challengeJson: String, promise: Promise) {
-    task { // a background executor, never the UI thread
-      try {
-        promise.resolve(KiwiSolver().solveJson(challengeJson))
-      } catch (t: Throwable) {
-        promise.reject("solve_failed", t.message, t)
-      }
+// MainApplication.kt
+override fun getPackages(): List<ReactPackage> =
+    PackageList(this).packages.apply {
+        add(com.kiwicaptcha.reactnative.KiwiSolverPackage())
     }
-  }
-}
 ```
 
-The solve core is `packages/kiwicaptcha-android`: SHA-256 via
-`java.security.MessageDigest`, rsw via `java.math.BigInteger`,
-argon2id fail-closed for the same reason as iOS.
+`android/build.gradle` follows the current RN library template: the
+`com.facebook.react` plugin (resolved through the app's includeBuild
+of `@react-native/gradle-plugin`), `compileSdkVersion` 35 by default
+(the app's `rootProject.ext` values win), `minSdkVersion` 21 by
+default, AGP/Kotlin pinned only as standalone fallbacks. The module is
+a classic `ReactPackage`, which the New Architecture serves through its
+legacy-module interop layer (default-on since RN 0.74) — no codegen
+configuration is needed.
+
+## iOS integration (CocoaPods)
+
+Autolinking: nothing to do; `pod install` picks up
+`KiwiCaptchaSolver.podspec` from node_modules. Manual:
+
+```ruby
+pod 'KiwiCaptchaSolver', :path => '../node_modules/@kiwicaptcha/react-native'
+```
+
+The pod depends on `React-Core`, floors iOS/tvOS at 13.4 (CryptoKit
+needs 13.0+; RN 0.76+ apps simply set their own higher minimum), and
+floors Swift at 5.7 via `s.swift_version` plus
+`s.pod_target_xcconfig` — the podspec-legal form of the post-install
+pacing (`post_install` itself is a Podfile-only hook). If the app's
+Podfile rewrites `SWIFT_VERSION` in its own `post_install`, re-assert
+the floor for this pod there:
+
+```ruby
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    next unless target.name == 'KiwiCaptchaSolver'
+    target.build_configurations.each do |config|
+      config.build_settings['SWIFT_VERSION'] = '5.7'
+    end
+  end
+end
+```
 
 ## Expo
 
-The modules are classic Native Modules; an Expo config plugin (or a
-development build with `expo-modules-autolinking` aware pods/gradle
-files) exposes them. Expo Go cannot carry native modules, so Expo Go
-sessions run in the fail-closed mode: low-difficulty sha256 only, and
-the error names the missing module honestly.
+The modules are classic native modules linked by autolinking, so Expo
+development builds include them with no config plugin. Expo Go cannot
+carry native modules: Expo Go sessions run in the fail-closed mode
+(low-difficulty sha256 only), and the error names the missing
+`KiwiCaptchaSolver` module honestly.

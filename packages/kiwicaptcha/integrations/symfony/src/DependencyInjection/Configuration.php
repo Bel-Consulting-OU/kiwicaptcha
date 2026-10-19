@@ -22,7 +22,7 @@ use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
  */
 final class Configuration implements ConfigurationInterface
 {
-    private const RISK_ACTIONS = ['allow', 'sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64', 'step_up', 'deny'];
+    private const RISK_ACTIONS = ['allow', 'sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64', 'rsw', 'step_up', 'deny'];
 
     /**
      * True when the configured value is an unresolved Symfony env

@@ -1000,6 +1000,22 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame([], $this->chainRecords($store), 'no chain state may be created for a non-chainable action');
     }
 
+    public function testRequireStage2OpensAnRswChainAtRankSeven(): void
+    {
+        $store = new ArrayChainedChallengeStateStore();
+        $service = $this->chainService($store);
+        $expiry = time() + 300;
+
+        // The adaptive rsw rung (change.md 1.4) opens a chain exactly like
+        // every other challenge rung: the record carries the rsw action at
+        // its ladder rank 7, and the store's chainable gate accepts it.
+        $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Rsw, $expiry);
+        self::assertSame(RiskAction::Rsw, $requirement->requiredAction, 'the rsw rung is chainable');
+        self::assertSame(7, $requirement->requiredRank, 'the rsw rank sits between argon64 (6) and step_up (8)');
+        $records = $this->chainRecords($store);
+        self::assertSame('rsw', $records[$requirement->chainId]['requiredAction'] ?? null, 'the chain record carries the rsw action the store validates');
+    }
+
     public function testStaleObligationPointingAtMissingChainIsRepaired(): void
     {
         $store = new ArrayChainedChallengeStateStore();

@@ -49,14 +49,13 @@ public data class KiwiSolution(
 public sealed class KiwiSolveError(message: String) : Exception(message) {
     public class Malformed(message: String) : KiwiSolveError(message)
     public class DifficultyBeyondCap(val targetBits: Long, val cap: Long) :
-        KiwiSolveError("target_bits $targetBits exceeds the sha256 solver cap $cap")
+        KiwiSolveError("target_bits $targetBits exceeds the solver cap $cap")
 
-    /** Argon2id is fail-closed: no vetted implementation on the JVM
-     * platform ships with Android, and this package refuses a
-     * home-grown memory-hard function. Link BouncyCastle or a native
-     * library and extend [KiwiSolver] to lift it. */
-    public class ArgonUnavailable :
-        KiwiSolveError("argon2id is not implemented in this package (fail-closed)")
+    /** The argon2id parameters are outside the issued client contract
+     * (m_kib 8..=65536 KiB and at least 8*p, t 3..=6, p = 1) — the same
+     * refusal the Rust and Flutter solvers raise. */
+    public class UnsupportedArgon2Params(val mKib: Long, val t: Long, val p: Long) :
+        KiwiSolveError("argon2id parameters are outside the client contract (m_kib $mKib, t $t, p $p)")
 
     public class UnsupportedRswParams(message: String) : KiwiSolveError(message)
     public class ExecutionUnsupported :
@@ -70,6 +69,8 @@ public sealed class KiwiSolveError(message: String) : Exception(message) {
 public object KiwiLimits {
     public const val MAX_HASHES: Long = 20_000_000L
     public const val SHA_MAX_TARGET_BITS: Long = 20L
+    public const val ARGON_MAX_TARGET_BITS: Long = 10L
+    public const val ARGON_MAX_M_KIB: Long = 65_536L
     public const val RSW_T_MIN: Long = 10_000L
     public const val RSW_T_MAX: Long = 300_000L
     public const val MAX_DURATION_MS: Long = 3_600_000L
@@ -127,8 +128,11 @@ public object KiwiBase64 {
  * The native Android solver core: the exact proof of work a browser
  * widget performs, inside the shared caps. SHA-256 comes from
  * java.security.MessageDigest, the rsw time lock from java.math
- * .BigInteger, and Argon2id is fail-closed (see
- * [KiwiSolveError.ArgonUnavailable]).
+ * .BigInteger, and Argon2id from the vetted pure-Java [Argon2id]
+ * implementation the JVM SDK carries (RFC 9106-pinned; see
+ * Argon2idTest). The argon2id preimage is the shared solver contract:
+ * Argon2id(password `prefix || decimal(counter)`, salt, m_kib, t, p)
+ * with a 32-byte tag, the same derivation the server verifier re-runs.
  */
 public object KiwiSolver {
 
@@ -153,7 +157,19 @@ public object KiwiSolver {
             "sha256" -> if (c.targetBits < 1 || c.targetBits > KiwiLimits.SHA_MAX_TARGET_BITS) {
                 throw KiwiSolveError.DifficultyBeyondCap(c.targetBits, KiwiLimits.SHA_MAX_TARGET_BITS)
             }
-            "argon2id" -> throw KiwiSolveError.ArgonUnavailable()
+            "argon2id" -> {
+                if (c.targetBits < 1 || c.targetBits > KiwiLimits.ARGON_MAX_TARGET_BITS) {
+                    throw KiwiSolveError.DifficultyBeyondCap(c.targetBits, KiwiLimits.ARGON_MAX_TARGET_BITS)
+                }
+                // The issued argon2id contract: the memory/time/parallelism
+                // ranges the Rust and Flutter solvers enforce, and the
+                // profile split the server verifier accepts (p = 1, t >= 3).
+                if (c.mKib < 8 || c.mKib > KiwiLimits.ARGON_MAX_M_KIB || c.mKib < 8 * c.p ||
+                    c.t < 3 || c.t > 6 || c.p != 1L
+                ) {
+                    throw KiwiSolveError.UnsupportedArgon2Params(c.mKib, c.t, c.p)
+                }
+            }
             "rsw" -> {
                 if (c.t < KiwiLimits.RSW_T_MIN || c.t > KiwiLimits.RSW_T_MAX || c.p != 1L || c.mKib != 0L) {
                     throw KiwiSolveError.UnsupportedRswParams(
@@ -178,8 +194,9 @@ public object KiwiSolver {
         validate(challenge)
         return when (challenge.algorithm) {
             "sha256" -> solveSha256(challenge, startedAt)
+            "argon2id" -> solveArgon2id(challenge, startedAt)
             "rsw" -> solveRsw(challenge, startedAt)
-            else -> throw KiwiSolveError.ArgonUnavailable()
+            else -> throw KiwiSolveError.Malformed("the algorithm is not one of sha256, argon2id, rsw")
         }
     }
 
@@ -198,6 +215,45 @@ public object KiwiSolver {
             digest.update(counter.toString().toByteArray(Charsets.UTF_8))
             digest.update(salt)
             val hash = digest.digest()
+            if (leadingZeroBits(hash) >= c.targetBits) {
+                return KiwiSolution(
+                    counter = counter,
+                    durationMs = durationSince(startedAt),
+                    hashes = counter + 1,
+                    hashHex = hex(hash),
+                )
+            }
+        }
+        throw KiwiSolveError.Exhausted(maxHashes)
+    }
+
+    /**
+     * The Argon2id search: Argon2id(password `prefix || decimal(counter)`,
+     * salt, m_kib, t, p = 1) for each counter from zero, first hit wins,
+     * exactly the loop the Rust solver and the wasm chunk solver run.
+     * Each derivation allocates the m_kib-block working memory (up to
+     * 64 MiB at the protocol ceiling), so the search is memory-hard at
+     * the challenge's own price.
+     */
+    public fun solveArgon2id(
+        c: KiwiChallenge,
+        startedAt: Long,
+        maxHashes: Long = KiwiLimits.MAX_HASHES,
+    ): KiwiSolution {
+        val salt = KiwiBase64.decode(c.salt) ?: throw KiwiSolveError.Malformed("the salt stopped decoding")
+        val prefix = c.prefix.toByteArray(Charsets.UTF_8)
+        for (counter in 0 until maxHashes) {
+            val password = prefix + counter.toString().toByteArray(Charsets.UTF_8)
+            val hash = Argon2id.derive(
+                password,
+                salt,
+                c.t.toInt(),
+                c.mKib.toInt(),
+                c.p.toInt(),
+                32,
+                ByteArray(0),
+                ByteArray(0),
+            )
             if (leadingZeroBits(hash) >= c.targetBits) {
                 return KiwiSolution(
                     counter = counter,

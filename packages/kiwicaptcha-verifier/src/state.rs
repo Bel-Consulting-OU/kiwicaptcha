@@ -319,7 +319,7 @@ impl SidecarState {
                         }
                         let decision_id = Some(decision.decision_id.clone());
                         (
-                            compose_rung(scope_rung, decision.action),
+                            compose_rung(scope_rung, decision.action, self.rsw.is_some()),
                             Some(disposition_json(&decision)),
                             decision_id,
                         )

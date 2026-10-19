@@ -1,11 +1,11 @@
 # kiwicaptcha (Flutter)
 
 The Flutter KiwiCaptcha client: a Material widget plus the Dart
-solver, which calls the Rust core over dart:ffi for everything above
-the low-difficulty ceiling and keeps a pure-Dart SHA-256 fallback for
-small challenges. The wire contract is the shared one: POST the
-challenge request, validate, solve, pack the wire token; your backend
-runs siteverify.
+solver, which calls the native solver core over dart:ffi for
+everything above the low-difficulty ceiling and keeps a pure-Dart
+SHA-256 fallback for small challenges. The wire contract is the shared
+one: POST the challenge request, validate, solve, pack the wire token;
+your backend runs siteverify.
 
 ## Install
 
@@ -14,6 +14,14 @@ dependencies:
   kiwicaptcha:
     path: packages/kiwicaptcha-flutter
 ```
+
+The package declares itself as an FFI plugin (`pubspec.yaml`), so a
+consuming app build packages the native library per platform: the
+Gradle build runs cargo-ndk for the Android ABIs
+(`android/build.gradle`) and the CocoaPods build compiles the Rust
+static library for the iOS slices (`ios/kiwicaptcha.podspec`). Both
+machines need the Rust toolchain (Android additionally the NDK and
+`cargo-ndk`; iOS the `rustup` iOS targets) — see `native/README.md`.
 
 ## Widget
 
@@ -56,47 +64,83 @@ final token = encodeKiwiToken(
 ```
 
 `solveKiwiChallenge` validates the client contract first (the shared
-caps of protocol/limits.json) and refuses execution-armed challenges
-outright. Low-difficulty SHA-256 (8 bits or fewer) runs in pure Dart.
-Everything else goes through the FFI core; when the library is absent
-the failure names it (fail-closed, never a weaker profile), and
-argon2id is fail-closed everywhere: the Dart side refuses and the Rust
-core answers `KIWI_ERR_ARGON_UNAVAILABLE` unless built with a vetted
-Argon2 feature.
+caps of protocol/limits.json: sha256 1..=20 bits, argon2id 1..=10 bits
+with `m_kib` 8..=65536 KiB / `t` 3..=6 / `p` = 1, rsw `t`
+10,000..=300,000 over a canonical 2048-bit odd modulus) and refuses
+execution-armed challenges outright — those need the browser
+interpreter. Low-difficulty SHA-256 (8 bits or fewer) runs in pure
+Dart; every other solve goes through the native core. A missing or
+refusing library surfaces as a `KiwiSolveError` naming the refusal
+(fail-closed, never a weaker profile).
 
-## The Rust core (required build artifact)
+All three algorithms — sha256, argon2id and rsw — are real on the
+native side; argon2id is unavailable only when the core is built
+`--no-default-features`, in which case the solve throws
+`KiwiRefusal.argonUnavailable`.
 
-The FFI contract is `src/kiwicaptcha_solver.h` (cbindgen-style): three
-C functions over the shared preimage contract, answering int32 error
-codes. Build the wrapper crate around packages/kiwicaptcha-solver per
-platform:
+## The native core (shipped in this package)
 
-```sh
-cargo build --release
-# Android (cargo-ndk), ship the .so in jniLibs:
-cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs build --release
-# iOS: static library linked into the app binary
-cargo build --release --target aarch64-apple-ios
+The FFI crate lives at `native/` in this package. It exports the three
+functions declared in `src/kiwicaptcha_solver.h`:
+
+```c
+int32_t kiwi_solve_sha256(prefix, prefix_len, salt, salt_len,
+                          target_bits, max_hashes, out_counter);
+int32_t kiwi_solve_rsw(modulus, modulus_len, prefix, prefix_len,
+                       nonce, nonce_len, t, out_proof /* 256 bytes */);
+int32_t kiwi_solve_argon2id(prefix, prefix_len, salt, salt_len,
+                            m_kib, t, p, target_bits, out_counter);
 ```
 
-`KiwiFfi` opens `libkiwicaptcha_solver.so` on Android and desktop and
-`DynamicLibrary.process()` on iOS.
+Ownership is one-sided: the caller (the Dart side) allocates and frees
+every buffer, the library only writes into the caller's out buffers on
+`KIWI_OK` (status codes 0..5, mapped onto `KiwiRefusal` in
+`ffi_bindings.dart`), so there is no exported free function. The
+implementations reuse the workspace core crate (`packages/kiwicaptcha`)
+for the protocol caps, the rsw base derivation and the proof
+rendering — the same code the server verifier trusts.
+
+Build it per target (`native/README.md` has the full table):
+
+```sh
+cd packages/kiwicaptcha-flutter/native
+cargo build --release
+# Android: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
+#            -o ../android/src/main/jniLibs build --release
+# iOS:     cargo build --release --target aarch64-apple-ios
+```
+
+`KiwiFfi` opens `libkiwicaptcha_solver.so` on Android/Linux, the
+`.dylib` on macOS, the DLL on Windows, and `DynamicLibrary.process()`
+on iOS (the podspec links the staticlib with `-force_load`, so the
+symbols stay in the app image).
 
 ## Tests and their status in this checkout
 
-`test/kiwicaptcha_test.dart` pins the SHA-256 vectors, the token
-grammar bytes, the validation refusals (execution, argon fail-closed,
-over-cap, broken nonce), the known low-difficulty counter, the
-siteverify body shape, `KiwiChallenge.fromJson` malformed-input
-refusals, and the widget lifecycle: Retry after a failed fetch
-restarts the flow, and a manual `start()` drives an
-`autoStart: false` widget.
-
-Status in this checkout: NOT RUN. The Dart/Flutter toolchain is not
-installed here (no `dart`, no `flutter`), so these tests are written
-for CI and have not been executed locally; nothing about their result
-is claimed. With the toolchain present they run as usual:
+* **Native (Rust) — RUN, GREEN on macOS arm64 (rustc 1.96).**
+  `cargo test` in `native/` loads the built cdylib exactly the way
+  Dart does and solves the shared golden PHP vectors
+  (`packages/kiwicaptcha-jvm/testdata/golden/golden-php-vectors.json`,
+  the records the JVM suite pins) for sha256, argon2id and rsw through
+  the EXPORTED C ABI, then verifies every solution with the workspace
+  core verifier. Refusal codes (cap, malformed, exhausted) are pinned
+  through the ABI too. `cargo build --release` produces
+  `libkiwicaptcha_solver.dylib` with all three symbols exported.
+* **Dart/Flutter — NOT RUN.** The Dart/Flutter toolchain is not
+  installed here (no `dart`, no `flutter`), so `test/kiwicaptcha_test.dart`
+  is written for CI and has not been executed locally; nothing about
+  its result is claimed. The Dart sources were made analyzer-correct
+  by careful reading (the FFI typedefs mirror the header exactly; the
+  `kiwiSha256` chunked-preimage signature bug is fixed and pinned by a
+  test). With the toolchain present they run as usual:
 
 ```sh
 flutter test
 ```
+
+* **Device packaging — DECLARATIVE ONLY.** `android/build.gradle` and
+  `ios/kiwicaptcha.podspec` are correct by inspection (they follow the
+  standard FFI-plugin shapes) but were not executed: no Android
+  SDK/Gradle and no Xcode/CocoaPods exist in this checkout. The first
+  `flutter build apk` / `flutter build ios` in an app that consumes
+  the package is what verifies them end to end.

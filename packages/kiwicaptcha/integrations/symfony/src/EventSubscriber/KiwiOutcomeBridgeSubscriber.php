@@ -33,6 +33,14 @@ use Symfony\Component\HttpFoundation\Request;
  * pseudonym when a continuity cookie exists, never on the raw claimed
  * identifier.
  *
+ * The rolling auth-outcome window hears of a login exactly once: its
+ * only writers are the final lanes (LoginSuccessEvent, LoginFailureEvent).
+ * The CheckPassport lane may observe and stash the claimed identifier,
+ * but it never writes the window. A CheckPassport error is always
+ * followed by the LoginFailureEvent of the same request (Symfony
+ * dispatches it for every AuthenticationException of the round);
+ * writing the window in both lanes would count one failed login twice.
+ *
  * The bridge must never break authentication: every listener body is a
  * try/catch that logs at debug and returns, so a reporting failure is a
  * missing risk signal, never a failed login. Raw identifiers never
@@ -275,6 +283,11 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
      * errors. The probe is swallowed, so the framework's own error
      * handling is unchanged and the LoginFailure lane of the same
      * request dedupes onto the same report.
+     *
+     * This lane never writes the auth-outcome window: the badge error
+     * is always followed by the LoginFailureEvent of the same request,
+     * which is the failure window's sole writer. A write here would
+     * count one failed login twice and suppress trust prematurely.
      */
     public function onCheckPassport(object $event): void
     {
@@ -287,9 +300,6 @@ final class KiwiOutcomeBridgeSubscriber implements EventSubscriberInterface
             if (!$this->passportBadgeResolves($event)) {
                 $username = $identifier;
                 $sessionRaw = $this->sessionRaw($request);
-                if ($sessionRaw !== null) {
-                    $this->authWindow?->recordFailure($this->identityFactory->sessionId($sessionRaw));
-                }
                 $context = $this->context(RiskEventKind::AuthenticationFailure, $request, $sessionRaw);
                 $handle = $username !== null && $this->targetFieldConfiguredOf($request)
                     ? $this->targetHandle($username)

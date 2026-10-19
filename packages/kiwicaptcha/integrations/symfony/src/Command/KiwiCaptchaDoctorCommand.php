@@ -1789,11 +1789,18 @@ final class KiwiCaptchaDoctorCommand extends Command
         if (self::isAbuseFirstProfile($profile) && !\is_string($modulus) && !\is_string($lambda)) {
             return ['FAIL', sprintf('protection_profile "%s" requires the RSW time-lock trapdoor (the abuse-first ladder runs on a first-class time-lock rung), but neither rsw_modulus_n nor rsw_lambda is configured: every verifier that may redeem an rsw record needs the same modulus and lambda, and issuance cannot arm the rung without the pair. Generate the trapdoor (tools/rsw-keygen), configure rsw_modulus_n and rsw_lambda (and flip algorithm to rsw to arm issuance), or drop the profile explicitly if the deployment means to run without the time-lock rung.', $profile)];
         }
+        if (\is_string($modulus) && \is_string($lambda)) {
+            // The pair arms the adaptive rsw rung (change.md 1.4: RSW is
+            // a first-class rung whenever a trapdoor is configured): rsw
+            // decisions issue time-lock challenges even while the
+            // baseline algorithm stays sha256/argon2id.
+            return ['PASS', sprintf('rsw trapdoor configured: the adaptive rsw rung issues sequential time-lock challenges (T=%d) for rsw decisions while baseline issuance stays on %s; every verifier that may redeem an rsw record needs the same modulus and lambda', $this->config['rsw_t'], $algorithm)];
+        }
         if (\is_string($modulus) || \is_string($lambda)) {
-            return [self::LEVEL_WARN, sprintf('rsw_modulus_n/rsw_lambda are configured but algorithm %s is selected: the fields are inert until the algorithm flips to rsw (the operator may pre-stage them)', $algorithm)];
+            return [self::LEVEL_WARN, 'only one half of the rsw trapdoor pair is configured (rsw_modulus_n/rsw_lambda): the incomplete pair is inert for both the rsw algorithm and the adaptive rsw rung, and adaptive rsw decisions resolve to the interactive step-up'];
         }
 
-        return ['PASS', 'rsw not configured (the default deployment keeps the sha256 issuance path unchanged; the rsw rung stays optional)'];
+        return ['PASS', 'rsw not configured (the default deployment keeps the configured issuance path unchanged; the adaptive rsw rung is unconfigured, so rsw risk decisions resolve to the interactive step-up, never a weaker challenge)'];
     }
 
     /**

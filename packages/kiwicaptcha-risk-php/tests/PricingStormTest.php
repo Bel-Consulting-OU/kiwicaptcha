@@ -241,8 +241,8 @@ final class PricingStormTest extends TestCase
             'the unproven storm session must land at the full escalation'
         );
         // 605 + the full 914-pressure ramp = 902 work: the priced rung is
-        // the interactive step-up, past the whole argon regime.
-        self::assertSame(RiskAction::StepUp, $botDecision->action);
+        // the rsw time-lock rung, past the whole argon regime.
+        self::assertSame(RiskAction::Rsw, $botDecision->action);
         self::assertTrue($botDecision->hasReason(RiskReason::PricedEscalation));
     }
 

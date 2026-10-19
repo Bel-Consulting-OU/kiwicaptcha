@@ -20,8 +20,9 @@ final class RiskActionTest extends TestCase
             [RiskAction::Argon16, 4],
             [RiskAction::Argon32, 5],
             [RiskAction::Argon64, 6],
-            [RiskAction::StepUp, 7],
-            [RiskAction::Deny, 8],
+            [RiskAction::Rsw, 7],
+            [RiskAction::StepUp, 8],
+            [RiskAction::Deny, 9],
         ];
         $previous = -1;
         foreach ($ordered as [$action, $rank]) {
@@ -48,7 +49,9 @@ final class RiskActionTest extends TestCase
             [849, RiskAction::Argon32],
             [850, RiskAction::Argon64],
             [929, RiskAction::Argon64],
-            [930, RiskAction::StepUp],
+            [930, RiskAction::Rsw],
+            [954, RiskAction::Rsw],
+            [955, RiskAction::StepUp],
             [979, RiskAction::StepUp],
             [980, RiskAction::Deny],
             [1000, RiskAction::Deny],
@@ -78,8 +81,18 @@ final class RiskActionTest extends TestCase
         foreach ([RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64] as $a) {
             self::assertTrue($a->isArgon());
         }
-        foreach ([RiskAction::Allow, RiskAction::Sha16, RiskAction::Sha20, RiskAction::StepUp, RiskAction::Deny] as $a) {
+        foreach ([RiskAction::Allow, RiskAction::Sha16, RiskAction::Sha20, RiskAction::Rsw, RiskAction::StepUp, RiskAction::Deny] as $a) {
             self::assertFalse($a->isArgon());
+        }
+    }
+
+    public function testCapacityGateCoversArgonAndRsw(): void
+    {
+        foreach ([RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64, RiskAction::Rsw] as $a) {
+            self::assertTrue($a->isCapacityGated());
+        }
+        foreach ([RiskAction::Allow, RiskAction::Sha16, RiskAction::Sha18, RiskAction::Sha20, RiskAction::StepUp, RiskAction::Deny] as $a) {
+            self::assertFalse($a->isCapacityGated());
         }
     }
 }

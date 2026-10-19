@@ -351,11 +351,16 @@ function selectRun(campaign) {
     if (selected !== null) {
         // Every refused event above the selection is disclosed, not
         // just the newest one: a genuine same-seed current-digest FAIL
-        // must never vanish behind a newer unrelated refusal.
+        // must never vanish behind a newer unrelated refusal. "Above"
+        // means strictly NEWER than the selection, so the scan starts
+        // after the selected index — walking from the beginning and
+        // stopping at the selection would read the selection's own
+        // history as newer evidence and bury a green run under its
+        // own past.
+        const selectedIndex = events.indexOf(selected);
         const above = [];
-        for (const ev of events) {
-            if (ev === selected) break;
-            if (ev.kind !== "doc" || ev === selected) continue;
+        for (const ev of events.slice(selectedIndex + 1)) {
+            if (ev.kind !== "doc") continue;
             const note = refusalNoteOf(ev, campaign);
             if (note !== null) above.push({ ev, note });
         }

@@ -35,6 +35,15 @@ use KiwiCaptcha\Risk\RiskAction;
  *    regardless of the decision. The core's issueWithProfile accepts a profile directly
  *    regardless of the app default, so a SHA-configured deployment can
  *    still issue Argon work via the risk ladder.
+ *  - rsw                -> the sequential time-lock rung, when the
+ *    deployment configured the trapdoor ({@see RswTrapdoor}): the issued
+ *    profile is exactly the configured rsw contract (the modulus rides
+ *    the deployment's issuance configuration, T = the configured rsw_t).
+ *    Without a trapdoor the rung is not servable, and
+ *    {@see self::effectiveAction()} resolves Rsw to StepUp before any
+ *    profile is selected; the direct mapping throws the typed
+ *    {@see RswTrapdoorUnavailable} so the rung can never silently
+ *    collapse onto a weaker challenge.
  *  - step_up            -> never mapped to a challenge profile. StepUp is
  *    a controller-level application-defined step-up action (the controller
  *    answers it with its own application step-up flow, e.g. MFA); the
@@ -107,6 +116,7 @@ final class RiskProfileResolver
         private readonly int $argon2DifficultyBits = 1,
         private readonly int $argonEnvelopeMemoryKib = 16384,
         private readonly array $argonTargetBits = [1, 2, 4],
+        private readonly ?RswTrapdoor $rswTrapdoor = null,
     ) {
         if (\count($this->argonTargetBits) !== 3) {
             throw new \InvalidArgumentException(
@@ -143,9 +153,11 @@ final class RiskProfileResolver
                 $this->argonP,
                 $this->argon2DifficultyBits,
             ),
-            // RSW has no adaptive-risk ordering: the bundle refuses
-            // rsw + risk at configuration time, so a resolver can never
-            // be constructed over an RSW deployment.
+            // An rsw issuance baseline still has no adaptive ordering:
+            // the bundle refuses algorithm rsw + risk at configuration
+            // time, so a resolver is never constructed over an RSW
+            // deployment. (The adaptive rsw rung is a different axis: it
+            // rides the trapdoor pair, not the baseline algorithm.)
             PoWAlgorithm::Rsw => throw new \LogicException(
                 'rsw has no adaptive-risk strength ordering; it cannot participate in profile escalation',
             ),
@@ -183,11 +195,52 @@ final class RiskProfileResolver
             RiskAction::Argon16 => $this->argonRequirement($baseline, $this->argonTargetBits[0]),
             RiskAction::Argon32 => $this->argonRequirement($baseline, $this->argonTargetBits[1]),
             RiskAction::Argon64 => $this->argonRequirement($baseline, $this->argonTargetBits[2]),
+            RiskAction::Rsw => $this->rswRequirement(),
             // Terminal actions: handled by the controller before any
             // profile is selected; never satisfiable by a record.
             RiskAction::StepUp,
             RiskAction::Deny => null,
         };
+    }
+
+    /**
+     * The action a decision resolves to on this deployment: the ladder
+     * action itself, except Rsw without a configured trapdoor, which
+     * resolves to the interactive step-up (change.md 1.4: RSW is a
+     * first-class rung whenever a trapdoor is configured). Callers map
+     * the resolved action, so the time-lock rung is never answered with
+     * a weaker silent challenge.
+     */
+    public function effectiveAction(RiskAction $action): RiskAction
+    {
+        if ($action === RiskAction::Rsw && $this->rswTrapdoor === null) {
+            return RiskAction::StepUp;
+        }
+
+        return $action;
+    }
+
+    /**
+     * Whether this deployment can serve the adaptive rsw rung at all.
+     */
+    public function resolvesRsw(): bool
+    {
+        return $this->rswTrapdoor !== null;
+    }
+
+    /**
+     * The rsw requirement: exactly the configured sequential contract
+     * (T squarings over the deployment's modulus). No trapdoor is a
+     * typed error — {@see self::effectiveAction()} is the resolution
+     * path, and the direct mapping must fail loudly.
+     */
+    private function rswRequirement(): ChallengeStrength
+    {
+        $trapdoor = $this->rswTrapdoor ?? throw new RswTrapdoorUnavailable(
+            'the rsw rung is not servable without a configured trapdoor; resolve the action through effectiveAction() (Rsw maps to StepUp), never to a weaker challenge'
+        );
+
+        return new ChallengeStrength(PoWAlgorithm::Rsw, 0, $trapdoor->t, 1, 1);
     }
 
     /**
@@ -199,6 +252,11 @@ final class RiskProfileResolver
     {
         if ($action === RiskAction::StepUp) {
             throw new \LogicException('StepUp is handled by the controller, not mapped to a profile');
+        }
+        if ($action === RiskAction::Rsw && $this->rswTrapdoor === null) {
+            // Typed, never a silent weaker challenge: the resolution
+            // path is effectiveAction() -> StepUp (controller flow).
+            throw new RswTrapdoorUnavailable('Rsw resolves to StepUp without a configured rsw trapdoor; answer it through the application step-up flow');
         }
         if ($action === RiskAction::Deny) {
             return null;
@@ -239,6 +297,11 @@ final class RiskProfileResolver
             return true;
         }
         if ($action === RiskAction::StepUp || $action === RiskAction::Deny) {
+            return false;
+        }
+        if ($action === RiskAction::Rsw && $this->rswTrapdoor === null) {
+            // Without a trapdoor the rung resolves to StepUp, which no
+            // challenge record satisfies.
             return false;
         }
         $required = $this->requiredStrength($action);

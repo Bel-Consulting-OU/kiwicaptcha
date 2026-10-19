@@ -18,9 +18,11 @@ namespace KiwiCaptcha\Risk;
  * Revision history is monotonic (never reset). 17 is the current model
  * generation. The 16 prior generations covered the fixed-point score
  * contract, class-normalized calibration, the random-sample resolution
- * gate, the outcome ledger and the rate-of-change clamp. This revision
- * adds the non-finite guards and the local-limiter warm-up ramp to the
- * model's behavior surface.
+ * gate, the outcome ledger, the rate-of-change clamp, the non-finite
+ * guards and the local-limiter warm-up ramp. This revision adds the
+ * first-class rsw rung to the decision ladder (between argon64 and
+ * step-up: the default bands, the marks floor, the priced band table)
+ * to the model's behavior surface.
  *
  * A model revision that materially affects security (e.g. changes how
  * scores are computed or how calibration moves the bias) requires a
@@ -31,5 +33,5 @@ namespace KiwiCaptcha\Risk;
 final class RiskModel
 {
     /** The current model generation (monotonic). */
-    public const REVISION = 18;
+    public const REVISION = 19;
 }

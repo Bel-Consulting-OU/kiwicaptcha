@@ -71,7 +71,7 @@ Part 2 — Architectural principles
 One identity computation per request. Every plane reads the same IdentityVector. No plane recomputes a pseudonym. Cost budget: < 20 µs.
 Additive evidence, authoritative outcomes. Polarity from §1.2 is enforced in the Lua apply_feedback path and proven by property tests.
 Fail-closed under uncertainty. A corrupt record, an unreadable store, a stale policy — all deny or step up, never silently pass.
-Attacker cost is a measured, published quantity (Plane 8). "Secure" means "priced above the abuse value for every scope," demonstrated by benchmark, not asserted.
+Attacker cost is a measured, published quantity (Plane 8). "Secure" means the total expected cost of an accepted abusive transaction — after rate controls, adaptive work, marks, step-up and denial — exceeds the abuse value for that scope, demonstrated by benchmark, not asserted. Raw proof of work is friction, priced and measured separately (docs/cost-to-abuse.md); it is never by itself the economic refusal threshold.
 Victim protection is correctness, not a softening. Signals about a target protect that target's account; signals from an attacker escalate the attacker's own dimensions. These never cross. This is not a reduced mode; it is the precise, full-strength behavior.
 Zero cloud dependency. Every datum the system needs is either derivable locally or shipped as a free redistributable file.
 Byte-identical cross-language cores. Rust and PHP produce identical canonical bytes, identity vectors, scores, and decisions on a shared vector corpus. CI enforces this.
@@ -193,7 +193,7 @@ Plane 8 — Observability and economics (self-hosted only)
 
 3.8.1 Metrics exporter. APCu/Redis-aggregated counters exported as Prometheus text at /kiwi-captcha/metrics behind its own auth, preserving redaction rules. (Prometheus/Grafana are themselves free and self-hosted; no cloud is implied.)
 
-3.8.2 kiwicaptcha:bench. Measures native attacker cost per rung on the adopter's own CPU; imports free, published GPU/FPGA reference numbers; outputs $/1,000 solves. The doctor proves each scope's value class is priced above its declared abuse value.
+3.8.2 kiwicaptcha:bench. Measures native attacker cost per rung on the adopter's own CPU; imports free, published GPU/FPGA reference numbers; outputs $/1,000 solves. The doctor proves the economics invariant for each scope: the total expected cost (and reduced yield) of an accepted abusive transaction — after rate controls, adaptive work, marks, step-up and denial — exceeds its declared abuse value. Raw PoW is friction, priced and measured separately (docs/cost-to-abuse.md), never by itself the economic refusal threshold.
 
 3.8.3 Explanations. Each decision log carries top contributors (exist in both cores) and the identity dimensions involved — never their values.
 
@@ -298,7 +298,7 @@ html
 
 <form method="post" data-kiwi="login">…</form>
 
-That is the whole integration for Tier A. The framework plugin verifies on submit and wires outcomes automatically. kiwicaptcha:doctor then confirms the deployment is sound (secret length, store reachability, ASN dataset present, every scope priced above its value class).
+That is the whole integration for Tier A. The framework plugin verifies on submit and wires outcomes automatically. kiwicaptcha:doctor then confirms the deployment is sound (secret length, store reachability, ASN dataset present, every scope's accepted-abuse cost — after rate controls, adaptive work, marks, step-up and denial — above its abuse value, per docs/cost-to-abuse.md).
 
 Progressive disclosure: everything else (per-dimension weights, custom resolvers, agents, step-up handlers, pricing curves) is optional and documented in layered guides (public → integration → maintainer), which already exist.
 
@@ -324,7 +324,7 @@ Nginx + TLS 1.3 + a real CDN-like reverse proxy (header strip/add); PHP-FPM, Fra
 9.3 Campaigns (each with actor budget, success criteria, required result)
 D3.1 Commodity no-JS bots — 10⁶ req/h of forged/replayed/omitted tokens. Required: 0 accepted; issuance/outstanding caps hold.
 D3.2 Stealth headless — Playwright/Puppeteer-stealth, undetected-chromedriver, patched Chromium, CDP input synthesis; legitimate solving at scale; adaptive decoy fill/skip; telemetry spoofing. Required: priced/escalated per §3.3; decoy never revealed; spoofed telemetry scored as evidence, never as "human."
-D3.3 Native PoW farms — strongest rentable hardware: SHA-NI/AVX-512 CPUs, GPU SHA-256/Argon2id kernels, GPU/GMP RSW squaring. Required: published $/1,000 per rung; every value class priced above its abuse value; RSW shown non-parallelizable per challenge.
+D3.3 Native PoW farms — strongest rentable hardware: SHA-NI/AVX-512 CPUs, GPU SHA-256/Argon2id kernels, GPU/GMP RSW squaring. Required: published $/1,000 per rung; per value class, the total expected cost (and reduced yield) of an accepted abusive transaction — after rate controls, adaptive work, marks, step-up and denial — shown above its abuse value (raw PoW is friction priced and measured separately, docs/cost-to-abuse.md); RSW shown non-parallelizable per challenge.
 D3.4 Residential/mobile proxy pools — 10⁴–10⁶ IPs, ≥ 500 ASNs, IPv6 /64 rotation, IPv4 CGNAT. Required: ASN + target dimensions catch it; scope_failure_ratio fires; cost/accepted-abuse ≥ threshold; CGNAT-sharing real users not escalated beyond their own price.
 D3.5 Credential stuffing — OpenBullet-class, 10⁶-pair list, 0.1–2% hit, over D3.4's pool, against login + reset. Required: cost/compromised-account ≥ critical threshold; each targeted account protected by step-up within ≤ 5 spread failures; zero victim lockouts; attacker identities denied within bounds.
 D3.6 Token brokering/relay — malicious embeds, opener chains, foreign origins; relay to a farm within TTL; stockpiling; cross-scope/binding/node replay. Required: origin/scope/binding enforcement holds; stockpiles bounded by caps; zero cross-scope/binding acceptance.

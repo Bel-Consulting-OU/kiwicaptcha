@@ -76,7 +76,9 @@ if command -v java >/dev/null 2>&1 && command -v javac >/dev/null 2>&1; then
         "$ROOT/keycloak/src/main/java/ee/bel/kiwi/keycloak/Json.java" \
         "$ROOT/keycloak/src/main/java/ee/bel/kiwi/keycloak/KiwiVerifyClient.java" \
         "$ROOT/keycloak/src/test/java/ee/bel/kiwi/keycloak/KiwiVerifyClientTest.java" >/dev/null 2>&1; then
-        run "keycloak: verify client tests" java -cp "$classes" ee.bel.kiwi.keycloak.KiwiVerifyClientTest
+        run "keycloak: verify client tests" \
+            java -Dkiwi.test.vectors="$ROOT/../tools/client-ip/test-vectors.json" \
+            -cp "$classes" ee.bel.kiwi.keycloak.KiwiVerifyClientTest
     else
         echo "FAIL: keycloak test compile" >&2
         fail=1

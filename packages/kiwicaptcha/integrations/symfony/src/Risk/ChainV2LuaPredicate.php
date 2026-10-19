@@ -99,10 +99,10 @@ local function isValidChainRecord(rec)
   if not isKiwiObligationId(rec['obligationId']) then
     return false
   end
-  -- The explicit chainable action -> rank table (RiskAction ranks 1..6):
-  -- the requiredAction must be a real chainable action and the
-  -- requiredRank must agree exactly.
-  local actions = { sha16 = 1, sha18 = 2, sha20 = 3, argon16 = 4, argon32 = 5, argon64 = 6 }
+  -- The explicit chainable action -> rank table (RiskAction ranks 1..7,
+  -- Sha16..Rsw; StepUp/Deny never open a chain): the requiredAction must
+  -- be a real chainable action and the requiredRank must agree exactly.
+  local actions = { sha16 = 1, sha18 = 2, sha20 = 3, argon16 = 4, argon32 = 5, argon64 = 6, rsw = 7 }
   local requiredAction = rec['requiredAction']
   if type(requiredAction) ~= 'string' then
     return false

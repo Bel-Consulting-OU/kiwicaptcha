@@ -7,6 +7,10 @@
 //
 //   * every package on disk has an inventory entry, a test marker, and
 //     a CI job that names it;
+//   * every declared capability is real: an exported ABI symbol is in
+//     the source, the native module the bridge dispatches to exists,
+//     and a removed degradation marker stays gone — wiring alone never
+//     satisfies the gate, and every failure names the missing artifact;
 //   * every tool under tools/ci is invoked by a workflow, a runner or
 //     another tool — an unreferenced script is a feature nobody uses;
 //   * every platform-integration directory is reached by the platform
@@ -121,6 +125,136 @@ for (const entry of manifest.packages) {
     failures.push(`${entry.path}: no CI job references this package`);
   }
 }
+
+// ---------- capability gates: wiring is not implementation ----------
+// A package may declare a `capabilities` list: concrete facts about its
+// implementation artifacts. Kinds:
+//   files      — every pattern in `files` must match an existing file
+//                (`**`/`*` globs, package-relative; a leading "/" anchors
+//                at the repository root for protocol-level markers)
+//   exports    — `file` must contain every string in `symbols`
+//   dispatches — `file` must reference every bridge target in `targets`
+//   free_of    — `file` must not contain any string in `markers`
+// Every failure names the exact missing artifact; an unknown kind, a
+// missing `file` or an empty token list is itself a loud failure, so a
+// half-edited capability can never silently check nothing.
+const KNOWN_CAPABILITY_KINDS = new Set(["files", "exports", "dispatches", "free_of"]);
+const capabilitySkipDirs = new Set([
+  "node_modules",
+  "build",
+  "target",
+  "dist",
+  "vendor",
+  ".gradle",
+  "Pods",
+]);
+const packageFilesCache = new Map();
+function packageFiles(packagePath) {
+  if (packageFilesCache.has(packagePath)) return packageFilesCache.get(packagePath);
+  const files = [];
+  const absPackage = path.join(root, packagePath);
+  const walk = (abs, rel) => {
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (capabilitySkipDirs.has(entry.name)) continue;
+        walk(path.join(abs, entry.name), `${rel}/${entry.name}`);
+      } else if (entry.isFile()) {
+        files.push(`${rel}/${entry.name}`);
+      }
+    }
+  };
+  if (fs.existsSync(absPackage)) walk(absPackage, packagePath);
+  packageFilesCache.set(packagePath, files);
+  return files;
+}
+
+function globToRegExp(pattern) {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    "^" +
+      escaped
+        .replace(/\*\*/g, "\u0000")
+        .replace(/\*/g, "[^/]*")
+        .replace(/\u0000/g, ".*") +
+      "$",
+  );
+}
+
+// Capability paths are package-relative; a leading "/" anchors at the
+// repository root (a protocol-level marker may live outside the package).
+function capabilityFilePath(entryPath, fileSpec) {
+  return fileSpec.startsWith("/") ? fileSpec.slice(1) : `${entryPath}/${fileSpec}`;
+}
+
+let capabilityChecks = 0;
+for (const entry of manifest.packages) {
+  for (const capability of entry.capabilities ?? []) {
+    const label = capability.comment ?? capability.kind;
+    if (!KNOWN_CAPABILITY_KINDS.has(capability.kind)) {
+      failures.push(`${entry.path}: capability "${label}" names an unknown kind "${capability.kind}"`);
+      continue;
+    }
+    capabilityChecks += 1;
+    if (capability.kind === "files") {
+      for (const patternSpec of capability.files ?? []) {
+        const anchored = patternSpec.startsWith("/");
+        const pattern = capabilityFilePath(entry.path, patternSpec);
+        if (anchored && patternSpec.includes("*")) {
+          failures.push(`${entry.path}: capability "${label}": an anchored pattern must be a literal path: ${patternSpec}`);
+          continue;
+        }
+        if (!pattern.includes("*")) {
+          if (!exists(pattern)) {
+            failures.push(`${entry.path}: capability "${label}" is missing its artifact: ${pattern}`);
+          }
+          continue;
+        }
+        if (!packageFiles(entry.path).some((file) => globToRegExp(pattern).test(file))) {
+          failures.push(`${entry.path}: capability "${label}" is missing its artifact (no file matches): ${pattern}`);
+        }
+      }
+      continue;
+    }
+    if (!capability.file) {
+      failures.push(`${entry.path}: capability "${label}" (kind ${capability.kind}) names no file to check`);
+      continue;
+    }
+    const file = capabilityFilePath(entry.path, capability.file);
+    if (!exists(file)) {
+      failures.push(`${entry.path}: capability "${label}" needs ${file}, which does not exist`);
+      continue;
+    }
+    const source = fs.readFileSync(path.join(root, file), "utf8");
+    if (capability.kind === "exports" || capability.kind === "dispatches") {
+      const tokens = capability.kind === "exports" ? capability.symbols ?? [] : capability.targets ?? [];
+      if (tokens.length === 0) {
+        failures.push(`${entry.path}: capability "${label}" (kind ${capability.kind}) lists no ${capability.kind === "exports" ? "symbols" : "targets"} for ${file}`);
+      }
+      for (const token of tokens) {
+        if (!source.includes(token)) {
+          failures.push(
+            capability.kind === "exports"
+              ? `${entry.path}: ${file} does not export ${token} (capability: ${label})`
+              : `${entry.path}: ${file} does not dispatch to ${token} (capability: ${label})`,
+          );
+        }
+      }
+    } else {
+      const markers = capability.markers ?? [];
+      if (markers.length === 0) {
+        failures.push(`${entry.path}: capability "${label}" (kind free_of) lists no forbidden markers for ${file}`);
+      }
+      for (const marker of markers) {
+        if (source.includes(marker)) {
+          failures.push(`${entry.path}: ${file} still contains forbidden marker "${marker}" (capability: ${label})`);
+        }
+      }
+    }
+  }
+}
+notes.push(
+  `capability gates: ${capabilityChecks} checks across ${manifest.packages.filter((entry) => (entry.capabilities ?? []).length > 0).length} packages`,
+);
 
 // ---------- tools/ci: every script must have a caller ----------
 const toolFiles = fs

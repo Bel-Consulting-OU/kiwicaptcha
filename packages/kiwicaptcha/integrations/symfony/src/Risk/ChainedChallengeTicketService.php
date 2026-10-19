@@ -25,8 +25,10 @@ final class ChainedChallengeTicketService
     /** The wire bound shared with the controller's accepted pattern. */
     private const MAX_TICKET_BYTES = 256;
 
-    /** The chainable PoW actions (Sha16..Argon64, never StepUp/Deny). */
-    private const CHAINABLE_ACTIONS = [RiskAction::Sha16, RiskAction::Sha18, RiskAction::Sha20, RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64];
+    /** The chainable challenge actions (Sha16..Rsw, never StepUp/Deny;
+     * an rsw demand is servable only where the trapdoor is configured —
+     * the enforcement mapping resolves it to StepUp otherwise). */
+    private const CHAINABLE_ACTIONS = [RiskAction::Sha16, RiskAction::Sha18, RiskAction::Sha20, RiskAction::Argon16, RiskAction::Argon32, RiskAction::Argon64, RiskAction::Rsw];
 
     /**
      * @param TransactionalChainedChallengeStateStore $store               the
@@ -167,7 +169,7 @@ final class ChainedChallengeTicketService
     public function requireStage2(string $stage1Nonce, string $scope, string $requestBinding, int $policyVersion, RiskAction $requiredAction, int $expiresAt): ChainRequirement
     {
         if (!\in_array($requiredAction, self::CHAINABLE_ACTIONS, true)) {
-            throw new \InvalidArgumentException(sprintf('requiredAction %s is not chainable (only the PoW actions Sha16..Argon64 open a chain)', $requiredAction->value));
+            throw new \InvalidArgumentException(sprintf('requiredAction %s is not chainable (only the challenge actions Sha16..Rsw open a chain)', $requiredAction->value));
         }
         if ($expiresAt <= $this->now()) {
             throw new \InvalidArgumentException('the chain expiry must be in the future');

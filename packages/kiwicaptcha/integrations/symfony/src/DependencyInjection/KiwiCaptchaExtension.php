@@ -80,6 +80,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\QuarantineMarkerInterface;
 use BelConsulting\KiwiCaptchaBundle\Risk\RequestQuarantineMarker;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Risk\RswTrapdoor;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
 use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
@@ -1613,6 +1614,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // while raising the adaptive requirement, and its
             // strengthSatisfies() compares the full envelope, never
             // (algorithm, targetBits) alone.
+            // The adaptive rsw rung rides the trapdoor pair (change.md
+            // 1.4: RSW is a first-class rung whenever a trapdoor is
+            // configured): with rsw_modulus_n + rsw_lambda the resolver
+            // maps the Rsw action onto the time-lock profile, without
+            // one it resolves Rsw to the interactive step-up. The pair
+            // is the same material the rsw issuance algorithm uses, but
+            // the two axes are independent: a sha256/argon2id deployment
+            // configures the pair to arm the adaptive rung alone.
+            $rswTrapdoor = null;
+            if (\is_string($config['rsw_modulus_n']) && \is_string($config['rsw_lambda'])) {
+                $rswTrapdoor = new Definition(RswTrapdoor::class, [
+                    $config['rsw_modulus_n'],
+                    $config['rsw_lambda'],
+                    $config['rsw_t'],
+                ]);
+            }
             $container->setDefinition('kiwi_captcha.risk.resolver', new Definition(RiskProfileResolver::class, [
                 PoWAlgorithm::from($config['algorithm']),
                 $config['difficulty_bits'],
@@ -1622,6 +1639,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $config['argon2_difficulty_bits'],
                 $riskConfig['argon_verification_memory_kib'],
                 $riskConfig['argon_escalation_target_bits'],
+                $rswTrapdoor,
             ]));
             $riskResolverRef = new Reference('kiwi_captcha.risk.resolver');
 

@@ -1385,6 +1385,29 @@ final class RiskGateway implements LoginDecisionGate
     }
 
     /**
+     * The action a decision resolves to on this deployment: the ladder
+     * action itself, except Rsw without a configured rsw trapdoor, which
+     * resolves to the interactive step-up (change.md 1.4: RSW is a
+     * first-class rung whenever a trapdoor is configured). Terminal
+     * mapping points call this before any profile or step-up flow is
+     * selected, so the time-lock rung is never answered with a weaker
+     * silent challenge.
+     */
+    public function effectiveAction(RiskAction $action): RiskAction
+    {
+        return $this->resolver->effectiveAction($action);
+    }
+
+    /**
+     * Whether this deployment can serve the adaptive rsw rung at all
+     * (the trapdoor pair is configured).
+     */
+    public function resolvesRsw(): bool
+    {
+        return $this->resolver->resolvesRsw();
+    }
+
+    /**
      * The challenge profile a risk action demands, the same mapping the
      * pre-issue decisions flow through; {@see decisionProfile()} delegates
      * here. The stage-2 chain controller uses it to enforce the ticket's
@@ -1395,6 +1418,10 @@ final class RiskGateway implements LoginDecisionGate
      *
      * @throws \LogicException for StepUp (controller-level application
      *                         step-up, never a challenge profile).
+     * @throws RswTrapdoorUnavailable for Rsw without a configured
+     *                                trapdoor — resolve the action
+     *                                through {@see effectiveAction()}
+     *                                first.
      */
     public function profileForAction(RiskAction $action): ?ChallengeProfile
     {

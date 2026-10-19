@@ -90,12 +90,14 @@ public class KiwiAuthenticatorFactory implements AuthenticatorFactory {
                 "The challenge scope this flow sends.",
                 ProviderConfigProperty.STRING_TYPE, "login"));
         properties.add(new ProviderConfigProperty(
-                KiwiAuthenticator.CONFIG_TRUST_PROXY, "Trust proxy headers",
-                "Bind the rightmost X-Forwarded-For hop (with X-Real-IP as the "
-                        + "fallback) instead of the socket peer. Enable only behind a "
-                        + "reverse proxy that appends or overwrites the header; the "
-                        + "default false ignores forwarding headers entirely.",
-                ProviderConfigProperty.BOOLEAN_TYPE, "false"));
+                KiwiAuthenticator.CONFIG_TRUST_PROXY_CIDRS, "Trusted proxy CIDRs",
+                "Comma-separated trusted-proxy CIDR list (IPv4 and IPv6, host bits masked, e.g. "
+                        + "10.0.0.0/24, 2001:db8::/64). The socket peer binds the challenge unless it "
+                        + "sits inside one of these prefixes; only then is the X-Forwarded-For chain "
+                        + "walked right to left through trusted hops (the first untrusted hop wins, a "
+                        + "malformed hop fails closed), with X-Real-IP as the no-chain fallback. "
+                        + "Empty (the default) trusts nobody: forwarding headers are ignored entirely.",
+                ProviderConfigProperty.STRING_TYPE, ""));
         return properties;
     }
 

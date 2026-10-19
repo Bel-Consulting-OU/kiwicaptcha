@@ -5,6 +5,7 @@ members = [
     "packages/kiwicaptcha-risk",
     "packages/kiwicaptcha-solver",
     "packages/kiwicaptcha-verifier",
+    "packages/kiwicaptcha-flutter/native",
 ]
 exclude = [
     "packages/kiwicaptcha-wasm",

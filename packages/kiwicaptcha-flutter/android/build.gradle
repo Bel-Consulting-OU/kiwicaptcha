@@ -1,0 +1,87 @@
+# The Android FFI-plugin build. It packages the native solver core
+# (libkiwicaptcha_solver.so) into the app's JNI libraries, where the
+# Dart side finds it with DynamicLibrary.open('libkiwicaptcha_solver.so')
+# (see lib/src/ffi_bindings.dart).
+#
+# The .so files are NOT checked in: the build invokes cargo via
+# cargo-ndk once per ABI, exactly the plan documented in ../native/README.md.
+# A machine that assembles the APK therefore needs the Rust toolchain,
+# the Android NDK and `cargo install cargo-ndk` — the same one-time
+# setup every Rust-on-Android plugin asks for.
+#
+# NOTE (verification status): this file is declarative and
+# correct-by-inspection only. Gradle/AGP were not run in this checkout
+# (no Android SDK here); the REQUIRED local proof for the native core
+# is `cargo test` + `cargo build --release` in ../native.
+
+group = "dev.kiwicaptcha.kiwicaptcha"
+version = "1.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.3.0")
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "dev.kiwicaptcha.kiwicaptcha"
+
+    compileSdk = 34
+
+    defaultConfig {
+        minSdk = 21
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            // Where the built .so files land for APK packaging.
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+        }
+    }
+}
+
+// Build the cdylib for each Android ABI and drop the .so files into
+// src/main/jniLibs, the layout cargo-ndk's -o flag produces and the
+// APK packaging consumes. Mirrors the documented command:
+//
+//   cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
+//     -o android/src/main/jniLibs build --release
+//
+// (run from packages/kiwicaptcha-flutter/native).
+tasks.register("buildKiwiRust") {
+    doLast {
+        def nativeDir = project.file("../native")
+        def outputDir = project.file("src/main/jniLibs")
+        exec {
+            workingDir nativeDir
+            executable "cargo"
+            args "ndk"
+            args "-t", "arm64-v8a"
+            args "-t", "armeabi-v7a"
+            args "-t", "x86_64"
+            args "-o", outputDir.absolutePath
+            args "build", "--release"
+        }
+    }
+}
+
+preBuild.dependsOn "buildKiwiRust"

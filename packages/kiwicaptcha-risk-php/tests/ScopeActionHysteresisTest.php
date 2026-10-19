@@ -159,15 +159,15 @@ final class ScopeActionHysteresisTest extends TestCase
         self::assertSame(RiskAction::Deny, $this->decide($policy, $h, 1, 980, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 500, $now++)->action);
 
-        // StepUp (plain, score 930) then a 500: plain mapping again.
-        self::assertSame(RiskAction::StepUp, $this->decide($policy, $h, 1, 930, $now++)->action);
+        // StepUp (plain, score 960) then a 500: plain mapping again.
+        self::assertSame(RiskAction::StepUp, $this->decide($policy, $h, 1, 960, $now++)->action);
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 500, $now++)->action);
 
         // A ladder previous action with a hard plain action: the hard
         // action wins immediately and is never held in the lower band.
         self::assertSame(RiskAction::Sha20, $this->decide($policy, $h, 1, 500, $now++)->action);
         self::assertSame(RiskAction::Deny, $this->decide($policy, $h, 1, 980, $now++)->action);
-        self::assertSame(RiskAction::StepUp, $this->decide($policy, $h, 1, 930, $now++)->action);
+        self::assertSame(RiskAction::StepUp, $this->decide($policy, $h, 1, 960, $now++)->action);
     }
 
     public function testHysteresisNeverViolatesMinimumOrFloor(): void
