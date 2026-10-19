@@ -1,3 +1,9 @@
 .dart_tool/
 build/
 .pub-cache/
+
+# The native core builds into the workspace target directory when this
+# package is used inside the kiwicaptcha repository; the paths below
+# cover a standalone checkout too. Never commit build artifacts.
+native/target/
+android/src/main/jniLibs/

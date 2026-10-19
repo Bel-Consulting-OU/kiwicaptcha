@@ -739,17 +739,18 @@ fn the_scope_ids_and_the_rung_composition_stay_stable() {
     // The risk ladder only ever raises the configured rung.
     let sha18 = parse_rung("sha18").unwrap();
     assert_eq!(
-        compose_rung(sha18, kiwicaptcha_risk::action::RiskAction::Allow),
+        compose_rung(sha18, kiwicaptcha_risk::action::RiskAction::Allow, false),
         sha18
     );
     assert_eq!(
-        compose_rung(sha18, kiwicaptcha_risk::action::RiskAction::Argon32),
+        compose_rung(sha18, kiwicaptcha_risk::action::RiskAction::Argon32, false),
         parse_rung("argon32").unwrap()
     );
     assert_eq!(
         compose_rung(
             parse_rung("argon16").unwrap(),
-            kiwicaptcha_risk::action::RiskAction::Sha20
+            kiwicaptcha_risk::action::RiskAction::Sha20,
+            false
         ),
         parse_rung("argon16").unwrap()
     );

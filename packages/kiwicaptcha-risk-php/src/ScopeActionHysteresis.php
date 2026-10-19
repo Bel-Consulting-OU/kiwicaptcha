@@ -48,7 +48,7 @@ final class ScopeActionHysteresis
     public const MAX_ENTRIES = 1024;
 
     /**
-     * The hysteresis ladder (ranks 0..6): StepUp and Deny are hard actions
+     * The hysteresis ladder (ranks 0..7): StepUp and Deny are hard actions
      * and never participate in the hold logic.
      *
      * @var list<RiskAction>
@@ -61,6 +61,7 @@ final class ScopeActionHysteresis
         RiskAction::Argon16,
         RiskAction::Argon32,
         RiskAction::Argon64,
+        RiskAction::Rsw,
     ];
 
     /**
@@ -77,6 +78,7 @@ final class ScopeActionHysteresis
         4 => [600, 750],
         5 => [750, 850],
         6 => [850, 930],
+        7 => [930, 955],
     ];
 
     /** @var array<string, array{action: RiskAction, updated: int}> */

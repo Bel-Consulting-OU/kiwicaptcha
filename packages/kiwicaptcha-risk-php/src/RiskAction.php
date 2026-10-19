@@ -8,9 +8,9 @@ namespace KiwiCaptcha\Risk;
  * Ordered risk actions, fixed by the cross-language risk-v1 contract.
  *
  * The ordering Allow < Sha16 < Sha18 < Sha20 < Argon16 < Argon32 < Argon64
- * < StepUp < Deny is the escalation ladder. `rank()` is strictly monotonic
- * and is the only comparison that may be used to combine actions: score
- * bands, scope minima, global floors.
+ * < Rsw < StepUp < Deny is the escalation ladder. `rank()` is strictly
+ * monotonic and is the only comparison that may be used to combine
+ * actions: score bands, scope minima, global floors.
  */
 enum RiskAction: string
 {
@@ -21,10 +21,11 @@ enum RiskAction: string
     case Argon16 = 'argon16';
     case Argon32 = 'argon32';
     case Argon64 = 'argon64';
+    case Rsw = 'rsw';
     case StepUp = 'step_up';
     case Deny = 'deny';
 
-    /** Strictly monotonic escalation rank: Allow = 0 … Deny = 8. */
+    /** Strictly monotonic escalation rank: Allow = 0 … Deny = 9. */
     public function rank(): int
     {
         return match ($this) {
@@ -35,13 +36,16 @@ enum RiskAction: string
             self::Argon16 => 4,
             self::Argon32 => 5,
             self::Argon64 => 6,
-            self::StepUp => 7,
-            self::Deny => 8,
+            self::Rsw => 7,
+            self::StepUp => 8,
+            self::Deny => 9,
         };
     }
 
     /**
      * Default score bands (configurable in policy; hard floors apply on top).
+     * The rsw band splits the former step-up band: 930..=954 is the
+     * sequential time-lock rung, 955..=979 stays the interactive step-up.
      */
     public static function actionForScore(int $score): self
     {
@@ -53,6 +57,7 @@ enum RiskAction: string
             $score < 750 => self::Argon16,
             $score < 850 => self::Argon32,
             $score < 930 => self::Argon64,
+            $score < 955 => self::Rsw,
             $score < 980 => self::StepUp,
             default => self::Deny,
         };
@@ -61,5 +66,18 @@ enum RiskAction: string
     public function isArgon(): bool
     {
         return $this === self::Argon16 || $this === self::Argon32 || $this === self::Argon64;
+    }
+
+    /**
+     * True for the rungs the argon-capacity checks re-escalate to the
+     * interactive step-up under a saturated backend: the three
+     * memory-hard actions plus the sequential rsw rung. The capacity
+     * floor must never leave a decision demanding work the backend
+     * cannot serve — an rsw decision under argon saturation therefore
+     * escalates to StepUp exactly like an argon rung, never weakens.
+     */
+    public function isCapacityGated(): bool
+    {
+        return $this->isArgon() || $this === self::Rsw;
     }
 }

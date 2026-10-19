@@ -70,12 +70,25 @@ void validateKiwiChallenge(KiwiChallenge c) {
             'target_bits ${c.targetBits} exceeds the sha256 cap ${KiwiLimits.shaMaxTargetBits}');
       }
     case KiwiAlgorithm.argon2id:
-      // Fail-closed: no vetted pure-Dart Argon2id exists and the FFI
-      // core reports argon availability per platform (see ffi_bindings).
-      throw const KiwiSolveError(
-          KiwiRefusal.argonUnavailable,
-          'argon2id is not implemented in this package (fail-closed); '
-          'the FFI core reports availability per platform');
+      // The issued argon2id contract: difficulty 1..=10 bits and the
+      // memory/time/parallelism ranges the core solver enforces. The
+      // solve itself runs in the native FFI core (argon2id, the same
+      // derivation the verifier re-runs); a core built without the
+      // `argon` feature answers kiwiErrArgonUnavailable at solve time.
+      if (c.targetBits < 1 || c.targetBits > KiwiLimits.argonMaxTargetBits) {
+        throw KiwiSolveError(KiwiRefusal.difficultyBeyondCap,
+            'target_bits ${c.targetBits} exceeds the argon2id cap ${KiwiLimits.argonMaxTargetBits}');
+      }
+      if (c.mKib < 8 ||
+          c.mKib > KiwiLimits.argonMaxMibKib ||
+          c.mKib < 8 * c.p ||
+          c.t < 3 ||
+          c.t > 6 ||
+          c.p != 1) {
+        throw const KiwiSolveError(KiwiRefusal.unsupportedParams,
+            'the argon2id parameters are outside the client contract '
+            '(m_kib 8..=65536 KiB and at least 8*p, t 3..=6, p = 1)');
+      }
     case KiwiAlgorithm.rsw:
       if (c.t < KiwiLimits.rswTMin ||
           c.t > KiwiLimits.rswTMax ||

@@ -31,6 +31,31 @@ final class MockURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    /// The outbound request body, whatever form Foundation presents it
+    /// in. URLSession hands a URLProtocol the body as an `httpBodyStream`
+    /// (the data is converted to a stream on the way down the stack), so
+    /// a double that only reads `httpBody` decodes an empty document and
+    /// every body assertion degenerates. When `httpBody` is present it
+    /// wins; otherwise the stream is drained to the end and the chunks
+    /// concatenated. Pure Foundation with no URLSession involvement, so
+    /// the drain logic itself is unit-tested directly below.
+    static func requestBody(of request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        let bufferSize = 4096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: bufferSize)
+            guard read > 0 else { break } // 0 = end of stream, < 0 = error
+            body.append(buffer, count: read)
+        }
+        return body
+    }
 }
 
 /// The XCTest suite the Xcode CI runs (`swift test` with a full Xcode;
@@ -216,6 +241,9 @@ final class KiwiCaptchaTests: XCTestCase {
     func testFetchChallengePostsTheDocumentAndDecodesTheAnswer() async throws {
         let challenge = shaChallenge()
         let payload = try JSONEncoder().encode(challenge)
+        // Captured from inside the handler; the outbound document is
+        // asserted separately below, after the fetch completes.
+        var sentBody: Data?
         MockURLProtocol.handler = { request in
             XCTAssertEqual(request.httpMethod, "POST")
             XCTAssertEqual(
@@ -223,11 +251,7 @@ final class KiwiCaptchaTests: XCTestCase {
                 "https://api.example.test/api/kcaptcha/challenge")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-            let body = try JSONDecoder().decode([String: String].self, from: request.httpBody ?? Data())
-            XCTAssertEqual(body["scope"], "login")
-            XCTAssertEqual(body["sitekey"], "pk-ios")
-            XCTAssertEqual(body["algorithm"], "sha256")
-            XCTAssertEqual(body["request_binding"], "rb-1")
+            sentBody = MockURLProtocol.requestBody(of: request)
             return (self.httpResponse(request, 200), payload)
         }
         let client = KiwiClient(
@@ -238,6 +262,17 @@ final class KiwiCaptchaTests: XCTestCase {
             scope: "login", algorithm: "sha256", requestBinding: "rb-1")
         XCTAssertEqual(fetched, challenge)
         XCTAssertEqual(fetched.prefix, "kiwi|login|")
+
+        // The JSON document KiwiClient actually sent. Decoding must
+        // succeed: an empty or truncated body is a failure here, which
+        // is exactly what a double that skips httpBodyStream produces.
+        let body = try JSONDecoder().decode(
+            [String: String].self, from: XCTUnwrap(sentBody, "the POST body was never captured"))
+        XCTAssertEqual(body["scope"], "login")
+        XCTAssertEqual(body["sitekey"], "pk-ios")
+        XCTAssertEqual(body["algorithm"], "sha256")
+        XCTAssertEqual(body["request_binding"], "rb-1")
+        XCTAssertEqual(body.count, 4)
     }
 
     func testFetchChallengeRefusesANon200Answer() async {
@@ -274,6 +309,40 @@ final class KiwiCaptchaTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+    }
+
+    // MARK: - MockURLProtocol.requestBody
+
+    // These exercise the body-drain logic itself (they run on the
+    // GitHub macOS lane, the only place this repository has XCTest).
+
+    func testRequestBodyHelperReadsAnInMemoryBody() throws {
+        var request = URLRequest(url: URL(string: "https://api.example.test/kc")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data("{\"scope\":\"login\"}".utf8)
+        XCTAssertEqual(MockURLProtocol.requestBody(of: request), Data("{\"scope\":\"login\"}".utf8))
+    }
+
+    func testRequestBodyHelperDrainsABodyStreamAcrossChunks() throws {
+        // Larger than the helper's 4096-byte read buffer, so a correct
+        // drain must loop and concatenate several chunks.
+        let sent = Data((0..<10_000).map { UInt8(truncatingIfNeeded: $0) })
+        var request = URLRequest(url: URL(string: "https://api.example.test/kc")!)
+        request.httpMethod = "POST"
+        request.httpBody = nil
+        request.httpBodyStream = InputStream(data: sent)
+        XCTAssertEqual(MockURLProtocol.requestBody(of: request), sent)
+    }
+
+    func testRequestBodyHelperDrainsAnEmptyBodyStream() throws {
+        var request = URLRequest(url: URL(string: "https://api.example.test/kc")!)
+        request.httpBodyStream = InputStream(data: Data())
+        XCTAssertTrue(MockURLProtocol.requestBody(of: request).isEmpty)
+    }
+
+    func testRequestBodyHelperWithoutAnyBodyIsEmpty() {
+        let request = URLRequest(url: URL(string: "https://api.example.test/kc")!)
+        XCTAssertEqual(MockURLProtocol.requestBody(of: request), Data())
     }
 
     // MARK: - Rsw direct entry points

@@ -37,6 +37,20 @@ void main() {
       );
     });
 
+    test('hashes the chunked preimage as one concatenated buffer', () {
+      // The low-difficulty solve hashes prefix || decimal(counter) ||
+      // salt as three chunks; the digest must equal the single-buffer
+      // spelling of the same bytes.
+      final chunked = kiwiSha256([
+        utf8.encode('kiwi|login|'),
+        utf8.encode('7'),
+        Uint8List.fromList([1, 2, 3, 4]),
+      ]);
+      final joined =
+          kiwiSha256([utf8.encode('kiwi|login|7'), Uint8List.fromList([1, 2, 3, 4])]);
+      expect(chunked, joined);
+    });
+
     test('counts leading zero bits in big-endian order', () {
       expect(kiwiLeadingZeroBits(Uint8List.fromList([0, 0, 1])), 23);
       expect(kiwiLeadingZeroBits(Uint8List.fromList([0x80])), 0);
@@ -91,7 +105,7 @@ void main() {
       expect(() => validateKiwiChallenge(armed), throwsA(isA<KiwiSolveError>()));
     });
 
-    test('refuses argon2id fail-closed', () {
+    test('accepts a well-formed argon2id challenge', () {
       final argon = KiwiChallenge(
         nonce: nonce,
         salt: salt,
@@ -102,9 +116,38 @@ void main() {
         targetBits: 5,
         prefix: prefix,
       );
+      validateKiwiChallenge(argon);
+    });
+
+    test('refuses out-of-contract argon2id parameters', () {
+      KiwiChallenge argon({int? targetBits, int? mKib, int? t, int? p}) => KiwiChallenge(
+            nonce: nonce,
+            salt: salt,
+            algorithm: KiwiAlgorithm.argon2id,
+            mKib: mKib ?? 64,
+            t: t ?? 3,
+            p: p ?? 1,
+            targetBits: targetBits ?? 5,
+            prefix: prefix,
+          );
+      // Difficulty above the argon2id ceiling is a cap refusal.
       expect(
-        () => validateKiwiChallenge(argon),
-        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.argonUnavailable)),
+        () => validateKiwiChallenge(argon(targetBits: KiwiLimits.argonMaxTargetBits + 1)),
+        throwsA(
+            predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.difficultyBeyondCap)),
+      );
+      // Memory/time/parallelism outside the issued contract.
+      expect(
+        () => validateKiwiChallenge(argon(mKib: 4)),
+        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.unsupportedParams)),
+      );
+      expect(
+        () => validateKiwiChallenge(argon(t: 2)),
+        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.unsupportedParams)),
+      );
+      expect(
+        () => validateKiwiChallenge(argon(p: 2)),
+        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.unsupportedParams)),
       );
     });
   });

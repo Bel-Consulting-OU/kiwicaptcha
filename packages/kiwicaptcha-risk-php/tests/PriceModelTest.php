@@ -63,14 +63,14 @@ final class PriceModelTest extends TestCase
 
     public function testConstsTableIsPinned(): void
     {
-        self::assertSame(1, PriceModel::version());
+        self::assertSame(2, PriceModel::version());
         self::assertSame(1000, PriceModel::CONSTS['score_saturation']);
         self::assertSame(10000, PriceModel::CONSTS['trust_saturation']);
         self::assertSame(2500, PriceModel::CONSTS['trust_half_scale']);
         self::assertSame(8000, PriceModel::CONSTS['trusted_bucket_credit']);
         self::assertSame(300, PriceModel::CONSTS['pressure_gain_saturation']);
         self::assertSame([800, 1000, 1200, 1400], PriceModel::CONSTS['value_weights']);
-        self::assertSame([150, 300, 450, 600, 700, 790, 880, 970], PriceModel::CONSTS['band_edges']);
+        self::assertSame([150, 300, 450, 600, 700, 775, 850, 925, 1000], PriceModel::CONSTS['band_edges']);
         self::assertSame(300, PriceModel::CONSTS['argon_capacity_floor']);
     }
 
@@ -112,17 +112,19 @@ final class PriceModelTest extends TestCase
         self::assertSame(697, PriceModel::workScore(500, ValueClass::High, 4000, 600));
         self::assertSame(1000, PriceModel::workScore(65535, ValueClass::Critical, 0, 1000));
 
-        // quantization corners of the band table.
+        // quantization corners of the band table, including the exact
+        // golden boundaries on both sides of the rsw band.
         $cases = [
             [0, RiskAction::Allow], [149, RiskAction::Allow],
             [150, RiskAction::Sha16], [299, RiskAction::Sha16],
             [300, RiskAction::Sha18], [449, RiskAction::Sha18],
             [450, RiskAction::Sha20], [599, RiskAction::Sha20],
             [600, RiskAction::Argon16], [699, RiskAction::Argon16],
-            [700, RiskAction::Argon32], [789, RiskAction::Argon32],
-            [790, RiskAction::Argon64], [879, RiskAction::Argon64],
-            [880, RiskAction::StepUp], [969, RiskAction::StepUp],
-            [970, RiskAction::Deny], [1000, RiskAction::Deny],
+            [700, RiskAction::Argon32], [774, RiskAction::Argon32],
+            [775, RiskAction::Argon64], [849, RiskAction::Argon64],
+            [850, RiskAction::Rsw], [924, RiskAction::Rsw],
+            [925, RiskAction::StepUp], [999, RiskAction::StepUp],
+            [1000, RiskAction::Deny],
         ];
         foreach ($cases as [$score, $expected]) {
             self::assertSame($expected, PriceModel::actionForWorkScore($score), "work score {$score}");
@@ -130,10 +132,22 @@ final class PriceModelTest extends TestCase
         // The sha-to-argon edge is the policy's own decision boundary.
         self::assertSame(RiskAction::Argon16, PriceModel::actionForWorkScore(600));
 
-        // Priced rungs at the pinned corners.
+        // Priced rungs at the pinned corners: a trusted full-credit
+        // identity walks the upper ladder one rung at a time, so the
+        // golden boundaries on both sides of the rsw band are hit
+        // exactly by the work score (risk + the 60-point full-credit
+        // pressure residual).
         self::assertSame(RiskAction::Sha16, PriceModel::price(100, ValueClass::Standard, 10000, 1000));
         self::assertSame(RiskAction::Sha18, PriceModel::price(100, ValueClass::Standard, 0, 1000));
         self::assertSame(RiskAction::Argon16, PriceModel::price(500, ValueClass::High, 4000, 600));
+        // Work scores 849 / 850 straddle the argon64-to-rsw edge.
+        self::assertSame(RiskAction::Argon64, PriceModel::price(789, ValueClass::Standard, 10000, 1000));
+        self::assertSame(RiskAction::Rsw, PriceModel::price(790, ValueClass::Standard, 10000, 1000));
+        // Work scores 924 / 925 straddle the rsw-to-step-up edge.
+        self::assertSame(RiskAction::Rsw, PriceModel::price(864, ValueClass::Standard, 10000, 1000));
+        self::assertSame(RiskAction::StepUp, PriceModel::price(865, ValueClass::Standard, 10000, 1000));
+        // Above the last edge the price denies.
+        self::assertSame(RiskAction::Deny, PriceModel::price(999, ValueClass::Standard, 10000, 1000));
     }
 
     /**
@@ -318,9 +332,10 @@ final class PriceModelTest extends TestCase
     }
 
     /**
-     * Sharp for marked identities: composing marks (the Argon64 floor)
-     * and then the price keeps the action at or above the marks floor,
-     * so the price never softens the decisive stage.
+     * Sharp for marked identities: composing marks (the Rsw floor, the
+     * maximum challenge rung) and then the price keeps the action at or
+     * above the marks floor, so the price never softens the decisive
+     * stage.
      */
     public function testPriceNeverSoftensTheMarksFloor(): void
     {
@@ -337,7 +352,7 @@ final class PriceModelTest extends TestCase
                 foreach ([0, 1000] as $pressure) {
                     $out = PriceModel::apply($marked, $this->inputs(ValueClass::Low, $trust), $pressure, $healthy);
                     self::assertGreaterThanOrEqual(
-                        RiskAction::Argon64->rank(),
+                        RiskAction::Rsw->rank(),
                         $out->action->rank(),
                         "score {$score} trust {$trust} pressure {$pressure} softened the marks floor"
                     );
@@ -348,7 +363,8 @@ final class PriceModelTest extends TestCase
 
     /**
      * The stage prepends its reason exactly like the marks stage, and a
-     * saturated backend re-escalates a priced argon rung to the
+     * saturated backend re-escalates a priced capacity-gated rung (an
+     * argon rung or the rsw time-lock rung) to the
      * interactive step-up instead of demanding unservable work.
      */
     public function testApplyStageReasonsAndCapacity(): void
@@ -373,8 +389,21 @@ final class PriceModelTest extends TestCase
         self::assertTrue($out->hasReason(RiskReason::PricedEscalation));
         self::assertTrue($out->hasReason(RiskReason::CapacityPressure));
 
+        // priced rsw rung (the trusted full-credit identity at risk 800
+        // works 860) on a saturated backend re-escalates to step-up too —
+        // the capacity gate covers the time-lock rung, never weakens —
+        // and with headroom the priced rsw rung stands.
+        $out = PriceModel::apply($this->plain(800), $this->inputs(ValueClass::Standard, 10000), 1000, $saturated);
+        self::assertSame(RiskAction::StepUp, $out->action);
+        self::assertTrue($out->hasReason(RiskReason::PricedEscalation));
+        self::assertTrue($out->hasReason(RiskReason::CapacityPressure));
+        $out = PriceModel::apply($this->plain(800), $this->inputs(ValueClass::Standard, 10000), 1000, $this->healthy());
+        self::assertSame(RiskAction::Rsw, $out->action);
+        self::assertTrue($out->hasReason(RiskReason::PricedEscalation));
+        self::assertFalse($out->hasReason(RiskReason::CapacityPressure));
+
         // priced deny on a saturated backend stays deny (capacity only
-        // re-escalates argon rungs).
+        // re-escalates capacity-gated rungs).
         $out = PriceModel::apply($this->plain(600), $this->inputs(ValueClass::Critical, 0), 1000, $saturated);
         self::assertSame(RiskAction::Deny, $out->action);
     }

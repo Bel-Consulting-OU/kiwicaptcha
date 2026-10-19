@@ -1,0 +1,52 @@
+// The KiwiCaptchaSolver Android module (docs/NATIVE.md).
+//
+// Shape follows the current React Native library template (RN 0.7x):
+// the app project already puts the Android Gradle Plugin, the Kotlin
+// plugin and the React Native gradle plugin on this build's classpath
+// through its root build.gradle and its settings.gradle includeBuild of
+// @react-native/gradle-plugin; the buildscript block below only pins
+// standalone fallbacks.
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.5.2")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24")
+    }
+}
+
+def safeExtGet(prop, fallback) {
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+apply plugin: "com.android.library"
+apply plugin: "com.facebook.react"
+apply plugin: "org.jetbrains.kotlin.android"
+
+android {
+    namespace "com.kiwicaptcha.reactnative"
+    // RN 0.73-0.75 apps compile against 34, 0.76+ against 35; the RN
+    // template always sets these in rootProject.ext, which wins here.
+    compileSdkVersion safeExtGet("compileSdkVersion", 35)
+
+    defaultConfig {
+        minSdkVersion safeExtGet("minSdkVersion", 21)
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+dependencies {
+    // From node_modules: the app's resolution strategy pins the exact
+    // React Android artifacts.
+    implementation "com.facebook.react:react-native:+"
+}

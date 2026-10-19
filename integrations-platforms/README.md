@@ -61,6 +61,22 @@ contract:
   `error_page`, since auth_request passes only 2xx);
 - gate fault: 503 when the kiwi deployment is unreachable. Fail closed.
 
+## The token authority rule (platform integrations)
+
+The native platform integrations in this directory — the Keycloak
+authenticator, the Discourse plugin, the phpBB extension and the
+authentik helper (like every server SDK package) — apply the shared
+token authority rule on the sources they read: every non-empty token
+value is collected (repeated header lines and repeated or array-valued
+form/query keys included) and all collected values must agree. One
+distinct value verifies however many sources carry it; two or more
+distinct values refuse the request with the typed
+`token_source_conflict` code (Keycloak: a failed authentication with
+that error event; Discourse: 403; authentik: a typed refusal result;
+phpBB: a typed error) before any token is verified, so a trusted
+gateway's header can never be shadowed by an attacker-controlled form
+field, query string or cookie.
+
 ## Tests
 
 `tests/run.sh` runs everything the local toolchain allows: PHP unit

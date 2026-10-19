@@ -20,10 +20,11 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
  *
  * 1. A mark on one of the requesting identity's own dimensions
  *    (session, principal, agent or the ASN bucket) escalates the chosen
- *    action to at least the ladder's maximum challenge rung (Argon64).
- *    StepUp and Deny keep their rank. A saturated argon backend
- *    re-escalates the rung to the interactive step-up exactly like the
- *    policy's own capacity check.
+ *    action to at least the ladder's maximum challenge rung (Rsw, the
+ *    sequential time-lock rung of change.md 1.4 and 3.3.3). Rsw, StepUp
+ *    and Deny keep their rank. A saturated argon backend re-escalates
+ *    the rung to the interactive step-up exactly like the policy's own
+ *    capacity check.
  * 2. A mark combined with corroborating attacker evidence on the same
  *    request denies for the remaining mark TTL. Corroborating evidence
  *    means bad-proof, replay or malformed traffic at the policy's
@@ -38,7 +39,7 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
  *
  * Victim-protection invariant (property-tested): when only target-side
  * evidence fires, the final action equals the plain action or StepUp,
- * never Argon64 and never Deny.
+ * never beyond the interactive step-up and never Deny.
  *
  * A mark outside its TTL window is inert: the stage treats it as absent
  * for both the rung and the deny rule, the belt to the store's own key
@@ -51,8 +52,8 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
  * quarantines instead of escalating. The action stays Allow (wire
  * identical to allow end to end, same rung and pricing), the decision
  * carries the quarantine disposition and the spam_mark_quarantine
- * reason. A spam mark never runs the Argon64 floor: above the Allow
- * band the plain action stands (severity wins) with the ordinary
+ * reason. A spam mark never runs the Rsw floor: above the Allow band
+ * the plain action stands (severity wins) with the ordinary
  * marked_identity reason. The deny, target and non-spam-mark rules keep
  * their precedence over quarantine. The legacy corpus
  * (attacker-denial-vectors.json) pins rules 1 to 3 with the selection
@@ -167,13 +168,13 @@ final class MarksEscalation
                 $stageReasons[] = RiskReason::SpamMarkQuarantine;
             } else {
                 $stageReasons[] = RiskReason::MarkedIdentity;
-                // The Argon64 floor belongs to the non-spam marks: a
+                // The Rsw floor belongs to the non-spam marks: a
                 // spam-only identity is the quarantine plane's subject, so
                 // above the Allow band its plain action stands (severity
                 // wins) and the stage adds no rung of its own.
                 if (!$quarantineSpamMarks || !Quarantine::spamOnly($view, $nowMs, $markTtlMs)) {
-                    if ($action->rank() < RiskAction::Argon64->rank()) {
-                        $action = RiskAction::Argon64;
+                    if ($action->rank() < RiskAction::Rsw->rank()) {
+                        $action = RiskAction::Rsw;
                         if ($resources->argonCapacity < self::ARGON_CAPACITY_FLOOR) {
                             $action = RiskAction::StepUp;
                             $stageReasons[] = RiskReason::CapacityPressure;

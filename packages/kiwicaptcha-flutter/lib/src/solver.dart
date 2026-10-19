@@ -19,7 +19,11 @@ const List<int> _k = [
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-Uint8List kiwiSha256(List<int> chunks) {
+/// SHA-256 over the concatenation of `chunks` (each chunk is a byte
+/// sequence). The chunked shape exists so a preimage built as
+/// `prefix || decimal(counter) || salt` never needs a defensive copy of
+/// the whole input.
+Uint8List kiwiSha256(List<List<int>> chunks) {
   final total = chunks.fold<int>(0, (sum, c) => sum + c.length);
   final h = <int>[0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
   final padded = Uint8List(((total + 8) ~/ 64 + 1) * 64);
@@ -145,14 +149,12 @@ KiwiSolution solveKiwiChallenge(KiwiChallenge challenge) {
   final ffi = KiwiFfi.instance();
   switch (challenge.algorithm) {
     case KiwiAlgorithm.sha256:
+      // Throws KiwiSolveError on any refusal, exhaustion included.
       final counter = ffi.sha256Search(
         prefix: challenge.prefix,
         salt: _base64Decode(challenge.salt),
         targetBits: challenge.targetBits,
       );
-      if (counter == null) {
-        throw const KiwiSolveError(KiwiRefusal.exhausted, 'the core exhausted the search');
-      }
       return KiwiSolution(
         counter: counter,
         durationMs: DateTime.now().millisecondsSinceEpoch - started,

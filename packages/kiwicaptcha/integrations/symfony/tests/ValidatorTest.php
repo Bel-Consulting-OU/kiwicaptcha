@@ -66,8 +66,15 @@ final class ValidatorTest extends TestCase
     /** The post-solve vector that demands Argon32 (score 813). */
     private const ARGON32_VECTOR = ['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890];
 
-    /** The post-solve vector that demands StepUp (score 933, no deny reason). */
-    private const STEP_UP_VECTOR = ['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890, 'action_failure' => 1000];
+    /**
+     * The post-solve vector that demands StepUp (score 959, no deny
+     * reason). The score sits inside the step-up band (955..979), past
+     * the rsw rung (930..954). A score inside the rsw band is a soft
+     * rung the hysteresis may hold at the previous band, while a
+     * step-up is a hard action this test's terminality semantics rely
+     * on.
+     */
+    private const STEP_UP_VECTOR = ['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890, 'action_failure' => 1000, 'malformed' => 100];
 
     private Issuer $issuer;
     private Verifier $verifier;

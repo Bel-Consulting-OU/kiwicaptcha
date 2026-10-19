@@ -61,22 +61,24 @@ final class PriceModel
      *   at pressure 1000.
      * - value_weights: per-mille value weights in ValueClass order.
      * - band_edges: the work-score band edges (exclusive upper bounds of
-     *   the first eight rungs). The first four edges match
+     *   the first nine rungs). The first four edges match
      *   RiskAction::actionForScore; the upper bands widen so the
-     *   narrowest consecutive gap (90) exceeds the trusted residual (71)
-     *   and the one-rung invariant is structural.
-     * - argon_capacity_floor: below this capacity a priced argon rung
+     *   narrowest consecutive gap (75) exceeds the trusted residual (71)
+     *   and the one-rung invariant is structural. The rsw band sits
+     *   between the argon64 and step-up bands, matching the ladder order.
+     * - argon_capacity_floor: below this capacity a priced
+     *   capacity-gated rung (an argon rung or the rsw rung)
      *   re-escalates to the interactive step-up.
      */
     public const CONSTS = [
-        'version' => 1,
+        'version' => 2,
         'score_saturation' => 1000,
         'trust_saturation' => 10000,
         'trust_half_scale' => 2500,
         'trusted_bucket_credit' => 8000,
         'pressure_gain_saturation' => 300,
         'value_weights' => [800, 1000, 1200, 1400],
-        'band_edges' => [150, 300, 450, 600, 700, 790, 880, 970],
+        'band_edges' => [150, 300, 450, 600, 700, 775, 850, 925, 1000],
         'argon_capacity_floor' => 300,
     ];
 
@@ -138,7 +140,7 @@ final class PriceModel
 
     /**
      * The quantization band table: maps a work score onto the ladder.
-     * The edges are the exclusive upper bounds of the first eight rungs;
+     * The edges are the exclusive upper bounds of the first nine rungs;
      * a score at or above the last edge denies. The first four edges are
      * RiskAction::actionForScore's own, so the boundary between the sha
      * and argon regimes (600) is the same number in both tables.
@@ -154,7 +156,8 @@ final class PriceModel
             $workScore < $edges[4] => RiskAction::Argon16,
             $workScore < $edges[5] => RiskAction::Argon32,
             $workScore < $edges[6] => RiskAction::Argon64,
-            $workScore < $edges[7] => RiskAction::StepUp,
+            $workScore < $edges[7] => RiskAction::Rsw,
+            $workScore < $edges[8] => RiskAction::StepUp,
             default => RiskAction::Deny,
         };
     }
@@ -172,10 +175,11 @@ final class PriceModel
      * overrides, hysteresis, marks) with the priced rung. The price may
      * only raise: when the priced rung does not exceed the composed
      * action the decision passes through untouched, and when it does the
-     * action rises to the priced rung. A priced argon rung on a
+     * action rises to the priced rung. A priced capacity-gated rung (an
+     * argon rung or the rsw time-lock rung) on a
      * saturated backend re-escalates to the interactive step-up exactly
      * like the policy's own capacity check, so the floor never demands
-     * memory-hard work the backend cannot serve.
+     * work the backend cannot serve.
      *
      * Pure; the decision's score, band, policy version, model revision,
      * global level and decision id pass through untouched. Stage reasons
@@ -194,9 +198,10 @@ final class PriceModel
         }
         $action = $priced;
         $stageReasons = [RiskReason::PricedEscalation];
-        if ($action->isArgon() && $resources->argonCapacity < self::CONSTS['argon_capacity_floor']) {
-            // StepUp outranks every argon rung, so the capacity
-            // re-escalation is still a raise over the composed action.
+        if ($action->isCapacityGated() && $resources->argonCapacity < self::CONSTS['argon_capacity_floor']) {
+            // StepUp outranks every capacity-gated rung (the argon rungs
+            // and the rsw rung), so the capacity re-escalation is still a
+            // raise over the composed action.
             $action = RiskAction::StepUp;
             $stageReasons[] = RiskReason::CapacityPressure;
         }

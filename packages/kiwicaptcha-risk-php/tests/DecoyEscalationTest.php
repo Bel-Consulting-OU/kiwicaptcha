@@ -57,14 +57,15 @@ final class DecoyEscalationTest extends TestCase
     {
         self::assertSame(RiskAction::Sha16, DecoyEscalation::apply($this->plain(100), true)->action);
         self::assertSame(RiskAction::Argon16, DecoyEscalation::apply($this->plain(500), true)->action);
-        self::assertSame(RiskAction::StepUp, DecoyEscalation::apply($this->plain(900), true)->action);
+        self::assertSame(RiskAction::Rsw, DecoyEscalation::apply($this->plain(900), true)->action);
+        self::assertSame(RiskAction::StepUp, DecoyEscalation::apply($this->plain(940), true)->action);
         $out = DecoyEscalation::apply($this->plain(500), true);
         self::assertTrue($out->hasReason(RiskReason::DecoyEscalation));
     }
 
     public function testEscalationNeverBlocks(): void
     {
-        self::assertSame(RiskAction::StepUp, DecoyEscalation::apply($this->plain(950), true)->action);
+        self::assertSame(RiskAction::StepUp, DecoyEscalation::apply($this->plain(965), true)->action);
         $deny = $this->plain(990);
         $out = DecoyEscalation::apply($deny, true);
         self::assertSame(RiskAction::Deny, $out->action);

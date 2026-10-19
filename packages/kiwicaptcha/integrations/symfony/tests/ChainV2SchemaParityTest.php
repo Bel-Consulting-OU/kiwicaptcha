@@ -114,6 +114,7 @@ final class ChainV2SchemaParityTest extends TestCase
         $records[] = ['valid-all-actions', $this->validRecord(['requiredAction' => 'argon16', 'requiredRank' => 4])];
         $records[] = ['valid-all-actions', $this->validRecord(['requiredAction' => 'argon32', 'requiredRank' => 5])];
         $records[] = ['valid-all-actions', $this->validRecord(['requiredAction' => 'argon64', 'requiredRank' => 6])];
+        $records[] = ['valid-all-actions', $this->validRecord(['requiredAction' => 'rsw', 'requiredRank' => 7])];
 
         // Single-field corruptions: wrong type, wrong shape, wrong value.
         $corrupt = [
@@ -170,6 +171,7 @@ final class ChainV2SchemaParityTest extends TestCase
             ['rank-string', ['requiredAction' => 'sha20', 'requiredRank' => '3']],
             ['rank-mismatch-high', ['requiredAction' => 'sha20', 'requiredRank' => 4]],
             ['rank-mismatch-low', ['requiredAction' => 'sha20', 'requiredRank' => 2]],
+            ['rank-mismatch-rsw', ['requiredAction' => 'rsw', 'requiredRank' => 6]],
             ['rank-zero', ['requiredAction' => 'sha20', 'requiredRank' => 0]],
             ['rank-null', ['requiredRank' => null]],
             ['rank-missing', ['requiredRank' => 'REMOVE']],

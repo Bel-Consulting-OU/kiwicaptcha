@@ -1,6 +1,6 @@
 {
   "schema": "kiwicaptcha.feature-inventory/1",
-  "comment": "Every shipped surface and the lane that exercises it. The checker fails when a package, tool, protocol or platform integration exists on disk without an entry here, or when an entry names a lane that no workflow or runner invokes.",
+  "comment": "Every shipped surface and the lane that exercises it. The checker fails when a package, tool, protocol or platform integration exists on disk without an entry here, or when an entry names a lane that no workflow or runner invokes. A package may additionally declare a `capabilities` list: concrete, machine-checked facts about its implementation artifacts (an exported ABI symbol, a native module the JS bridge must dispatch to, a degradation marker that must stay gone). Capability paths are package-relative; a leading \"/\" anchors at the repository root for protocol-level markers that live outside the package.",
   "packages": [
     {
       "path": "packages/kiwicaptcha",
@@ -20,7 +20,17 @@
         "Cargo.toml",
         "tests"
       ],
-      "kiwi_job": "risk-rust"
+      "kiwi_job": "risk-rust",
+      "capabilities": [
+        {
+          "kind": "files",
+          "comment": "the escalation ladder is implemented, not just wired: the consistency-ledger ladder checker exists and the RSW adaptive-rung kernel has a dedicated Symfony test",
+          "files": [
+            "/tools/ci/consistency-ledger-ladder-check.py",
+            "/packages/kiwicaptcha/integrations/symfony/tests/RswAdaptiveRungKernelTest.php"
+          ]
+        }
+      ]
     },
     {
       "path": "packages/kiwicaptcha-php",
@@ -130,7 +140,24 @@
         "build.gradle.kts",
         "src/test"
       ],
-      "kiwi_job": "android-unit-tests"
+      "kiwi_job": "android-unit-tests",
+      "capabilities": [
+        {
+          "kind": "files",
+          "comment": "Argon2id is implemented natively, not stubbed",
+          "files": [
+            "src/main/java/com/kiwicaptcha/Argon2id.java"
+          ]
+        },
+        {
+          "kind": "free_of",
+          "comment": "the solver must not carry the removed ArgonUnavailable degradation path",
+          "file": "src/main/kotlin/com/kiwicaptcha/KiwiSolver.kt",
+          "markers": [
+            "ArgonUnavailable"
+          ]
+        }
+      ]
     },
     {
       "path": "packages/kiwicaptcha-wasm",
@@ -230,7 +257,28 @@
         "package.json",
         "test"
       ],
-      "kiwi_job": "wrappers"
+      "kiwi_job": "wrappers",
+      "capabilities": [
+        {
+          "kind": "files",
+          "comment": "both native solver modules and their iOS podspec exist",
+          "files": [
+            "android/src/main/java/**/KiwiCaptchaSolverModule.kt",
+            "ios/KiwiCaptchaSolver.swift",
+            "ios/KiwiCaptchaSolver.podspec"
+          ]
+        },
+        {
+          "kind": "dispatches",
+          "comment": "the JS bridge dispatches to those native modules through both RN bridges, under the exact name they register",
+          "file": "src/native.ts",
+          "targets": [
+            "TurboModuleRegistry",
+            "NativeModules",
+            "NATIVE_MODULE_NAME = \"KiwiCaptchaSolver\""
+          ]
+        }
+      ]
     },
     {
       "path": "packages/kiwicaptcha-ios",
@@ -251,6 +299,36 @@
         "test"
       ],
       "kiwi_job": "flutter"
+    },
+    {
+      "path": "packages/kiwicaptcha-flutter/native",
+      "capability": "the native FFI core (libkiwicaptcha_solver) the Flutter Dart bindings load over dart:ffi: real sha256/argon2id/rsw solving behind the exported C ABI of src/kiwicaptcha_solver.h, proven by tests/abi.rs which dlopens the built cdylib, solves the shared golden PHP vectors through the exported symbols, and verifies each solution with the workspace core verifier",
+      "test": "cargo test (working-directory packages/kiwicaptcha-flutter/native)",
+      "ci_job": "flutter",
+      "markers": [
+        "Cargo.toml",
+        "tests"
+      ],
+      "kiwi_job": "flutter",
+      "capabilities": [
+        {
+          "kind": "exports",
+          "comment": "the C ABI exports one solver per algorithm, not a stub",
+          "file": "src/lib.rs",
+          "symbols": [
+            "kiwi_solve_sha256",
+            "kiwi_solve_rsw",
+            "kiwi_solve_argon2id"
+          ]
+        },
+        {
+          "kind": "files",
+          "comment": "the dlopen ABI test that exercises the exported symbols against the shared golden vectors",
+          "files": [
+            "tests/abi.rs"
+          ]
+        }
+      ]
     }
   ],
   "surfaces": [

@@ -76,6 +76,36 @@ final class ChallengeProfile
             return;
         }
 
+        if ($this->algorithm === PoWAlgorithm::Rsw) {
+            // The time-lock profile space: the difficulty slot carries
+            // the protocol floor pin (1 — rsw has no leading-zero
+            // target, the verifier reads t and never consults it), the
+            // sequential cost is the configured squaring count, memory
+            // is unused and parallelism is fixed at 1.
+            if ($this->targetBits !== 1) {
+                throw new \InvalidArgumentException(
+                    sprintf('rsw target bits carry the protocol floor pin 1 (got %d)', $this->targetBits)
+                );
+            }
+            if ($this->t < Config::MIN_RSW_T || $this->t > Config::MAX_RSW_T) {
+                throw new \InvalidArgumentException(
+                    sprintf('rsw sequential cost t must be within %d..%d (got %d)', Config::MIN_RSW_T, Config::MAX_RSW_T, $this->t)
+                );
+            }
+            if ($this->p !== 1) {
+                throw new \InvalidArgumentException(
+                    sprintf('rsw parallelism p must be 1 (got %d)', $this->p)
+                );
+            }
+            if ($this->mKib !== 0) {
+                throw new \InvalidArgumentException(
+                    sprintf('rsw memory m_kib is unused and must be 0 (got %d)', $this->mKib)
+                );
+            }
+
+            return;
+        }
+
         if ($this->targetBits < 1 || $this->targetBits > Config::MAX_ARGON2_TARGET_BITS) {
             throw new \InvalidArgumentException(
                 sprintf('Argon2id target bits must be within 1..%d (got %d)', Config::MAX_ARGON2_TARGET_BITS, $this->targetBits)

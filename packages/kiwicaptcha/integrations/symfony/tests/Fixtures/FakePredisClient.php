@@ -1971,12 +1971,15 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        if (str_contains($script, 'Calibration confirmation: outcome ledger CAS + receipt + bucket')) {
-            // Canonical confirm.lua (v2): keys[1] receipt, keys[2]
-            // decision-time bucket, keys[3] outcome ledger;
-            // argv[1] mode, argv[2] weight, argv[3] legitimate,
-            // argv[4] bucket TTL, argv[5] outcome TTL, argv[6] expected
-            // scope, argv[7] expected decision_hour.
+        if (str_contains($script, 'Calibration confirmation: outcome ledger + receipt + bucket')) {
+            // Canonical confirm.lua (the recoverable-effect-state writer):
+            // keys[1] receipt, keys[2] decision-time bucket, keys[3]
+            // outcome ledger; argv[1] mode, argv[2] weight, argv[3]
+            // legitimate, argv[4] bucket TTL, argv[5] outcome TTL, argv[6]
+            // expected scope, argv[7] expected decision_hour. The ledger is
+            // the exactly-once authority; the effect state (fx/po/st/sm)
+            // makes an interrupted invocation recoverable; the terminal
+            // ledger carries c (sampled?) and v = 2 (writer generation).
             $receiptKey = (string) $keys[0];
             $bucketKey = (string) $keys[1];
             $ledgerKey = (string) $keys[2];
@@ -2004,13 +2007,120 @@ final class FakePredisClient extends \Predis\Client
                 throw new \Predis\Response\ServerException('confirm: outcome_ttl_s must be a positive integer no greater than 2147483647');
             }
             $legitimate = $legitimateRaw === '1';
+            $boundary = 600;
+
+            // The per-decision bucket marker (fx:<decision tag>): present
+            // only between the pending ledger write and the cleanup, so a
+            // retry never repeats a landed bucket effect.
+            $decisionTag = \is_string($keys[2]) && preg_match('/:outcome:([^:]+)$/', (string) $keys[2], $m) === 1
+                ? $m[1] : (string) $keys[2];
+            $markerField = 'fx:' . $decisionTag;
+
+            $completeEffects = function (string $outcome, int $status, float $recordedWeight, float $score, bool $sampleResolved) use ($receiptKey, $bucketKey, $ledgerKey, $markerField, $bucketTtlSecs, $boundary): int {
+                if ($status === 1) {
+                    if (!isset($this->hashes[$bucketKey][$markerField])) {
+                        if ($outcome === 'L') {
+                            $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $recordedWeight]);
+                            $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $recordedWeight]);
+                            $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', max(0.0, $score - $boundary) * $recordedWeight]);
+                        } else {
+                            $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $recordedWeight]);
+                            $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $recordedWeight]);
+                            $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', max(0.0, $boundary - $score) * $recordedWeight]);
+                        }
+                        if ($sampleResolved) {
+                            $this->fakeHincrbyfloat([$bucketKey, 'sample_resolved', 1.0]);
+                        }
+                        $this->hashes[$bucketKey][$markerField] = '1';
+                    }
+                    $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
+                }
+                $ledger = json_decode($this->strings[$ledgerKey] ?? '{}', true);
+                if (!\is_array($ledger)) {
+                    $ledger = [];
+                }
+                $ledger['o'] = $outcome;
+                $ledger['w'] = $recordedWeight;
+                $ledger['c'] = $status === 1 ? 1 : 0;
+                $ledger['v'] = 2;
+                $ledger['fx'] = 2;
+                // SET ... KEEPTTL: the registration TTL is preserved.
+                $this->strings[$ledgerKey] = (string) json_encode($ledger);
+                unset($this->strings[$receiptKey]);
+                if ($status === 1) {
+                    unset($this->hashes[$bucketKey][$markerField]);
+                }
+
+                return $status;
+            };
 
             $raw = $this->strings[$receiptKey] ?? null;
-            if ($raw === null) {
+            $receipt = \is_string($raw) ? json_decode($raw, true) : null;
+            if (!\is_array($receipt)) {
+                $receipt = null;
+            }
+
+            $ledgerRaw = $this->strings[$ledgerKey] ?? null;
+            if ($ledgerRaw === null) {
                 return 0;
             }
-            $receipt = json_decode($raw, true);
-            if (!\is_array($receipt) || !isset($receipt['scope'])) {
+            $ledger = json_decode($ledgerRaw, true);
+            if (!\is_array($ledger)) {
+                throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey} is not a JSON object");
+            }
+
+            // Recoverable effect set (fx = 1): finish the recorded
+            // confirmation exactly (no receipt re-read, no repeated bucket
+            // write when the marker is present).
+            if ((int) ($ledger['fx'] ?? 0) === 1) {
+                if (($ledger['o'] ?? null) !== 'P') {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey}:fx is pending but the outcome is not P");
+                }
+                $outcome = (string) ($ledger['po'] ?? '');
+                if ($outcome !== 'L' && $outcome !== 'A') {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey}:po must be L or A");
+                }
+                $status = (int) ($ledger['st'] ?? 0);
+                if ($status !== 1 && $status !== 2) {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey}:st must be 1 or 2");
+                }
+                $recordedWeight = (float) ($ledger['w'] ?? 0);
+                if ($recordedWeight <= 0 || !\is_finite($recordedWeight)) {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey}:w must be positive");
+                }
+                if ((int) ($ledger['scope'] ?? 0) !== $expectedScope
+                    || (int) ($ledger['hour'] ?? 0) !== $expectedHour
+                ) {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey} disagrees with the confirm arguments");
+                }
+                $score = (float) ($ledger['score'] ?? 0);
+                $score = max(0.0, min(1000.0, $score));
+
+                return $completeEffects($outcome, $status, $recordedWeight, $score, (int) ($ledger['sm'] ?? 0) === 1);
+            }
+
+            // Terminal ledger with the receipt still present: the previous
+            // invocation was interrupted before the receipt delete — clean
+            // up and return the recorded status once.
+            if (($ledger['o'] ?? null) === 'L' || ($ledger['o'] ?? null) === 'A') {
+                $status = (int) ($ledger['st'] ?? 0);
+                if ($status === 1) {
+                    unset($this->hashes[$bucketKey][$markerField]);
+                }
+                unset($this->strings[$receiptKey]);
+
+                return $receipt !== null ? $status : 0;
+            }
+
+            if (($ledger['o'] ?? null) !== 'P') {
+                return 0;
+            }
+
+            // a pending ledger needs its receipt to confirm.
+            if ($receipt === null) {
+                return 0;
+            }
+            if (!isset($receipt['scope'])) {
                 unset($this->strings[$receiptKey]);
 
                 return 0;
@@ -2018,14 +2128,6 @@ final class FakePredisClient extends \Predis\Client
             if ((int) $receipt['scope'] !== $expectedScope
                 || (int) ($receipt['decision_hour'] ?? 0) !== $expectedHour
             ) {
-                return 0;
-            }
-            $ledgerRaw = $this->strings[$ledgerKey] ?? null;
-            if ($ledgerRaw === null) {
-                return 0;
-            }
-            $ledger = json_decode($ledgerRaw, true);
-            if (!\is_array($ledger) || ($ledger['o'] ?? null) !== 'P') {
                 return 0;
             }
 
@@ -2042,31 +2144,25 @@ final class FakePredisClient extends \Predis\Client
                 $score = 1000;
             }
 
-            $ledger['o'] = $legitimate ? 'L' : 'A';
-            $ledger['w'] = $weight;
-            $ledger['c'] = $status === 1 ? 1 : 0;
-            $this->strings[$ledgerKey] = (string) json_encode($ledger);
-            $this->fakePexpire([$ledgerKey, $outcomeTtlSecs * 1000]);
-            unset($this->strings[$receiptKey]);
-
-            $boundary = 600;
-            if ($status === 1) {
-                if ($legitimate) {
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', max(0.0, $score - $boundary) * $weight]);
-                } else {
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', max(0.0, $boundary - $score) * $weight]);
-                }
-                $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
-                if ($mode === 1) {
-                    $this->fakeHincrbyfloat([$bucketKey, 'sample_resolved', 1.0]);
-                }
+            // Product guard (pre-mutation): a huge weight must reject the
+            // whole confirmation before the receipt is consumed.
+            if ($status === 1 && (abs($score * $weight) > 1e100 || is_nan($score * $weight))) {
+                throw new \Predis\Response\ServerException('invalid calibration weight product');
             }
 
-            return $status;
+            $outcome = $legitimate ? 'L' : 'A';
+            $sampleResolved = $status === 1 && $mode === 1;
+
+            // The recoverable effect state: keep the outcome pending,
+            // record the intended outcome/status, then consume the receipt.
+            $ledger['fx'] = 1;
+            $ledger['po'] = $outcome;
+            $ledger['st'] = $status;
+            $ledger['sm'] = $sampleResolved ? 1 : 0;
+            $ledger['w'] = $weight;
+            $this->strings[$ledgerKey] = (string) json_encode($ledger);
+
+            return $completeEffects($outcome, $status, $weight, $score, $sampleResolved);
         }
 
         if (str_contains($script, 'Calibration correction: flip the outcome ledger + reverse/redo')) {
@@ -2082,6 +2178,13 @@ final class FakePredisClient extends \Predis\Client
             $outcomeTtlSecs = (int) $rest[3];
             $expectedScope = (int) $rest[4];
             $expectedHour = (int) $rest[5];
+
+            // The per-decision bucket marker, derived from the ledger key's
+            // `:outcome:<decision>` tail exactly like confirm.lua does, so
+            // both scripts address the same marker field.
+            $markerField = preg_match('/:outcome:([^:]+)$/', $ledgerKey, $fxTag) === 1
+                ? 'fx:' . $fxTag[1]
+                : 'fx:' . $ledgerKey;
 
             if ($newOutcome !== 'L' && $newOutcome !== 'A') {
                 throw new \Predis\Response\ServerException('invalid correction outcome');
@@ -2114,6 +2217,8 @@ final class FakePredisClient extends \Predis\Client
                 return 0;
             }
             if (($ledger['o'] ?? null) === $newOutcome) {
+                unset($this->hashes[$bucketKey][$markerField]);
+
                 return 0;
             }
             $score = (float) ($ledger['score'] ?? 0);
@@ -2125,45 +2230,106 @@ final class FakePredisClient extends \Predis\Client
             }
             $oldW = (float) ($ledger['w'] ?? 1);
             $counted = (int) ($ledger['c'] ?? 0) === 1;
+            // The clipped legit_above_sum / abuse_below_sum legs exist only
+            // since the generation-2 confirm writer (v = 2): a legacy or
+            // unsampled ledger never wrote them, so a correction must not
+            // reverse or redo them.
+            $clipped = $counted && (int) ($ledger['v'] ?? 0) === 2;
             $boundary = 600;
 
-            if ($counted) {
-                if (($ledger['o'] ?? null) === 'L') {
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_count', -$oldW]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', -($score * $oldW)]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', -(max(0.0, $score - $boundary) * $oldW)]);
-                } else {
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', -$oldW]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', -($score * $oldW)]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', -(max(0.0, $boundary - $score) * $oldW)]);
+            // Product guard (pre-mutation): both bucket contributions are
+            // score * weight products.
+            if ($oldW < 0 || !\is_finite($oldW)
+                || abs($score * $oldW) > 1e100 || abs($score * $weight) > 1e100
+            ) {
+                throw new \Predis\Response\ServerException('invalid calibration weight product');
+            }
+
+            $applyCorrection = function (string $fromO, string $toO, float $fromW, float $toW) use ($bucketKey, $markerField, $counted, $clipped, $score, $boundary): void {
+                if (!$counted) {
+                    return;
                 }
-                foreach (['legit_count', 'legit_score_sum', 'legit_above_sum', 'abuse_count', 'abuse_score_sum', 'abuse_below_sum'] as $field) {
-                    if (($this->hashes[$bucketKey][$field] ?? 0) < 0) {
-                        $this->hashes[$bucketKey][$field] = 0;
+                $fields = [
+                    'legit_count' => (float) ($this->hashes[$bucketKey]['legit_count'] ?? 0),
+                    'legit_score_sum' => (float) ($this->hashes[$bucketKey]['legit_score_sum'] ?? 0),
+                    'legit_above_sum' => (float) ($this->hashes[$bucketKey]['legit_above_sum'] ?? 0),
+                    'abuse_count' => (float) ($this->hashes[$bucketKey]['abuse_count'] ?? 0),
+                    'abuse_score_sum' => (float) ($this->hashes[$bucketKey]['abuse_score_sum'] ?? 0),
+                    'abuse_below_sum' => (float) ($this->hashes[$bucketKey]['abuse_below_sum'] ?? 0),
+                ];
+                $apply = function (string $o, float $w, int $sign) use (&$fields, $clipped, $boundary, $score): void {
+                    if ($o === 'L') {
+                        $fields['legit_count'] += $sign * $w;
+                        $fields['legit_score_sum'] += $sign * $w * $score;
+                        if ($clipped) {
+                            $fields['legit_above_sum'] += $sign * $w * max(0.0, $score - $boundary);
+                        }
+                    } else {
+                        $fields['abuse_count'] += $sign * $w;
+                        $fields['abuse_score_sum'] += $sign * $w * $score;
+                        if ($clipped) {
+                            $fields['abuse_below_sum'] += $sign * $w * max(0.0, $boundary - $score);
+                        }
+                    }
+                };
+                $apply($fromO, $fromW, -1);
+                foreach ($fields as $field => $value) {
+                    if ($value < 0) {
+                        $fields[$field] = 0.0;
                     }
                 }
-
-                if ($newOutcome === 'L') {
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_count', $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_score_sum', $score * $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'legit_above_sum', max(0.0, $score - $boundary) * $weight]);
-                } else {
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_count', $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_score_sum', $score * $weight]);
-                    $this->fakeHincrbyfloat([$bucketKey, 'abuse_below_sum', max(0.0, $boundary - $score) * $weight]);
+                $apply($toO, $toW, 1);
+                foreach ($fields as $field => $value) {
+                    if (($this->hashes[$bucketKey][$field] ?? 0) != $value) {
+                        $this->fakeHincrbyfloat([$bucketKey, $field, $value - (float) ($this->hashes[$bucketKey][$field] ?? 0)]);
+                    }
                 }
-                $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
+                $this->hashes[$bucketKey][$markerField] = '1';
+            };
+
+            // Recoverable effect set (fx = 1): finish the recorded
+            // correction (the marker says whether the bucket effect landed).
+            if ((int) ($ledger['fx'] ?? 0) === 1) {
+                $toO = (string) ($ledger['po'] ?? '');
+                if ($toO !== 'L' && $toO !== 'A') {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey}:po must be L or A");
+                }
+                $newW = (float) ($ledger['nw'] ?? 0);
+                if ($newW <= 0 || !\is_finite($newW)) {
+                    throw new \Predis\Response\ServerException("storage-corruption: {$ledgerKey}:nw must be positive");
+                }
+                if (!isset($this->hashes[$bucketKey][$markerField])) {
+                    $applyCorrection((string) $ledger['o'], $toO, $oldW, $newW);
+                } else {
+                    $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
+                }
+                $ledger['o'] = $toO;
+                $ledger['w'] = $newW;
+                $ledger['fx'] = 2;
+                $this->strings[$ledgerKey] = (string) json_encode($ledger);
+                unset($this->hashes[$bucketKey][$markerField]);
+
+                return 1;
             }
+
+            // Clear a stale marker from an already-completed correction
+            // whose cleanup was interrupted (the ledger says fx = 2).
+            unset($this->hashes[$bucketKey][$markerField]);
+
+            $applyCorrection((string) $ledger['o'], $newOutcome, $oldW, $weight);
+            $this->fakePexpire([$bucketKey, $bucketTtlSecs * 1000]);
 
             $ledger['o'] = $newOutcome;
             $ledger['w'] = $weight;
+            $ledger['fx'] = 2;
             $this->strings[$ledgerKey] = (string) json_encode($ledger);
+            unset($this->hashes[$bucketKey][$markerField]);
             $this->fakePexpire([$ledgerKey, $outcomeTtlSecs * 1000]);
 
             return 1;
         }
 
-        if (str_contains($script, 'register: create a PENDING entry')) {
+        if (str_contains(strtolower($script), 'register: create a pending entry')) {
             // Canonical outcome_register.lua: keys[1] ledger;
             // argv[1] scope, argv[2] hour, argv[3] score, argv[4] TTL.
             $ledgerKey = (string) $keys[0];
@@ -2182,7 +2348,7 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        if (str_contains($script, 'Outcome ledger confirm: PENDING -> L/A exactly once')) {
+        if (str_contains(strtolower($script), 'outcome ledger confirm: pending -> l/a exactly once')) {
             // Canonical outcome_confirm.lua: keys[1] ledger;
             // argv[1] outcome, argv[2] TTL.
             $ledgerKey = (string) $keys[0];
@@ -2201,7 +2367,7 @@ final class FakePredisClient extends \Predis\Client
             return 1;
         }
 
-        if (str_contains($script, 'Outcome ledger correction: flip L <-> A')) {
+        if (str_contains($script, 'Outcome ledger correction (calibration-disabled path): flip L <-> A')) {
             // Canonical outcome_correct.lua: keys[1] ledger;
             // argv[1] new outcome, argv[2] TTL.
             $ledgerKey = (string) $keys[0];

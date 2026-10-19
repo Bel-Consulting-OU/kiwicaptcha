@@ -145,7 +145,7 @@ $doc = [
         'trusted_bucket_credit' => 8000,
         'pressure_gain_saturation' => 300,
         'value_weights' => array_map(static fn (ValueClass $c): int => $c->weight(), $classes),
-        'band_edges' => [150, 300, 450, 600, 700, 790, 880, 970],
+        'band_edges' => PriceModel::CONSTS['band_edges'],
         'argon_capacity_floor' => 300,
         'class_order' => $classOrder,
         'rung_order' => $rungOrder,

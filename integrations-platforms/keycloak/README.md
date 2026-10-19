@@ -9,25 +9,34 @@ is missing or failed. An unreachable deployment fails the flow closed.
 ## Mechanism
 
 - `src/main/java/ee/bel/kiwi/keycloak/KiwiAuthenticator.java`: the
-  Authenticator SPI class. `authenticate()` reads the token from the
-  `X-Kiwi-Token` header or the incumbent form fields
+  Authenticator SPI class. `authenticate()` applies the shared token
+  authority rule: every non-empty value from every source — every
+  `X-Kiwi-Token` header line, every value of the incumbent form fields
   (`kiwi__token`, `g-recaptcha-response`, `h-captcha-response`,
-  `cf-turnstile-response`, `frc-captcha-solution`, `altcha`), calls
-  the sidecar-shaped verify endpoint, `context.success()` on pass, a
-  challenge error page on deny, `failure(INTERNAL_ERROR)` when the
-  deployment is unreachable.
+  `cf-turnstile-response`, `frc-captcha-solution`, `altcha`) and of the
+  same-named query parameters — is collected and must agree. One
+  distinct value verifies however many sources carry it; two or more
+  distinct values fail the authentication with the typed
+  `token_source_conflict` event before any token is verified. The call
+  goes to the sidecar-shaped verify endpoint, `context.success()` on
+  pass, a challenge error page on deny, `failure(INTERNAL_ERROR)` when
+  the deployment is unreachable.
 - `KiwiAuthenticatorFactory.java` registers it (id `kiwi-captcha`)
   with the flow-editor config: verify URL, bearer, scope and the
-  trust-proxy switch. The switch is off by default (the socket peer
-  is the binding and forwarding headers are ignored); when on, the
-  rightmost `X-Forwarded-For` hop appended by the nearest proxy is
-  used, with `X-Real-IP` as the no-chain fallback. Enable it only
-  behind a reverse proxy that appends or overwrites the header.
+  trusted-proxy CIDR list (`kiwi.trust.proxy.cidrs`, comma-separated,
+  empty by default). The socket peer binds the challenge unless it
+  sits inside one of the configured prefixes; only then is the
+  `X-Forwarded-For` chain walked right to left through trusted hops
+  (the first untrusted hop wins, a malformed hop or a repeated
+  forwarding header fails closed to the peer), with `X-Real-IP` as the
+  no-chain fallback. An empty list trusts nobody: forwarding headers
+  are ignored entirely. Malformed CIDR entries are skipped, so a typo
+  can never widen the trust boundary.
 - The factory offers REQUIRED, ALTERNATIVE and DISABLED. Under
-  ALTERNATIVE a missing or failed challenge calls `attempted()`, so
-  the flow can continue with its other alternatives; success still
-  requires a verified token, and an unreachable deployment fails the
-  flow closed under either requirement.
+  ALTERNATIVE a missing, conflicting or failed challenge calls
+  `attempted()`, so the flow can continue with its other alternatives;
+  success still requires a verified token, and an unreachable
+  deployment fails the flow closed under either requirement.
 - `KiwiVerifyClient.java` is the dependency-free client (java.net.http
   plus a hand-rolled JSON encoder) and `Json.java` is its strict
   RFC 8259 parser: the verify response is parsed as real JSON and
@@ -45,12 +54,15 @@ is missing or failed. An unreachable deployment fails the flow closed.
 3. Admin console, Authentication, Flows: copy the browser flow, add
    the "KiwiCaptcha" execution where the protection belongs
    (registration path or login), set it REQUIRED. ALTERNATIVE is also
-   supported: a missing or failed challenge marks the execution
-   attempted so the flow's other alternatives can satisfy it, while
-   this execution never reaches `success()` without a verified token.
-   Configure the verify URL (default `http://127.0.0.1:7371/verify`),
-   the bearer, the scope and, only behind a trusted proxy, the
-   trust-proxy switch.
+   supported: a missing, conflicting or failed challenge marks the
+   execution attempted so the flow's other alternatives can satisfy
+   it, while this execution never reaches `success()` without a
+   verified token. Configure the verify URL (default
+   `http://127.0.0.1:7371/verify`), the bearer, the scope and — only
+   behind a reverse proxy — the trusted-proxy CIDR list
+   (`kiwi.trust.proxy.cidrs`, e.g. `10.0.0.0/24, 2001:db8::/64`; the
+   proxy must be the immediate socket peer for the headers to be
+   honored).
 4. Bind the flow to the relevant action (browser or direct grant).
 5. The client side: Keycloak's login theme needs the shim. Drop the
    deployment's script tag into your theme's `footer.ftl` (or a
@@ -61,28 +73,39 @@ is missing or failed. An unreachable deployment fails the flow closed.
 
 ## Test status
 
-`KiwiVerifyClientTest.java` (33 checks) is a plain-JDK test compiled
+`KiwiVerifyClientTest.java` (121 checks) is a plain-JDK test compiled
 and run here:
 
 ```
 javac -d /tmp/kiwi-kc-classes src/main/java/ee/bel/kiwi/keycloak/KiwiVerifyClient.java \
   src/main/java/ee/bel/kiwi/keycloak/Json.java \
   src/test/java/ee/bel/kiwi/keycloak/KiwiVerifyClientTest.java
-java -cp /tmp/kiwi-kc-classes ee.bel.kiwi.keycloak.KiwiVerifyClientTest
+java -Dkiwi.test.vectors=../../tools/client-ip/test-vectors.json \
+  -cp /tmp/kiwi-kc-classes ee.bel.kiwi.keycloak.KiwiVerifyClientTest
 ```
+
+(It also finds the vectors by searching upward from the working
+directory when the property is absent; `tests/run-all.sh` passes it
+explicitly so the cwd never matters.)
 
 It covers the decision surface (status mapping, real-JSON body
 parsing — truncated documents, trailing garbage, string lookalikes and
-duplicate keys all fail closed), token extraction, the opt-in client-ip
-resolver (peer by default, rightmost forwarded hop with the switch on,
-malformed chains and inputs fail closed), JSON escaping and live round
-trips against a local HTTP stub (success, failure, 5xx fail closed,
-unreachable fail closed).
+duplicate keys all fail closed), the token authority rule (the
+collect/distinct/conflict matrix of
+`protocol/decision-v1/corpus.json`: no token, exactly one value, two
+distinct values across sources, two distinct repeated header lines,
+the same value twice), the client-ip resolver parameterized over the
+ENTIRE shared `tools/client-ip/test-vectors.json` matrix (every CIDR
+case and every scenario, exactly like the go and dotnet SDK suites)
+plus direct-reachability checks (an untrusted peer never unlocks
+forwarding headers, not even when other ranges are configured), and
+JSON escaping and live round trips against a local HTTP stub (success,
+failure, 5xx fail closed, unreachable fail closed).
 
 `KiwiAuthenticatorFactoryTest.java` (9 checks) pins the flow-editor
 surface: REQUIRED, ALTERNATIVE and DISABLED are offered, and the
 config properties are the verify URL, bearer, scope and the
-trust-proxy boolean defaulting to false. It compiles against
+trusted-proxy CIDR list defaulting to empty. It compiles against
 `target/classes` plus the Keycloak SPI jars (`mvn -o compile` first).
 
 `mvn -o compile` was run on this host (Java 17, Keycloak 23

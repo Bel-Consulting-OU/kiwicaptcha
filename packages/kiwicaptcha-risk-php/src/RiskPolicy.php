@@ -388,7 +388,7 @@ final class RiskPolicy
         // Argon capacity is the last step: the floor/minimum re-clamp above
         // can never reintroduce Argon, and the capacity downgrade never
         // falls back below the ladder.
-        if ($action->isArgon() && $r->argonCapacity < 300) {
+        if ($action->isCapacityGated() && $r->argonCapacity < 300) {
             $action = RiskAction::StepUp;
             $reasons[] = RiskReason::CapacityPressure;
         }

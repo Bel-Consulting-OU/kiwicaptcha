@@ -1,13 +1,15 @@
 # @kiwicaptcha/react-native
 
 React Native KiwiCaptcha client: the proof of work runs on a NATIVE
-thread through the platform solver module — no WebView, no
-JavaScript-thread search above the low-difficulty ceiling. The package
-ships the JS orchestration (challenge fetch, validation, dispatch,
-token assembly) and the native-module bridge contract
-(docs/NATIVE.md). Expo works through a development build; Expo Go
-sessions run fail-closed (low-difficulty sha256 only, with the missing
-module named honestly in the error).
+thread through the platform solver module shipped in this package —
+`android/` (Kotlin, MessageDigest SHA-256 on a background executor) and
+`ios/` (Swift, CryptoKit SHA-256 on a background queue) — no WebView,
+no JavaScript-thread search above the low-difficulty ceiling. The
+package also carries the JS orchestration (challenge fetch, validation,
+dispatch, token assembly); docs/NATIVE.md is the bridge contract. Expo
+works through a development build; Expo Go sessions run fail-closed
+(low-difficulty sha256 only, with the missing module named honestly in
+the error).
 
 ## The four-setting quickstart
 
@@ -25,18 +27,26 @@ const token = await acquireToken({
 
 ## Solver dispatch
 
-- sha256 at 8 bits or fewer runs on the JS thread through the
-  optional `react-native-quick-crypto` peer (or the bundled pure-TS
-  SHA-256); a missed window fails CLOSED to the native module, never
-  to a weaker profile.
-- Everything harder, and all argon2id and rsw challenges, go to
-  `NativeModules.KiwiCaptchaSolver`: one async method, JSON in, JSON
-  out (docs/NATIVE.md is the authoritative interface, the caps the
-  module must enforce included).
+- When the shipped `KiwiCaptchaSolver` module is linked, every
+  challenge goes native (the module runs the exact shared contract, so
+  answers are byte-identical to the JS loop); argon2id and rsw are
+  refused by the module with a typed code and surface as
+  `solver-unavailable`.
+- With no module linked, sha256 at 8 bits or fewer runs on the JS
+  thread through the optional `react-native-quick-crypto` peer (or the
+  bundled pure-TS SHA-256); everything harder fails CLOSED, never to a
+  weaker profile. A native failure on an in-window sha256 challenge
+  retries the same profile on the JS thread.
 - An absent module is a fail-closed condition: `KiwiSolveError` with
   `refusal: "solver-unavailable"` names what is missing.
 - Execution-armed challenges are refused outright (the browser
   interpreter is outside the native path).
+
+Argon2id status: the `packages/kiwicaptcha-ios` SwiftPM package
+implements Argon2id (vendored reference C implementation);
+`packages/kiwicaptcha-android` and this package's native modules are
+SHA-256 only and refuse argon2id honestly (docs/NATIVE.md has the full
+per-platform table).
 
 `acquireToken` POSTs the challenge request, validates the document
 with the exact caps the browser driver enforces, dispatches, and packs
@@ -51,5 +61,7 @@ validation refusals, the low-difficulty solve against a pinned
 counter, native dispatch and malformed-answer handling, bounded
 `onProgress` reporting on both solver paths, the optional
 `react-native-quick-crypto` branch, the full acquireToken flow against
-a mocked fetch, and the siteverify body.
+a mocked fetch, the siteverify body, and the native-contract reference
+(a pure-JS mirror of the shipped Kotlin/Swift loop pinned to the
+shared vector — not a mock of a native run).
 `npm run typecheck` runs the strict `tsc --noEmit`.

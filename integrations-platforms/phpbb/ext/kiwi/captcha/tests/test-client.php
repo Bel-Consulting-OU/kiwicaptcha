@@ -82,11 +82,25 @@ check('missing peer fails closed', client::client_ip([]) === '');
 check('garbage peer fails closed', client::client_ip(['REMOTE_ADDR' => 'not-an-ip']) === '');
 check('garbage body is unreadable', client::decide(200, '<html>')['code'] === 'verify_unreadable');
 
-// Token extraction.
-check('header token', kiwi::extract_token(['HTTP_X_KIWI_TOKEN' => 'h'], [], []) === 'h');
-check('incumbent field token', kiwi::extract_token([], ['g-recaptcha-response' => 'g'], []) === 'g');
-check('cookie token', kiwi::extract_token([], [], ['kiwi_token' => 'c']) === 'c');
-check('missing token is null', kiwi::extract_token([], [], []) === null);
+// Token resolution: the collect/distinct/conflict authority rule.
+check('header token', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => 'h'], [], []) === ['token' => 'h', 'code' => null]);
+check('incumbent field token', kiwi::resolve_token([], ['g-recaptcha-response' => 'g'], []) === ['token' => 'g', 'code' => null]);
+check('cookie token', kiwi::resolve_token([], [], ['kiwi_token' => 'c']) === ['token' => 'c', 'code' => null]);
+check('missing token', kiwi::resolve_token([], [], []) === ['token' => null, 'code' => null]);
+check('blank values are no token', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => '  '], ['kiwi__token' => ''], []) === ['token' => null, 'code' => null]);
+
+// The ambiguity matrix: zero distinct values pass nothing, one
+// distinct value verifies however many sources carry it, two or more
+// distinct values refuse with the typed token_source_conflict code
+// before any verification.
+check('header a field b conflicts', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => 'a'], ['kiwi__token' => 'b'], []) === ['token' => null, 'code' => 'token_source_conflict']);
+check('header a cookie b conflicts', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => 'a'], [], ['kiwi_token' => 'b']) === ['token' => null, 'code' => 'token_source_conflict']);
+check('field a cookie b conflicts', kiwi::resolve_token([], ['kiwi__token' => 'a'], ['kiwi_token' => 'b']) === ['token' => null, 'code' => 'token_source_conflict']);
+check('two distinct repeated header lines conflict', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => 'a, b'], [], []) === ['token' => null, 'code' => 'token_source_conflict']);
+check('two distinct form array values conflict', kiwi::resolve_token([], ['kiwi__token' => ['a', 'b']], []) === ['token' => null, 'code' => 'token_source_conflict']);
+check('same token in every source verifies', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => 'a'], ['kiwi__token' => 'a'], ['kiwi_token' => 'a']) === ['token' => 'a', 'code' => null]);
+check('same value twice in the merged header verifies', kiwi::resolve_token(['HTTP_X_KIWI_TOKEN' => 'a, a'], [], []) === ['token' => 'a', 'code' => null]);
+check('same value as a repeated form array verifies', kiwi::resolve_token([], ['kiwi__token' => ['a', 'a']], []) === ['token' => 'a', 'code' => null]);
 check('bad scope falls back', kiwi::sanitize_scope('nope nope') === 'signup');
 
 // The plugin against a stub config and a stub Guzzle client.
@@ -126,6 +140,24 @@ $_SERVER = [];
 $plugin->reset();
 check('confirm denies a missing token', $plugin->confirm() === false);
 check('attempts counted', $plugin->get_attempt_count() === 1);
+check('a missing token carries no typed code', $plugin->get_last_code() === null);
+
+// A token_source_conflict refuses the confirmation with the typed
+// code before anything is verified: the stub client would answer
+// success for any token, so only the authority rule can deny here.
+$plugin->reset();
+$_SERVER = ['REMOTE_ADDR' => '192.0.2.5', 'HTTP_X_KIWI_TOKEN' => 'good'];
+$_POST = ['kiwi__token' => 'evil'];
+check('confirm refuses a token_source_conflict', $plugin->confirm() === false);
+check('the typed conflict code is exposed', $plugin->get_last_code() === 'token_source_conflict');
+check('a conflict counts as a failed attempt', $plugin->get_attempt_count() === 1);
+
+$_POST = [];
+$_SERVER = [];
+$plugin->reset();
+$_SERVER = ['REMOTE_ADDR' => '192.0.2.5', 'HTTP_X_KIWI_TOKEN' => 'good'];
+check('confirm passes the single token through', $plugin->confirm() === true);
+check('a pass carries no typed code', $plugin->get_last_code() === null);
 
 // The ACP surface: the module files exist and the module writes every
 // config key the captcha plugin reads.

@@ -8,6 +8,8 @@
   "files": [
     "src",
     "docs",
+    "android",
+    "ios",
     "README.md"
   ],
   "scripts": {

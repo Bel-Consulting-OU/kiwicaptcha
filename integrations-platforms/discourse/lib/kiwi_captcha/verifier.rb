@@ -59,16 +59,40 @@ module KiwiCaptcha
       { ok: false, code: :challenge_failed }
     end
 
-    # The first present token: header, then the kiwi_token cookie.
-    # returns nil when the request carries none.
-    def self.extract_token(headers:, cookies:)
-      header = headers["HTTP_X_KIWI_TOKEN"] || headers["X-Kiwi-Token"]
-      return header.strip if header.is_a?(String) && !header.strip.empty?
+    # The token authority rule (protocol/decision-v1/corpus.json):
+    # every non-empty value is collected from all sources — every
+    # X-Kiwi-Token header line and the kiwi_token cookie — repeated
+    # values included. One distinct value verifies however many sources
+    # carry it; two or more distinct values refuse the request with the
+    # typed token_source_conflict code before any token is verified, so
+    # a trusted gateway's header can never be shadowed by an
+    # attacker-controlled cookie.
+    #
+    # Returns { token: string-or-nil, code: nil-or-:token_source_conflict }.
+    def self.resolve_token(headers:, cookies:)
+      distinct = (header_token_values(headers) + cookie_token_values(cookies)).uniq
+      return { token: nil, code: :token_source_conflict } if distinct.size > 1
 
+      { token: distinct.first, code: nil }
+    end
+
+    # Every X-Kiwi-Token header line value. Rack folds duplicate header
+    # lines into one "\n"-joined env value, and a single line may itself
+    # carry a comma-joined list; the token alphabet has no comma or
+    # newline, so the split loses nothing.
+    def self.header_token_values(headers)
+      raw = headers["HTTP_X_KIWI_TOKEN"] || headers["X-Kiwi-Token"]
+      return [] if raw.nil?
+
+      raw.to_s.split("\n").flat_map { |line| line.split(",") }.map(&:strip).reject(&:empty?)
+    end
+
+    def self.cookie_token_values(cookies)
       cookie = cookies["kiwi_token"]
-      return cookie.strip if cookie.is_a?(String) && !cookie.strip.empty?
+      return [] unless cookie.is_a?(String)
 
-      nil
+      value = cookie.strip
+      value.empty? ? [] : [value]
     end
 
     # The client ip bound into the verify call, resolved through the

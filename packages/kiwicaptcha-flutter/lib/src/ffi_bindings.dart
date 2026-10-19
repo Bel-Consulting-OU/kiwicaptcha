@@ -1,13 +1,26 @@
-/// dart:ffi binding to the Rust solver core (libkiwicaptcha_solver).
+/// dart:ffi binding to the native solver core (libkiwicaptcha_solver),
+/// built from the FFI crate in `native/` of this package.
 ///
-/// The required artifact and the full C header contract live in
-/// `src/kiwicaptcha_solver.h` (cbindgen-style). Build the wrapper crate
-/// once per platform and ship the library beside the app:
+/// The C ABI contract lives in `src/kiwicaptcha_solver.h` and is
+/// implemented by the crate at `native/`:
+///
+/// * every function answers an int32 status code (the `kiwi*` constants
+///   below) and writes its result into a CALLER-ALLOCATED out buffer
+///   (`uint64_t* out_counter`, or the 256-byte `uint8_t* out_proof` of
+///   the rsw solve). The library allocates nothing the caller must
+///   free; all input and output memory is owned by this side, so no
+///   exported free function exists.
+/// * pointers are `const uint8_t*` with a `uint32_t` length each; the
+///   counter/t arguments are `uint32_t`/`uint64_t` exactly as the
+///   typedefs below spell them.
+///
+/// Build the native library once per platform (see native/README.md):
 ///
 /// ```sh
+/// cd native
 /// cargo build --release
-/// # iOS:     target/aarch64-apple-ios/release/libkiwicaptcha_solver.a
-/// # Android: target/aarch64-linux-android/release/libkiwicaptcha_solver.so
+/// # Android: cargo-ndk for each ABI
+/// # iOS:    --target aarch64-apple-ios (staticlib, linked with -force_load)
 /// ```
 library kiwicaptcha.ffi;
 
@@ -68,14 +81,20 @@ class KiwiFfi {
   }
 
   static DynamicLibrary _open() {
-    // Static-linked into the app binary on iOS; a shared object on
-    // Android and desktop.
-    return Platform.isIOS ? DynamicLibrary.process() : DynamicLibrary.open('libkiwicaptcha_solver.so');
+    // Static-linked into the app binary on iOS (the podspec links the
+    // staticlib with -force_load, so the symbols stay live); a shared
+    // object everywhere else: the .so on Android and Linux, the .dylib
+    // on macOS, the DLL on Windows.
+    if (Platform.isIOS) return DynamicLibrary.process();
+    if (Platform.isMacOS) return DynamicLibrary.open('libkiwicaptcha_solver.dylib');
+    if (Platform.isWindows) return DynamicLibrary.open('kiwicaptcha_solver.dll');
+    return DynamicLibrary.open('libkiwicaptcha_solver.so');
   }
 
   /// Solve a validated sha256 challenge through the Rust core.
-  /// Returns the winning counter, or null on exhaustion.
-  int? sha256Search({
+  /// Returns the winning counter; throws [KiwiSolveError] on any
+  /// refusal (including exhaustion of the hash budget).
+  int sha256Search({
     required String prefix,
     required Uint8List salt,
     required int targetBits,
@@ -89,7 +108,7 @@ class KiwiFfi {
       final code = solveSha256(
           prefixPtr, prefixBytes.length, saltPtr, salt.length, targetBits, maxHashes, outCounter);
       _check(code);
-      return code == kiwiOk ? outCounter.value : null;
+      return outCounter.value;
     } finally {
       calloc.free(prefixPtr);
       calloc.free(saltPtr);
@@ -123,9 +142,11 @@ class KiwiFfi {
     }
   }
 
-  /// Argon2id through the core; the Rust wrapper refuses when its
-  /// feature is compiled out, which this package surfaces verbatim.
-  int? argon2id({
+  /// Argon2id through the core; a core built without the `argon`
+  /// feature answers `kiwiErrArgonUnavailable`, which this package
+  /// surfaces verbatim. Returns the winning counter; throws
+  /// [KiwiSolveError] on any refusal.
+  int argon2id({
     required String prefix,
     required Uint8List salt,
     required int mKib,

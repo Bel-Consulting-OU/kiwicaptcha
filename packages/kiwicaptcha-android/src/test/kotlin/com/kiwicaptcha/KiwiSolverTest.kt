@@ -29,6 +29,20 @@ class KiwiSolverTest {
         ),
     )
 
+    /** The smallest issued-profile argon challenge: m_kib 8, t 3, p 1. */
+    private fun argonChallenge(mutate: (KiwiChallenge) -> KiwiChallenge = { it }) = mutate(
+        KiwiChallenge(
+            nonce = nonce,
+            salt = "AAECAw==",
+            algorithm = "argon2id",
+            mKib = 8,
+            t = 3,
+            p = 1,
+            targetBits = 4,
+            prefix = "kiwi|login|",
+        ),
+    )
+
     @Test
     fun sha256SolverFindsTheKnownCounter() {
         val solution = KiwiSolver.solve(shaChallenge())
@@ -82,6 +96,85 @@ class KiwiSolverTest {
         assertEquals(
             solution.rswProof,
             KiwiSolver.solveRsw(challenge, System.currentTimeMillis()).rswProof,
+        )
+    }
+
+    @Test
+    fun argon2idSolverFindsTheKnownCounter() {
+        val solution = KiwiSolver.solve(argonChallenge())
+        assertEquals(11L, solution.counter)
+        assertEquals(12L, solution.hashes)
+        assertEquals(
+            "0364a814c9f69263470001ffee3058bc9a74436924229444560bb91adcd6fc3d",
+            solution.hashHex,
+        )
+        assertNull(solution.rswProof)
+    }
+
+    @Test
+    fun argon2idTokenPacksTheCounterIntoTheWireGrammar() {
+        val challenge = argonChallenge()
+        val solution = KiwiSolver.solve(challenge)
+        val token = KiwiToken.encode(challenge, solution)
+        val plain = String(java.util.Base64.getDecoder().decode(token), Charsets.UTF_8)
+        assertTrue(plain.startsWith("$nonce.11."))
+        assertTrue(plain.endsWith(".{}"))
+    }
+
+    @Test
+    fun solveArgon2idDirectEntryPointAndExhaustedBranch() {
+        val challenge = argonChallenge()
+        // Counter 11 is the first hit: a 12-hash window covers it, an
+        // 11-hash window exhausts one short, and the typed error names
+        // the attempted count.
+        val solution = KiwiSolver.solveArgon2id(challenge, System.currentTimeMillis(), maxHashes = 12)
+        assertEquals(11L, solution.counter)
+        assertEquals(12L, solution.hashes)
+        try {
+            KiwiSolver.solveArgon2id(challenge, System.currentTimeMillis(), maxHashes = 11)
+            fail("expected the exhausted branch")
+        } catch (e: KiwiSolveError.Exhausted) {
+            assertEquals(11L, e.attempted)
+        }
+    }
+
+    @Test
+    fun argon2idValidationEnforcesTheSharedCaps() {
+        refusal(argonChallenge { it.copy(targetBits = 11) }) {
+            assertTrue(it is KiwiSolveError.DifficultyBeyondCap)
+            assertEquals(10L, (it as KiwiSolveError.DifficultyBeyondCap).cap)
+        }
+        refusal(argonChallenge { it.copy(targetBits = 0) }) {
+            assertTrue(it is KiwiSolveError.DifficultyBeyondCap)
+        }
+        refusal(argonChallenge { it.copy(mKib = 0) }) {
+            assertTrue(it is KiwiSolveError.UnsupportedArgon2Params)
+        }
+        refusal(argonChallenge { it.copy(mKib = 65_537) }) {
+            assertTrue(it is KiwiSolveError.UnsupportedArgon2Params)
+        }
+        refusal(argonChallenge { it.copy(t = 2) }) {
+            assertTrue(it is KiwiSolveError.UnsupportedArgon2Params)
+        }
+        refusal(argonChallenge { it.copy(t = 7) }) {
+            assertTrue(it is KiwiSolveError.UnsupportedArgon2Params)
+        }
+        refusal(argonChallenge { it.copy(p = 2) }) {
+            assertTrue(it is KiwiSolveError.UnsupportedArgon2Params)
+        }
+    }
+
+    @Test
+    fun argon2idSolvesAtTheMemoryCeiling() {
+        // The top of the issued profile space (a 64 MiB working memory)
+        // must derive and search, not refuse: this pins the allocator
+        // envelope the official client has to absorb.
+        val solution = KiwiSolver.solve(argonChallenge { it.copy(mKib = 65_536, targetBits = 1) })
+        assertEquals(0L, solution.counter)
+        assertEquals(1L, solution.hashes)
+        assertEquals(
+            "7cb9eaedf7c47fdb5bd934cd92235547e17e340afc09cc048ce9b0ab72ac17ac",
+            solution.hashHex,
         )
     }
 
@@ -141,7 +234,7 @@ class KiwiSolverTest {
             assertTrue(it is KiwiSolveError.ExecutionUnsupported)
         }
         refusal(shaChallenge { it.copy(algorithm = "argon2id") }) {
-            assertTrue(it is KiwiSolveError.ArgonUnavailable)
+            assertTrue(it is KiwiSolveError.UnsupportedArgon2Params)
         }
         refusal(shaChallenge { it.copy(nonce = "short") }) {
             assertTrue(it is KiwiSolveError.Malformed)

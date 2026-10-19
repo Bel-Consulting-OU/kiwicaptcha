@@ -298,8 +298,8 @@ fn l4_storm_prices_trusted_within_one_rung_and_escalates_untrusted() {
         bot_decision.action
     );
     // 605 + the full 914-pressure ramp = 902 work: the priced rung is the
-    // interactive step-up, past the whole argon regime.
-    assert_eq!(bot_decision.action, RiskAction::StepUp);
+    // rsw time-lock rung, past the whole argon regime.
+    assert_eq!(bot_decision.action, RiskAction::Rsw);
     assert!(bot_decision.has_reason(RiskReason::PricedEscalation));
 }
 

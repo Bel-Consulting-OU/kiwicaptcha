@@ -1290,9 +1290,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
 
         // The authoritative requirement lookup — resolved exactly once
         // per validation and threaded through the assessment, the
-        // stage-2 detection and the chain transitions ({@see
-        // self::assessFinalDisposition()} / {@see self::applyStage2Disposition()}),
-        // so the requirement can never diverge between the terminal-state
+        // stage-2 detection and the chain transitions — {@see
+        // self::assessFinalDisposition()} and {@see
+        // self::applyStage2Disposition()} — so the requirement can never
+        // diverge between the terminal-state
         // dominance, the disposition and the transition that follows it.
         // Runs before the nonce -> decision handle is consumed: a
         // chain-state read failure must never consume the handle — the
@@ -1838,6 +1839,26 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
      *                                                 while the obligation
      *                                                 may be uncleared
      */
+    /**
+     * The enforcement-grade action of a fresh assessment: the engine's
+     * action with the Rsw rung resolved by
+     * {@see RiskProfileResolver::effectiveAction()}. With the
+     * configured trapdoor the chainable time-lock demand stands; without
+     * one it is the interactive step-up — never a weaker silent
+     * challenge and never an unservable demand. An unwired resolver
+     * carries no trapdoor by construction, so the same resolution
+     * applies inline.
+     */
+    private function enforcementAction(RiskDecision $postSolve): \KiwiCaptcha\Risk\RiskAction
+    {
+        $action = $postSolve->action;
+        if ($this->riskResolver !== null) {
+            return $this->riskResolver->effectiveAction($action);
+        }
+
+        return $action === RiskAction::Rsw ? RiskAction::StepUp : $action;
+    }
+
     private function mapPostSolveDecision(string $token, VerifyOutcome $outcome, KiwiCaptcha $constraint, string $nonce, ?RiskDecision $postSolve, ?string $canonicalBinding, ?ChainRequirement $requirement): PostSolveDisposition
     {
         // Depth-2 detection (read-only): the verified challenge may be
@@ -1877,6 +1898,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
         //     chain id: a stage-1 token of a chained transaction can
         //     never pass.
         $isStage2 = $requirement !== null && $requirement->stage2Nonce !== null && hash_equals($requirement->stage2Nonce, $nonce);
+        // The enforcement-grade fresh action: the engine's own ladder
+        // answer with the Rsw rung resolved (interactive step-up without
+        // a trapdoor, the chainable time-lock rung with one).
+        $fresh = $postSolve !== null ? $this->enforcementAction($postSolve) : null;
 
         // Defense in depth for a solved stage-2 token: the accepted
         // challenge's actual strength must satisfy the chain's current
@@ -1920,7 +1945,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 //    anomaly (the transaction already ended via Pass —
                 //    its obligation is gone, the fresh disposition
                 //    applies to the nonce alone).
-                if ($postSolve->action === RiskAction::Deny) {
+                if ($fresh === RiskAction::Deny) {
                     $this->terminalizeOpenChain($requirement, PostSolveDispositionKind::Deny);
 
                     return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
@@ -1932,7 +1957,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 //    fresh StepUp also terminalizes the open obligation
                 //    (markTransactionStepUpRequired — the same durable
                 //    terminality for the transaction's lifetime).
-                if ($postSolve->action === RiskAction::StepUp) {
+                if ($fresh === RiskAction::StepUp) {
                     $this->terminalizeOpenChain($requirement, PostSolveDispositionKind::StepUp);
 
                     return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
@@ -1944,9 +1969,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                 //    create-or-get keeps the same chain id and the
                 //    original expiry, only the required rank/action
                 //    rise.
-                if ($postSolve->action !== RiskAction::Allow
-                    && !$this->recordSatisfiesRequiredAction($token, $postSolve->action)
-                    && $postSolve->action->rank() > $requirement->requiredRank
+                if ($fresh !== RiskAction::Allow
+                    && !$this->recordSatisfiesRequiredAction($token, $fresh)
+                    && $fresh->rank() > $requirement->requiredRank
                 ) {
                     // Chaining is available (the open obligation proves
                     // it was when the chain opened; the guard mirrors
@@ -1958,7 +1983,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                                 $constraint->scope,
                                 $canonicalBinding,
                                 $this->effectivePolicyEpoch,
-                                $postSolve->action,
+                                $fresh,
                                 $this->chainExpiresAt(),
                             );
                         } catch (\Throwable $e) {
@@ -1999,17 +2024,21 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
             return new PostSolveDisposition(PostSolveDispositionKind::Pass);
         }
         $decisionId = $postSolve->decisionId;
+        // The enforcement-grade fresh action: the engine's own ladder
+        // answer with the Rsw rung resolved (interactive step-up without
+        // a trapdoor, the chainable time-lock rung with one).
+        $fresh = $this->enforcementAction($postSolve);
 
-        if ($postSolve->action === RiskAction::Deny) {
+        if ($fresh === RiskAction::Deny) {
             return new PostSolveDisposition(PostSolveDispositionKind::Deny, $decisionId);
         }
-        if ($postSolve->action === RiskAction::StepUp) {
+        if ($fresh === RiskAction::StepUp) {
             // StepUp is terminal application-level step-up: it never
             // becomes a chain ticket (a ticket could later be spent on
             // ordinary PoW instead of the application's step-up).
             return new PostSolveDisposition(PostSolveDispositionKind::StepUp, $decisionId);
         }
-        if ($postSolve->action === RiskAction::Allow || $this->recordSatisfiesRequiredAction($token, $postSolve->action)) {
+        if ($fresh === RiskAction::Allow || $this->recordSatisfiesRequiredAction($token, $fresh)) {
             // The required PoW level is already satisfied by the solved
             // challenge under the actual configured ladders. The
             // quarantine disposition (change.md 1.3 and 3.3.4) rides the
@@ -2038,7 +2067,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator implements ResetInt
                     $constraint->scope,
                     $canonicalBinding,
                     $this->effectivePolicyEpoch,
-                    $postSolve->action,
+                    $fresh,
                     $this->chainExpiresAt(),
                 );
             } catch (\Throwable $e) {

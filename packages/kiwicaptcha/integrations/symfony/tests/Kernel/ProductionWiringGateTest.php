@@ -119,6 +119,15 @@ final class ProductionWiringGateTest extends TestCase
             // operator opt-in (risk.calibration.enabled, default off).
             'calibration' => 'calibration is an opt-in stage (risk.calibration.enabled)',
         ],
+        'kiwi_captcha.risk.resolver' => [
+            // The adaptive rsw rung rides the operator-configured
+            // trapdoor pair (rsw_modulus_n + rsw_lambda): without a pair
+            // the resolver maps the Rsw action onto the interactive
+            // step-up (typed, tested), never onto a weaker silent
+            // challenge — the null is the documented rung-not-servable
+            // posture, not a disabled defense.
+            'rswTrapdoor' => 'the adaptive rsw rung is armed only by the configured trapdoor pair; without one Rsw resolves to StepUp',
+        ],
         'kiwi_captcha.risk.outstanding' => [
             // A lazily memoized internal (??= on first mutation), not a
             // wiring seam: the executor is always constructible from

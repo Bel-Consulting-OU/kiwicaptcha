@@ -84,7 +84,7 @@ final class MarksEscalationTest extends TestCase
     {
         foreach ([0, 100, 500, 700] as $score) {
             $out = MarksEscalation::apply($this->plain($score), $this->sessionView((int) self::T0), false, self::T0, self::TTL, $this->healthy());
-            self::assertSame(RiskAction::Argon64, $out->action, "score {$score}");
+            self::assertSame(RiskAction::Rsw, $out->action, "score {$score}");
             self::assertTrue($out->hasReason(RiskReason::MarkedIdentity));
             self::assertNull($out->retryAfterMs);
         }
@@ -92,7 +92,9 @@ final class MarksEscalationTest extends TestCase
 
     public function testMarkedIdentityNeverDowngradesStepUpOrDeny(): void
     {
-        $step = MarksEscalation::apply($this->plain(950), $this->sessionView((int) self::T0), false, self::T0, self::TTL, $this->healthy());
+        $rsw = MarksEscalation::apply($this->plain(940), $this->sessionView((int) self::T0), false, self::T0, self::TTL, $this->healthy());
+        self::assertSame(RiskAction::Rsw, $rsw->action);
+        $step = MarksEscalation::apply($this->plain(965), $this->sessionView((int) self::T0), false, self::T0, self::TTL, $this->healthy());
         self::assertSame(RiskAction::StepUp, $step->action);
         $deny = MarksEscalation::apply($this->plain(980), $this->sessionView((int) self::T0), false, self::T0, self::TTL, $this->healthy());
         self::assertSame(RiskAction::Deny, $deny->action);
@@ -220,7 +222,7 @@ final class MarksEscalationTest extends TestCase
                 $view = MarksView::fromParts([$dimension => $this->mark((int) self::T0)], null);
                 $out = MarksEscalation::apply($base, $view, false, self::T0, self::TTL, $this->healthy());
                 self::assertTrue(
-                    $out->action->rank() >= RiskAction::Argon64->rank(),
+                    $out->action->rank() >= RiskAction::Rsw->rank(),
                     sprintf('%s score %d: %s', $dimension, $score, $out->action->value),
                 );
             }
@@ -230,7 +232,7 @@ final class MarksEscalationTest extends TestCase
     public function testUnreadableMarksFloorFailClosedWithoutFabricatingADeny(): void
     {
         $out = MarksEscalation::applyUnreadable($this->plain(100), self::T0, $this->healthy());
-        self::assertSame(RiskAction::Argon64, $out->action);
+        self::assertSame(RiskAction::Rsw, $out->action);
         self::assertTrue($out->hasReason(RiskReason::MarkedIdentity));
         self::assertNull($out->retryAfterMs);
         $saturated = new ResourcePressure(0, 1000);
@@ -321,7 +323,7 @@ final class MarksEscalationTest extends TestCase
         self::assertNotNull($sessionPseudonym);
         $store->writeMark('session', $sessionPseudonym, 'accountBanned', (int) floor(microtime(true) * 1000));
         $decision = $wired->assessPreIssue($context);
-        self::assertSame(RiskAction::Argon64, $decision->action);
+        self::assertSame(RiskAction::Rsw, $decision->action);
         self::assertTrue($decision->hasReason(RiskReason::MarkedIdentity));
         // The unwired engine still answers the plain action.
         self::assertSame(RiskAction::Allow, $unwired->assessPreIssue($context)->action);
@@ -369,7 +371,7 @@ final class MarksEscalationTest extends TestCase
             resources: new ResourcePressure(1000, 1000),
         );
         $decision = $engine->assessPreIssue($context);
-        self::assertSame(RiskAction::Argon64, $decision->action);
+        self::assertSame(RiskAction::Rsw, $decision->action);
         self::assertTrue($decision->hasReason(RiskReason::MarkedIdentity));
     }
 }

@@ -1740,10 +1740,14 @@ final class ChallengeController
                 // Sha18). StepUp and Deny stay terminal: when the effective
                 // action is StepUp, the application step-up answers (403)
                 // and the reservation is released; a Deny stays the
-                // risk-denied 429 with the same release.
+                // risk-denied 429 with the same release. The Rsw rung is
+                // resolved first: with the rsw trapdoor it issues the
+                // time-lock profile, without one it resolves to the
+                // interactive step-up — never a weaker silent challenge.
                 $effectiveAction = $chainRequirement !== null
                     ? $this->effectiveChainAction($decision->action, $chainRequirement->requiredAction->value)
                     : $decision->action;
+                $effectiveAction = $this->risk->effectiveAction($effectiveAction);
                 // The risk trigger of the execution gate: the effective
                 // action (chain floor included), so a stage-2 issuance
                 // never loses the trigger its chain promised.
@@ -1781,7 +1785,20 @@ final class ChallengeController
                 // No pre-issue decision (the engine declined or degraded):
                 // the server-held state's required action is still the
                 // floor, so the stage-2 issuance can never be weaker than
-                // what the chain promised.
+                // what the chain promised. The Rsw rung resolves first:
+                // without a trapdoor the time-lock demand is the
+                // interactive step-up (403), never a weaker challenge.
+                if ($this->risk->effectiveAction($chainRequirement->requiredAction) === RiskAction::StepUp) {
+                    $this->releaseChain($chainId, $chainOwner);
+
+                    return $this->privateJson(
+                        $this->stepUpRequiredBody($scope, $request, $chainId, null),
+                        Response::HTTP_FORBIDDEN,
+                        $request,
+                        $riskSession,
+                        $mintedCookie,
+                    );
+                }
                 $profile = $this->risk->profileForAction($chainRequirement->requiredAction);
             }
         }

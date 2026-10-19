@@ -32,19 +32,62 @@ VERIFY_URL_DEFAULT = "http://127.0.0.1:7371/verify"
 Transport = Callable[[str, str, Dict[str, str]], Dict[str, Any]]
 
 
-def extract_token(
-    header_token: Optional[str],
+MALFORMED_TOKEN = "malformed_token"
+TOKEN_SOURCE_CONFLICT = "token_source_conflict"
+
+
+def resolve_token(
+    header_lines: Any,
     form: Dict[str, Any],
     cookies: Dict[str, str],
     raw_json_body: Optional[str] = None,
-) -> Optional[str]:
-    """The first present token: header, form fields, JSON body, cookie."""
-    if header_token and header_token.strip():
-        return header_token.strip()
+) -> Dict[str, Any]:
+    """The shared token authority rule (protocol/decision-v1/corpus.json):
+    every non-empty value is collected from all sources — every
+    X-Kiwi-Token header line, every value of the shim form fields
+    (a repeated form key arrives as a list), the namespaced JSON body
+    keys and the kiwi_token cookie — repeated values included. One
+    distinct value verifies however many sources carry it; two or more
+    distinct values refuse the request with the typed
+    token_source_conflict code before any token is verified, so a
+    trusted gateway's header can never be shadowed by an
+    attacker-controlled body field or cookie.
+
+    header_lines accepts one line or a list of lines (a single line may
+    itself carry a comma-joined list; the token alphabet has no comma,
+    so the split loses nothing).
+
+    Returns {"token": str} for exactly one distinct value,
+    {"code": "malformed_token"} for none and
+    {"code": "token_source_conflict"} for a disagreement.
+    """
+    distinct: Dict[str, None] = {}
+    for candidate in _token_candidates(header_lines, form, cookies, raw_json_body):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        distinct[candidate] = None
+        if len(distinct) > 1:
+            return {"code": TOKEN_SOURCE_CONFLICT}
+    if not distinct:
+        return {"code": MALFORMED_TOKEN}
+    return {"token": next(iter(distinct))}
+
+
+def _token_candidates(
+    header_lines: Any,
+    form: Dict[str, Any],
+    cookies: Dict[str, str],
+    raw_json_body: Optional[str],
+):
+    lines = header_lines if isinstance(header_lines, list) else [header_lines]
+    for line in lines:
+        if not isinstance(line, str):
+            continue
+        for part in line.replace("\n", ",").split(","):
+            yield part
     for field in TOKEN_FIELDS:
-        value = form.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        yield from _string_values(form.get(field))
     if raw_json_body and raw_json_body.strip():
         try:
             parsed = json.loads(raw_json_body)
@@ -52,13 +95,20 @@ def extract_token(
             parsed = None
         if isinstance(parsed, dict):
             for field in JSON_TOKEN_FIELDS:
-                value = parsed.get(field)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+                yield from _string_values(parsed.get(field))
     cookie = cookies.get("kiwi_token")
-    if isinstance(cookie, str) and cookie.strip():
-        return cookie.strip()
-    return None
+    if isinstance(cookie, str):
+        yield cookie
+
+
+def _string_values(value: Any) -> List[str]:
+    """Every string of a form or body value, array values included (a
+    repeated form key arrives as a list)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for item in value if isinstance(item, str)]
+    return []
 
 
 def client_ip(

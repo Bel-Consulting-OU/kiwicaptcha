@@ -334,7 +334,9 @@ $cleanDecision = $policy->decide(1, $cleanScore, $cleanAssess, $healthy, 0, $mar
 $cleanStaged = MarksEscalation::apply($cleanDecision, $marksOnClean, false, $markNow, $ttl, $healthy);
 $cgnatCleanBounded = !$cleanMarked
     && $cleanDecision->action->rank() < RiskAction::StepUp->rank()
-    && $cleanStaged->action->rank() <= RiskAction::Argon64->rank()
+    // The bounded tier tops out at the ladder's maximum adaptive work
+    // rung, which change.md 1.4 defines as RSW (never step-up or deny).
+    && $cleanStaged->action->rank() <= RiskAction::Rsw->rank()
     && $cleanStaged->action !== RiskAction::Deny
     && $cleanStaged->action !== RiskAction::StepUp;
 
