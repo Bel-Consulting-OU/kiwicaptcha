@@ -117,7 +117,7 @@ a { color: inherit; }
   padding-bottom: 26px;
 }
 .brand-lockup { display: inline-flex; color: var(--ink); }
-.brand-lockup img { width: 198px; height: auto; }
+.brand-lockup .brand-art { width: 198px; }
 .site-nav { display: flex; flex-wrap: wrap; gap: 44px; }
 .site-nav a {
   font-size: 19px;
@@ -608,5 +608,13 @@ a { color: inherit; }
 
 .prior-lockup { width: 150px; color: var(--ink); }
 
-/* The single global definition of the Spiral Lock used by <use>. */
+/* The generated brand-art partial renders every master through <use>;
+   color always comes from the surrounding CSS via currentColor. */
 .kiwi-mark-def { position: absolute; width: 0; height: 0; overflow: hidden; }
+.brand-art { display: block; height: auto; fill: currentColor; stroke: currentColor; }
+.header-row .brand-art { width: 198px; aspect-ratio: 226 / 43; }
+.footer-lockup.brand-art { width: 170px; aspect-ratio: 226 / 43; }
+.board-lockup.brand-art { width: 320px; aspect-ratio: 226 / 43; }
+.board-site-lockup.brand-art { width: 170px; aspect-ratio: 226 / 43; }
+.master-art.brand-art { width: 280px; max-width: 100%; aspect-ratio: 226 / 43; }
+.prior-lockup.brand-art { width: 150px; aspect-ratio: 226 / 43; }

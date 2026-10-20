@@ -18,7 +18,7 @@ The board recreates the identity with the supplied SVG masters, the exact palett
     <span>BEL CONSULTING / INDEPENDENT PRODUCT</span>
   </div>
   <div class="board-lockup-row">
-    <img class="board-lockup" src="/brand/kiwi-lockup.svg" alt="KiwiCaptcha lockup">
+    <svg class="board-lockup brand-art" role="img" aria-label="KiwiCaptcha lockup" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg>
     <p class="campaign-chip">Let the browser do the work.</p>
   </div>
   <div class="board-row">
@@ -44,7 +44,7 @@ The board recreates the identity with the supplied SVG masters, the exact palett
     <div>
       <p class="board-label">PRODUCT WEBSITE / NATIVE DESIGN SPECIMEN</p>
       <div class="master-tile board-site-tile">
-        <img class="board-site-lockup" src="/brand/kiwi-lockup.svg" alt="">
+        <svg class="board-site-lockup brand-art" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg>
         <p class="board-site-headline">Let the browser do&nbsp;the&nbsp;work.</p>
         <a class="board-site-link" href="/integration/">Explore integration</a>
       </div>
@@ -80,11 +80,11 @@ Every master except the app tile recolors through currentColor, so the Ink, whit
 
 <div class="master-pair">
   <div>
-    <div class="master-tile"><img src="/brand/kiwi-lockup.svg" alt="KiwiCaptcha horizontal lockup in Ink on Paper"></div>
+    <div class="master-tile"><svg class="master-art brand-art" role="img" aria-label="KiwiCaptcha horizontal lockup in Ink on Paper" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg></div>
     <p class="master-caption">PRIMARY LIGHT / INK ON PAPER</p>
   </div>
   <div>
-    <div class="master-tile master-tile--reverse"><img src="/brand/kiwi-lockup.svg" alt="KiwiCaptcha horizontal lockup in Teal on Ink"></div>
+    <div class="master-tile master-tile--reverse"><svg class="master-art brand-art" role="img" aria-label="KiwiCaptcha horizontal lockup in Teal on Ink" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg></div>
     <p class="master-caption">REVERSE / TEAL ON INK</p>
   </div>
 </div>

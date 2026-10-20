@@ -64,7 +64,7 @@ Edition 3, 11 October 2026. The prior live implementation carried four pages wit
     <span class="strip-mono">SELF-HOSTED COMPUTATIONAL ANTI-ABUSE</span>
   </div>
   <div class="prior-header">
-    <img class="prior-lockup" src="/brand/kiwi-lockup.svg" alt="KiwiCaptcha lockup">
+    <svg class="prior-lockup brand-art" role="img" aria-label="KiwiCaptcha lockup" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg>
     <nav class="prior-nav" aria-label="Prior edition specimen">
       <span>Integration</span><span>Widget</span><span>Identity</span>
     </nav>

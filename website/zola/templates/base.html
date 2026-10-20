@@ -11,7 +11,7 @@
   {% block head %}{% endblock %}
 </head>
 <body>
-<svg class="kiwi-mark-def" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><symbol id="kiwi-mark" viewBox="0 0 64 64"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M32 42 C32 35 43 35 43 42 C43 51 29 54 23 46 C16 36 25 28 35 29 C47 29 54 38 53 46 C52 56 43 60 31 59 C17 58 9 51 10 41 C10 33 16 28 21 28"/><path d="M22 25 V16 A10 10 0 0 1 42 16 V25"/></g></symbol></svg>
+{% include "partials/brand-art.html" %}
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="top-strip">
   <div class="shell top-strip-row">
@@ -22,7 +22,7 @@
 <header class="site-header">
   <div class="shell header-row">
     <a class="brand-lockup" href="/" aria-label="KiwiCaptcha home">
-      <img src="/brand/kiwi-lockup.svg" alt="" width="226" height="43">
+      <svg class="brand-art" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg>
     </a>
     <nav class="site-nav" aria-label="Primary">
       {%- for item in config.extra.nav -%}
@@ -44,7 +44,7 @@
 <footer class="site-footer">
   <div class="shell footer-grid">
     <div class="footer-brand">
-      <img class="footer-lockup" src="/brand/kiwi-lockup.svg" alt="KiwiCaptcha" width="170" height="32">
+      <svg class="footer-lockup brand-art" role="img" aria-label="KiwiCaptcha" xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-lockup"/></svg>
       <p>Symfony-first adaptive anti-abuse. First-party control.</p>
     </div>
     <ul class="footer-links">
