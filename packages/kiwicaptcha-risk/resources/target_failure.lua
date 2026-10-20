@@ -14,13 +14,15 @@
 -- step-up-completed clear. One atomic call per op.
 --
 -- SCRIPT BOUNDS — all bounded constants:
---   max keys touched:     4 (target hash + two HLLs + the per-report
---                          dedupe marker; all carry the same family hash
---                          tag, one slot)
---   max Redis calls:      18 (4 TYPE + 1 TIME + 1 GET + 1 SET +
---                          1 HGETALL + 1 HSET + 3 PEXPIRE + 2 PFADD +
---                          2 PFCOUNT on the fail path; fewer on
---                          clear/read)
+--   max keys touched:     5 (target hash + two HLLs + the per-report
+--                          dedupe marker plus the per-event effect
+--                          completion key derived below as
+--                          KEYS[4] .. ':fxdone'; all carry the same
+--                          family hash tag, one slot)
+--   max Redis calls:      18 (4 TYPE + 1 TIME + 1 GET + 1 EXISTS +
+--                          2 SET completion/claim + 1 HGETALL + 1 HSET +
+--                          3 PEXPIRE + 2 PFADD + 2 PFCOUNT on the fail
+--                          path; fewer on clear/read)
 --   max collection cardinality: 4 flat fields in the target hash
 --
 -- KEYS[1] target state hash {ts, fails, first_ms, last_ms}
@@ -178,12 +180,29 @@ if op == 'fail' then
     -- that already landed. The claim is written LAST: a claim written
     -- first would survive an abort and suppress every retry of a report
     -- that was never booked.
+    --
+    -- The per-event effect completion key (`fxdone`, derived from the
+    -- marker's own event-id namespace and expiring with the same dedupe
+    -- TTL as the `fx` marker value) closes the one interleaving the `fx`
+    -- marker cannot: A books its failure (fx = A), aborts before its
+    -- claim; B then books its own (fx = B); A retries — fx no longer
+    -- says A, so the failure would be booked twice. The completion key
+    -- is written in the same invocation, immediately after the guarded
+    -- effects and before the claim, and the guard below accepts
+    -- "fx == me OR the completion key exists", so the retry skips the
+    -- booking and converges by (re)writing the claim.
+    local effect_done_key = event_id ~= '' and KEYS[4] ~= nil
+        and KEYS[4] .. ':fxdone'
+        or nil
     local is_duplicate = false
     if event_id ~= '' and KEYS[4] ~= nil and redis.call('GET', KEYS[4]) then
         is_duplicate = true
     end
     local fails, ts, first_ms, last_ms, fx = read_record(KEYS[1])
-    local effect_done = kiwi_effect_matches(fx, event_id, now)
+    local event_done = effect_done_key ~= nil
+        and redis.call('EXISTS', effect_done_key) == 1
+        or false
+    local effect_done = event_done or kiwi_effect_matches(fx, event_id, now)
     if not is_duplicate then
         if not effect_done then
             fails = fails + 1
@@ -217,13 +236,15 @@ if op == 'fail' then
             redis.call('PFADD', KEYS[3], ARGV[3])
             redis.call('PEXPIRE', KEYS[3], ttl * 1000)
         end
-        -- The claim is written LAST, after the effect it claims. A script
-        -- that aborts does not roll back what it already wrote, so a
-        -- claim set before the booking would survive a mid-script error
-        -- (a key of the wrong type, for instance) and then suppress
-        -- every retry of a report that was never booked. The counter
-        -- HSET's own `fx` marker makes the booking idempotent instead.
-        if event_id ~= '' and KEYS[4] ~= nil then
+        -- The claim is written LAST, after the effects it claims. A
+        -- script that aborts does not roll back what it already wrote,
+        -- so a claim set before the booking would survive a mid-script
+        -- error (a key of the wrong type, for instance) and then
+        -- suppress every retry of a report that was never booked. The
+        -- counter HSET's own `fx` marker, backed by the effect
+        -- completion key above it, makes the booking idempotent instead.
+        if effect_done_key ~= nil then
+            redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)
             redis.call('SET', KEYS[4], '1', 'EX', dedupe_ttl)
         end
     end

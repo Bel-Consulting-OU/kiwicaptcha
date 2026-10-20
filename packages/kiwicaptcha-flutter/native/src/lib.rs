@@ -27,7 +27,38 @@
 //!     const uint8_t* salt, uint32_t salt_len,
 //!     uint32_t m_kib, uint32_t t, uint32_t p,
 //!     uint32_t target_bits, uint64_t* out_counter);
+//!
+//! // The batched spelling the Dart solver drives so its cooperative
+//! // cancellation probe fires at the Interactive-Client Lifecycle v1
+//! // cadence (sha256: every 2048 candidates; argon2id: between
+//! // derivations; rsw: every 256 squarings):
+//! int32_t kiwi_solve_sha256_range(
+//!     const uint8_t* prefix, uint32_t prefix_len,
+//!     const uint8_t* salt, uint32_t salt_len,
+//!     uint32_t target_bits, uint64_t start_counter,
+//!     uint64_t max_hashes, uint64_t* out_counter);
+//!
+//! int32_t kiwi_solve_argon2id_range(
+//!     const uint8_t* prefix, uint32_t prefix_len,
+//!     const uint8_t* salt, uint32_t salt_len,
+//!     uint32_t m_kib, uint32_t t, uint32_t p,
+//!     uint32_t target_bits, uint64_t start_counter,
+//!     uint64_t max_hashes, uint64_t* out_counter);
+//!
+//! int32_t kiwi_rsw_begin(
+//!     const uint8_t* modulus, uint32_t modulus_len,
+//!     const uint8_t* prefix, uint32_t prefix_len,
+//!     const uint8_t* nonce, uint32_t nonce_len,
+//!     uint8_t* out_value);                       // out_value: 256 bytes
+//!
+//! int32_t kiwi_rsw_square(
+//!     const uint8_t* modulus, uint32_t modulus_len,
+//!     uint8_t* value, uint32_t squarings);       // value: 256 bytes, in place
 //! ```
+//!
+//! The three `kiwi_solve_*` entry points keep their original semantics
+//! (one call, whole search); the range/batched exports above are
+//! strictly additive, so existing consumers never see a change.
 //!
 //! Memory ownership: the caller owns everything. Inputs are
 //! caller-owned read-only buffers; results are written into
@@ -171,10 +202,47 @@ fn solve_sha256(
         n if n > SOLVER_MAX_HASHES => return KIWI_ERR_CAP,
         n => n,
     };
+    solve_sha256_range(prefix, salt, target_bits, 0, cap, out_counter)
+}
+
+/// The batched spelling the Dart-side cancellation loop drives: scan
+/// `SHA-256(prefix || decimal(counter) || salt)` for `target_bits`
+/// leading zero bits over the half-open counter window
+/// `[start_counter, start_counter + max_hashes)`. The window must be
+/// non-empty (`max_hashes >= 1`) and within the shared budget
+/// (`max_hashes <= SOLVER_MAX_HASHES`); the Dart solver calls it in
+/// 2048-counter batches so its cancellation probe fires at the
+/// Interactive-Client Lifecycle v1 cadence. Answers
+/// `KIWI_ERR_EXHAUSTED` when the window held no winner.
+#[allow(clippy::too_many_arguments)]
+fn solve_sha256_range(
+    prefix: &[u8],
+    salt: &[u8],
+    target_bits: u32,
+    start_counter: u64,
+    max_hashes: u64,
+    out_counter: &mut u64,
+) -> i32 {
+    if prefix.is_empty() || prefix.len() > 4096 {
+        return KIWI_ERR_MALFORMED;
+    }
+    if salt.is_empty() || salt.len() > 512 {
+        return KIWI_ERR_MALFORMED;
+    }
+    if target_bits == 0 || target_bits > SOLVER_MAX_TARGET_BITS {
+        return KIWI_ERR_CAP;
+    }
+    if max_hashes == 0 || max_hashes > SOLVER_MAX_HASHES {
+        return KIWI_ERR_CAP;
+    }
+    let end = match start_counter.checked_add(max_hashes) {
+        Some(end) => end,
+        None => return KIWI_ERR_MALFORMED,
+    };
     let mut base = Sha256::new();
     base.update(prefix);
     let mut counter_buf = [0u8; 20];
-    for counter in 0..cap {
+    for counter in start_counter..end {
         let mut hasher = base.clone();
         let len = write_decimal(counter, &mut counter_buf);
         hasher.update(&counter_buf[..len]);
@@ -188,15 +256,18 @@ fn solve_sha256(
     KIWI_ERR_EXHAUSTED
 }
 
-fn solve_rsw(modulus: &[u8], prefix: &str, nonce: &str, t: u64, out_proof: &mut [u8]) -> i32 {
+/// The shared rsw input validation: canonical 2048-bit odd composite,
+/// prefix inside 1..=4096 bytes, the wire nonce. Returns the modulus
+/// as a big integer, or `None` for a refusal (`KIWI_ERR_MALFORMED`).
+fn validate_rsw_inputs(modulus: &[u8], prefix: &str, nonce: &str) -> Option<BigUint> {
     if modulus.len() != MODULUS_BYTES
         || modulus[0] & 0x80 == 0
         || modulus[MODULUS_BYTES - 1] & 1 == 0
     {
-        return KIWI_ERR_MALFORMED;
+        return None;
     }
     if prefix.is_empty() || prefix.len() > 4096 {
-        return KIWI_ERR_MALFORMED;
+        return None;
     }
     if nonce.len() != NONCE_LEN
         || !nonce.as_bytes()[..NONCE_LEN - 1]
@@ -204,12 +275,30 @@ fn solve_rsw(modulus: &[u8], prefix: &str, nonce: &str, t: u64, out_proof: &mut 
             .all(|b| b.is_ascii_alphanumeric() || *b == b'+' || *b == b'/')
         || !nonce.ends_with('=')
     {
-        return KIWI_ERR_MALFORMED;
+        return None;
     }
+    Some(BigUint::from_bytes_be(modulus))
+}
+
+/// Store a residue as the 256-byte big-endian wire form (the
+/// byte-level mirror of the core's `proof_hex`: 512 lowercase hex,
+/// zero-padded).
+fn write_be_256(value: &BigUint, out: &mut [u8]) {
+    let bytes = value.to_bytes_be();
+    debug_assert!(bytes.len() <= MODULUS_BYTES);
+    out.fill(0);
+    let start = MODULUS_BYTES - bytes.len();
+    out[start..].copy_from_slice(&bytes);
+}
+
+fn solve_rsw(modulus: &[u8], prefix: &str, nonce: &str, t: u64, out_proof: &mut [u8]) -> i32 {
+    let n = match validate_rsw_inputs(modulus, prefix, nonce) {
+        Some(n) => n,
+        None => return KIWI_ERR_MALFORMED,
+    };
     if !(RSW_T_MIN..=RSW_T_MAX).contains(&t) {
         return KIWI_ERR_MALFORMED;
     }
-    let n = BigUint::from_bytes_be(modulus);
     // The base derivation and the wire rendering are the core crate's
     // own public functions, so the sequential loop starts and ends
     // exactly where the trapdoor verifier expects.
@@ -217,13 +306,47 @@ fn solve_rsw(modulus: &[u8], prefix: &str, nonce: &str, t: u64, out_proof: &mut 
     for _ in 0..t {
         value = (&value * &value) % &n;
     }
-    // The 256-byte big-endian wire form: the byte-level mirror of the
-    // core's `proof_hex` (512 lowercase hex, zero-padded).
-    let bytes = value.to_bytes_be();
-    debug_assert!(bytes.len() <= MODULUS_BYTES);
-    out_proof.fill(0);
-    let start = MODULUS_BYTES - bytes.len();
-    out_proof[start..].copy_from_slice(&bytes);
+    write_be_256(&value, out_proof);
+    KIWI_OK
+}
+
+/// The batched rsw spelling the Dart-side cancellation loop drives,
+/// step one: validate the inputs and derive the squaring base
+/// `SHA-256(prefix || nonce) mod n`, written big-endian to
+/// `out_value` (256 bytes). The Dart side then advances the value with
+/// [kiwi_rsw_square] in 256-squaring batches and renders the final
+/// 256 bytes as the 512-hex proof itself.
+fn rsw_begin(modulus: &[u8], prefix: &str, nonce: &str, out_value: &mut [u8]) -> i32 {
+    let n = match validate_rsw_inputs(modulus, prefix, nonce) {
+        Some(n) => n,
+        None => return KIWI_ERR_MALFORMED,
+    };
+    let value = derive_base(prefix, nonce, &n);
+    write_be_256(&value, out_value);
+    KIWI_OK
+}
+
+/// Step two: square the 256-byte big-endian `value` modulo the
+/// canonical composite exactly `squarings` times, updating the buffer
+/// in place. A value at or above the modulus is refused
+/// (`KIWI_ERR_MALFORMED`) — a state the begin/square chain can never
+/// produce, so it only flags a misused buffer.
+fn rsw_square(modulus: &[u8], value: &mut [u8], squarings: u32) -> i32 {
+    if modulus.len() != MODULUS_BYTES
+        || modulus[0] & 0x80 == 0
+        || modulus[MODULUS_BYTES - 1] & 1 == 0
+    {
+        return KIWI_ERR_MALFORMED;
+    }
+    let n = BigUint::from_bytes_be(modulus);
+    let mut v = BigUint::from_bytes_be(value);
+    if v >= n {
+        return KIWI_ERR_MALFORMED;
+    }
+    for _ in 0..squarings {
+        v = (&v * &v) % &n;
+    }
+    write_be_256(&v, value);
     KIWI_OK
 }
 
@@ -235,6 +358,38 @@ fn solve_argon2id(
     t: u32,
     p: u32,
     target_bits: u32,
+    out_counter: &mut u64,
+) -> i32 {
+    solve_argon2id_range(
+        prefix,
+        salt,
+        m_kib,
+        t,
+        p,
+        target_bits,
+        0,
+        SOLVER_MAX_HASHES,
+        out_counter,
+    )
+}
+
+/// The batched spelling the Dart-side cancellation loop drives:
+/// argon2id over `prefix || decimal(counter)` for counters in the
+/// half-open window `[start_counter, start_counter + max_hashes)`,
+/// first hit wins. The Dart solver calls it one derivation at a time
+/// so its cancellation probe fires between candidate derivations (the
+/// lifecycle contract's argon2id cadence).
+#[cfg(feature = "argon")]
+#[allow(clippy::too_many_arguments)]
+fn solve_argon2id_range(
+    prefix: &[u8],
+    salt: &[u8],
+    m_kib: u32,
+    t: u32,
+    p: u32,
+    target_bits: u32,
+    start_counter: u64,
+    max_hashes: u64,
     out_counter: &mut u64,
 ) -> i32 {
     use argon2::{Algorithm, Argon2, Block, Params, Version};
@@ -255,6 +410,13 @@ fn solve_argon2id(
     {
         return KIWI_ERR_MALFORMED;
     }
+    if max_hashes == 0 || max_hashes > SOLVER_MAX_HASHES {
+        return KIWI_ERR_CAP;
+    }
+    let end = match start_counter.checked_add(max_hashes) {
+        Some(end) => end,
+        None => return KIWI_ERR_MALFORMED,
+    };
     let params = match Params::new(m_kib, t, p, Some(32)) {
         Ok(params) => params,
         Err(_) => return KIWI_ERR_MALFORMED,
@@ -268,7 +430,7 @@ fn solve_argon2id(
     let digit_start = password.len();
     let mut counter_buf = [0u8; 20];
     let mut output = [0u8; 32];
-    for counter in 0..SOLVER_MAX_HASHES {
+    for counter in start_counter..end {
         password.truncate(digit_start);
         let len = write_decimal(counter, &mut counter_buf);
         password.extend_from_slice(&counter_buf[..len]);
@@ -294,6 +456,22 @@ fn solve_argon2id(
     _t: u32,
     _p: u32,
     _target_bits: u32,
+    _out_counter: &mut u64,
+) -> i32 {
+    KIWI_ERR_ARGON_UNAVAILABLE
+}
+
+#[cfg(not(feature = "argon"))]
+#[allow(clippy::too_many_arguments)]
+fn solve_argon2id_range(
+    _prefix: &[u8],
+    _salt: &[u8],
+    _m_kib: u32,
+    _t: u32,
+    _p: u32,
+    _target_bits: u32,
+    _start_counter: u64,
+    _max_hashes: u64,
     _out_counter: &mut u64,
 ) -> i32 {
     KIWI_ERR_ARGON_UNAVAILABLE
@@ -433,6 +611,172 @@ pub unsafe extern "C" fn kiwi_solve_argon2id(
     })
 }
 
+/// Batched sha256 search over the half-open counter window
+/// `[start_counter, start_counter + max_hashes)`: the entry point the
+/// Dart solver drives in 2048-counter batches so its cancellation
+/// probe fires at the Interactive-Client Lifecycle v1 cadence. Writes
+/// the winning counter to `*out_counter` on success; answers
+/// `KIWI_ERR_EXHAUSTED` when the window was scanned without a hit.
+///
+/// # Safety
+///
+/// Same buffer rules as [`kiwi_solve_sha256`].
+#[no_mangle]
+pub unsafe extern "C" fn kiwi_solve_sha256_range(
+    prefix: *const u8,
+    prefix_len: u32,
+    salt: *const u8,
+    salt_len: u32,
+    target_bits: u32,
+    start_counter: u64,
+    max_hashes: u64,
+    out_counter: *mut u64,
+) -> i32 {
+    guard(|| {
+        // SAFETY: the caller guarantees the buffer lengths above; the
+        // slices live for this call only and outlive the body below.
+        let prefix = input_slice(prefix, prefix_len);
+        let salt = input_slice(salt, salt_len);
+        let (prefix, salt) = match (prefix, salt) {
+            (Some(p), Some(s)) => (p, s),
+            _ => return KIWI_ERR_MALFORMED,
+        };
+        if out_counter.is_null() {
+            return KIWI_ERR_MALFORMED;
+        }
+        // SAFETY: non-null caller-provided u64 slot.
+        let out = &mut *out_counter;
+        solve_sha256_range(prefix, salt, target_bits, start_counter, max_hashes, out)
+    })
+}
+
+/// Batched argon2id search over the half-open counter window
+/// `[start_counter, start_counter + max_hashes)`: the entry point the
+/// Dart solver drives one derivation at a time so its cancellation
+/// probe fires between candidate derivations. Built without the
+/// `argon` feature this answers `KIWI_ERR_ARGON_UNAVAILABLE`.
+///
+/// # Safety
+///
+/// Same buffer rules as [`kiwi_solve_sha256`].
+#[no_mangle]
+pub unsafe extern "C" fn kiwi_solve_argon2id_range(
+    prefix: *const u8,
+    prefix_len: u32,
+    salt: *const u8,
+    salt_len: u32,
+    m_kib: u32,
+    t: u32,
+    p: u32,
+    target_bits: u32,
+    start_counter: u64,
+    max_hashes: u64,
+    out_counter: *mut u64,
+) -> i32 {
+    guard(|| {
+        let prefix = input_slice(prefix, prefix_len);
+        let salt = input_slice(salt, salt_len);
+        let (prefix, salt) = match (prefix, salt) {
+            (Some(p), Some(s)) => (p, s),
+            _ => return KIWI_ERR_MALFORMED,
+        };
+        if out_counter.is_null() {
+            return KIWI_ERR_MALFORMED;
+        }
+        // SAFETY: non-null caller-provided u64 slot.
+        let out = &mut *out_counter;
+        solve_argon2id_range(
+            prefix,
+            salt,
+            m_kib,
+            t,
+            p,
+            target_bits,
+            start_counter,
+            max_hashes,
+            out,
+        )
+    })
+}
+
+/// Rsw step one (the batched spelling of [`kiwi_solve_rsw`]):
+/// validate the inputs and derive the squaring base
+/// `SHA-256(prefix || nonce) mod n`, written big-endian to
+/// `out_value` (exactly 256 bytes).
+///
+/// # Safety
+///
+/// Same buffer rules as [`kiwi_solve_rsw`], with `out_value` taking
+/// the 256-byte proof buffer's role.
+#[no_mangle]
+pub unsafe extern "C" fn kiwi_rsw_begin(
+    modulus: *const u8,
+    modulus_len: u32,
+    prefix: *const u8,
+    prefix_len: u32,
+    nonce: *const u8,
+    nonce_len: u32,
+    out_value: *mut u8,
+) -> i32 {
+    guard(|| {
+        let modulus = match input_slice(modulus, modulus_len) {
+            Some(slice) => slice,
+            None => return KIWI_ERR_MALFORMED,
+        };
+        let prefix = match input_slice(prefix, prefix_len) {
+            Some(slice) => slice,
+            None => return KIWI_ERR_MALFORMED,
+        };
+        let nonce = match input_slice(nonce, nonce_len) {
+            Some(slice) => slice,
+            None => return KIWI_ERR_MALFORMED,
+        };
+        let (prefix, nonce): (&str, &str) =
+            match (std::str::from_utf8(prefix), std::str::from_utf8(nonce)) {
+                (Ok(p), Ok(n)) => (p, n),
+                _ => return KIWI_ERR_MALFORMED,
+            };
+        if out_value.is_null() {
+            return KIWI_ERR_MALFORMED;
+        }
+        // SAFETY: non-null caller-provided 256-byte buffer.
+        let out = std::slice::from_raw_parts_mut(out_value, MODULUS_BYTES);
+        rsw_begin(modulus, prefix, nonce, out)
+    })
+}
+
+/// Rsw step two: square the 256-byte big-endian `value` (updated in
+/// place) modulo the canonical composite exactly `squarings` times.
+/// The Dart solver drives it in 256-squaring batches so its
+/// cancellation probe fires at the lifecycle contract's rsw cadence.
+///
+/// # Safety
+///
+/// `modulus` must point to `modulus_len` readable bytes and `value` to
+/// 256 writable bytes (holding a residue below the modulus, as
+/// [`kiwi_rsw_begin`] produced). Nulls are refused with
+/// `KIWI_ERR_MALFORMED`.
+#[no_mangle]
+pub unsafe extern "C" fn kiwi_rsw_square(
+    modulus: *const u8,
+    modulus_len: u32,
+    value: *mut u8,
+    squarings: u32,
+) -> i32 {
+    guard(|| {
+        let modulus = match input_slice(modulus, modulus_len) {
+            Some(slice) => slice,
+            None => return KIWI_ERR_MALFORMED,
+        };
+        if value.is_null() {
+            return KIWI_ERR_MALFORMED;
+        }
+        // SAFETY: non-null caller-provided 256-byte buffer.
+        let out = std::slice::from_raw_parts_mut(value, MODULUS_BYTES);
+        rsw_square(modulus, out, squarings)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +792,105 @@ mod tests {
                 "the counter spelling must be the plain decimal one"
             );
         }
+    }
+
+    #[test]
+    fn sha256_range_windows_match_the_single_call() {
+        let prefix = b"kiwi|login|";
+        let salt: &[u8] = &[1, 2, 3, 4];
+        let mut whole = 0u64;
+        assert_eq!(solve_sha256(prefix, salt, 8, 1000, &mut whole), KIWI_OK);
+        // The window ending just below the winner exhausts; the window
+        // starting at the winner finds it in a one-counter batch.
+        let mut out = 0u64;
+        assert_eq!(
+            solve_sha256_range(prefix, salt, 8, 0, whole, &mut out),
+            KIWI_ERR_EXHAUSTED
+        );
+        assert_eq!(
+            solve_sha256_range(prefix, salt, 8, whole, 1, &mut out),
+            KIWI_OK
+        );
+        assert_eq!(
+            out, whole,
+            "the batched search finds the same first counter"
+        );
+        // A window past the winner still solves (the first hit inside
+        // the window, never an earlier one).
+        assert_eq!(
+            solve_sha256_range(prefix, salt, 8, whole + 1, 2048, &mut out),
+            KIWI_OK
+        );
+        assert!(
+            out > whole,
+            "the shifted window never revisits earlier counters"
+        );
+    }
+
+    #[test]
+    fn sha256_range_refuses_an_empty_or_oversized_window() {
+        let mut out = 0u64;
+        assert_eq!(
+            solve_sha256_range(b"prefix", b"salt", 8, 0, 0, &mut out),
+            KIWI_ERR_CAP
+        );
+        assert_eq!(
+            solve_sha256_range(b"prefix", b"salt", 8, 0, SOLVER_MAX_HASHES + 1, &mut out),
+            KIWI_ERR_CAP
+        );
+        // The window must stay inside u64 (start + max must not wrap).
+        assert_eq!(
+            solve_sha256_range(b"prefix", b"salt", 8, u64::MAX, 2, &mut out),
+            KIWI_ERR_MALFORMED
+        );
+    }
+
+    #[test]
+    fn rsw_begin_and_square_reproduce_the_single_call_proof() {
+        let modulus = [0xffu8; MODULUS_BYTES];
+        let prefix = "prefix|";
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let t = RSW_T_MIN; // 10,000 squarings: crosses the 256 batch many times
+        let mut proof = [0u8; MODULUS_BYTES];
+        assert_eq!(solve_rsw(&modulus, prefix, nonce, t, &mut proof), KIWI_OK);
+
+        let mut value = [0u8; MODULUS_BYTES];
+        assert_eq!(rsw_begin(&modulus, prefix, nonce, &mut value), KIWI_OK);
+        assert_ne!(
+            value, [0u8; MODULUS_BYTES],
+            "the base derivation is nonzero"
+        );
+
+        // The Dart loop's shape: 256-squaring batches until t is spent.
+        let mut remaining = t;
+        while remaining > 0 {
+            let step = remaining.min(256) as u32;
+            assert_eq!(rsw_square(&modulus, &mut value, step), KIWI_OK);
+            remaining -= step as u64;
+        }
+        assert_eq!(value, proof, "batched squarings land on the one-call proof");
+        // A zero-squaring call is a no-op, and a value at or above the
+        // modulus is refused.
+        assert_eq!(rsw_square(&modulus, &mut value, 0), KIWI_OK);
+        assert_eq!(value, proof);
+        let mut above = [0xffu8; MODULUS_BYTES];
+        assert_eq!(rsw_square(&modulus, &mut above, 1), KIWI_ERR_MALFORMED);
+    }
+
+    #[test]
+    fn rsw_begin_refuses_out_of_contract_input_before_any_work() {
+        let mut value = [0u8; MODULUS_BYTES];
+        let prefix = "prefix|";
+        let nonce = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let short = [0u8; MODULUS_BYTES - 1];
+        assert_eq!(
+            rsw_begin(&short, prefix, nonce, &mut value),
+            KIWI_ERR_MALFORMED
+        );
+        assert_eq!(
+            rsw_begin(&[0xffu8; MODULUS_BYTES], prefix, "short", &mut value),
+            KIWI_ERR_MALFORMED
+        );
     }
 
     #[test]
@@ -609,6 +1052,42 @@ mod tests {
             ),
             KIWI_ERR_CAP,
             "difficulty above the argon2id ceiling"
+        );
+    }
+
+    #[cfg(feature = "argon")]
+    #[test]
+    fn argon2id_range_agrees_with_the_single_call() {
+        // The Argon2 layer refuses salts shorter than 8 bytes, so the
+        // happy-path window check needs a wire-legal salt.
+        let salt = b"0123456789abcdef";
+        let mut whole = 0u64;
+        assert_eq!(
+            solve_argon2id(b"prefix", salt, 8, 3, 1, 4, &mut whole),
+            KIWI_OK
+        );
+        let mut out = 0u64;
+        // The window ending below the winner exhausts; the
+        // one-derivation window starting at the winner finds it — the
+        // exact call shape the Dart-side cancellation loop issues.
+        if whole > 0 {
+            assert_eq!(
+                solve_argon2id_range(b"prefix", salt, 8, 3, 1, 4, 0, whole, &mut out),
+                KIWI_ERR_EXHAUSTED
+            );
+        }
+        assert_eq!(
+            solve_argon2id_range(b"prefix", salt, 8, 3, 1, 4, whole, 1, &mut out),
+            KIWI_OK
+        );
+        assert_eq!(
+            out, whole,
+            "the batched search finds the same first counter"
+        );
+        // An empty window is a cap refusal.
+        assert_eq!(
+            solve_argon2id_range(b"prefix", salt, 8, 3, 1, 4, 0, 0, &mut out),
+            KIWI_ERR_CAP
         );
     }
 }

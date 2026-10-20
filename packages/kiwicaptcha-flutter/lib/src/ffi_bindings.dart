@@ -13,6 +13,12 @@
 /// * pointers are `const uint8_t*` with a `uint32_t` length each; the
 ///   counter/t arguments are `uint32_t`/`uint64_t` exactly as the
 ///   typedefs below spell them.
+/// * alongside the three whole-search entry points there is the
+///   batched spelling the solver's cooperative cancellation loop
+///   drives (`kiwi_solve_sha256_range`, `kiwi_solve_argon2id_range`,
+///   `kiwi_rsw_begin` + `kiwi_rsw_square`) — windowed searches and
+///   in-place squaring batches, so the Dart side can probe
+///   `isCancelled` at the Interactive-Client Lifecycle v1 cadence.
 ///
 /// Build the native library once per platform (see native/README.md):
 ///
@@ -46,15 +52,52 @@ typedef _SolveSha256Native = Int32 Function(Pointer<Uint8>, Uint32,
 typedef _SolveSha256Dart = int Function(
     Pointer<Uint8>, int, Pointer<Uint8>, int, int, int, Pointer<Uint64>);
 
+typedef _SolveSha256RangeNative = Int32 Function(
+    Pointer<Uint8>,
+    Uint32,
+    Pointer<Uint8>,
+    Uint32,
+    Uint32,
+    Uint64,
+    Uint64,
+    Pointer<Uint64>);
+typedef _SolveSha256RangeDart = int Function(
+    Pointer<Uint8>, int, Pointer<Uint8>, int, int, int, int, Pointer<Uint64>);
+
 typedef _SolveRswNative = Int32 Function(Pointer<Uint8>, Uint32,
     Pointer<Uint8>, Uint32, Pointer<Uint8>, Uint32, Uint64, Pointer<Uint8>);
 typedef _SolveRswDart = int Function(Pointer<Uint8>, int, Pointer<Uint8>,
     int, Pointer<Uint8>, int, int, Pointer<Uint8>);
 
+typedef _RswBeginNative = Int32 Function(Pointer<Uint8>, Uint32,
+    Pointer<Uint8>, Uint32, Pointer<Uint8>, Uint32, Pointer<Uint8>);
+typedef _RswBeginDart = int Function(Pointer<Uint8>, int, Pointer<Uint8>,
+    int, Pointer<Uint8>, int, Pointer<Uint8>);
+
+typedef _RswSquareNative = Int32 Function(
+    Pointer<Uint8>, Uint32, Pointer<Uint8>, Uint32);
+typedef _RswSquareDart = int Function(
+    Pointer<Uint8>, int, Pointer<Uint8>, int);
+
 typedef _SolveArgonNative = Int32 Function(Pointer<Uint8>, Uint32,
     Pointer<Uint8>, Uint32, Uint32, Uint32, Uint32, Uint64, Pointer<Uint64>);
 typedef _SolveArgonDart = int Function(Pointer<Uint8>, int, Pointer<Uint8>,
     int, int, int, int, int, Pointer<Uint64>);
+
+typedef _SolveArgonRangeNative = Int32 Function(
+    Pointer<Uint8>,
+    Uint32,
+    Pointer<Uint8>,
+    Uint32,
+    Uint32,
+    Uint32,
+    Uint32,
+    Uint32,
+    Uint64,
+    Uint64,
+    Pointer<Uint64>);
+typedef _SolveArgonRangeDart = int Function(Pointer<Uint8>, int,
+    Pointer<Uint8>, int, int, int, int, int, int, int, Pointer<Uint64>);
 
 /// Test seam: swap the native functions for fakes. Null restores the
 /// real library.
@@ -63,16 +106,28 @@ KiwiFfi? debugFfiOverride;
 /// The typed bindings plus the solve dispatch over them.
 class KiwiFfi {
   final _SolveSha256Dart solveSha256;
+  final _SolveSha256RangeDart solveSha256Range;
   final _SolveRswDart solveRsw;
+  final _RswBeginDart rswBeginFn;
+  final _RswSquareDart rswSquareFn;
   final _SolveArgonDart solveArgon;
+  final _SolveArgonRangeDart solveArgonRange;
 
   KiwiFfi._(DynamicLibrary lib)
       : solveSha256 = lib
             .lookupFunction<_SolveSha256Native, _SolveSha256Dart>('kiwi_solve_sha256'),
+        solveSha256Range = lib.lookupFunction<_SolveSha256RangeNative, _SolveSha256RangeDart>(
+            'kiwi_solve_sha256_range'),
         solveRsw = lib
             .lookupFunction<_SolveRswNative, _SolveRswDart>('kiwi_solve_rsw'),
+        rswBeginFn = lib
+            .lookupFunction<_RswBeginNative, _RswBeginDart>('kiwi_rsw_begin'),
+        rswSquareFn = lib
+            .lookupFunction<_RswSquareNative, _RswSquareDart>('kiwi_rsw_square'),
         solveArgon = lib
-            .lookupFunction<_SolveArgonNative, _SolveArgonDart>('kiwi_solve_argon2id');
+            .lookupFunction<_SolveArgonNative, _SolveArgonDart>('kiwi_solve_argon2id'),
+        solveArgonRange = lib.lookupFunction<_SolveArgonRangeNative, _SolveArgonRangeDart>(
+            'kiwi_solve_argon2id_range');
 
   factory KiwiFfi.instance() {
     final override = debugFfiOverride;
@@ -113,6 +168,78 @@ class KiwiFfi {
       calloc.free(prefixPtr);
       calloc.free(saltPtr);
       calloc.free(outCounter);
+    }
+  }
+
+  /// The batched sha256 search the solver's cancellation loop drives:
+  /// scan counters in `[startCounter, startCounter + maxHashes)` and
+  /// return the first one meeting [targetBits]. Answers
+  /// [KiwiRefusal.exhausted] when the window held no winner.
+  int sha256SearchRange({
+    required String prefix,
+    required Uint8List salt,
+    required int targetBits,
+    required int startCounter,
+    required int maxHashes,
+  }) {
+    final prefixBytes = Uint8List.fromList(utf8.encode(prefix));
+    final prefixPtr = _bytesPtr(prefixBytes);
+    final saltPtr = _bytesPtr(salt);
+    final outCounter = calloc<Uint64>();
+    try {
+      final code = solveSha256Range(prefixPtr, prefixBytes.length, saltPtr, salt.length,
+          targetBits, startCounter, maxHashes, outCounter);
+      _check(code);
+      return outCounter.value;
+    } finally {
+      calloc.free(prefixPtr);
+      calloc.free(saltPtr);
+      calloc.free(outCounter);
+    }
+  }
+
+  /// The batched rsw solve, step one: derive the squaring base
+  /// (256 bytes big-endian) for a validated challenge.
+  Uint8List rswBegin({
+    required Uint8List modulus,
+    required String prefix,
+    required String nonce,
+  }) {
+    final modulusPtr = _bytesPtr(modulus);
+    final prefixBytes = Uint8List.fromList(utf8.encode(prefix));
+    final prefixPtr = _bytesPtr(prefixBytes);
+    final nonceBytes = Uint8List.fromList(utf8.encode(nonce));
+    final noncePtr = _bytesPtr(nonceBytes);
+    final outValue = calloc<Uint8>(256);
+    try {
+      final code = rswBeginFn(modulusPtr, modulus.length, prefixPtr, prefixBytes.length,
+          noncePtr, nonceBytes.length, outValue);
+      _check(code);
+      return Uint8List.fromList(outValue.asTypedList(256));
+    } finally {
+      calloc.free(modulusPtr);
+      calloc.free(prefixPtr);
+      calloc.free(noncePtr);
+      calloc.free(outValue);
+    }
+  }
+
+  /// The batched rsw solve, step two: square [value] (256 bytes,
+  /// updated in place) exactly [squarings] times modulo the modulus.
+  void rswSquare({
+    required Uint8List modulus,
+    required Uint8List value,
+    required int squarings,
+  }) {
+    final modulusPtr = _bytesPtr(modulus);
+    final valuePtr = _bytesPtr(value);
+    try {
+      final code = rswSquareFn(modulusPtr, modulus.length, valuePtr, squarings);
+      _check(code);
+      value.setAll(0, valuePtr.asTypedList(256));
+    } finally {
+      calloc.free(modulusPtr);
+      calloc.free(valuePtr);
     }
   }
 
@@ -161,6 +288,37 @@ class KiwiFfi {
     try {
       final code = solveArgon(prefixPtr, prefixBytes.length, saltPtr, salt.length, mKib, t,
           p, targetBits, outCounter);
+      _check(code);
+      return outCounter.value;
+    } finally {
+      calloc.free(prefixPtr);
+      calloc.free(saltPtr);
+      calloc.free(outCounter);
+    }
+  }
+
+  /// The batched argon2id search the solver's cancellation loop drives
+  /// (one derivation per call): scan counters in
+  /// `[startCounter, startCounter + maxHashes)` and return the first
+  /// one meeting [targetBits]. Answers [KiwiRefusal.exhausted] when
+  /// the window held no winner.
+  int argon2idRange({
+    required String prefix,
+    required Uint8List salt,
+    required int mKib,
+    required int t,
+    required int p,
+    required int targetBits,
+    required int startCounter,
+    required int maxHashes,
+  }) {
+    final prefixBytes = Uint8List.fromList(utf8.encode(prefix));
+    final prefixPtr = _bytesPtr(prefixBytes);
+    final saltPtr = _bytesPtr(salt);
+    final outCounter = calloc<Uint64>();
+    try {
+      final code = solveArgonRange(prefixPtr, prefixBytes.length, saltPtr, salt.length, mKib,
+          t, p, targetBits, startCounter, maxHashes, outCounter);
       _check(code);
       return outCounter.value;
     } finally {

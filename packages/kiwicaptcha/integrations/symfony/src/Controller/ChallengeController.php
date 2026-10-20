@@ -1141,12 +1141,21 @@ final class ChallengeController
         // degrades to 1, never a 422, and the issued version is
         // further capped by the node config and the central fleet
         // floor, see {@see self::effectiveExecutionVersion()}.
-        $clientExecutionCapability = 1;
-        $rawCapability = $request->headers->get('Kiwi-Execution-Max-Version');
-        if (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {
-            $clientExecutionCapability = (int) $rawCapability;
+        // The one exception is the explicit zero: `0` (exactly, after
+        // trim) means the client cannot execute the execution dimension
+        // at all — a different statement from "I only
+        // know version 1". The shared interpretation lives in
+        // {@see ExecutionVersionPolicy::clientCapability()}, so this
+        // controller, the PHP core and the reference deployment can
+        // never diverge on it.
+        $clientExecutionCapability = ExecutionVersionPolicy::clientCapability($request->headers->get('Kiwi-Execution-Max-Version'));
+        $clientExecutionCapabilityNone = $clientExecutionCapability === ExecutionVersionPolicy::CAPABILITY_NONE;
+        if ($clientExecutionCapabilityNone) {
+            // A zero-capability client never reaches the grammar ladder:
+            // the version field stays at the v1 floor and arming alone
+            // governs (see the arming block below).
+            $clientExecutionCapability = 1;
         }
-        $clientExecutionCapability = max(1, min($clientExecutionCapability, self::MAX_EXECUTION_VERSION));
 
 
         // Identifier validation: scopes and request bindings must match
@@ -1962,6 +1971,35 @@ final class ChallengeController
             // generator maximum). An older client never advertises and
             // receives version 1.
             $armExecution = $verifiedAgent === null && $this->executionArmingEnabled($executionRiskDecision);
+            // The explicit capability zero: the client declared it
+            // cannot execute the execution dimension at all, so the
+            // dimension is never armed for that request — the plain
+            // challenge is issued even when the deployment configured an
+            // execution key and a higher node cap. But when this request
+            // would have been execution-armed, the deployment demands
+            // execution evidence (the same population the required-tier
+            // mandate governs): minting an armed challenge would hand the
+            // client a program it cannot run and minting an unarmed one
+            // would silently waive the mandate, so the deterministic
+            // client-unsupported refusal answers instead. The refusal
+            // happens before any admission slot or record commit, but a
+            // chain stage-2 request may already hold the chain reservation
+            // taken by prepareStageTwo(); release it exactly like every
+            // other post-reservation refusal so the ticket stays reusable.
+            if ($clientExecutionCapabilityNone && $armExecution) {
+                $this->releaseChain($chainId, $chainOwner);
+
+                return $this->privateJson(
+                    ['error' => ['code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED', 'message' => 'This deployment requires an execution-capable client; reload the page or upgrade the widget.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            if ($clientExecutionCapabilityNone) {
+                $armExecution = false;
+            }
             $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
             // The server-owned required execution tier: the client
             // capability declaration is never an authority over the

@@ -4,6 +4,13 @@ import 'dart:typed_data';
 import 'challenge.dart';
 import 'ffi_bindings.dart';
 
+/// The cooperative-cancellation probe of the Interactive-Client
+/// Lifecycle v1 contract (protocol/interactive-client-v1): a cheap,
+/// non-blocking zero-argument predicate. When it fires the solver
+/// raises the typed [KiwiSolveError.cancelled] and schedules no
+/// further CPU work.
+typedef IsCancelled = bool Function();
+
 /// Pure-Dart SHA-256 for the low-difficulty fallback. Correctness is
 /// pinned against standard vectors in the Dart test suite; it is only
 /// ever used below the low-difficulty ceiling, where the expected work
@@ -18,6 +25,14 @@ const List<int> _k = [
   0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
+
+/// The cancellation checkpoint cadences of the lifecycle contract:
+/// sha256 probes at most every 2048 candidates, rsw at most every 256
+/// modular squarings, argon2id between candidate derivations. After a
+/// firing probe at most one batch of stale work remains.
+const int kiwiShaCancellationBatch = 2048;
+const int kiwiRswCancellationBatch = 256;
+const int kiwiArgonCancellationBatch = 1;
 
 /// SHA-256 over the concatenation of `chunks` (each chunk is a byte
 /// sequence). The chunked shape exists so a preimage built as
@@ -125,8 +140,23 @@ const int kiwiLowDifficultyMaxBits = 8;
 /// Solve a validated challenge: low-difficulty sha256 on the Dart side
 /// (via kiwiSha256), everything else through the FFI core. Returns the
 /// solution; throws [KiwiSolveError] on any refusal.
-KiwiSolution solveKiwiChallenge(KiwiChallenge challenge) {
+///
+/// [isCancelled] is the cooperative-cancellation probe: checked once
+/// before any work is spent, then at the contract cadences — every
+/// [kiwiShaCancellationBatch] sha256 candidates, every
+/// [kiwiRswCancellationBatch] rsw squarings, between argon2id
+/// derivations. A firing probe raises [KiwiSolveError.cancelled].
+KiwiSolution solveKiwiChallenge(KiwiChallenge challenge, {IsCancelled? isCancelled}) {
   validateKiwiChallenge(challenge);
+  void ensureNotCancelled() {
+    final probe = isCancelled;
+    if (probe != null && probe()) {
+      throw const KiwiSolveError.cancelled();
+    }
+  }
+
+  // The entry checkpoint: before any work is spent.
+  ensureNotCancelled();
   final started = DateTime.now().millisecondsSinceEpoch;
   if (challenge.algorithm == KiwiAlgorithm.sha256 &&
       challenge.targetBits <= kiwiLowDifficultyMaxBits) {
@@ -134,6 +164,7 @@ KiwiSolution solveKiwiChallenge(KiwiChallenge challenge) {
     final prefix = utf8.encode(challenge.prefix);
     final cap = 1 << challenge.targetBits;
     for (var counter = 0; counter < cap; counter++) {
+      if (counter % kiwiShaCancellationBatch == 0) ensureNotCancelled();
       final digest = kiwiSha256([prefix, utf8.encode('$counter'), salt]);
       if (kiwiLeadingZeroBits(digest) >= challenge.targetBits) {
         return KiwiSolution(
@@ -149,24 +180,47 @@ KiwiSolution solveKiwiChallenge(KiwiChallenge challenge) {
   final ffi = KiwiFfi.instance();
   switch (challenge.algorithm) {
     case KiwiAlgorithm.sha256:
-      // Throws KiwiSolveError on any refusal, exhaustion included.
-      final counter = ffi.sha256Search(
-        prefix: challenge.prefix,
-        salt: _base64Decode(challenge.salt),
-        targetBits: challenge.targetBits,
-      );
-      return KiwiSolution(
-        counter: counter,
-        durationMs: DateTime.now().millisecondsSinceEpoch - started,
-        hashHex: '',
-      );
+      // The batched core search: 2048 candidates per invocation with
+      // the probe between invocations, so cancellation stays within
+      // the contract's stale-work ceiling.
+      final salt = _base64Decode(challenge.salt);
+      var start = 0;
+      while (start < KiwiLimits.maxHashes) {
+        ensureNotCancelled();
+        var budget = KiwiLimits.maxHashes - start;
+        if (budget > kiwiShaCancellationBatch) budget = kiwiShaCancellationBatch;
+        try {
+          final counter = ffi.sha256SearchRange(
+            prefix: challenge.prefix,
+            salt: salt,
+            targetBits: challenge.targetBits,
+            startCounter: start,
+            maxHashes: budget,
+          );
+          return KiwiSolution(
+            counter: counter,
+            durationMs: DateTime.now().millisecondsSinceEpoch - started,
+            hashHex: '',
+          );
+        } on KiwiSolveError catch (error) {
+          if (error.refusal != KiwiRefusal.exhausted) rethrow;
+          start += budget;
+        }
+      }
+      throw const KiwiSolveError(KiwiRefusal.exhausted, 'the core exhausted the search');
     case KiwiAlgorithm.rsw:
-      final proof = ffi.rswSquarings(
-        modulus: _base64Decode(challenge.rswModulus!),
-        prefix: challenge.prefix,
-        nonce: challenge.nonce,
-        t: challenge.t,
-      );
+      // Validation guarantees the modulus for the rsw profile.
+      final modulus = _base64Decode(challenge.rswModulus!);
+      final value = ffi.rswBegin(modulus: modulus, prefix: challenge.prefix, nonce: challenge.nonce);
+      var remaining = challenge.t;
+      while (remaining > 0) {
+        ensureNotCancelled();
+        var step = remaining;
+        if (step > kiwiRswCancellationBatch) step = kiwiRswCancellationBatch;
+        ffi.rswSquare(modulus: modulus, value: value, squarings: step);
+        remaining -= step;
+      }
+      final proof = value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
       return KiwiSolution(
         counter: 0,
         durationMs: DateTime.now().millisecondsSinceEpoch - started,
@@ -174,18 +228,33 @@ KiwiSolution solveKiwiChallenge(KiwiChallenge challenge) {
         rswProof: proof,
       );
     case KiwiAlgorithm.argon2id:
-      final counter = ffi.argon2id(
-        prefix: challenge.prefix,
-        salt: _base64Decode(challenge.salt),
-        mKib: challenge.mKib,
-        t: challenge.t,
-        p: challenge.p,
-        targetBits: challenge.targetBits,
-      );
-      return KiwiSolution(
-        counter: counter,
-        durationMs: DateTime.now().millisecondsSinceEpoch - started,
-        hashHex: '',
-      );
+      // One derivation per core invocation: the probe fires between
+      // candidate derivations, the contract's argon2id cadence.
+      final salt = _base64Decode(challenge.salt);
+      var start = 0;
+      while (start < KiwiLimits.maxHashes) {
+        ensureNotCancelled();
+        try {
+          final counter = ffi.argon2idRange(
+            prefix: challenge.prefix,
+            salt: salt,
+            mKib: challenge.mKib,
+            t: challenge.t,
+            p: challenge.p,
+            targetBits: challenge.targetBits,
+            startCounter: start,
+            maxHashes: kiwiArgonCancellationBatch,
+          );
+          return KiwiSolution(
+            counter: counter,
+            durationMs: DateTime.now().millisecondsSinceEpoch - started,
+            hashHex: '',
+          );
+        } on KiwiSolveError catch (error) {
+          if (error.refusal != KiwiRefusal.exhausted) rethrow;
+          start += kiwiArgonCancellationBatch;
+        }
+      }
+      throw const KiwiSolveError(KiwiRefusal.exhausted, 'the core exhausted the search');
   }
 }

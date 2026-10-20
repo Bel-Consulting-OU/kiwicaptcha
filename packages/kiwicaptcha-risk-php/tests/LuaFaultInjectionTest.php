@@ -168,6 +168,33 @@ final class LuaFaultInjectionTest extends TestCase
         }
     }
 
+    /**
+     * The adversarial convergence check: the interleaved A/B timelines
+     * are separated by a few milliseconds of extra wall time, and the
+     * decay leak deducts a handful of units for that (rf leaks 250 per
+     * second), so exact equality would flake. A double application
+     * differs by 1000 or more — the tolerance never comes close to
+     * masking the invariant.
+     */
+    private function assertSignalsConverged(string $cleanKey, string $faultKey, string $message): void
+    {
+        $clean = $this->signals($cleanKey);
+        $fault = $this->signals($faultKey);
+        self::assertSame(
+            array_keys($clean),
+            array_keys($fault),
+            $message.': '.json_encode([$clean, $fault]),
+        );
+        foreach ($clean as $field => $cleanValue) {
+            self::assertLessThanOrEqual(
+                30,
+                abs((float) $cleanValue - (float) $fault[$field]),
+                $message.": field {$field} differs beyond the leak tolerance "
+                ."({$cleanValue} vs {$fault[$field]})",
+            );
+        }
+    }
+
     // ── the shared decoder ─────────────────────────────────────────────
 
     public function testThePersistedStateDecoderIsSharedByteForByte(): void
@@ -270,6 +297,64 @@ final class LuaFaultInjectionTest extends TestCase
             );
         }
         self::assertSame('1', (string) $this->client->get($faultyKeys[9]), 'the completed retry claims the event');
+    }
+
+    /**
+     * The adversarial interleaving the per-event `fx` markers alone
+     * cannot order: A applies its effects, keeps its effect completion
+     * key (`fxdone`) but stops short of its dedupe claim; B then runs to
+     * completion and clobbers every state's `fx` marker; A retries. The
+     * retry must converge on the completion key — A's contribution lands
+     * exactly once and the state ends at the post-A-and-B reference.
+     */
+    public function testRiskV1EffectCompletionKeyConvergesAnInterleavedEvent(): void
+    {
+        $clean = $this->namespace('ficlean');
+        $fault = $this->namespace('fifax');
+        [$cleanA, $cleanAArgs] = $this->riskV1Case($clean, 'aaaa');
+        [$cleanB, $cleanBArgs] = $this->riskV1Case($clean, 'bbbb');
+        [$faultA, $faultAArgs] = $this->riskV1Case($fault, 'aaaa');
+        [$faultB, $faultBArgs] = $this->riskV1Case($fault, 'bbbb');
+
+        // The reference: A fully, then B fully.
+        $this->evalScript('risk-v1.lua', $cleanA, $cleanAArgs);
+        $this->evalScript('risk-v1.lua', $cleanB, $cleanBArgs);
+
+        // A applies its effects and stops after its completion key,
+        // before its claim.
+        $injected = self::injectAfter(
+            'risk-v1.lua',
+            "redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)",
+        );
+        try {
+            $this->runBody($injected, $faultA, $faultAArgs);
+            self::fail('the injected failure must abort');
+        } catch (ServerException $e) {
+            self::assertStringContainsString('injected-command-failure', $e->getMessage());
+        }
+        self::assertSame(0, (int) $this->client->exists($faultA[9]), 'A stopped short of its claim');
+        self::assertSame(
+            1,
+            (int) $this->client->exists($faultA[9].':fxdone'),
+            "A's effect completion key stands",
+        );
+
+        // B runs to completion: fx now says B on every state hash.
+        $this->evalScript('risk-v1.lua', $faultB, $faultBArgs);
+
+        // A retries: the completion key (not the clobbered markers)
+        // proves the effects landed, so the retry only rewrites the claim.
+        $this->evalScript('risk-v1.lua', $faultA, $faultAArgs);
+
+        foreach ([0, 3, 6, 7, 8] as $index) {
+            $this->assertSignalsConverged(
+                $cleanA[$index],
+                $faultA[$index],
+                'key '.$index.' must carry A once and B once after the retry',
+            );
+        }
+        self::assertSame('1', (string) $this->client->get($faultA[9]), 'the retry claims A');
+        self::assertSame('1', (string) $this->client->get($faultB[9]), 'B stays claimed');
     }
 
     /** @return array{0: list<string>, 1: list<int|string>} */
@@ -403,6 +488,69 @@ final class LuaFaultInjectionTest extends TestCase
         $cleanLedger = json_decode((string) $this->client->get($cleanKeys[12]), true);
         $faultyLedger = json_decode((string) $this->client->get($faultyKeys[12]), true);
         self::assertSame($cleanLedger, $faultyLedger, 'the retry books the same ledger entry');
+    }
+
+    /**
+     * The same interleaving on the consolidated v2 assessment, target
+     * included. A applies every guarded effect: the state dimensions, the
+     * target booking and the pending ledger. A keeps its effect completion
+     * key but stops short of its claim. B runs to completion and clobbers
+     * the markers. The retry of A must observe its own completion key and
+     * apply nothing, so every counter lands at exactly once.*/
+    public function testAssessV2EffectCompletionKeyConvergesAnInterleavedEvent(): void
+    {
+        $clean = $this->namespace('ficlean');
+        $fault = $this->namespace('fifax');
+        [$cleanA, $cleanAArgs] = $this->assessCase($clean, 'aaaa', 'decision-clean-a', true);
+        [$cleanB, $cleanBArgs] = $this->assessCase($clean, 'bbbb', 'decision-clean-b', true);
+        [$faultA, $faultAArgs] = $this->assessCase($fault, 'aaaa', 'decision-fault-a', true);
+        [$faultB, $faultBArgs] = $this->assessCase($fault, 'bbbb', 'decision-fault-b', true);
+
+        $this->evalScript('assess_v2.lua', $cleanA, $cleanAArgs);
+        $this->evalScript('assess_v2.lua', $cleanB, $cleanBArgs);
+
+        $injected = self::injectAfter(
+            'assess_v2.lua',
+            "redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)",
+        );
+        try {
+            $this->runBody($injected, $faultA, $faultAArgs);
+            self::fail('the injected failure must abort');
+        } catch (ServerException $e) {
+            self::assertStringContainsString('injected-command-failure', $e->getMessage());
+        }
+        self::assertSame(0, (int) $this->client->exists($faultA[9]), 'A stopped short of its claim');
+        self::assertSame(
+            1,
+            (int) $this->client->exists($faultA[9].':fxdone'),
+            "A's effect completion key stands",
+        );
+
+        $this->evalScript('assess_v2.lua', $faultB, $faultBArgs);
+        $this->evalScript('assess_v2.lua', $faultA, $faultAArgs);
+
+        foreach ([0, 3, 6, 7, 8] as $index) {
+            $this->assertSignalsConverged(
+                $cleanA[$index],
+                $faultA[$index],
+                'key '.$index.' must carry A once and B once after the retry',
+            );
+        }
+        self::assertSame(
+            (int) $this->client->hget($cleanA[13], 'fails'),
+            (int) $this->client->hget($faultA[13], 'fails'),
+            'the target failure is booked once per report',
+        );
+        self::assertSame(
+            (int) $this->client->pfcount($cleanA[14]),
+            (int) $this->client->pfcount($faultA[14]),
+            'the spread is recorded once',
+        );
+        self::assertSame('1', (string) $this->client->get($faultA[9]), 'the retry claims A');
+        self::assertSame('1', (string) $this->client->get($faultB[9]), 'B stays claimed');
+        $cleanLedger = json_decode((string) $this->client->get($cleanA[12]), true);
+        $faultLedger = json_decode((string) $this->client->get($faultA[12]), true);
+        self::assertSame($cleanLedger, $faultLedger, 'A books exactly one ledger entry');
     }
 
     public function testAssessV2CorruptTargetFailsBeforeAnyWrite(): void

@@ -740,8 +740,11 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // is empty, garbage or below 2 must degrade to version 1 with a
         // 200 response, exactly like the absent header. Only integer
         // strings parse (2 and above are capped at the node ceiling);
-        // a header never produces a 422.
-        foreach (['', 'abc', '-1', '0', '1', ' 2', '2.0', '007'] as $value) {
+        // a header never produces a 422. The explicit zero is the one
+        // exception and carries its own explicit-zero semantics — see
+        // testExplicitZeroCapabilityNeverArmsTheDimension — so it stays
+        // out of this degrade matrix.
+        foreach (['', 'abc', '-1', '1', ' 2', '2.0', '007'] as $value) {
             [$response] = $this->armedIssuance('{"scope":"login"}', $value);
             self::assertSame(200, $response->getStatusCode(), 'header value '.var_export($value, true).' must never 422: '.(string) $response->getContent());
             $payload = json_decode((string) $response->getContent(), true);
@@ -754,6 +757,81 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
         $payload = json_decode((string) $response->getContent(), true);
         self::assertSame(2, $this->programVersion($payload['execution_program']), 'the wiring control: a header value 2 still issues version 2');
+    }
+
+    public function testExplicitZeroCapabilityNeverArmsTheDimension(): void
+    {
+        // The explicit capability zero (`Kiwi-Execution-Max-Version: 0`)
+        // means the client cannot execute the execution dimension at
+        // all — a different statement from the v1 compatibility floor of
+        // an absent header. The execution key is configured and the node
+        // cap is raised, but this wiring leaves the gate off (the
+        // dimension is not armed for any request here, exactly like
+        // testGateOffIssuanceIsByteIdenticalLegacy): the zero-capability
+        // request is served the plain challenge — no execution_program
+        // on the client surface, no program on the stored record, no
+        // 422 — the deployment's configured key and maximum never arm a
+        // zero advertisement. On the armed wiring the zero advertisement
+        // is the mandate refusal instead — see
+        // testExplicitZeroCapabilityAtAMandatoryExecutionScopeIsRefusedNotDowngraded.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_version' => 2,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'off'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        $server = [
+            'CONTENT_TYPE' => 'application/json',
+            'REMOTE_ADDR' => '127.0.0.1',
+            'HTTP_ORIGIN' => 'http://localhost',
+            'HTTP_Kiwi_Execution_Max_Version' => '0',
+        ];
+        $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, '{"scope":"login"}'));
+        self::assertSame(200, $response->getStatusCode(), 'the zero capability must be served, never refused: '.(string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertIsArray($payload);
+        self::assertArrayHasKey('challenge', $payload, 'the plain challenge document is still minted');
+        self::assertArrayNotHasKey('execution_program', $payload, 'the zero capability must never arm the execution dimension');
+        self::assertArrayNotHasKey('execution_version', $payload, 'no execution version rides the plain challenge');
+        self::assertArrayNotHasKey('execution_commitment', $payload, 'no execution commitment rides the plain challenge');
+        $storage = $container->get('kiwi_captcha.storage.array');
+        $record = $storage->find($payload['nonce']);
+        self::assertNotNull($record, 'the plain challenge is a real stored record');
+        self::assertNull($record->executionProgram, 'the stored record of a zero-capability issuance carries no program');
+        self::assertNull($record->executionVersion, 'the stored record of a zero-capability issuance stamps no grammar version');
+
+        // The absent header on the same wiring: the unchanged behavior —
+        // the gate off keeps the dimension unarmed for every client.
+        $absentResponse = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], [
+            'CONTENT_TYPE' => 'application/json',
+            'REMOTE_ADDR' => '127.0.0.1',
+            'HTTP_ORIGIN' => 'http://localhost',
+        ], '{"scope":"login"}'));
+        self::assertSame(200, $absentResponse->getStatusCode(), (string) $absentResponse->getContent());
+        $absentPayload = json_decode((string) $absentResponse->getContent(), true);
+        self::assertArrayNotHasKey('execution_program', $absentPayload, 'the absent header keeps the unchanged gate-off behavior');
+    }
+
+    public function testExplicitZeroCapabilityAtAMandatoryExecutionScopeIsRefusedNotDowngraded(): void
+    {
+        // The mandatory-execution corner: the deployment demands
+        // execution evidence on this scope (the risk trigger passes, the
+        // gate is on, the v4 floor holds — the request would have been
+        // armed). A zero-capability client can execute no grammar at
+        // all, so minting an armed challenge would hand it a program it
+        // cannot run and minting a plain one would silently waive the
+        // mandate: the deterministic client-unsupported refusal answers
+        // instead, exactly like a sub-required positive capability.
+        [$response] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '0', 1);
+        self::assertSame(422, $response->getStatusCode(), 'a zero capability at a would-be-armed issuance must be refused: '.(string) $response->getContent());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('CLIENT_EXECUTION_VERSION_UNSUPPORTED', $body['error']['code'] ?? null, 'the refusal code is deterministic');
+        self::assertArrayNotHasKey('execution_program', $body, 'no program is ever handed to a zero-capability client');
+        self::assertArrayNotHasKey('challenge', $body, 'no unarmed challenge silently waives the mandate');
     }
 
     public function testBodyCarryingExecutionMaxVersionIs422UnknownFieldsPreservingTheClosedContract(): void

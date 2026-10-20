@@ -493,7 +493,9 @@ The dimension is controlled by these knobs:
   it, and the confirmed central security-policy floor
   (`{kiwi:<ns>}:security-policy` `min_execution_version`) reaches it.
   The current widget driver sends the header when the execution tier
-  is configured.
+  is configured. An explicit header value of `0` declares the client
+  cannot execute the dimension at all, so no arming ever happens for
+  that request regardless of this cap.
   Every other combination emits version 1, so a mixed fleet of older
   binaries and stale open pages is never handed the newer grammar.
   The cap defaults to 1: raising it declares the node ready to write

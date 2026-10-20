@@ -2,10 +2,12 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     10 (KEYS[1..10])
---   max Redis calls:      31 (10 TYPE + 1 TIME + 9 HMGET + 5 HSET +
---                           4 EXPIRE + 1 GET + 1 SET — every call is
---                           fixed-cost;
+--   max keys touched:     11 (KEYS[1..10] plus the per-event effect
+--                          completion key derived below as
+--                          KEYS[10] .. ':fxdone', same hash tag)
+--   max Redis calls:      33 (10 TYPE + 1 TIME + 9 HMGET + 5 HSET +
+--                           4 EXPIRE + 2 GET/EXISTS + 2 SET — every call
+--                           is fixed-cost;
 --                           no KEYS/SCAN/EVAL nesting, no iteration over
 --                           attacker-sized collections)
 --   max collection cardinality: 13 flat fields per state hash (the
@@ -441,12 +443,30 @@ kiwi_assert_type(KEYS[10], 'string')
 -- application into an event that a retry refuses as a duplicate. With
 -- the marker last, a retry re-enters; each dimension's own `fx` marker
 -- makes the already-applied dimensions a no-op.
+--
+-- The per-event effect completion key (`fxdone`, derived from the
+-- dedupe key's own event-id namespace and expiring with the same dedupe
+-- TTL as the `fx` marker values) closes the one interleaving the
+-- per-key markers cannot: A applies its effects (fx = A everywhere),
+-- aborts before its claim; B then runs to completion (fx = B
+-- everywhere); A retries — fx no longer says A, so the effects would
+-- apply twice. The completion key is written in the same invocation,
+-- immediately after the guarded effects and before the claim, and the
+-- guards below accept "fx == me OR the completion key exists", so the
+-- retry skips the effects and converges by (re)writing the claim.
 local event_id = ARGV[4] or ''
 local effect_marker = event_id ~= '' and kiwi_effect_marker(event_id, now, dedupe_ttl) or ''
+local effect_done_key = event_id ~= '' and KEYS[10] .. ':fxdone' or ''
 local is_duplicate = false
 if event_id ~= '' and redis.call('GET', KEYS[10]) then
     is_duplicate = true
 end
+-- The completion record of THIS event id: when it exists, every guarded
+-- effect of the event has already landed (it is written only after the
+-- last of them), whatever later events did to the per-key markers.
+local event_done = event_id ~= ''
+    and redis.call('EXISTS', effect_done_key) == 1
+    or false
 
 local event = event_arg
 local scope = scope_arg
@@ -472,7 +492,7 @@ local prin = read_state(KEYS[8], now)
 local g = read_state(KEYS[9], now)
 
 -- ── Source: update current epoch; the ±1 keys above are boundary reads.
-local src_done = kiwi_effect_matches(src.fx, event_id, now)
+local src_done = event_done or kiwi_effect_matches(src.fx, event_id, now)
 if not is_duplicate and not src_done then
     apply_event(src, event, scope)
     if event == 15 then
@@ -483,14 +503,14 @@ if not is_duplicate and not src_done then
 end
 
 -- ── Subnet: same pattern.
-local net_done = kiwi_effect_matches(net.fx, event_id, now)
+local net_done = event_done or kiwi_effect_matches(net.fx, event_id, now)
 if not is_duplicate and not net_done then
     apply_event(net, event, scope)
     save(KEYS[4], net, state_ttl, effect_marker)
 end
 
 -- ── Session (continuity) and principal (authenticated reputation).
-local sess_done = kiwi_effect_matches(sess.fx, event_id, now)
+local sess_done = event_done or kiwi_effect_matches(sess.fx, event_id, now)
 if has_session and not is_duplicate and not sess_done then
     apply_session_event(sess, event, scope)
     if event == 15 then
@@ -499,7 +519,7 @@ if has_session and not is_duplicate and not sess_done then
     end
     save(KEYS[7], sess, session_ttl, effect_marker)
 end
-local prin_done = kiwi_effect_matches(prin.fx, event_id, now)
+local prin_done = event_done or kiwi_effect_matches(prin.fx, event_id, now)
 if has_principal and not is_duplicate and not prin_done then
     apply_principal_event(prin, event, scope)
     save(KEYS[8], prin, principal_ttl, effect_marker)
@@ -520,7 +540,7 @@ end
 -- fresh state legitimately starts at level 0, and forcing a minimum of
 -- 1 here would raise every namespace's baseline pressure.
 local prev_level = math.min(4, g.scope)
-local g_done = kiwi_effect_matches(g.fx, event_id, now)
+local g_done = event_done or kiwi_effect_matches(g.fx, event_id, now)
 if not is_duplicate and not g_done then
     apply_event(g, event, scope)
     if event == 16 then
@@ -558,15 +578,20 @@ do
         end
     end
     g.scope = level
-    -- A duplicate never claims the current event id: its global state
-    -- already carries whichever effect marker the first delivery wrote.
-    save(KEYS[9], g, 0, is_duplicate and '' or effect_marker)
+    -- A duplicate or a converged retry never claims the current event
+    -- id: the former already carries whichever effect marker the first
+    -- delivery wrote, the latter holds its completion key instead.
+    save(KEYS[9], g, 0, (is_duplicate or event_done) and '' or effect_marker)
 end
 
--- The dedupe claim is written after every effect it guards. A retry of an
--- interrupted invocation finds no claim, re-enters, and the per-key `fx`
--- markers make the completed dimensions no-ops.
+-- The effect completion key lands immediately after the guarded effects
+-- and BEFORE the dedupe claim: an attempt that stops anywhere short of
+-- the claim is finished by a retry that finds this key (or its own fx
+-- markers) and rewrites the claim instead of re-applying the effects.
+-- It expires with the same dedupe TTL as the fx marker values, so it
+-- cannot outlive the claims and markers it complements.
 if event_id ~= '' and not is_duplicate then
+    redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)
     redis.call('SET', KEYS[10], '1', 'EX', dedupe_ttl)
 end
 

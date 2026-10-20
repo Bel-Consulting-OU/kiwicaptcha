@@ -67,6 +67,10 @@ public enum KiwiSolveError: Error, Equatable, CustomStringConvertible {
     case unsupportedRswParams(String)
     case executionUnsupported
     case exhausted(attempted: UInt64)
+    /// The `isCancelled` probe fired at a checkpoint: the generation
+    /// owning this solve was invalidated (a restart, a teardown or the
+    /// expiry deadline), so the solve stopped before burning more CPU.
+    case cancelled
 
     public var description: String {
         switch self {
@@ -81,6 +85,7 @@ public enum KiwiSolveError: Error, Equatable, CustomStringConvertible {
         case .executionUnsupported:
             return "an execution-armed challenge needs the browser interpreter; the native solver refuses it"
         case .exhausted(let a): return "no counter met the target within the \(a)-hash cap"
+        case .cancelled: return "the solve was cancelled at a checkpoint"
         }
     }
 }
@@ -193,15 +198,27 @@ public enum KiwiSolver {
     }
 
     /// Solve a validated challenge at the browser's price.
-    public static func solve(challenge: KiwiChallenge, startedAt: Date = Date()) throws -> KiwiSolution {
+    ///
+    /// `isCancelled` is the cooperative-cancellation probe: it is
+    /// checked at bounded-latency checkpoints (the SHA-256 search every
+    /// 2048 candidates, the argon2id search between candidate
+    /// derivations, the rsw time lock every 256 squarings), and when it
+    /// returns true the solve throws `KiwiSolveError.cancelled` without
+    /// spending another unit of work. The parameter defaults to "never
+    /// cancelled", so existing call sites compile unchanged; headless
+    /// callers pass `{ false }` semantics for free.
+    public static func solve(
+        challenge: KiwiChallenge, startedAt: Date = Date(),
+        isCancelled: @escaping () -> Bool = { false }
+    ) throws -> KiwiSolution {
         try validate(challenge)
         switch challenge.algorithm {
         case "sha256":
-            return try solveSha256(challenge, startedAt: startedAt)
+            return try solveSha256(challenge, startedAt: startedAt, isCancelled: isCancelled)
         case "argon2id":
-            return try solveArgon2id(challenge, startedAt: startedAt)
+            return try solveArgon2id(challenge, startedAt: startedAt, isCancelled: isCancelled)
         case "rsw":
-            return try solveRsw(challenge, startedAt: startedAt)
+            return try solveRsw(challenge, startedAt: startedAt, isCancelled: isCancelled)
         default:
             throw KiwiSolveError.malformed("the algorithm is not one of sha256, argon2id, rsw")
         }
@@ -213,12 +230,18 @@ public enum KiwiSolver {
     /// shared hash cap. The framing is the one the server verifier
     /// recomputes (password = prefix + counter, salt bytes, 32 bytes
     /// out, Argon2id v1.3), identical with the wasm widget's solver.
-    static func solveArgon2id(_ c: KiwiChallenge, startedAt: Date, maxHashes: UInt64 = KiwiLimits.maxHashes) throws -> KiwiSolution {
+    /// Cancellation checkpoint: between candidate derivations.
+    static func solveArgon2id(
+        _ c: KiwiChallenge, startedAt: Date,
+        maxHashes: UInt64 = KiwiLimits.maxHashes,
+        isCancelled: () -> Bool = { false }
+    ) throws -> KiwiSolution {
         let salt = try require(Base64.decode(c.salt), "the salt stopped decoding")
         let prefix = Array(c.prefix.utf8)
         var password = prefix
         let digitStart = password.count
         for counter in 0..<maxHashes {
+            if isCancelled() { throw KiwiSolveError.cancelled }
             password.removeSubrange(digitStart...)
             password.append(contentsOf: Array(String(counter).utf8))
             let digest: [UInt8]
@@ -241,11 +264,18 @@ public enum KiwiSolver {
     }
 
     /// The SHA-256 search: hash `prefix || decimal(counter) || salt`,
-    /// first hit wins, bounded by the shared cap.
-    static func solveSha256(_ c: KiwiChallenge, startedAt: Date, maxHashes: UInt64 = KiwiLimits.maxHashes) throws -> KiwiSolution {
+    /// first hit wins, bounded by the shared cap. Cancellation
+    /// checkpoint: every 2048 candidates (a probe's own cost stays
+    /// noise next to the hashing budget between checks).
+    static func solveSha256(
+        _ c: KiwiChallenge, startedAt: Date,
+        maxHashes: UInt64 = KiwiLimits.maxHashes,
+        isCancelled: () -> Bool = { false }
+    ) throws -> KiwiSolution {
         let salt = try require(Base64.decode(c.salt), "the salt stopped decoding")
         let prefix = Array(c.prefix.utf8)
         for counter in 0..<maxHashes {
+            if counter & 2047 == 0, isCancelled() { throw KiwiSolveError.cancelled }
             var input = prefix
             input.append(contentsOf: Array(String(counter).utf8))
             input.append(contentsOf: salt)
@@ -263,12 +293,26 @@ public enum KiwiSolver {
 
     /// The rsw time lock: T sequential modular squarings of the derived
     /// base over the issued composite, rendered as the 512-hex form.
-    static func solveRsw(_ c: KiwiChallenge, startedAt: Date) throws -> KiwiSolution {
+    /// Cancellation checkpoint: every 256 squarings (each squaring is
+    /// 64x64 Montgomery rounds, so 256 is a few milliseconds of work
+    /// between probes at worst).
+    static func solveRsw(
+        _ c: KiwiChallenge, startedAt: Date,
+        isCancelled: () -> Bool = { false }
+    ) throws -> KiwiSolution {
         let modulusBytes = try require(Base64.decode(c.rswModulus ?? ""), "the rsw modulus is not base64")
         let modulus = Rsw.Modulus(modulusBytes)
         let digest = SHA256Hash.digest(Array(c.prefix.utf8) + Array(c.nonce.utf8))
         let value = Rsw.Value(digest, modulus: modulus)
-        let squared = value.squared(times: Int(c.t), modulus: modulus)
+        let squared: Rsw.Value
+        do {
+            squared = try value.squared(
+                times: Int(c.t), modulus: modulus, isCancelled: isCancelled)
+        } catch is CancellationError {
+            // The bignum layer reports cancellation generically; the
+            // solver's typed error is the contract.
+            throw KiwiSolveError.cancelled
+        }
         let proof = squared.proofHex(modulus: modulus)
         return KiwiSolution(
             counter: 0,

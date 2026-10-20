@@ -11,10 +11,13 @@
 --
 -- SCRIPT BOUNDS — all bounded constants, no attacker-sized
 -- collections anywhere in this script:
---   max keys touched:     2 (KEYS[1] shard hash, KEYS[2] dedupe marker;
---                          both carry the shard family tag, one slot)
---   max Redis calls:      7 (2 TYPE + 1 TIME + 1 HMGET + 1 GET + 1 SET +
---                          1 HSET, every call fixed-cost; the shard hash rolls
+--   max keys touched:     3 (KEYS[1] shard hash, KEYS[2] dedupe marker
+--                          plus the per-event effect completion key
+--                          derived below as KEYS[2] .. ':fxdone'; all
+--                          carry the shard family tag, one slot)
+--   max Redis calls:      9 (2 TYPE + 1 TIME + 1 HMGET + 2 GET/EXISTS +
+--                          2 SET + 1 HSET, every call fixed-cost; the
+--                          shard hash rolls
 --                          with no expiry like the risk-v1 global state,
 --                          so no EXPIRE call)
 --   max collection cardinality: 13 flat fields per shard hash (12 state
@@ -251,6 +254,16 @@ kiwi_assert_type(KEYS[2], 'string')
 -- effect. A marker written first would survive a mid-script abort and
 -- make every retry look like a duplicate, permanently dropping an event
 -- whose increment never landed.
+--
+-- The per-event effect completion key (`fxdone`, derived from the
+-- marker's own event-id namespace and expiring with the same dedupe TTL
+-- as the `fx` marker value) closes the one interleaving the `fx` marker
+-- cannot: A applies its increment (fx = A), aborts before its claim; B
+-- then runs to completion (fx = B); A retries — fx no longer says A, so
+-- the increment would apply twice. The completion key is written in the
+-- same invocation, immediately after the effect and before the claim,
+-- and the guard below accepts "fx == me OR the completion key exists",
+-- so the retry skips the effect and converges by (re)writing the claim.
 local is_duplicate = false
 local event_id = ARGV[5] or ''
 if has_write and event_id ~= '' and redis.call('GET', KEYS[2]) then
@@ -258,14 +271,21 @@ if has_write and event_id ~= '' and redis.call('GET', KEYS[2]) then
 end
 
 local effect_marker = event_id ~= '' and kiwi_effect_marker(event_id, now, dedupe_ttl) or ''
+local effect_done_key = has_write and event_id ~= ''
+    and KEYS[2] .. ':fxdone'
+    or ''
 local s = read_state(KEYS[1], now)
-local effect_done = kiwi_effect_matches(s.fx, event_id, now)
+local event_done = effect_done_key ~= ''
+    and redis.call('EXISTS', effect_done_key) == 1
+    or false
+local effect_done = event_done or kiwi_effect_matches(s.fx, event_id, now)
 if has_write and not is_duplicate and not effect_done then
     apply_event(s, event, scope)
     save(KEYS[1], s, effect_marker)
 end
 
 if has_write and event_id ~= '' and not is_duplicate then
+    redis.call('SET', effect_done_key, '1', 'EX', dedupe_ttl)
     redis.call('SET', KEYS[2], '1', 'EX', dedupe_ttl)
 end
 

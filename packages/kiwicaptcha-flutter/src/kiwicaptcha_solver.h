@@ -83,6 +83,62 @@ int32_t kiwi_solve_argon2id(
     uint32_t target_bits,
     uint64_t* out_counter);
 
+/*
+ * Batched sha256 search over the half-open counter window
+ * [start_counter, start_counter + max_hashes): the entry point the
+ * Dart solver drives in 2048-counter batches so its cooperative
+ * cancellation probe fires at the Interactive-Client Lifecycle v1
+ * cadence. Writes the winning counter to *out_counter on success;
+ * answers KIWI_ERR_EXHAUSTED when the window held no hit. An empty
+ * or over-budget window (max_hashes 0 or > 20,000,000) is refused
+ * with KIWI_ERR_CAP.
+ */
+int32_t kiwi_solve_sha256_range(
+    const uint8_t* prefix, uint32_t prefix_len,
+    const uint8_t* salt, uint32_t salt_len,
+    uint32_t target_bits,
+    uint64_t start_counter,
+    uint64_t max_hashes,
+    uint64_t* out_counter);
+
+/*
+ * Batched argon2id search over the half-open counter window
+ * [start_counter, start_counter + max_hashes): the entry point the
+ * Dart solver drives one derivation at a time so its cancellation
+ * probe fires between candidate derivations. Window rules as for
+ * kiwi_solve_sha256_range.
+ */
+int32_t kiwi_solve_argon2id_range(
+    const uint8_t* prefix, uint32_t prefix_len,
+    const uint8_t* salt, uint32_t salt_len,
+    uint32_t m_kib, uint32_t t, uint32_t p,
+    uint32_t target_bits,
+    uint64_t start_counter,
+    uint64_t max_hashes,
+    uint64_t* out_counter);
+
+/*
+ * Rsw step one (the batched spelling of kiwi_solve_rsw): validate the
+ * inputs and derive the squaring base SHA-256(prefix || nonce) mod n,
+ * written big-endian to out_value (exactly 256 bytes).
+ */
+int32_t kiwi_rsw_begin(
+    const uint8_t* modulus, uint32_t modulus_len,
+    const uint8_t* prefix, uint32_t prefix_len,
+    const uint8_t* nonce, uint32_t nonce_len,
+    uint8_t* out_value /* 256 bytes */);
+
+/*
+ * Rsw step two: square the 256-byte big-endian value (updated in
+ * place) modulo the canonical composite exactly `squarings` times.
+ * The Dart solver drives it in 256-squaring batches so its
+ * cancellation probe fires at the lifecycle contract's rsw cadence.
+ */
+int32_t kiwi_rsw_square(
+    const uint8_t* modulus, uint32_t modulus_len,
+    uint8_t* value /* 256 bytes, in place */,
+    uint32_t squarings);
+
 #ifdef __cplusplus
 }
 #endif

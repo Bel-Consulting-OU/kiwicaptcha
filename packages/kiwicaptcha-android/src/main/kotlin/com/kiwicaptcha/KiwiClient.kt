@@ -38,6 +38,7 @@ public class KiwiClient(
             connection.doOutput = true
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty(EXECUTION_MAX_VERSION_HEADER, EXECUTION_MAX_VERSION)
             connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val status = connection.responseCode
             if (status != 200) throw BadStatus(status)
@@ -49,6 +50,14 @@ public class KiwiClient(
     }
 
     public companion object {
+        /** The capability header naming the newest execution-dimension
+         * version this client can run (protocol/interactive-client-v1):
+         * native clients cannot execute the execution dimension, and a
+         * *missing* header would read as the v1 compatibility floor, so
+         * the "cannot execute" declaration is sent explicitly. */
+        public const val EXECUTION_MAX_VERSION_HEADER: String = "Kiwi-Execution-Max-Version"
+        public const val EXECUTION_MAX_VERSION: String = "0"
+
         /** The provider-shaped siteverify request body. */
         public fun siteverifyBody(secret: String, response: String, remoteip: String? = null): String {
             val out = StringBuilder()

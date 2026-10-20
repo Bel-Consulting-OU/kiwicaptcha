@@ -63,6 +63,11 @@ public sealed class KiwiSolveError(message: String) : Exception(message) {
 
     public class Exhausted(val attempted: Long) :
         KiwiSolveError("no counter met the target within the $attempted-hash cap")
+
+    /** The generation's cancellation probe fired (widget closed, a
+     * newer generation started, or the solve lost the expiry race):
+     * the solver stopped before spending the next batch of work. */
+    public class Cancelled : KiwiSolveError("the solve was cancelled")
 }
 
 /** The shared protocol caps (protocol/limits.json). */
@@ -189,27 +194,45 @@ public object KiwiSolver {
         }
     }
 
-    /** Solve a validated challenge at the browser's price. */
-    public fun solve(challenge: KiwiChallenge, startedAt: Long = System.currentTimeMillis()): KiwiSolution {
+    /**
+     * Solve a validated challenge at the browser's price.
+     *
+     * [isCancelled] is the Interactive-Client Lifecycle v1 cooperative
+     * probe: a cheap, non-blocking predicate checked on entry and then
+     * at bounded cadence inside each search (see the checkpoint table
+     * in protocol/interactive-client-v1/README.md). When it fires the
+     * solver raises [KiwiSolveError.Cancelled] and schedules no further
+     * CPU work.
+     */
+    public fun solve(
+        challenge: KiwiChallenge,
+        startedAt: Long = System.currentTimeMillis(),
+        isCancelled: (() -> Boolean)? = null,
+    ): KiwiSolution {
         validate(challenge)
+        cancelledIf(isCancelled)
         return when (challenge.algorithm) {
-            "sha256" -> solveSha256(challenge, startedAt)
-            "argon2id" -> solveArgon2id(challenge, startedAt)
-            "rsw" -> solveRsw(challenge, startedAt)
+            "sha256" -> solveSha256(challenge, startedAt, isCancelled = isCancelled)
+            "argon2id" -> solveArgon2id(challenge, startedAt, isCancelled = isCancelled)
+            "rsw" -> solveRsw(challenge, startedAt, isCancelled = isCancelled)
             else -> throw KiwiSolveError.Malformed("the algorithm is not one of sha256, argon2id, rsw")
         }
     }
 
-    /** The SHA-256 search over `prefix || decimal(counter) || salt`. */
+    /** The SHA-256 search over `prefix || decimal(counter) || salt`.
+     * The cancellation probe runs every 2048 candidates (protocol
+     * Interactive-Client Lifecycle v1 latency table). */
     public fun solveSha256(
         c: KiwiChallenge,
         startedAt: Long,
         maxHashes: Long = KiwiLimits.MAX_HASHES,
+        isCancelled: (() -> Boolean)? = null,
     ): KiwiSolution {
         val salt = KiwiBase64.decode(c.salt) ?: throw KiwiSolveError.Malformed("the salt stopped decoding")
         val digest = MessageDigest.getInstance("SHA-256")
         val prefix = c.prefix.toByteArray(Charsets.UTF_8)
         for (counter in 0 until maxHashes) {
+            if (counter % CANCEL_CHECK_HASHES == 0L) cancelledIf(isCancelled)
             digest.reset()
             digest.update(prefix)
             digest.update(counter.toString().toByteArray(Charsets.UTF_8))
@@ -239,10 +262,14 @@ public object KiwiSolver {
         c: KiwiChallenge,
         startedAt: Long,
         maxHashes: Long = KiwiLimits.MAX_HASHES,
+        isCancelled: (() -> Boolean)? = null,
     ): KiwiSolution {
         val salt = KiwiBase64.decode(c.salt) ?: throw KiwiSolveError.Malformed("the salt stopped decoding")
         val prefix = c.prefix.toByteArray(Charsets.UTF_8)
         for (counter in 0 until maxHashes) {
+            // The probe runs between candidate derivations: at most one
+            // derivation of stale work after a firing probe.
+            cancelledIf(isCancelled)
             val password = prefix + counter.toString().toByteArray(Charsets.UTF_8)
             val hash = Argon2id.derive(
                 password,
@@ -266,8 +293,14 @@ public object KiwiSolver {
         throw KiwiSolveError.Exhausted(maxHashes)
     }
 
-    /** The rsw time lock: T sequential modular squarings. */
-    public fun solveRsw(c: KiwiChallenge, startedAt: Long): KiwiSolution {
+    /** The rsw time lock: T sequential modular squarings. The
+     * cancellation probe runs every 256 squarings (protocol
+     * Interactive-Client Lifecycle v1 latency table). */
+    public fun solveRsw(
+        c: KiwiChallenge,
+        startedAt: Long,
+        isCancelled: (() -> Boolean)? = null,
+    ): KiwiSolution {
         val modulusBytes = KiwiBase64.decode(c.rswModulus ?: "")
             ?: throw KiwiSolveError.UnsupportedRswParams("the rsw modulus is not base64")
         val n = java.math.BigInteger(1, modulusBytes)
@@ -275,15 +308,19 @@ public object KiwiSolver {
         digest.update(c.prefix.toByteArray(Charsets.UTF_8))
         digest.update(c.nonce.toByteArray(Charsets.UTF_8))
         var value = java.math.BigInteger(1, digest.digest()).mod(n)
+        val two = java.math.BigInteger.TWO
         val start = System.currentTimeMillis()
-        repeat(c.t.toInt()) {
-            value = value.modPow(java.math.BigInteger.TWO, n)
+        var squarings = 0L
+        while (squarings < c.t) {
+            if (squarings % CANCEL_CHECK_SQUARINGS == 0L) cancelledIf(isCancelled)
+            value = value.modPow(two, n)
+            squarings++
         }
         val proof = value.toString(16).padStart(512, '0')
         return KiwiSolution(
             counter = 0,
             durationMs = durationSince(start),
-            hashes = c.t,
+            hashes = squarings,
             hashHex = proof,
             rswProof = proof,
         )
@@ -309,6 +346,16 @@ public object KiwiSolver {
 
     public fun hex(bytes: ByteArray): String =
         bytes.joinToString("") { String.format("%02x", it) }
+
+    /** Cancellation checkpoint cadences: the bounded latency the
+     * Interactive-Client Lifecycle v1 contract pins (the most work a
+     * cancelled generation can still schedule after its probe fired). */
+    public const val CANCEL_CHECK_HASHES: Long = 2_048L
+    public const val CANCEL_CHECK_SQUARINGS: Long = 256L
+
+    private fun cancelledIf(isCancelled: (() -> Boolean)?) {
+        if (isCancelled != null && isCancelled()) throw KiwiSolveError.Cancelled()
+    }
 
     private fun durationSince(startedAt: Long): Long =
         (System.currentTimeMillis() - startedAt).coerceAtLeast(0)

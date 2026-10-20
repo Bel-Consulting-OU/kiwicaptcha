@@ -56,7 +56,7 @@ These invariants are pinned by cross-language tests; see [the claims registry](p
 
 ## Features
 
-- Two proof-of-work algorithms, explicitly selected: `Sha256` (hash-based, extremely cheap server-side verification) and `Argon2id` (memory-hard, reduces the parallelism advantage of specialized hardware).
+- Three proof-of-work families, explicitly selected: `Sha256` (hash-based, extremely cheap server-side verification), `Argon2id` (memory-hard, reduces the parallelism advantage of specialized hardware) and `Rsw` (sequential time-lock squaring that cannot be divided across parallel lanes for one challenge).
   The algorithm is carried on every challenge, so the solver and the verifier can never disagree about the computation.
 - Hybrid Solving Engine: the widget embeds a Rust/WASM solver with an optimized pure-JS SHA-256 fallback for browsers without WebAssembly.
 - Difficulty derived per algorithm: SHA-256 scales to 20 bits (~1M hashes, the browser solver ceiling); Argon2id is capped at 10 bits because every memory-hard hash is ~1000x more expensive.

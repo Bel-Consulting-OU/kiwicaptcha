@@ -134,6 +134,81 @@ struct KiwiSelfTest {
         check("siteverify body", body == "{\"response\":\"t\",\"secret\":\"s\"}"
             || body == "{\"secret\":\"s\",\"response\":\"t\"}")
 
+        // Cooperative cancellation: an immediate probe stops the sha
+        // search before any candidate and surfaces the typed error.
+        do {
+            var probes = 0
+            var threw = false
+            do {
+                _ = try KiwiSolver.solve(challenge: challenge, isCancelled: {
+                    probes += 1
+                    return true
+                })
+            } catch let error as KiwiSolveError {
+                threw = error == .cancelled
+            } catch {
+                threw = false
+            }
+            check("solver cancellation probe stops with .cancelled",
+                  threw && probes == 1)
+        }
+
+        // Lifecycle v1: the shared delivery-decision vectors from
+        // protocol/interactive-client-v1/lifecycle-vectors.json (the
+        // first-writer contract file; resolved relative to this
+        // source file's package).
+        do {
+            struct LifecycleVector: Decodable {
+                struct Expectation: Decodable {
+                    let deliver: Bool
+                    let deliverAtMs: Int64
+                    let reason: String
+                }
+                let name: String
+                let receivedAtMs: Int64
+                let ttlSecs: Int64
+                let minDurationMs: Int64
+                let solveFinishedAtMs: Int64
+                let nowMs: Int64
+                let cancelled: Bool
+                let expect: Expectation
+            }
+            let selfTestDir = (#filePath as NSString).deletingLastPathComponent // Sources/KiwiSelfTest
+            let sourcesDir = (selfTestDir as NSString).deletingLastPathComponent // Sources
+            let packageRoot = (sourcesDir as NSString).deletingLastPathComponent // the package root
+            let url = URL(fileURLWithPath: packageRoot, isDirectory: true)
+                .appendingPathComponent("../../protocol/interactive-client-v1/lifecycle-vectors.json")
+            let vectors = try JSONDecoder().decode(
+                [LifecycleVector].self, from: try Data(contentsOf: url))
+            check("lifecycle vectors present (>= 10)", vectors.count >= 10)
+            var mismatches = 0
+            for vector in vectors {
+                if vector.cancelled {
+                    let ok = !vector.expect.deliver
+                        && vector.expect.deliverAtMs == 0
+                        && vector.expect.reason == "cancelled"
+                    if !ok { mismatches += 1; print("FAIL lifecycle vector \(vector.name)") }
+                    continue
+                }
+                let decision = KiwiLifecycle.deliveryDecision(
+                    receivedAtMs: vector.receivedAtMs,
+                    ttlSecs: vector.ttlSecs,
+                    minDurationMs: vector.minDurationMs,
+                    solveFinishedAtMs: vector.solveFinishedAtMs,
+                    nowMs: vector.nowMs)
+                if decision.deliver != vector.expect.deliver
+                    || decision.deliverAtMs != vector.expect.deliverAtMs
+                    || decision.reason != vector.expect.reason {
+                    mismatches += 1
+                    print("FAIL lifecycle vector \(vector.name)")
+                }
+            }
+            check("lifecycle deliveryDecision vectors", mismatches == 0)
+        } catch {
+            failures += 1
+            print("FAIL lifecycle vectors unreadable: \(error)")
+        }
+
         if failures == 0 {
             print("selftest: all checks passed")
         } else {

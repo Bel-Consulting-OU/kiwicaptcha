@@ -37,6 +37,10 @@ public struct KiwiClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // The capability header: the native client runs no browser
+        // execution interpreter, so it advertises version 0 and the
+        // endpoint must not arm execution_program against it.
+        request.setValue("0", forHTTPHeaderField: "Kiwi-Execution-Max-Version")
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {

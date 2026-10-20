@@ -20,7 +20,9 @@ declare(strict_types=1);
  *                    (nonce, challenge, salt, algorithm, mKib, t, p,
  *                    targetBits, ttlSecs, minDurationMs, prefix, plus
  *                    execution_program when the execution key is
- *                    configured and rsw_modulus for rsw challenges).
+ *                    configured and the client did not advertise the
+ *                    Kiwi-Execution-Max-Version capability zero, and
+ *                    rsw_modulus for rsw challenges).
  *                    The issued algorithm always comes from the
  *                    server-selected KIWI_ALGORITHM profile: the
  *                    request `algorithm` field is compatibility
@@ -70,6 +72,7 @@ require __DIR__.'/health.php';
 // refuse exactly the same bytes.
 require __DIR__.'/framing.php';
 
+use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Verifier;
 
@@ -168,7 +171,9 @@ LUA;
  * a present non-empty value must name one of the known profiles or the
  * request is refused with 422 INVALID_ALGORITHM, and it never rebuilds
  * the issuance configuration. The execution dimension is armed on
- * every issuance exactly when KIWI_EXECUTION_KEY is set.
+ * every issuance exactly when KIWI_EXECUTION_KEY is set and the client
+ * did not advertise the Kiwi-Execution-Max-Version capability zero
+ * (see kiwiChallenge()).
  */
 function kiwiChallenge(): void
 {
@@ -240,10 +245,24 @@ function kiwiChallenge(): void
     $storage = kiwiStorage($deployment['redisUrl']);
     $issuer = new Issuer($config, $storage);
     try {
+        // The execution-capability advertisement: the shared
+        // {@see ExecutionVersionPolicy::clientCapability()} interprets
+        // the `Kiwi-Execution-Max-Version` request header exactly like
+        // the bundle controller. The explicit zero (capability NONE)
+        // means the client cannot execute the execution dimension at
+        // all: the dimension is never armed for that request and the
+        // plain challenge is issued even when KIWI_EXECUTION_KEY is
+        // configured. Absence or any other value keeps the existing
+        // behavior (the v1 floor and above).
+        $capability = ExecutionVersionPolicy::clientCapability($_SERVER['HTTP_KIWI_EXECUTION_MAX_VERSION'] ?? null);
         // The execution dimension is armed exactly when the deployment
         // configured the execution key (the mirror of the bundle gate:
-        // the key is the arming condition).
-        $challenge = $config->executionKey !== null
+        // the key is the arming condition) and the client did not
+        // advertise the capability zero. The reference deployment has
+        // no mandatory-execution knob (arming is the key's only
+        // condition, with no required tier), so a NONE-capability
+        // client is served the plain challenge, never a refusal.
+        $challenge = $config->executionKey !== null && $capability !== ExecutionVersionPolicy::CAPABILITY_NONE
             ? $issuer->issueWithExecutionField($scope, kiwiClientIp(), true, $requestBinding)
             : $issuer->issue($scope, kiwiClientIp(), $requestBinding);
     } catch (\Throwable $e) {

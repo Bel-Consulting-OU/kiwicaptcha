@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'challenge.dart';
 
@@ -7,7 +6,8 @@ import 'challenge.dart';
 ///
 /// The grammar is the shared one:
 /// base64(nonce.counter.durationMs.telemetry) with the rsw proof riding
-/// as the final 512-hex segment.
+/// as the final 512-hex segment. Challenge validation lives in
+/// challenge.dart ([validateKiwiChallenge]).
 const String _alphabet =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
@@ -40,88 +40,4 @@ String encodeKiwiToken({
   var plain = '$nonce.$counter.$duration.$telemetry';
   if (rswProof != null) plain += '.$rswProof';
   return kiwiBase64Encode(utf8.encode(plain));
-}
-
-/// Challenge validation with the exact caps the browser driver and the
-/// Rust solver enforce. A challenge outside the contract is refused
-/// before any work is spent.
-void validateKiwiChallenge(KiwiChallenge c) {
-  if (c.executionProgram != null && c.executionProgram!.isNotEmpty) {
-    throw const KiwiSolveError(
-        KiwiRefusal.executionUnsupported,
-        'an execution-armed challenge needs the browser interpreter; '
-        'the native path refuses it');
-  }
-  final nonceOk =
-      c.nonce.length == 44 && c.nonce.endsWith('=') && RegExp(r'^[A-Za-z0-9+/]{43}=$').hasMatch(c.nonce);
-  if (!nonceOk) {
-    throw const KiwiSolveError.malformed('the nonce is not the standard base64 of 32 bytes');
-  }
-  if (c.prefix.isEmpty || c.prefix.length > 4096) {
-    throw const KiwiSolveError.malformed('the prefix length is outside 1..=4096');
-  }
-  if (c.salt.isEmpty || c.salt.length > 512 || !RegExp(r'^[A-Za-z0-9+/]+={0,2}$').hasMatch(c.salt)) {
-    throw const KiwiSolveError.malformed('the salt is not decodable base64 or is oversized');
-  }
-  switch (c.algorithm) {
-    case KiwiAlgorithm.sha256:
-      if (c.targetBits < 1 || c.targetBits > KiwiLimits.shaMaxTargetBits) {
-        throw KiwiSolveError(KiwiRefusal.difficultyBeyondCap,
-            'target_bits ${c.targetBits} exceeds the sha256 cap ${KiwiLimits.shaMaxTargetBits}');
-      }
-    case KiwiAlgorithm.argon2id:
-      // The issued argon2id contract: difficulty 1..=10 bits and the
-      // memory/time/parallelism ranges the core solver enforces. The
-      // solve itself runs in the native FFI core (argon2id, the same
-      // derivation the verifier re-runs); a core built without the
-      // `argon` feature answers kiwiErrArgonUnavailable at solve time.
-      if (c.targetBits < 1 || c.targetBits > KiwiLimits.argonMaxTargetBits) {
-        throw KiwiSolveError(KiwiRefusal.difficultyBeyondCap,
-            'target_bits ${c.targetBits} exceeds the argon2id cap ${KiwiLimits.argonMaxTargetBits}');
-      }
-      if (c.mKib < 8 ||
-          c.mKib > KiwiLimits.argonMaxMibKib ||
-          c.mKib < 8 * c.p ||
-          c.t < 3 ||
-          c.t > 6 ||
-          c.p != 1) {
-        throw const KiwiSolveError(KiwiRefusal.unsupportedParams,
-            'the argon2id parameters are outside the client contract '
-            '(m_kib 8..=65536 KiB and at least 8*p, t 3..=6, p = 1)');
-      }
-    case KiwiAlgorithm.rsw:
-      if (c.t < KiwiLimits.rswTMin ||
-          c.t > KiwiLimits.rswTMax ||
-          c.p != 1 ||
-          c.mKib != 0 ||
-          c.rswModulus == null ||
-          c.rswModulus.isEmpty) {
-        throw const KiwiSolveError(KiwiRefusal.unsupportedParams,
-            'the rsw parameters are outside the client contract');
-      }
-      final modulus = _strictBase64Decode(c.rswModulus!);
-      if (modulus.length != 256 || (modulus[0] & 0x80) == 0 || (modulus[255] & 1) == 0) {
-        throw const KiwiSolveError(KiwiRefusal.unsupportedParams,
-            'the rsw modulus is not a canonical 2048-bit odd composite');
-      }
-  }
-}
-
-Uint8List _strictBase64Decode(String value) {
-  final clean = value.replaceAll('=', '');
-  final out = Uint8List(clean.length * 3 ~/ 4);
-  var bits = 0;
-  var acc = 0;
-  var o = 0;
-  for (final ch in clean.codeUnits) {
-    final idx = _alphabet.indexOf(String.fromCharCode(ch));
-    if (idx < 0) throw const KiwiSolveError.malformed('the value is not standard base64');
-    acc = (acc << 6) | idx;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out[o++] = (acc >> bits) & 0xff;
-    }
-  }
-  return out;
 }

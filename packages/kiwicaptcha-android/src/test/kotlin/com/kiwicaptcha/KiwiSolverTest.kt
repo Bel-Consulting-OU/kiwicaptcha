@@ -310,6 +310,86 @@ class KiwiSolverTest {
         assertNull(KiwiBase64.decode("abc"))
     }
 
+    @Test
+    fun cancelledProbeBeforeAnyWorkRaisesTheTypedErrorWithZeroSearchWork() {
+        val challenge = shaChallenge { it.copy(targetBits = 20) }
+        var probes = 0
+        try {
+            KiwiSolver.solve(challenge, isCancelled = { probes++; true })
+            fail("expected the typed cancelled error")
+        } catch (e: KiwiSolveError.Cancelled) {
+            // The entry checkpoint only: no candidate was ever hashed.
+            assertEquals(1, probes)
+        }
+    }
+
+    @Test
+    fun sha256SolveCancelsMidSearchAtTheCheckpointCadence() {
+        // targetBits 20 on this fixed challenge first hits at counter
+        // 978_941 (computed offline), so the search passes several
+        // 2048-candidate checkpoints before it can finish.
+        val challenge = shaChallenge { it.copy(targetBits = 20) }
+        var probes = 0
+        try {
+            KiwiSolver.solveSha256(challenge, System.currentTimeMillis(), isCancelled = {
+                probes++
+                probes >= 2
+            })
+            fail("expected the typed cancelled error")
+        } catch (e: KiwiSolveError.Cancelled) {
+            // Probe 1 ran at counter 0, probe 2 fired at the counter
+            // 2048 checkpoint: at most 2048 hashes of stale work.
+            assertEquals(2, probes)
+        }
+        // The same search without the probe completes past the
+        // checkpoints: the cadence does not disturb the result.
+        val solution = KiwiSolver.solveSha256(challenge, System.currentTimeMillis())
+        assertEquals(978_941L, solution.counter)
+        assertTrue(solution.counter >= KiwiSolver.CANCEL_CHECK_HASHES)
+    }
+
+    @Test
+    fun argon2idSolveCancelsBetweenDerivations() {
+        val challenge = argonChallenge() // counter 11 is the first hit
+        var probes = 0
+        try {
+            KiwiSolver.solveArgon2id(challenge, System.currentTimeMillis(), isCancelled = {
+                probes++
+                probes >= 5
+            })
+            fail("expected the typed cancelled error")
+        } catch (e: KiwiSolveError.Cancelled) {
+            // One probe per candidate, between derivations: five probes
+            // means four derivations of work, none after the firing one.
+            assertEquals(5, probes)
+        }
+    }
+
+    @Test
+    fun rswSolveCancelsAtTheSquaringCheckpoint() {
+        val challenge = shaChallenge {
+            it.copy(
+                algorithm = "rsw",
+                t = 10_000,
+                targetBits = 1,
+                rswModulus = KiwiBase64.encode(composite2048()),
+            )
+        }
+        var probes = 0
+        try {
+            KiwiSolver.solve(challenge, isCancelled = {
+                probes++
+                probes >= 3
+            })
+            fail("expected the typed cancelled error")
+        } catch (e: KiwiSolveError.Cancelled) {
+            // Entry checkpoint, then the squarings-0 checkpoint... the
+            // third probe fires at the 256-squaring checkpoint: at most
+            // 256 squarings of stale work out of the 10_000 issued.
+            assertEquals(3, probes)
+        }
+    }
+
     private fun refusal(challenge: KiwiChallenge, check: (KiwiSolveError) -> Unit) {
         try {
             KiwiSolver.validate(challenge)

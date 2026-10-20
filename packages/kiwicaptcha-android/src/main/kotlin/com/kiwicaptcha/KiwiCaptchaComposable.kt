@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
 /**
@@ -38,25 +39,53 @@ public fun KiwiCaptcha(
     var attempt by remember { mutableStateOf(0) }
     var failed by remember { mutableStateOf(false) }
 
+    // Interactive-Client Lifecycle v1 (protocol/interactive-client-v1):
+    // the expiry clock starts at challenge parse and races the solve;
+    // delivery waits for the server's minimum-duration floor; only the
+    // newest generation (this LaunchedEffect's coroutine) emits.
     LaunchedEffect(endpoint, scope, sitekey, attempt) {
         if (!autoStart && attempt == 0) return@LaunchedEffect
+        val generation = this
         failed = false
         status = "Working"
         try {
             val client = KiwiClient(endpoint, sitekey)
             val challenge = withContext(Dispatchers.IO) { client.fetchChallenge(scope) }
-            val solution = withContext(Dispatchers.Default) { KiwiSolver.solve(challenge) }
+            val receivedAtMs = System.currentTimeMillis()
+            val expiresAtMs = KiwiLifecycle.expiresAtMs(receivedAtMs, challenge.ttlSecs)
+            val minSubmitAtMs = KiwiLifecycle.minSubmitAtMs(receivedAtMs, challenge.minDurationMs)
+            val solution = withContext(Dispatchers.Default) {
+                // coroutineContext reaches the LaunchedEffect job inside
+                // withContext, so cancellation of a superseded generation
+                // and the wall-clock deadline both stop the CPU work.
+                KiwiSolver.solve(challenge, isCancelled = {
+                    !generation.isActive || System.currentTimeMillis() >= expiresAtMs
+                })
+            }
+            val nowMs = System.currentTimeMillis()
+            val decision = KiwiLifecycle.deliveryDecision(
+                receivedAtMs, challenge.ttlSecs, challenge.minDurationMs, nowMs, nowMs,
+            )
+            if (!decision.deliver) {
+                status = "Expired"
+                failed = true
+                onExpire()
+                return@LaunchedEffect
+            }
+            if (decision.deliverAtMs > nowMs) {
+                // Cancellable: a restart or dispose cancels the deferral.
+                delay(decision.deliverAtMs - nowMs)
+                if (System.currentTimeMillis() >= expiresAtMs) {
+                    status = "Expired"
+                    failed = true
+                    onExpire()
+                    return@LaunchedEffect
+                }
+            }
             val token = KiwiToken.encode(challenge, solution)
             progress = 1f
             status = "Success"
             onVerify(token)
-            val ttl = challenge.ttlSecs
-            if (ttl > 0) {
-                delay(ttl * 1000)
-                status = "Expired"
-                failed = true
-                onExpire()
-            }
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (t: Throwable) {
