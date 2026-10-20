@@ -12,14 +12,14 @@ publish = false
 # its resolution matches the shipped crate graph.
 base64 = "=0.22.1"
 hex = "=0.4.3"
-num-bigint = "=0.4.8"
+num-bigint = "=0.5.1"
 num-integer = "=0.1.47"
 rand = "=0.8.7"
 sha2 = "=0.10.9"
 kiwicaptcha = { path = "../../packages/kiwicaptcha" }
 
 [dev-dependencies]
-num-bigint = "=0.4.8"
+num-bigint = "=0.5.1"
 
 # The heavy modular arithmetic runs in num-bigint (and in the kiwicaptcha
 # path dependency). Optimizing the dependencies keeps dev-mode `cargo test`
