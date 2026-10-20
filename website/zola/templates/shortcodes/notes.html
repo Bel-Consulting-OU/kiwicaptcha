@@ -1,0 +1,9 @@
+{# Source notes: the repo paths a section is grounded in. #}
+<div class="source-notes">
+  <p class="notes-label" aria-label="Source notes">Source notes</p>
+  <ul>
+    {%- for path in paths -%}
+    <li><a href="{{ config.extra.source_url }}/blob/main/{{ path }}" rel="noopener">{{ path }}</a></li>
+    {%- endfor -%}
+  </ul>
+</div>

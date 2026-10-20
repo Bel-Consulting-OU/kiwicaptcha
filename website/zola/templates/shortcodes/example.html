@@ -1,0 +1,9 @@
+{# A titled example panel: readonly textarea (native copy), a label that
+   focuses and selects it without JavaScript, and a mono caption. #}
+<section class="example">
+  {% if title %}<h3 class="example-title">{{ title }}</h3>{% endif %}
+  {%- set example_id = "example-" ~ title | default(value="snippet") | slugify -%}
+  <textarea id="{{ example_id }}" class="example-code" readonly rows="{{ rows | default(value=7) }}" aria-label="{{ title | default(value='Example') }} — focus the field, then select all and copy">{{ body }}</textarea>
+  <label class="copy-example" for="{{ example_id }}">Copy example</label>
+  {% if caption %}<p class="example-caption">{{ caption }}</p>{% endif %}
+</section>

@@ -1,0 +1,38 @@
+{# The single definition of the static widget specimen. Callers set
+   spec_state (required), and optionally spec_width (w240|w300|w352),
+   spec_scale (1|2) and spec_caption before including this partial.
+   Labels are the runtime English pack strings; the mark is the global
+   #kiwi-mark symbol; sizing classes are global in kiwi.css. #}
+{%- set spec_width = spec_width | default(value="") -%}
+{%- set spec_scale = spec_scale | default(value="") -%}
+{%- set spec_caption = spec_caption | default(value="") -%}
+{%- set spec_label = "Security Check" -%}
+{%- set spec_badge = "Idle" -%}
+{%- set spec_hint = "Protected" -%}
+{%- set spec_progress = "0" -%}
+{%- set spec_timer = "" -%}
+{%- set spec_retry = false -%}
+{%- set spec_classes = "kiwi-container kiwi-specimen" -%}
+{%- if spec_width -%}{%- set spec_classes = spec_classes ~ " specimen--" ~ spec_width -%}{%- endif -%}
+{%- if spec_scale == 2 -%}{%- set spec_classes = spec_classes ~ " specimen--scale-2" -%}{%- endif -%}
+{%- if spec_state == "idle" -%}{%- set spec_retry = true -%}
+{%- elif spec_state == "connecting" -%}{%- set spec_label = "Connecting…" -%}{%- set spec_badge = "Wait" -%}
+{%- elif spec_state == "solving" -%}{%- set spec_label = "Verifying…" -%}{%- set spec_badge = "Working" -%}{%- set spec_progress = "40" -%}
+{%- elif spec_state == "done" -%}{%- set spec_label = "Check complete" -%}{%- set spec_badge = "Success" -%}{%- set spec_hint = "Proof-of-work verified locally." -%}{%- set spec_progress = "100" -%}{%- set spec_timer = "2:58" -%}
+{%- elif spec_state == "failed" -%}{%- set spec_label = "Verification failed" -%}{%- set spec_badge = "Failed" -%}{%- set spec_hint = "Challenge failed (the connection failed) — press the Retry button to try again." -%}{%- set spec_retry = true -%}
+{%- elif spec_state == "expired" -%}{%- set spec_label = "Verification expired" -%}{%- set spec_badge = "Expired" -%}{%- set spec_hint = "The check expired — press the Retry button to run it again." -%}{%- set spec_retry = true -%}
+{%- elif spec_state == "worker-unavailable" -%}{%- set spec_label = "Check could not start" -%}{%- set spec_badge = "Unavailable" -%}{%- set spec_hint = "The security check could not start on this device — press the Retry button to try again." -%}{%- set spec_retry = true -%}
+{%- elif spec_state == "execution-unavailable" -%}{%- set spec_label = "Check incomplete" -%}{%- set spec_badge = "Unavailable" -%}{%- set spec_hint = "The security check could not complete — press the Retry button to try again." -%}{%- set spec_retry = true -%}
+{%- elif spec_state == "solver-mismatch" -%}{%- set spec_label = "Solver version mismatch" -%}{%- set spec_badge = "Version Error" -%}{%- set spec_hint = "The solver worker is out of date — reload the page to load the current version." -%}{%- set spec_retry = true -%}
+{%- endif -%}
+<div class="{{ spec_classes }}" data-theme="light">
+  <div class="kiwi-widget" role="group" data-state="{{ spec_state }}" aria-label="{{ spec_label }}">
+    <div class="kiwi-icon-wrapper" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg"><use href="#kiwi-mark"/></svg></div>
+    <div class="kiwi-main">
+      <div class="kiwi-top"><span class="kiwi-label">{{ spec_label }}</span><span class="kiwi-badge">{{ spec_badge }}</span></div>
+      <div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-progress="{{ spec_progress }}"></div></div>
+      <div class="kiwi-bottom"><p class="kiwi-info">{{ spec_hint }}</p>{% if spec_timer %}<span class="kiwi-timer">{{ spec_timer }}</span>{% endif %}{% if spec_retry %}<button class="kiwi-retry" type="button" disabled>Retry</button>{% endif %}</div>
+    </div>
+  </div>
+</div>
+{%- if spec_caption -%}<p class="mono-caption">{{ spec_caption }}</p>{%- endif -%}

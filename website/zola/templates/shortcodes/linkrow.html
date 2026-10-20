@@ -1,0 +1,2 @@
+{# A full-width arrow link row: hairlines above and below, label and ↗. #}
+<a class="link-row" href="{{ href }}"{% if external %} rel="noopener"{% endif %}{% if id %} id="{{ id }}"{% endif %}>{{ label }} <span aria-hidden="true">{{ arrow | default(value="↗") }}</span></a>

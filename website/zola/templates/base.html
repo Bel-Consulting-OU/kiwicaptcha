@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{% block description %}{{ config.description }}{% endblock %}">
+  <title>{% block title %}{{ config.title }}{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="/brand/kiwi-mark.svg">
+  <link rel="stylesheet" href="/css/kiwi.css">
+  <link rel="stylesheet" href="/css/widget.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+<svg class="kiwi-mark-def" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg"><symbol id="kiwi-mark" viewBox="0 0 64 64"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M32 42 C32 35 43 35 43 42 C43 51 29 54 23 46 C16 36 25 28 35 29 C47 29 54 38 53 46 C52 56 43 60 31 59 C17 58 9 51 10 41 C10 33 16 28 21 28"/><path d="M22 25 V16 A10 10 0 0 1 42 16 V25"/></g></symbol></svg>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="top-strip">
+  <div class="shell top-strip-row">
+    <span class="strip-mono">Bel Consulting</span>
+    <span class="strip-mono">Symfony-first / Adaptive anti-abuse</span>
+  </div>
+</div>
+<header class="site-header">
+  <div class="shell header-row">
+    <a class="brand-lockup" href="/" aria-label="KiwiCaptcha home">
+      <img src="/brand/kiwi-lockup.svg" alt="" width="226" height="43">
+    </a>
+    <nav class="site-nav" aria-label="Primary">
+      {%- for item in config.extra.nav -%}
+      {%- set here = current_path | default(value="") -%}
+      <a href="{{ item.path }}"{% if here == item.path %} aria-current="page"{% endif %}>{{ item.label }}</a>
+      {%- endfor -%}
+    </nav>
+  </div>
+</header>
+<main id="main" class="shell">
+{% block content %}{% endblock %}
+</main>
+<div class="shell page-end">
+  <div class="page-end-row">
+    <a href="/pdf/KiwiCaptcha_Website.pdf">Download the complete website PDF ↓</a>
+    <a href="/faq/">All questions and answers →</a>
+  </div>
+</div>
+<footer class="site-footer">
+  <div class="shell footer-grid">
+    <div class="footer-brand">
+      <img class="footer-lockup" src="/brand/kiwi-lockup.svg" alt="KiwiCaptcha" width="170" height="32">
+      <p>Symfony-first adaptive anti-abuse. First-party control.</p>
+    </div>
+    <ul class="footer-links">
+      <li><a href="{{ config.extra.source_url }}" rel="noopener">Source &amp; documentation ↗</a></li>
+      <li><a href="/brand/">Identity &amp; downloads</a></li>
+      <li><a href="/reference/">Research &amp; prior edition</a></li>
+    </ul>
+    <div class="footer-family">
+      <p>An independent Bel Consulting product.</p>
+      <p>Also in the family: <a href="{{ config.extra.family_url }}" rel="noopener">Faktor</a> · <a href="{{ config.extra.family_url }}" rel="noopener">Kiwi CI</a></p>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
