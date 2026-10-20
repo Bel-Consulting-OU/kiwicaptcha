@@ -6,5 +6,5 @@ description = "Regenerates the glue-embedded worker artifacts: kiwicaptcha-wasm.
 license = "MIT"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
