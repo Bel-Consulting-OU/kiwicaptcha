@@ -10,7 +10,7 @@ publish = false
 # The exact versions of the kiwicaptcha workspace lock: the tool builds
 # standalone (outside the workspace) and pins the same dependency set so
 # its resolution matches the shipped crate graph.
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 hex = "=0.4.3"
 num-bigint = "=0.4.8"
 num-integer = "=0.1.47"
