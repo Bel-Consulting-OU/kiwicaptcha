@@ -19,7 +19,7 @@ Developed by Bel Consulting OÜ (MIT license).
 
 **Self-hosted adaptive anti-abuse with transaction-bound authorization and auditable enforcement.**
 
-KiwiCaptcha is a Symfony-first, self-hosted anti-abuse platform with language-neutral verification and risk cores (Rust and PHP, protocol-identical). It imposes measurable computational friction on cheap abuse — every signup, login, password-reset, or scraping attempt carries a real, tunable proof-of-work cost — and then escalates adaptively: the risk engine steps up, quarantines, or denies per source, without storing identities. The value is not "PoW alone": it is the combination of priced friction and self-hosted enforcement that can refuse, step up, or quarantine with an auditable decision trail.
+KiwiCaptcha is a self-hosted anti-abuse platform with language-neutral verification and risk cores (Rust and PHP, protocol-identical). Every host is first-class: the Symfony bundle, the PHP core, seven server SDKs (Go, Node, Python, Ruby, JVM, .NET, Elixir), the browser wrappers, the native clients and the verifier sidecar. It imposes measurable computational friction on cheap abuse — every signup, login, password-reset, or scraping attempt carries a real, tunable proof-of-work cost — and then escalates adaptively: the risk engine steps up, quarantines, or denies per source, without storing identities. The value is not "PoW alone": it is the combination of priced friction and self-hosted enforcement that can refuse, step up, or quarantine with an auditable decision trail.
 
 A human does not solve the challenge: their CPU does, and an automated client's CPU can do the same work. That is exactly why the proof-of-work cost is friction, not a Turing test — the enforcement plane on top is what converts friction into a decision.
 
@@ -118,7 +118,7 @@ The risk engines (Rust and PHP) are byte-identical in the state protocol; both e
 
 ## Platform scope
 
-KiwiCaptcha is Symfony-first: the complete enforcement plane (challenge issuance, risk decisions, step-up, quarantine, deny) ships as the standalone Symfony bundle. The verification core (`packages/kiwicaptcha-php`) and the risk cores (`packages/kiwicaptcha-risk`, `packages/kiwicaptcha-risk-php`) are language-neutral and protocol-identical, so other hosts can embed them — but only the Symfony integration is a first-class enforcement plane today. SDK packages (Go, Node, Python, Ruby, JVM, .NET, Elixir) are verification/risk clients, not full framework enforcement planes.
+Every host integration is first-class. The Rust core (`packages/kiwicaptcha`) defines the protocol, the record schema and the risk engine. The PHP core (`packages/kiwicaptcha-php`) and the risk cores (`packages/kiwicaptcha-risk`, `packages/kiwicaptcha-risk-php`) are protocol-identical mirrors held to machine-checked parity with it. The Symfony bundle (`packages/kiwicaptcha/integrations/symfony`) composes the complete enforcement plane (challenge issuance, risk decisions, step-up, quarantine, deny) as a standalone host integration. SDK packages (Go, Node, Python, Ruby, JVM, .NET, Elixir) carry the same verification and risk contracts as first-class clients. Decision, authority and rejection parity with the Rust engine is machine-checked across all seven (`tools/redteam/campaigns/d3.17-cross-sdk-parity.sh`). The shared protocol surface is pinned by the parity gates in `tools/ci/`: challenge/response fixtures, limits, error codes and the canonical Lua scripts.
 
 ## Five-minute installation (Symfony)
 

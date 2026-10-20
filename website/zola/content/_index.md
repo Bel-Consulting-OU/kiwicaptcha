@@ -47,7 +47,7 @@ A completed widget is a response to verify. A verified factor is still subject t
 
 ## The enforcement stays in your application.
 
-Symfony is the current first-class complete enforcement plane. It composes challenge issuance, risk, additional factors, quarantine and denial around the application.
+The complete enforcement plane composes around your application: challenge issuance, risk, additional factors, quarantine and denial. The Symfony bundle ships it as a host integration, and every server SDK carries the same decisions on machine-checked parity with the Rust core.
 
 Other language SDKs support local verification and risk clients with explicit capabilities. Browser and native wrappers manage the client lifecycle; they do not become an authorization service.
 
@@ -149,8 +149,8 @@ Computation, factor completion and authorization are distinct. The current sourc
 </div>
 
 <div class="qa">
-<h3>What is the complete first-class integration today?</h3>
-<p>Symfony is the current complete enforcement plane: issuance, risk decisions, step-up, quarantine and denial. Other language SDKs are verification/risk clients and middleware with their own capability contracts.</p>
+<h3>Which integrations are first-class?</h3>
+<p>All of them. The complete enforcement plane — issuance, risk decisions, step-up, quarantine and denial — ships as the Symfony bundle host integration, and the seven server SDKs, the PHP core, the browser and native clients and the verifier sidecar are first-class against the same Rust-defined contracts: decision, authority and rejection parity with the Rust engine is machine-checked across all of them.</p>
 </div>
 
 <div class="qa">

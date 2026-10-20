@@ -156,7 +156,7 @@ Do not turn an optional dimension into a human-proof or browser-proof seal. Oper
 
 ## Choose a complete host contract.
 
-Use the Symfony plane when you need the current complete adaptive enforcement flow. For other stacks, start from the verification client or local sidecar and preserve its stated capability boundary.
+Use the complete enforcement plane when your scope needs adaptive step-up, quarantine and denial: the Symfony bundle composes it as a host integration, and every SDK exposes the same decisions on machine-checked parity with the Rust core. For other stacks, start from the verification client or local sidecar and preserve its stated capability boundary.
 
 {{ linkrow(href="/integration/", label="Integration roles", arrow="↗") }}
 
