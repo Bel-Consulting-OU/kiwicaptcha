@@ -345,6 +345,239 @@ final class KiwiCaptchaTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.requestBody(of: request), Data())
     }
 
+    // MARK: - Solver cancellation (cooperative, typed)
+
+    /// The probe is checked at bounded-latency checkpoints. A probe
+    /// that fires immediately stops the SHA-256 search before any
+    /// candidate is hashed, and the typed `KiwiSolveError.cancelled`
+    /// is the observable result.
+    func testSolverSha256StopsAtTheCheckpointWhenCancelled() {
+        var probes = 0
+        do {
+            _ = try KiwiSolver.solve(challenge: shaChallenge(), isCancelled: {
+                probes += 1
+                return true
+            })
+            XCTFail("a cancelled sha256 solve must throw")
+        } catch let error as KiwiSolveError {
+            XCTAssertEqual(error, .cancelled)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        // Checked at counter 0, before the first candidate: no
+        // hashing happened after the check fired.
+        XCTAssertEqual(probes, 1)
+    }
+
+    /// The argon2id search probes between candidate derivations: the
+    /// same immediate probe refuses before the first derivation.
+    func testSolverArgon2idStopsAtTheCheckpointWhenCancelled() {
+        var probes = 0
+        var c = shaChallenge()
+        c.algorithm = "argon2id"
+        c.mKib = 8
+        c.t = 3
+        do {
+            _ = try KiwiSolver.solve(challenge: c, isCancelled: {
+                probes += 1
+                return true
+            })
+            XCTFail("a cancelled argon2id solve must throw")
+        } catch let error as KiwiSolveError {
+            XCTAssertEqual(error, .cancelled)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        XCTAssertEqual(probes, 1)
+    }
+
+    /// The rsw time lock probes every 256 squarings. One free
+    /// checkpoint, then cancellation: the loop must stop at the very
+    /// next checkpoint (256 squarings into a 10_000-squaring run),
+    /// which is the bounded-latency contract.
+    func testSolverRswStopsWithinOneCheckpointWhenCancelled() {
+        var probes = 0
+        let challenge = shaChallenge {
+            $0.algorithm = "rsw"
+            $0.t = 10_000
+            $0.targetBits = 1
+            $0.rswModulus = Base64.encode(composite2048())
+        }
+        do {
+            _ = try KiwiSolver.solve(challenge: challenge, isCancelled: {
+                probes += 1
+                return probes > 1
+            })
+            XCTFail("a cancelled rsw solve must throw")
+        } catch let error as KiwiSolveError {
+            XCTAssertEqual(error, .cancelled)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        // First probe (before squaring 0) passed, the second (at
+        // squaring 256) fired and the loop threw there.
+        XCTAssertEqual(probes, 2)
+    }
+
+    // MARK: - Lifecycle v1 delivery decision
+
+    /// One scenario of protocol/interactive-client-v1/
+    /// lifecycle-vectors.json. The file is the shared, first-writer
+    /// contract: the same vectors gate every client.
+    private struct LifecycleVector: Decodable {
+        struct Expectation: Decodable {
+            let deliver: Bool
+            let deliverAtMs: Int64
+            let reason: String
+        }
+        let name: String
+        let receivedAtMs: Int64
+        let ttlSecs: Int64
+        let minDurationMs: Int64
+        let solveFinishedAtMs: Int64
+        let nowMs: Int64
+        let cancelled: Bool
+        let expect: Expectation
+    }
+
+    /// protocol/interactive-client-v1/lifecycle-vectors.json, located
+    /// relative to the package root (this file lives in
+    /// Tests/KiwiCaptchaTests under it; the two ".." steps then reach
+    /// the repository's protocol/ directory).
+    private func lifecycleVectorsURL() throws -> URL {
+        let testsDir = (#filePath as NSString).deletingLastPathComponent // Tests/KiwiCaptchaTests
+        let testsRoot = (testsDir as NSString).deletingLastPathComponent // Tests
+        let packageRoot = (testsRoot as NSString).deletingLastPathComponent // the package root
+        return URL(fileURLWithPath: packageRoot, isDirectory: true)
+            .appendingPathComponent("../../protocol/interactive-client-v1/lifecycle-vectors.json")
+    }
+
+    func testDeliveryDecisionMatchesTheSharedLifecycleVectors() throws {
+        let data = try Data(contentsOf: try lifecycleVectorsURL())
+        let vectors = try JSONDecoder().decode([LifecycleVector].self, from: data)
+        XCTAssertGreaterThanOrEqual(vectors.count, 10, "the shared vector set is the contract floor")
+        for vector in vectors {
+            if vector.cancelled {
+                // Cancellation is caller-side: it never reaches the
+                // pure helper, and the pinned expectation is that it
+                // delivers nothing.
+                XCTAssertFalse(vector.expect.deliver, vector.name)
+                XCTAssertEqual(vector.expect.deliverAtMs, 0, vector.name)
+                XCTAssertEqual(vector.expect.reason, "cancelled", vector.name)
+                continue
+            }
+            let decision = KiwiLifecycle.deliveryDecision(
+                receivedAtMs: vector.receivedAtMs,
+                ttlSecs: vector.ttlSecs,
+                minDurationMs: vector.minDurationMs,
+                solveFinishedAtMs: vector.solveFinishedAtMs,
+                nowMs: vector.nowMs)
+            XCTAssertEqual(decision.deliver, vector.expect.deliver, vector.name)
+            XCTAssertEqual(decision.deliverAtMs, vector.expect.deliverAtMs, vector.name)
+            XCTAssertEqual(decision.reason, vector.expect.reason, vector.name)
+        }
+    }
+
+    /// Direct unit cases beside the shared file: the boundaries the
+    /// contract calls out verbatim.
+    func testDeliveryDecisionUnitCases() {
+        let received: Int64 = 1_000_000
+
+        // A fast solve with no gates delivers at once.
+        var d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 120, minDurationMs: 0,
+            solveFinishedAtMs: received + 400, nowMs: received + 400)
+        XCTAssertTrue(d.deliver && d.deliverAtMs == received + 400 && d.reason == "deliver")
+
+        // Boundary equality delivers: now == deliverAtMs.
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 120, minDurationMs: 5_000,
+            solveFinishedAtMs: received + 400, nowMs: received + 5_000)
+        XCTAssertTrue(d.deliver && d.deliverAtMs == received + 5_000 && d.reason == "deliver")
+
+        // The min-submit floor defers the finished token to the floor.
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 120, minDurationMs: 5_000,
+            solveFinishedAtMs: received + 400, nowMs: received + 400)
+        XCTAssertTrue(!d.deliver && d.deliverAtMs == received + 5_000 && d.reason == "defer")
+
+        // The solve finished exactly at expiry: expired (equality is
+        // expiry, the token may never arrive at or after the deadline).
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 30, minDurationMs: 0,
+            solveFinishedAtMs: received + 29_000, nowMs: received + 29_000)
+        XCTAssertTrue(!d.deliver && d.deliverAtMs == 0 && d.reason == "expired")
+
+        // One millisecond before expiry still delivers (the fixed 1 s
+        // margin: expiresAt = received + 30_000 - 1_000).
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 30, minDurationMs: 0,
+            solveFinishedAtMs: received + 28_999, nowMs: received + 28_999)
+        XCTAssertTrue(d.deliver && d.deliverAtMs == received + 28_999 && d.reason == "deliver")
+
+        // A gate that could only land at or after expiry is dead up
+        // front: minSubmitAtMs == expiresAtMs → expired.
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 30, minDurationMs: 29_000,
+            solveFinishedAtMs: received + 1_000, nowMs: received + 1_000)
+        XCTAssertTrue(!d.deliver && d.deliverAtMs == 0 && d.reason == "expired")
+
+        // A late evaluation checkpoint (after a deferral) past the
+        // deadline never delivers either.
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 30, minDurationMs: 25_000,
+            solveFinishedAtMs: received + 500, nowMs: received + 30_000)
+        XCTAssertTrue(!d.deliver && d.deliverAtMs == 0 && d.reason == "expired")
+
+        // No TTL: never expires, the floor still applies.
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 0, minDurationMs: 2_000,
+            solveFinishedAtMs: received + 500, nowMs: received + 500)
+        XCTAssertTrue(!d.deliver && d.deliverAtMs == received + 2_000 && d.reason == "defer")
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 0, minDurationMs: 0,
+            solveFinishedAtMs: received + 500, nowMs: received + 500)
+        XCTAssertTrue(d.deliver && d.deliverAtMs == received + 500 && d.reason == "deliver")
+
+        // ttl of one second: the margin consumes it, the deadline is
+        // parse time itself and no solve can win.
+        d = KiwiLifecycle.deliveryDecision(
+            receivedAtMs: received, ttlSecs: 1, minDurationMs: 0,
+            solveFinishedAtMs: received, nowMs: received)
+        XCTAssertTrue(!d.deliver && d.deliverAtMs == 0 && d.reason == "expired")
+
+        // The clock helpers agree with the decision arithmetic.
+        XCTAssertEqual(
+            KiwiLifecycle.expiresAt(receivedAtMs: received, ttlSecs: 30),
+            received + 29_000)
+        XCTAssertEqual(
+            KiwiLifecycle.expiresAt(receivedAtMs: received, ttlSecs: 0),
+            Int64.max)
+        XCTAssertEqual(
+            KiwiLifecycle.minSubmitAt(receivedAtMs: received, minDurationMs: 0), 0)
+        XCTAssertEqual(
+            KiwiLifecycle.minSubmitAt(receivedAtMs: received, minDurationMs: 2_500),
+            received + 2_500)
+    }
+
+    // MARK: - KiwiClient capability header
+
+    func testFetchChallengeSendsTheExecutionMaxVersionCapabilityHeader() async throws {
+        let payload = try JSONEncoder().encode(shaChallenge())
+        var capability: String?
+        MockURLProtocol.handler = { request in
+            capability = request.value(forHTTPHeaderField: "Kiwi-Execution-Max-Version")
+            return (self.httpResponse(request, 200), payload)
+        }
+        let client = KiwiClient(
+            endpoint: URL(string: "https://api.example.test/kc")!,
+            session: mockSession())
+        _ = try await client.fetchChallenge(scope: "login")
+        // Version 0: the native path runs no execution interpreter,
+        // and the endpoint must not arm execution_program against it.
+        XCTAssertEqual(capability, "0")
+    }
+
     // MARK: - Rsw direct entry points
 
     func testRswMontgomeryRoundTripAndSquaring() {
@@ -480,6 +713,134 @@ final class KiwiCaptchaTests: XCTestCase {
             XCTAssertEqual(view.sitekey, "pk-swiftui")
             view.onVerify("tok")
             XCTAssertEqual(verified, "tok")
+        }
+
+        // MARK: Lifecycle v1 on the widget
+
+        /// minDurationMs gates delivery: the token is finished early
+        /// but held (cancellably) to the floor before onVerify fires.
+        @MainActor
+        func testWidgetDefersDeliveryUntilMinSubmit() async throws {
+            let challenge = shaChallenge { $0.minDurationMs = 600 }
+            let payload = try JSONEncoder().encode(challenge)
+            MockURLProtocol.handler = { request in
+                (self.httpResponse(request, 200), payload)
+            }
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(
+                    endpoint: URL(string: "https://api.example.test/kc")!,
+                    session: mockSession()),
+                scope: "login")
+            let verified = expectation(description: "verified after the floor")
+            let startedAt = Date()
+            view.applyConfiguration(
+                endpoint: URL(string: "https://api.example.test/kc")!,
+                scope: "login", sitekey: nil,
+                onVerify: { _ in verified.fulfill() })
+            view.start()
+            await fulfillment(of: [verified], timeout: 10)
+            let elapsedMs = Date().timeIntervalSince(startedAt) * 1000
+            // The solve itself takes milliseconds; the wait to the
+            // min-submit floor is the reason delivery happened here.
+            XCTAssertGreaterThanOrEqual(elapsedMs, 550)
+            XCTAssertEqual(view.state, .verified)
+            XCTAssertFalse(view.token.isEmpty)
+        }
+
+        /// The expiry clock starts at parse time, not after solving.
+        /// A 1 s TTL means the deadline lands at parse time itself
+        /// (the fixed 1 s margin consumes the TTL): no solve can win,
+        /// the widget shows the expired state and onVerify is
+        /// suppressed — the pre-contract behavior delivered first and
+        /// only then started the countdown.
+        @MainActor
+        func testWidgetNeverDeliversWhenTheDeadlineBeatsTheSolve() async throws {
+            let challenge = shaChallenge { $0.ttlSecs = 1 }
+            let payload = try JSONEncoder().encode(challenge)
+            MockURLProtocol.handler = { request in
+                (self.httpResponse(request, 200), payload)
+            }
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(
+                    endpoint: URL(string: "https://api.example.test/kc")!,
+                    session: mockSession()),
+                scope: "login")
+            let expired = expectation(description: "expired at the parse-anchored deadline")
+            var delivered = false
+            view.applyConfiguration(
+                endpoint: URL(string: "https://api.example.test/kc")!,
+                scope: "login", sitekey: nil,
+                onVerify: { _ in delivered = true },
+                onExpire: { expired.fulfill() })
+            view.start()
+            await fulfillment(of: [expired], timeout: 10)
+            XCTAssertFalse(delivered, "a token past expiresAtMs must never be delivered")
+            XCTAssertTrue(view.token.isEmpty)
+            XCTAssertEqual(view.state, .expired)
+        }
+
+        /// Only the newest generation emits: a run superseded by a
+        /// configuration change has its late challenge answer
+        /// discarded — it never verifies, never overwrites the token.
+        @MainActor
+        func testWidgetSupersedesTheStaleGenerationToken() async throws {
+            let payload = try JSONEncoder().encode(shaChallenge())
+            var servedFirst = false
+            MockURLProtocol.handler = { request in
+                if !servedFirst {
+                    servedFirst = true
+                    // Hold the first run's fetch open so the restart
+                    // happens well before it answers.
+                    Thread.sleep(forTimeInterval: 0.3)
+                }
+                return (self.httpResponse(request, 200), payload)
+            }
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(
+                    endpoint: URL(string: "https://a.example.test/kc")!,
+                    session: mockSession()),
+                scope: "login")
+            view.start()
+            var verifyCount = 0
+            let verified = expectation(description: "verified by the newest generation")
+            view.applyConfiguration(
+                endpoint: URL(string: "https://b.example.test/kc")!,
+                scope: "login", sitekey: nil,
+                onVerify: { _ in
+                    verifyCount += 1
+                    verified.fulfill()
+                })
+            await fulfillment(of: [verified], timeout: 10)
+            // Let the superseded run's late answer land and be
+            // discarded by its dead generation.
+            try await Task.sleep(nanoseconds: 500_000_000)
+            XCTAssertEqual(verifyCount, 1, "only the newest generation may emit")
+            XCTAssertEqual(view.state, .verified)
+            XCTAssertFalse(view.token.isEmpty)
+        }
+
+        /// The container is no longer one collapsed accessibility
+        /// element: the Retry button stays a real, reachable button,
+        /// the status label is the live region, and the progress bar
+        /// reports itself.
+        @MainActor
+        func testWidgetAccessibilityKeepsControlsSeparate() {
+            let view = KiwiCaptchaUIView(
+                client: KiwiClient(
+                    endpoint: URL(string: "https://api.example.test/kc")!,
+                    session: mockSession()),
+                scope: "login")
+            XCTAssertFalse(view.isAccessibilityElement, "the control must not collapse its children")
+            XCTAssertTrue(view.retryButton.isAccessibilityElement)
+            XCTAssertEqual(view.retryButton.accessibilityLabel, "Retry")
+            XCTAssertTrue(view.statusLabel.isAccessibilityElement)
+            XCTAssertEqual(view.statusLabel.accessibilityLabel, "Security check status")
+            XCTAssertTrue(
+                view.statusLabel.accessibilityTraits.contains(.updatesFrequently),
+                "the status label is the live region")
+            XCTAssertEqual(view.statusLabel.accessibilityValue, "Idle")
+            XCTAssertTrue(view.progress.isAccessibilityElement)
+            XCTAssertEqual(view.progress.accessibilityLabel, "Security check progress")
         }
     #endif
 }

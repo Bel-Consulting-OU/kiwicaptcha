@@ -12,9 +12,39 @@
         case expired
     }
 
-    /// The UIKit widget: a status view that acquires, solves and expires
-    /// a challenge on its own, and reports the token to the app. The
-    /// token also lands in `token` for form serialization.
+    /// The monotonic generation counter behind cooperative
+    /// cancellation. Only the newest generation may emit: a restart,
+    /// a teardown or the expiry deadline advances the counter, every
+    /// earlier generation's solve probe fires at the next checkpoint,
+    /// and stale results are discarded. Probes read it from solver
+    /// threads while the widget mutates it on the main thread, so it
+    /// is lock-guarded, not a bare Int.
+    private final class KiwiGenerationCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var current = 0
+
+        /// Invalidate every earlier generation and return the new one.
+        func advance() -> Int {
+            lock.lock(); defer { lock.unlock() }
+            current += 1
+            return current
+        }
+
+        func isCurrent(_ generation: Int) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return generation == current
+        }
+    }
+
+    /// The UIKit widget: a status view that acquires, solves and
+    /// expires a challenge on its own, and reports the token to the
+    /// app. The token also lands in `token` for form serialization.
+    ///
+    /// The run follows the Interactive-Client Lifecycle v1 contract:
+    /// the clocks start the moment the challenge JSON parses, the
+    /// expiry timer races the solve, a finished solve waits out the
+    /// issued minimum duration before delivery, and only the newest
+    /// generation emits.
     public final class KiwiCaptchaUIView: UIControl {
 
         public var onVerify: ((String) -> Void)?
@@ -34,14 +64,22 @@
         /// can assert a configuration change cancels the previous run.
         private(set) var task: Task<Void, Never>?
         private(set) var expiryTask: Task<Void, Never>?
+        /// The generation the in-flight work belongs to; only the
+        /// newest may emit.
+        private let generations = KiwiGenerationCounter()
         /// Number of full teardown/rebuild cycles (observability for the
         /// update path; also makes the no-op case assertable).
         private(set) var restartCount: Int = 0
 
-        private let statusLabel = UILabel()
-        private let badgeLabel = UILabel()
-        private let progress = UIProgressView(progressViewStyle: .default)
-        private let retryButton = UIButton(type: .system)
+        // The outlets are internal so the test target (@testable) can
+        // assert the accessibility wiring.
+        let statusLabel = UILabel()
+        let badgeLabel = UILabel()
+        let progress = UIProgressView(progressViewStyle: .default)
+        let retryButton = UIButton(type: .system)
+        /// The last state accessibility announced, so a render that
+        /// does not change the state stays silent.
+        private var announcedState: KiwiWidgetState?
 
         public init(client: KiwiClient, scope: String) {
             self.client = client
@@ -57,8 +95,10 @@
         required init?(coder: NSCoder) { fatalError("init(client:scope:) is the only initializer") }
 
         deinit {
-            // A view leaving the hierarchy cancels both the solve and the
-            // expiry timer: neither task may outlive the widget.
+            // A view leaving the hierarchy invalidates the generation
+            // (an in-flight solve stops at its next checkpoint) and
+            // cancels both tasks: neither may outlive the widget.
+            generations.advance()
             task?.cancel()
             expiryTask?.cancel()
         }
@@ -81,15 +121,29 @@
             retryButton.setTitle("Retry", for: .normal)
             retryButton.addTarget(self, action: #selector(start), for: .touchUpInside)
             retryButton.isHidden = true
-            isAccessibilityElement = true
-            accessibilityLabel = "Security Check"
-            accessibilityTraits = [.staticText]
+
+            // Accessibility: the container is not one collapsed
+            // element — the Retry button stays a real, reachable
+            // button. The status label is the live region (its value
+            // tracks the state word) and the progress bar reports its
+            // own percentage; state transitions are announced below.
+            statusLabel.isAccessibilityElement = true
+            statusLabel.accessibilityLabel = "Security check status"
+            statusLabel.accessibilityTraits = [.updatesFrequently]
+            badgeLabel.isAccessibilityElement = false
+            progress.isAccessibilityElement = true
+            progress.accessibilityLabel = "Security check progress"
+            retryButton.accessibilityHint = "Runs the security check again"
         }
 
-        /// Cancel and release both in-flight tasks. Cancellation is
-        /// cooperative; the solves check `Task.isCancelled` after each
-        /// await, and the expiry task's sleep throws on cancellation.
+        /// Cancel and release both in-flight tasks. Advancing the
+        /// generation invalidates the run: the solve's probe fires at
+        /// its next bounded-latency checkpoint (sha256 every 2048
+        /// candidates, argon2id between derivations, rsw every 256
+        /// squarings) and stops the CPU work; the sleeps throw on
+        /// cancellation.
         private func cancelTasks() {
+            generations.advance()
             task?.cancel()
             task = nil
             expiryTask?.cancel()
@@ -127,61 +181,157 @@
                 endpoint: endpoint, sitekey: sitekey, session: client.session)
             token = ""
             state = .idle
-            accessibilityValue = nil
             restartCount += 1
             start()
             return true
         }
 
         /// Acquire and solve a challenge. Safe to call again: the
-        /// previous run is cancelled first.
+        /// previous run's generation is invalidated first, so its
+        /// solve stops at the next checkpoint and its results are
+        /// discarded even if a checkpoint was never reached.
         @objc public func start() {
             cancelTasks()
             token = ""
             state = .solving
             let client = client
             let scope = scope
+            let generation = generations.advance()
+            // The solver's cancellation probe: it fires the moment
+            // this generation stops being the newest (a restart, a
+            // teardown, the expiry deadline) or the view is gone.
+            let probe: @Sendable () -> Bool = { [weak self] in
+                guard let self else { return true }
+                return !self.generations.isCurrent(generation)
+            }
             task = Task { [weak self] in
                 do {
                     let challenge = try await client.fetchChallenge(scope: scope)
-                    guard !Task.isCancelled else { return }
-                    let solution = try KiwiSolver.solve(challenge: challenge)
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, !probe() else { return }
+
+                    // Lifecycle v1: `receivedAtMs` is captured
+                    // immediately after the challenge JSON parses, and
+                    // every clock — expiry and min-submit alike — runs
+                    // from there, never from after the solve.
+                    let receivedAtMs = Self.nowMs()
+                    let ttlSecs = Int64(challenge.ttlSecs ?? 0)
+                    let minDurationMs = Int64(challenge.minDurationMs ?? 0)
+                    let expiresAtMs = KiwiLifecycle.expiresAt(
+                        receivedAtMs: receivedAtMs, ttlSecs: ttlSecs)
+
+                    // Arm the expiry timer at parse time. It now
+                    // races the solve, which is the contract's point:
+                    // a solve that outlives the deadline is
+                    // invalidated at its next checkpoint and can
+                    // never deliver.
+                    await MainActor.run {
+                        self?.armExpiry(generation, expiresAtMs: expiresAtMs)
+                    }
+                    guard !Task.isCancelled, !probe() else { return }
+
+                    // The proof of work is pure CPU: run it detached
+                    // at user-initiated priority so the main thread
+                    // never freezes behind the SHA search, the
+                    // argon2id derivations or the rsw squarings. Only
+                    // UI state updates marshal back to the main
+                    // actor.
+                    let solution = try await Task.detached(priority: .userInitiated) {
+                        try KiwiSolver.solve(challenge: challenge, isCancelled: probe)
+                    }.value
+                    let solveFinishedAtMs = Self.nowMs()
+
+                    // Delivery gating: min-submit defers the finished
+                    // token (cancellably) to the floor; anything the
+                    // pure helper calls expired is never delivered.
+                    var decision = KiwiLifecycle.deliveryDecision(
+                        receivedAtMs: receivedAtMs, ttlSecs: ttlSecs,
+                        minDurationMs: minDurationMs,
+                        solveFinishedAtMs: solveFinishedAtMs,
+                        nowMs: solveFinishedAtMs)
+                    if decision.reason == "defer" {
+                        let holdMs = decision.deliverAtMs - Self.nowMs()
+                        if holdMs > 0 {
+                            try await Task.sleep(nanoseconds: UInt64(holdMs) * 1_000_000)
+                        }
+                        guard !Task.isCancelled, !probe() else { return }
+                        decision = KiwiLifecycle.deliveryDecision(
+                            receivedAtMs: receivedAtMs, ttlSecs: ttlSecs,
+                            minDurationMs: minDurationMs,
+                            solveFinishedAtMs: solveFinishedAtMs,
+                            nowMs: Self.nowMs())
+                    }
+                    guard decision.reason == "deliver" else { return }
+
+                    // The last gate before onVerify: never deliver at
+                    // or after the deadline.
+                    guard expiresAtMs == Int64.max || Self.nowMs() < expiresAtMs else { return }
                     let token = KiwiToken.encode(challenge: challenge, solution: solution)
-                    await MainActor.run { self?.verify(token, ttlSecs: challenge.ttlSecs ?? 0) }
+                    await MainActor.run {
+                        // Only the newest generation emits; a
+                        // superseded result is discarded here.
+                        guard let self, self.generations.isCurrent(generation) else { return }
+                        self.token = token
+                        self.state = .verified
+                        self.onVerify?(token)
+                    }
                 } catch is CancellationError {
                     return
+                } catch let error as KiwiSolveError where error == .cancelled {
+                    // The probe fired mid-solve; the generation is
+                    // already gone, so there is nothing to report.
+                    return
                 } catch {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, !probe() else { return }
                     await MainActor.run { self?.fail(String(describing: error)) }
                 }
             }
         }
 
-        private func verify(_ token: String, ttlSecs: UInt64) {
-            self.token = token
-            state = .verified
-            onVerify?(token)
-            accessibilityValue = "Verification complete"
-            guard ttlSecs > 0 else { return }
+        /// Arm the deadline for a generation, measured from parse
+        /// time (minus the fixed 1 s safety margin, already folded
+        /// into `expiresAtMs`). Called right after the challenge
+        /// parses, so the timer races the solve.
+        private func armExpiry(_ generation: Int, expiresAtMs: Int64) {
+            guard expiresAtMs != Int64.max, generations.isCurrent(generation) else { return }
             expiryTask = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(ttlSecs) * 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                await MainActor.run { self?.expire() }
+                // Cancellable sleep to the deadline. Main-actor
+                // context: this Task was created inside MainActor.run.
+                let delayMs = expiresAtMs - Self.nowMs()
+                if delayMs > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                }
+                guard let self, !Task.isCancelled,
+                      self.generations.isCurrent(generation) else { return }
+                self.expireGeneration(generation)
             }
+        }
+
+        /// The deadline fired for a live generation: invalidate it (an
+        /// in-flight solve stops at its next checkpoint and a late
+        /// result is discarded), drop both tasks and show the expired
+        /// state.
+        private func expireGeneration(_ generation: Int) {
+            guard generations.isCurrent(generation) else { return }
+            generations.advance()
+            task?.cancel()
+            task = nil
+            expiryTask?.cancel()
+            expiryTask = nil
+            token = ""
+            state = .expired
+            onExpire?()
         }
 
         private func fail(_ message: String) {
             token = ""
             state = .failed
-            accessibilityValue = "Verification failed"
             onError?(message)
         }
 
-        private func expire() {
-            token = ""
-            state = .expired
-            onExpire?()
+        /// Wall-clock milliseconds. Lifecycle v1 uses the wall clock:
+        /// the deadline is anchored to the server's issue time.
+        static func nowMs() -> Int64 {
+            Int64(Date().timeIntervalSince1970 * 1000)
         }
 
         private func render() {
@@ -193,6 +343,23 @@
             case .expired: badgeLabel.text = "Expired"; progress.progress = 0
             }
             retryButton.isHidden = state != .failed && state != .expired
+            progress.accessibilityValue = "\(Int((progress.progress * 100).rounded())) percent"
+            // The status label is the live region: its value tracks
+            // the state word, and attention-worthy transitions are
+            // announced through UIAccessibility.
+            statusLabel.accessibilityValue = badgeLabel.text
+            guard state != announcedState else { return }
+            announcedState = state
+            switch state {
+            case .verified:
+                UIAccessibility.post(notification: .announcement, argument: "Security check complete")
+            case .failed:
+                UIAccessibility.post(notification: .announcement, argument: "Security check failed. Retry available")
+            case .expired:
+                UIAccessibility.post(notification: .announcement, argument: "Security check expired. Retry available")
+            case .idle, .solving:
+                break
+            }
         }
     }
 
@@ -235,8 +402,8 @@
             // SwiftUI calls this after every parent update. The widget
             // refreshes its callbacks either way, and tears down/rebuilds
             // the run only when endpoint, scope or sitekey changed; the
-            // previous task and expiry timer are cancelled first, so no
-            // observer or task is left behind.
+            // previous generation is invalidated and both tasks are
+            // cancelled first, so no observer or task is left behind.
             uiView.applyConfiguration(
                 endpoint: endpoint,
                 scope: scope,

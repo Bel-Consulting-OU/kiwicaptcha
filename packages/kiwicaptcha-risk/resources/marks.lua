@@ -1,9 +1,11 @@
 -- Long-memory outcome marks: one atomic mark write.
 --
 -- SCRIPT BOUNDS — all bounded constants:
---   max keys touched:     2 (mark hash + its event-id dedupe marker;
---                          both carry the {kiwi:<ns>} hash tag, one slot)
---   max Redis calls:      8 (2 TYPE + 1 TIME + 1 GET + 1 SET +
+--   max keys touched:     3 (mark hash + its event-id dedupe marker
+--                          plus the per-event effect completion key
+--                          derived below as KEYS[2] .. ':fxdone'; all
+--                          carry the {kiwi:<ns>} hash tag, one slot)
+--   max Redis calls:      10 (2 TYPE + 1 TIME + 2 GET/EXISTS + 2 SET +
 --                           1 HGETALL + 1 HSET + 1 PEXPIRE on the counted
 --                           path; strictly fewer on the duplicate path)
 --   max collection cardinality: 5 hash fields
@@ -140,6 +142,18 @@ local function read_count()
     return kiwi_decode_integer(redis.call('HGET', KEYS[1], 'count'), KEYS[1] .. ':count') or 0
 end
 
+-- The per-event effect completion key (`fxdone`, derived from the
+-- dedupe marker's own event-id namespace and expiring with the same
+-- retry-horizon TTL as the marker and the `fx` marker value) closes the
+-- one interleaving the `fx` marker cannot: A writes its mark (fx = A),
+-- aborts before its claim; B then writes its own (fx = B); A retries —
+-- fx no longer says A, so the report would be counted twice. The
+-- completion key is written in the same invocation, immediately after
+-- the mark effect and before the claim, and the guard below accepts
+-- "fx == me OR the completion key exists", so the retry skips the count
+-- and converges by (re)writing the claim.
+local effect_done_key = event_id ~= '' and KEYS[2] .. ':fxdone' or ''
+
 -- The dedupe claim is a completion record: when it exists the delivery
 -- is already fully applied, so the stored count answers unchanged.
 if event_id ~= '' and redis.call('GET', KEYS[2]) then
@@ -156,11 +170,18 @@ local count = kiwi_decode_integer(stored.count, KEYS[1] .. ':count') or 0
 local first_ms = kiwi_decode_integer(stored.first_ms, KEYS[1] .. ':first_ms') or 0
 local last_ms = kiwi_decode_integer(stored.last_ms, KEYS[1] .. ':last_ms') or 0
 local fx = stored.fx or false
-local effect_done = kiwi_effect_matches(fx, event_id, now_ms)
+local event_done = effect_done_key ~= ''
+    and redis.call('EXISTS', effect_done_key) == 1
+    or false
+local effect_done = event_done or kiwi_effect_matches(fx, event_id, now_ms)
 
 if effect_done then
     -- A retry after an abort: the mark write already landed. Complete
-    -- the claim without counting the report twice.
+    -- the delivery — the completion key and the claim — without
+    -- counting the report twice.
+    if effect_done_key ~= '' then
+        redis.call('SET', effect_done_key, '1', 'PX', RETRY_HORIZON_MS)
+    end
     redis.call('SET', KEYS[2], '1', 'PX', RETRY_HORIZON_MS)
     return count
 end
@@ -193,8 +214,10 @@ if effect_marker ~= '' then
 end
 redis.call('HSET', KEYS[1], unpack(fields))
 redis.call('PEXPIRE', KEYS[1], ttl_ms)
--- The claim is written after the mark effect it guards.
+-- The completion key and the claim are written after the mark effect
+-- they guard.
 if event_id ~= '' then
+    redis.call('SET', effect_done_key, '1', 'PX', RETRY_HORIZON_MS)
     redis.call('SET', KEYS[2], '1', 'PX', RETRY_HORIZON_MS)
 end
 return count

@@ -7,7 +7,11 @@
 //!    timing floor enforced;
 //! 2. the optional risk plane gates issuance (deny refuses with 429,
 //!    step-up carries its disposition) and books outcomes on verify;
-//! 3. the store lock never covers a hash derivation, measured;
+//! 3. the store lock never covers a hash derivation, proven directly:
+//!    a derivation blocked between the consume transition and the commit
+//!    holds no store call — a second verify completes inside the blocked
+//!    window (the wall-clock concurrency bound survives as an ignored
+//!    performance characterization);
 //! 4. one-shot: a failed candidate burns the record (no retry window);
 //! 5. the file store survives a server restart (spawn, kill, respawn);
 //! 6. a stalled client times out and the bounded pool stays healthy;
@@ -15,20 +19,24 @@
 //!    hatch, at the binary's startup;
 //! 8. remoteip is required on /issue and /verify while binding is on.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
+use kiwicaptcha::challenge::ChallengeRecord;
 use kiwicaptcha::SolutionToken;
 use kiwicaptcha_risk::event::RiskObservation;
 use kiwicaptcha_risk::signals::SignalVector;
 use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError};
+use kiwicaptcha_verifier::state::derivation_gate;
 use kiwicaptcha_verifier::{
     compose_rung, open_store, parse_rung, parse_scopes, scope_id, serve_http_with, validate_secret,
-    RiskPlane, ServerOptions, SidecarConfig, SidecarState, StoreConfig, EXAMPLE_SECRET,
-    MIN_SECRET_BYTES,
+    ConsumeOutcome, MemoryStore, RecordMeta, RecordStore, RiskPlane, ServerOptions, SidecarConfig,
+    SidecarState, StoreConfig, EXAMPLE_SECRET, MIN_SECRET_BYTES,
 };
 
 const SECRET: &str = "a-locally-generated-secret-of-48-bytes!!";
@@ -224,11 +232,22 @@ fn profiles_map_rungs_value_classes_and_enforce_the_timing_floor() {
     assert_eq!(standard["minDurationMs"], 5);
 
     // The timing floor is enforced server-side: an immediate submit of
-    // a well-formed token arrives within the 5 ms floor and answers
+    // a well-formed token arrives inside the derived floor and answers
     // too_fast (the burned record answers the duplicate vocabulary on
-    // the retry, which is the one-shot contract of finding 4).
+    // the retry, which is the one-shot contract of finding 4). The
+    // critical class re-issues here so the submit's elapsed window is
+    // the token encode alone against the 50 ms argon floor — the 5 ms
+    // low-class window is one scheduler hiccup wide on a loaded host.
+    let (status, _, wire) = post_json(
+        server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(status, 200, "{wire}");
+    let immediate: serde_json::Value = serde_json::from_str(wire.trim_end()).unwrap();
+    assert_eq!(immediate["profile"], "argon16");
     let token = SolutionToken {
-        nonce: low["nonce"].as_str().unwrap().to_string(),
+        nonce: immediate["nonce"].as_str().unwrap().to_string(),
         counter: 0,
         duration_ms: 1,
         telemetry: serde_json::json!({}),
@@ -237,7 +256,7 @@ fn profiles_map_rungs_value_classes_and_enforce_the_timing_floor() {
         rsw_proof: None,
     }
     .encode();
-    let payload = verify_body(&server, &token, "comment");
+    let payload = verify_body(&server, &token, "login");
     assert_eq!(payload["kiwi-code"], "too_fast", "{payload}");
     assert_eq!(
         payload["error-codes"],
@@ -357,9 +376,265 @@ fn risk_on_books_outcomes_for_solved_and_failed_verifies() {
 }
 
 // ------------------------------------------- finding 3: lock contention
+//
+// The store-lock invariant is proven directly, not by timing: a
+// derivation blocked after the consume transition returned and before the
+// commit runs must hold no store operation. The old wall-clock bound
+// (four concurrent Argon verifies finishing under half a 4x-serialized
+// estimate) proved nothing — memory-bandwidth contention alone can
+// resemble serialization with the store lock completely free — so it
+// survives only as an ignored performance characterization below.
+
+/// The one-shot hold channel pair of an armed consume: `entered` fires
+/// when the consume call is open, `release` unblocks the delegation.
+type ConsumeHold = (mpsc::Sender<()>, mpsc::Receiver<()>);
+
+/// The test store wrapper: every operation delegates to the real memory
+/// store while the wrapper records each call's interval and the
+/// concurrent-entry high watermark at the store seam. A consume whose
+/// nonce was armed through [`InstrumentedStore::hold_consume`] signals
+/// `entered` with its call already open and blocks the delegation until
+/// `release` fires, which makes two overlapping store calls
+/// deterministic instead of a timing race.
+struct InstrumentedStore {
+    inner: Arc<MemoryStore>,
+    holds: Mutex<HashMap<String, ConsumeHold>>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+    events: Mutex<Vec<(&'static str, Instant, Option<Instant>)>>,
+}
+
+impl InstrumentedStore {
+    fn record<T>(&self, op: &'static str, body: impl FnOnce() -> T) -> T {
+        let index = {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            let mut events = self.events.lock().expect("the store events lock");
+            events.push((op, Instant::now(), None));
+            events.len() - 1
+        };
+        let out = body();
+        self.events.lock().expect("the store events lock")[index].2 = Some(Instant::now());
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        out
+    }
+
+    fn hold_consume(&self, nonce: &str, entered: mpsc::Sender<()>, release: mpsc::Receiver<()>) {
+        self.holds
+            .lock()
+            .expect("the holds lock")
+            .insert(nonce.to_string(), (entered, release));
+    }
+}
+
+impl RecordStore for InstrumentedStore {
+    fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
+        self.record("put_pending", || self.inner.put_pending(record, meta))
+    }
+
+    fn consume(
+        &self,
+        nonce: &str,
+        now_unix: u64,
+        operation_identity: Option<&str>,
+    ) -> ConsumeOutcome {
+        self.record("consume", || {
+            let hold = self.holds.lock().expect("the holds lock").remove(nonce);
+            if let Some((entered, release)) = hold {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+            self.inner.consume(nonce, now_unix, operation_identity)
+        })
+    }
+
+    fn commit(&self, nonce: &str, record: &ChallengeRecord, valid: bool) {
+        self.record("commit", || self.inner.commit(nonce, record, valid));
+    }
+
+    fn counts(&self) -> (usize, usize) {
+        self.record("counts", || self.inner.counts())
+    }
+
+    fn describe(&self) -> String {
+        self.record("describe", || self.inner.describe())
+    }
+}
+
+/// Removes the derivation gate hook even when an assertion fails: the
+/// hook is process-global and every other verify consults it.
+struct GateGuard;
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        derivation_gate::remove();
+    }
+}
 
 #[test]
-fn concurrent_argon_verifies_do_not_serialize_behind_the_store_lock() {
+fn a_blocked_derivation_leaves_the_store_free() {
+    let store = Arc::new(InstrumentedStore {
+        inner: Arc::new(MemoryStore::new()),
+        holds: Mutex::new(HashMap::new()),
+        active: AtomicUsize::new(0),
+        max_active: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+    });
+    let mut config = config_with("login", None);
+    config.store = Arc::clone(&store) as Arc<dyn RecordStore>;
+    let server = spawn(SidecarState::build(config), ServerOptions::default());
+
+    // Three distinct tokens: (a) the derivation the test blocks, (b) the
+    // consume the store holds open, (c) the verify that must complete
+    // inside the blocked window. The default rung keeps the suite fast;
+    // the blocked window is channel-driven, not timed.
+    let tokens: Vec<String> = (0..3).map(|_| issue_and_solve(&server, "login")).collect();
+    let nonces: Vec<String> = tokens
+        .iter()
+        .map(|token| {
+            SolutionToken::decode(token)
+                .expect("the token decodes")
+                .nonce
+        })
+        .collect();
+    // Stay above the rung's server-measured timing floor.
+    std::thread::sleep(Duration::from_millis(20));
+
+    // The gate blocks nonce (a)'s derivation after the consume transition
+    // returned and before the commit runs. The hook is keyed on the
+    // nonce: every other verify in the process passes straight through.
+    let (gate_entered, gate_entered_rx) = mpsc::channel();
+    let (gate_release, gate_release_rx) = mpsc::channel::<()>();
+    let entered = Mutex::new(Some(gate_entered));
+    let release = Mutex::new(Some(gate_release_rx));
+    let blocked = nonces[0].clone();
+    derivation_gate::install(move |nonce| {
+        if nonce != blocked {
+            return;
+        }
+        let Some(sender) = entered.lock().expect("the gate entered lock").take() else {
+            return;
+        };
+        let _ = sender.send(());
+        if let Some(receiver) = release.lock().expect("the gate release lock").take() {
+            let _ = receiver.recv();
+        }
+    });
+    let _gate = GateGuard;
+
+    // The store wrapper arms a hold on nonce (b)'s consume call.
+    let (hold_entered, hold_entered_rx) = mpsc::channel();
+    let (hold_release, hold_release_rx) = mpsc::channel::<()>();
+    store.hold_consume(&nonces[1], hold_entered, hold_release_rx);
+
+    fn verify_request(token: &str) -> String {
+        format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}")
+    }
+    let addr = server.addr;
+
+    // (a) wins the consume, then blocks at the gate. The window start
+    // precedes the spawn, so every store call of the blocked verify
+    // itself begins inside the window and can never span it.
+    let window_start = Instant::now();
+    let blocked_thread = {
+        let token = tokens[0].clone();
+        std::thread::spawn(move || post_json(addr, "/verify", &verify_request(&token)))
+    };
+    gate_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the blocked derivation enters the gate");
+
+    // (b)'s consume call is held open inside the store seam.
+    let held_thread = {
+        let token = tokens[1].clone();
+        std::thread::spawn(move || post_json(addr, "/verify", &verify_request(&token)))
+    };
+    hold_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the held consume is entered");
+
+    // (c) completes a FULL verify — consume, derive, commit — while (a)
+    // sits blocked between its consume and its commit. If the store were
+    // held across the derivation, this could never answer.
+    let payload = verify_body(&server, &tokens[2], "login");
+    assert_eq!(payload["kiwi-code"], "ok", "{payload}");
+
+    // Release the held consume, then the blocked derivation.
+    let _ = hold_release.send(());
+    let (_, _, body) = held_thread.join().expect("the held verify joins");
+    let held: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(held["kiwi-code"], "ok", "{body}");
+    let window_end = Instant::now();
+    let _ = gate_release.send(());
+    let (_, _, body) = blocked_thread.join().expect("the blocked verify joins");
+    let unblocked: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(unblocked["kiwi-code"], "ok", "{body}");
+
+    // Two store calls were open at once, and no store call spans the
+    // blocked window: a derivation blocked between the consume and the
+    // commit holds nothing.
+    assert!(
+        store.max_active.load(Ordering::SeqCst) >= 2,
+        "the store must admit overlapping calls"
+    );
+    for (op, start, end) in store.events.lock().expect("the store events lock").iter() {
+        let Some(end) = end else { continue };
+        assert!(
+            !(*start <= window_start && window_end <= *end),
+            "the {op} call ({start:?}..{end:?}) spans the blocked window"
+        );
+    }
+
+    // The one-shot semantics survive the blocked window: (a) is consumed
+    // exactly once, and its replay answers from the retained state.
+    let payload = verify_body(&server, &tokens[0], "login");
+    assert_eq!(payload["kiwi-code"], "already_consumed", "{payload}");
+}
+
+#[test]
+fn the_same_token_race_answers_one_winner_from_the_retained_state() {
+    let server = spawn(
+        SidecarState::build(config_with("login", None)),
+        ServerOptions::default(),
+    );
+    let token = issue_and_solve(&server, "login");
+    let barrier = Arc::new(Barrier::new(4));
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let barrier = Arc::clone(&barrier);
+            let token = token.clone();
+            let addr = server.addr;
+            std::thread::spawn(move || {
+                barrier.wait();
+                post_json(
+                    addr,
+                    "/verify",
+                    &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+                )
+            })
+        })
+        .collect();
+    let mut ok = 0;
+    let mut duplicate = 0;
+    for handle in handles {
+        let (_, _, body) = handle.join().expect("the race thread joins");
+        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+        match payload["kiwi-code"].as_str() {
+            Some("ok") => ok += 1,
+            Some("already_consumed") => duplicate += 1,
+            other => panic!("unexpected race outcome {other:?}: {body}"),
+        }
+    }
+    assert_eq!(ok, 1, "exactly one winner");
+    assert_eq!(duplicate, 3, "the losers never re-derive");
+}
+
+#[test]
+#[ignore = "performance characterization, not a correctness gate: concurrent Argon derivations \
+            contend for memory bandwidth, so a wall-clock estimate below the 4x-serialized sum \
+            can resemble lock serialization with the store lock completely free; the store-lock \
+            invariant is proven directly by a_blocked_derivation_leaves_the_store_free"]
+fn concurrent_argon_verifies_wall_clock_characterization() {
     let server = spawn(
         SidecarState::build(config_with("login=argon16", None)),
         ServerOptions::default(),
@@ -373,8 +648,8 @@ fn concurrent_argon_verifies_do_not_serialize_behind_the_store_lock() {
 
     // Four simultaneous verifications of four distinct tokens: each
     // derives (the store lock covers only the transition and the
-    // commit), so the wall time must land well under the serialized
-    // sum 4 x S.
+    // commit), so the wall time lands well under the serialized sum
+    // 4 x S on an unloaded multi-core host.
     let tokens: Vec<String> = (0..4).map(|_| issue_and_solve(&server, "login")).collect();
     let barrier = Arc::new(Barrier::new(4));
     let total_start = Instant::now();
@@ -406,48 +681,15 @@ fn concurrent_argon_verifies_do_not_serialize_behind_the_store_lock() {
     let concurrent_total = total_start.elapsed();
     assert_eq!(oks, 4);
 
-    // The serialized sum would be 4 x single; the concurrent wall time
-    // must beat even HALF of it (a 2x speedup at least, on any
-    // multi-core host, since the four derivations never share a lock).
+    // The characterization: the concurrent wall time against the
+    // serialized sum 4 x single. Bounded work (argon16), informative
+    // only — never a merge gate.
     let serialized = single * 4;
     assert!(
         concurrent_total < serialized / 2,
         "concurrent {concurrent_total:?} must beat half the serialized sum {:?} (single {single:?})",
         serialized / 2
     );
-
-    // The same-token race: exactly one caller wins the one-shot
-    // consume and derives; the losers answer from the retained state.
-    let token = issue_and_solve(&server, "login");
-    let barrier = Arc::new(Barrier::new(4));
-    let handles: Vec<_> = (0..4)
-        .map(|_| {
-            let barrier = Arc::clone(&barrier);
-            let token = token.clone();
-            let addr = server.addr;
-            std::thread::spawn(move || {
-                barrier.wait();
-                post_json(
-                    addr,
-                    "/verify",
-                    &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
-                )
-            })
-        })
-        .collect();
-    let mut ok = 0;
-    let mut duplicate = 0;
-    for handle in handles {
-        let (_, _, body) = handle.join().expect("the race thread joins");
-        let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
-        match payload["kiwi-code"].as_str() {
-            Some("ok") => ok += 1,
-            Some("already_consumed") => duplicate += 1,
-            other => panic!("unexpected race outcome {other:?}: {body}"),
-        }
-    }
-    assert_eq!(ok, 1, "exactly one winner");
-    assert_eq!(duplicate, 3, "the losers never re-derive");
 }
 
 // ---------------------------------------------- finding 4: one-shot burn

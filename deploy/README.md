@@ -156,7 +156,14 @@ Optional:
 
 - `KIWI_EXECUTION_KEY` — at least 32 bytes when set. When set, every
   issued challenge arms the browser-execution dimension (the core
-  `execution_key` of the bundle); unset stays execution-unarmed.
+  `execution_key` of the bundle); unset stays execution-unarmed. One
+  exception: a client that advertises the `Kiwi-Execution-Max-Version`
+  request header with the explicit value `0` declares it cannot execute
+  the execution dimension at all, and its challenge stays
+  execution-unarmed even with the key configured (the same zero
+  interpretation the Symfony bundle controller and the PHP core
+  `ExecutionVersionPolicy::clientCapability()` apply; every other
+  header value, including absence, keeps the behavior above).
 - `KIWI_RSW_MODULUS_N` / `KIWI_RSW_LAMBDA` — the rsw time-lock
   trapdoor pair. Both must be configured together; setting exactly one
   refuses startup with

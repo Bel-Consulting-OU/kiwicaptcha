@@ -10,6 +10,9 @@ solve, pack the wire token; your backend runs siteverify.
 
 - `KiwiSolver` / `KiwiToken` / `KiwiBase64` / `KiwiChallenge` — the
   solver core, dependency-free pure Kotlin.
+- `KiwiLifecycle` — the pure Interactive-Client Lifecycle v1 delivery
+  gate (`deliveryDecision`), pinned by the shared vectors in
+  `protocol/interactive-client-v1/lifecycle-vectors.json`.
 - `Argon2id` / `Blake2b` (`src/main/java`) — the vetted pure-Java
   Argon2id stack, a byte-identical port of the JVM SDK's sources
   (RFC 9106-pinned; the Java sources compile into the Kotlin module).
@@ -78,6 +81,65 @@ memory cost; run the solve off the main thread (the widget already
 does). Execution-armed challenges are refused outright — the browser
 interpreter is outside the native path.
 
+## Interactive-Client Lifecycle v1
+
+The widget implements the shared lifecycle contract
+(protocol/interactive-client-v1). The rules:
+
+- `receivedAtMs` is captured immediately after the challenge JSON
+  parses; the expiry clock starts there, never after solving.
+- `expiresAtMs = receivedAtMs + ttlSecs*1000 - 1000` (a fixed 1 s
+  safety margin); `minSubmitAtMs = receivedAtMs + minDurationMs`
+  (`0` when absent). A `ttlSecs == 0` challenge has no expiry.
+- The expiry timer arms at parse time and races the solve. A solve
+  that loses the race is stopped cooperatively, the token is never
+  delivered, `onVerify` is suppressed, and the widget surfaces the
+  typed expired state. At every checkpoint and immediately before
+  `onVerify`: `now >= expiresAtMs` invalidates the generation.
+- Delivery gating: a solve finishing before `minSubmitAtMs` is held
+  (cancellably) until the floor; `minSubmitAtMs >= expiresAtMs`
+  is treated as expired.
+- Only the newest generation may emit; results from superseded
+  generations are discarded.
+- `KiwiLifecycle.deliveryDecision(receivedAtMs, ttlSecs,
+  minDurationMs, solveFinishedAtMs, nowMs)` is the pure decision
+  helper every client shares, with reasons `deliver | defer |
+  expired` (plus `cancelled` when the caller passes the flag). The
+  JVM tests run every scenario from
+  `protocol/interactive-client-v1/lifecycle-vectors.json` against it.
+
+### Cancellation
+
+`KiwiSolver.solve(challenge, isCancelled = { ... })` accepts a cheap,
+non-blocking probe. It is checked on entry — a cancelled generation
+spends no work at all — and then at a bounded cadence; when it fires,
+the typed `KiwiSolveError.Cancelled` is raised and no further CPU work
+is scheduled:
+
+| Workload | Checkpoint cadence            | Stale-work ceiling      |
+|----------|-------------------------------|-------------------------|
+| sha256   | every 2048 candidates         | 2048 hashes             |
+| argon2id | between candidate derivations | one derivation          |
+| rsw      | every 256 modular squarings   | 256 squarings           |
+
+The view's probe is generation-based: it fires when the job is
+cancelled, a newer generation started, or the parse-time deadline has
+passed. The probe is optional (`null` default), so existing call
+sites keep compiling unchanged.
+
+### Execution capability header
+
+`KiwiClient.fetchChallenge` sends `Kiwi-Execution-Max-Version: 0` on
+the challenge POST. Native clients cannot execute the execution
+dimension, and a *missing* header would read as the v1 compatibility
+floor rather than "cannot execute" — so the declaration is explicit.
+
+Widget notes: the status color comes from the theme's
+`android.R.attr.textColorPrimary` (dark-quirk-safe fallback), text
+sizes are in sp, state changes are announced through
+contentDescription/stateDescription for TalkBack, and Retry stays an
+independently focusable control.
+
 ## Tests
 
 `src/test` holds the JVM unit tests: the BLAKE2b/Argon2id shared
@@ -87,7 +149,12 @@ pack, the exhaustion branch, the caps refusals, and a solve at the
 64 MiB memory ceiling), the SHA-256 vectors, the known search counter
 for a fixed challenge, the token grammar bytes, the rsw external
 vector, the validation refusals, the JSON reader, the siteverify body,
-and the base64 round trip.
+the base64 round trip, the Interactive-Client Lifecycle v1 delivery
+gate against every shared vector (`KiwiLifecycleTest`), the solver
+cancellation checkpoints (`KiwiSolverTest`), the expiry suppression
+seam (`KiwiExpirySuppressionTest`), and the challenge POST shape
+including the `Kiwi-Execution-Max-Version` capability header
+(`KiwiClientTest`).
 
 Run them with the pinned wrapper (AGP 8.13 needs Gradle up to 9.5):
 

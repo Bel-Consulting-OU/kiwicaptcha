@@ -26,6 +26,58 @@ namespace KiwiCaptcha;
 final class ExecutionVersionPolicy
 {
     /**
+     * The explicit capability zero of the `Kiwi-Execution-Max-Version`
+     * request header: the client cannot execute the execution dimension
+     * at all. A different statement from the v1 compatibility floor.
+     * The floor says "I only know version 1" and the dimension may
+     * still arm at version 1; the explicit zero says the dimension must
+     * never arm for that request.
+     */
+    public const CAPABILITY_NONE = 0;
+
+    /**
+     * The single interpretation of a raw `Kiwi-Execution-Max-Version`
+     * header value. Every issuance surface shares it (the Symfony
+     * bundle controller, the PHP core callers and the reference
+     * deployment), so they can never diverge on what a client
+     * advertises.
+     *
+     * An absent, empty, whitespace-only or garbage value reads as the
+     * v1 compatibility floor: an older driver, a stale open page, or
+     * any client that never advertises. The dimension may still arm at
+     * version 1.
+     *
+     * The exact zero (`0` after trim) reads as
+     * {@see self::CAPABILITY_NONE}. The client cannot execute the
+     * dimension at all, so the caller must never arm it, regardless of
+     * the deployment's configured maximum.
+     *
+     * A canonical decimal advertisement reads as that capability,
+     * clamped to 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION},
+     * the grammar the binary can actually mint.
+     *
+     * A malformed value is a capability claim, never a gate: it
+     * degrades, never refuses.
+     *
+     * @return int {@see self::CAPABILITY_NONE} or the clamped
+     *             advertisement 1..MAX_EXECUTION_VERSION
+     */
+    public static function clientCapability(?string $raw): int
+    {
+        if ($raw === null) {
+            return 1;
+        }
+        if (trim($raw) === '0') {
+            return self::CAPABILITY_NONE;
+        }
+        if (preg_match('/^(?:0|[1-9][0-9]*)$/D', $raw) !== 1) {
+            return 1;
+        }
+
+        return max(1, min((int) $raw, ExecutionChallengeGenerator::MAX_EXECUTION_VERSION));
+    }
+
+    /**
      * @param int      $nodeCap    the node's execution_version cap
      * @param int|null $fleetFloor the confirmed central
      *                             min_execution_version fleet floor,

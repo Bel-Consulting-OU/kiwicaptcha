@@ -609,7 +609,15 @@ lands on the highest N whose client, cap and floor all reach it, with
    request, carried by the `Kiwi-Execution-Max-Version` request
    header. The current widget driver sends the header when the
    deployment configured the execution tier; an older driver never
-   advertises and the server treats absence as version 1.
+   advertises and the server treats absence as version 1. The one
+   exception is the explicit zero: a client that advertises `0`
+   declares it cannot execute the execution dimension at all, so the
+   dimension is never armed for that request. The same zero
+   interpretation applies in the PHP core's
+   `ExecutionVersionPolicy::clientCapability()` and the reference
+   deployment. On an issuance that would have been armed, the
+   deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED` refusal
+   answers instead of an unsolvable challenge.
 2. the node's `kiwi_captcha.execution_version` cap is raised to N
    (default 1). The cap is the writer switch: no node emits the newer
    grammars until the operator declares it ready.

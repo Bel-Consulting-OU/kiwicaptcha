@@ -162,6 +162,21 @@ final class MethodOverrideFramingTest extends TestCase
         self::assertSame('DUPLICATE_HEADER', $this->errorCode($cancel));
     }
 
+    public function testQueryMethodOverrideIsRefusedBeforeRouting(): void
+    {
+        // A query-string _method is honored by Request::getMethod() the
+        // moment anything asks, so the canonical query-framing refusal —
+        // not the framework's 405 — has to answer first.
+        // POST parameters land in the request bag; the override the
+        // framework honors lives in the query string itself.
+        $request = $this->challengeRequest(path: '/kiwi-captcha/challenge?_method=DELETE');
+        self::assertNotNull($this->dispatch($this->subscriber(), $request), 'the subscriber must answer a query override');
+        $response = $this->dispatch($this->subscriber(), $request);
+        self::assertSame(400, $response->getStatusCode());
+        self::assertSame('METHOD_OVERRIDE_IN_QUERY', $this->errorCode($response));
+        self::assertStringContainsString('query string', json_decode((string) $response->getContent(), true)['error']['message']);
+    }
+
     public function testSingleOverrideKeepsTheFrameworkBehaviour(): void
     {
         $request = $this->challengeRequest('DELETE');

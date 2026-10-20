@@ -2,9 +2,9 @@
 library kiwicaptcha;
 
 export 'src/challenge.dart';
+export 'src/lifecycle.dart';
 export 'src/solver.dart';
-export 'src/token.dart'
-    show encodeKiwiToken, kiwiBase64Encode, validateKiwiChallenge;
+export 'src/token.dart' show encodeKiwiToken, kiwiBase64Encode;
 export 'src/widget.dart'
     show
         KiwiCaptcha,

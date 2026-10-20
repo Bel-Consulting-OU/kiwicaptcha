@@ -376,8 +376,13 @@ impl SidecarState {
         if let Err(e) = self.store.put_pending(&issued.record, meta) {
             return self.error_response(500, "store_write_failed", &e);
         }
-        // The provider challenge wire (the camelCase key set the native
-        // solver parses), plus the additive profile and risk fields.
+        // The provider challenge wire (the camelCase PoW key set the
+        // native solver parses), plus the additive profile and risk
+        // fields. The optional security fields ride the canonical
+        // snake_case spelling the stored-record schema owns: the native
+        // clients parse `execution_program` (and `rsw_modulus` below),
+        // so the challenge response carries the canonical names, never
+        // a sidecar-private camelCase dialect.
         let c = &issued.challenge;
         let mut wire = serde_json::json!({
             "nonce": c.nonce,
@@ -394,8 +399,8 @@ impl SidecarState {
             "profile": effective_rung.as_str(),
         });
         if let Some(program) = &c.execution_program {
-            wire["executionProgram"] = serde_json::Value::String(program.clone());
-            wire["executionVersion"] = serde_json::Value::from(self.execution_version);
+            wire["execution_program"] = serde_json::Value::String(program.clone());
+            wire["execution_version"] = serde_json::Value::from(self.execution_version);
         }
         // The rsw public modulus rides the client-facing response (the
         // solver squares modulo n); lambda never leaves the server. The
@@ -499,6 +504,12 @@ impl SidecarState {
                 return self.provider_response(&["internal-error"], Some("storage_unavailable"));
             }
         };
+        // The test-only derivation gate (never installed in production):
+        // a derivation blocked here sits after the consume transition
+        // above has returned and before the commit below runs, holding
+        // nothing — which is exactly the invariant the integration tests
+        // prove through this seam.
+        derivation_gate::consult(&decoded.nonce);
         // 2. Derive: no lock held. The scope's rung supplies the timing
         // floor even for a foreign injected record; the record's own
         // floor rides on top (the verifier takes the max).
@@ -774,9 +785,51 @@ pub fn default_profile() -> ChallengeProfile {
         .profile()
 }
 
-/// The provider challenge wire (the camelCase key set the native solver
-/// parses) of a minted challenge, spelled exactly as the `/issue`
-/// endpoint emits it. The integration tests drive the same renderer.
+/// The test-only derivation gate: a process-wide hook consulted on the
+/// verify path between the consume transition and the derivation. The
+/// integration tests install a closure that blocks one chosen nonce (a
+/// channel receive) to hold a verification mid-flight while another
+/// completes, which proves directly that the store is never held across
+/// a hash derivation — the wall-clock concurrency estimate this replaced
+/// could not tell lock serialization from memory-bandwidth contention.
+/// Production installs nothing: the consult is one mutex-guarded option
+/// check per verify.
+#[doc(hidden)]
+pub mod derivation_gate {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    type Hook = Arc<dyn Fn(&str) + Send + Sync>;
+
+    fn slot() -> &'static Mutex<Option<Hook>> {
+        static SLOT: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Install the hook (replacing any previous one).
+    pub fn install(hook: impl Fn(&str) + Send + Sync + 'static) {
+        *slot().lock().expect("the derivation gate lock") = Some(Arc::new(hook));
+    }
+
+    /// Remove the hook.
+    pub fn remove() {
+        *slot().lock().expect("the derivation gate lock") = None;
+    }
+
+    /// Consulted by the verify path. The hook clone runs with no lock
+    /// held: it may block arbitrarily long.
+    pub fn consult(nonce: &str) {
+        let hook = slot().lock().expect("the derivation gate lock").clone();
+        if let Some(hook) = hook {
+            hook(nonce);
+        }
+    }
+}
+
+/// The provider challenge wire (the camelCase PoW key set the native
+/// solver parses, with the optional security fields on the canonical
+/// snake_case spellings) of a minted challenge, spelled exactly as the
+/// `/issue` endpoint emits it. The integration tests drive the same
+/// renderer.
 pub fn issue_wire_of(issued: &kiwicaptcha::challenge::Issued) -> String {
     let c = &issued.challenge;
     let mut wire = serde_json::json!({

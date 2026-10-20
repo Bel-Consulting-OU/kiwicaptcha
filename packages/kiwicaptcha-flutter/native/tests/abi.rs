@@ -35,6 +35,24 @@ type SolveRsw =
     unsafe extern "C" fn(*const u8, u32, *const u8, u32, *const u8, u32, u64, *mut u8) -> i32;
 type SolveArgon2id =
     unsafe extern "C" fn(*const u8, u32, *const u8, u32, u32, u32, u32, u32, *mut u64) -> i32;
+type SolveSha256Range =
+    unsafe extern "C" fn(*const u8, u32, *const u8, u32, u32, u64, u64, *mut u64) -> i32;
+type SolveArgon2idRange = unsafe extern "C" fn(
+    *const u8,
+    u32,
+    *const u8,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u64,
+    u64,
+    *mut u64,
+) -> i32;
+type RswBegin =
+    unsafe extern "C" fn(*const u8, u32, *const u8, u32, *const u8, u32, *mut u8) -> i32;
+type RswSquare = unsafe extern "C" fn(*const u8, u32, *mut u8, u32) -> i32;
 
 const KIWI_OK: i32 = 0;
 const KIWI_ERR_MALFORMED: i32 = 1;
@@ -49,6 +67,10 @@ struct Abi {
     solve_sha256: SolveSha256,
     solve_rsw: SolveRsw,
     solve_argon2id: SolveArgon2id,
+    solve_sha256_range: SolveSha256Range,
+    solve_argon2id_range: SolveArgon2idRange,
+    rsw_begin: RswBegin,
+    rsw_square: RswSquare,
 }
 
 impl Abi {
@@ -70,11 +92,35 @@ impl Abi {
                 lib.get(b"kiwi_solve_argon2id\0").expect("argon2id export");
             *sym
         };
+        let solve_sha256_range = unsafe {
+            let sym: Symbol<SolveSha256Range> = lib
+                .get(b"kiwi_solve_sha256_range\0")
+                .expect("sha256 range export");
+            *sym
+        };
+        let solve_argon2id_range = unsafe {
+            let sym: Symbol<SolveArgon2idRange> = lib
+                .get(b"kiwi_solve_argon2id_range\0")
+                .expect("argon2id range export");
+            *sym
+        };
+        let rsw_begin = unsafe {
+            let sym: Symbol<RswBegin> = lib.get(b"kiwi_rsw_begin\0").expect("rsw begin export");
+            *sym
+        };
+        let rsw_square = unsafe {
+            let sym: Symbol<RswSquare> = lib.get(b"kiwi_rsw_square\0").expect("rsw square export");
+            *sym
+        };
         Abi {
             _lib: lib,
             solve_sha256,
             solve_rsw,
             solve_argon2id,
+            solve_sha256_range,
+            solve_argon2id_range,
+            rsw_begin,
+            rsw_square,
         }
     }
 
@@ -142,6 +188,100 @@ impl Abi {
             )
         };
         (code, out_counter)
+    }
+
+    /// The exact call the Dart cancellation loop performs per 2048-
+    /// candidate sha256 batch.
+    fn sha256_range(
+        &self,
+        prefix: &[u8],
+        salt: &[u8],
+        target_bits: u32,
+        start_counter: u64,
+        max_hashes: u64,
+    ) -> (i32, u64) {
+        let mut out_counter = 0u64;
+        // SAFETY: valid buffers and lengths, as the Dart caller builds them.
+        let code = unsafe {
+            (self.solve_sha256_range)(
+                prefix.as_ptr(),
+                prefix.len() as u32,
+                salt.as_ptr(),
+                salt.len() as u32,
+                target_bits,
+                start_counter,
+                max_hashes,
+                &mut out_counter,
+            )
+        };
+        (code, out_counter)
+    }
+
+    /// The exact call the Dart cancellation loop performs per argon2id
+    /// derivation batch.
+    #[allow(clippy::too_many_arguments)]
+    fn argon2id_range(
+        &self,
+        prefix: &[u8],
+        salt: &[u8],
+        m_kib: u32,
+        t: u32,
+        p: u32,
+        target_bits: u32,
+        start_counter: u64,
+        max_hashes: u64,
+    ) -> (i32, u64) {
+        let mut out_counter = 0u64;
+        // SAFETY: valid buffers and lengths, as the Dart caller builds them.
+        let code = unsafe {
+            (self.solve_argon2id_range)(
+                prefix.as_ptr(),
+                prefix.len() as u32,
+                salt.as_ptr(),
+                salt.len() as u32,
+                m_kib,
+                t,
+                p,
+                target_bits,
+                start_counter,
+                max_hashes,
+                &mut out_counter,
+            )
+        };
+        (code, out_counter)
+    }
+
+    /// The exact call the Dart cancellation loop performs to start an
+    /// rsw solve: derive the squaring base into a 256-byte buffer.
+    fn rsw_begin(&self, modulus: &[u8], prefix: &[u8], nonce: &[u8]) -> (i32, Vec<u8>) {
+        let mut out_value = vec![0u8; 256];
+        // SAFETY: valid buffers and lengths, as the Dart caller builds them.
+        let code = unsafe {
+            (self.rsw_begin)(
+                modulus.as_ptr(),
+                modulus.len() as u32,
+                prefix.as_ptr(),
+                prefix.len() as u32,
+                nonce.as_ptr(),
+                nonce.len() as u32,
+                out_value.as_mut_ptr(),
+            )
+        };
+        (code, out_value)
+    }
+
+    /// The exact call the Dart cancellation loop performs per 256-
+    /// squaring rsw batch: square in place.
+    fn rsw_square(&self, modulus: &[u8], value: &mut [u8], squarings: u32) -> i32 {
+        // SAFETY: valid buffers and lengths, as the Dart caller builds them.
+        unsafe {
+            (self.rsw_square)(
+                modulus.as_ptr(),
+                modulus.len() as u32,
+                value.as_mut_ptr(),
+                squarings,
+            )
+        }
     }
 }
 
@@ -377,6 +517,123 @@ fn rsw_golden_vector_solves_through_the_abi_and_verifies() {
         ),
         VerifyOutcome::Valid { .. }
     ));
+}
+
+// ── the batched entry points, through the ABI ─────────────────────────
+
+#[test]
+fn sha256_range_windows_reach_the_golden_counter_through_the_abi() {
+    let golden = golden();
+    let entry = golden_record(&golden, "sha_plain");
+    let record_json = &entry["record"];
+    let prefix = record_json["prefix"].as_str().unwrap();
+    let salt = B64.decode(record_json["salt"].as_str().unwrap()).unwrap();
+    let target_bits = record_json["target_bits"].as_u64().unwrap() as u32;
+    let expected_counter = token_parts(entry["token_b64"].as_str().unwrap())[1]
+        .parse::<u64>()
+        .unwrap();
+
+    let abi = Abi::load();
+    // The window below the winner exhausts; the one-counter window at
+    // the winner finds it — the exact shape the Dart cancellation
+    // batches issue.
+    if expected_counter > 0 {
+        let (code, _) =
+            abi.sha256_range(prefix.as_bytes(), &salt, target_bits, 0, expected_counter);
+        assert_eq!(code, KIWI_ERR_EXHAUSTED);
+    }
+    let (code, counter) =
+        abi.sha256_range(prefix.as_bytes(), &salt, target_bits, expected_counter, 1);
+    assert_eq!(code, KIWI_OK);
+    assert_eq!(counter, expected_counter);
+    // The Dart cadence's 2048-counter batch spanning the winner finds
+    // the same first hit (no counter below the winner qualifies).
+    let batch_start = expected_counter / 2048 * 2048;
+    let (code, counter) =
+        abi.sha256_range(prefix.as_bytes(), &salt, target_bits, batch_start, 2048);
+    assert_eq!(code, KIWI_OK);
+    assert_eq!(counter, expected_counter);
+}
+
+#[test]
+fn rsw_begin_and_square_batches_reproduce_the_golden_proof_through_the_abi() {
+    let golden = golden();
+    let entry = golden_record(&golden, "rsw");
+    let record_json = &entry["record"];
+    let prefix = record_json["prefix"].as_str().unwrap();
+    let nonce = record_json["nonce"].as_str().unwrap();
+    let t = record_json["t"].as_u64().unwrap();
+    let modulus = B64
+        .decode(entry["verify_opts"]["rsw"]["modulus_n"].as_str().unwrap())
+        .unwrap();
+    let parts = token_parts(entry["token_b64"].as_str().unwrap());
+    let expected_proof = parts
+        .last()
+        .expect("the golden rsw token carries the 512-hex proof");
+
+    let abi = Abi::load();
+    let (code, mut value) = abi.rsw_begin(&modulus, prefix.as_bytes(), nonce.as_bytes());
+    assert_eq!(code, KIWI_OK, "the rsw base derives through the ABI");
+    // The Dart loop's shape: 256-squaring batches until t is spent.
+    let mut remaining = t;
+    while remaining > 0 {
+        let step = remaining.min(256) as u32;
+        assert_eq!(
+            abi.rsw_square(&modulus, &mut value, step),
+            KIWI_OK,
+            "the squaring batch advances through the ABI"
+        );
+        remaining -= step as u64;
+    }
+    let proof_hex: String = value.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        proof_hex, *expected_proof,
+        "batched squarings land on the golden proof"
+    );
+}
+
+#[test]
+#[cfg(feature = "argon")]
+fn argon2id_range_windows_reach_the_golden_counter_through_the_abi() {
+    let golden = golden();
+    let entry = golden_record(&golden, "argon2id");
+    let record_json = &entry["record"];
+    let prefix = record_json["prefix"].as_str().unwrap();
+    let salt = B64.decode(record_json["salt"].as_str().unwrap()).unwrap();
+    let m_kib = record_json["m_kib"].as_u64().unwrap() as u32;
+    let t = record_json["t"].as_u64().unwrap() as u32;
+    let p = record_json["p"].as_u64().unwrap() as u32;
+    let target_bits = record_json["target_bits"].as_u64().unwrap() as u32;
+    let expected_counter = token_parts(entry["token_b64"].as_str().unwrap())[1]
+        .parse::<u64>()
+        .unwrap();
+
+    let abi = Abi::load();
+    if expected_counter > 0 {
+        let (code, _) = abi.argon2id_range(
+            prefix.as_bytes(),
+            &salt,
+            m_kib,
+            t,
+            p,
+            target_bits,
+            0,
+            expected_counter,
+        );
+        assert_eq!(code, KIWI_ERR_EXHAUSTED);
+    }
+    let (code, counter) = abi.argon2id_range(
+        prefix.as_bytes(),
+        &salt,
+        m_kib,
+        t,
+        p,
+        target_bits,
+        expected_counter,
+        1,
+    );
+    assert_eq!(code, KIWI_OK);
+    assert_eq!(counter, expected_counter);
 }
 
 // ── the refusal codes, through the ABI ────────────────────────────────

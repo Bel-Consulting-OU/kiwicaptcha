@@ -16,7 +16,8 @@ use std::time::Duration;
 use kiwicaptcha::challenge::{issue_challenge, now_epoch_micros, BindingMode, ChallengeConfig};
 use kiwicaptcha::{Issued, PoWAlgorithm};
 use kiwicaptcha_verifier::{
-    parse_listen, serve_http_with, ServerOptions, SidecarConfig, SidecarState,
+    parse_listen, parse_rung, parse_scopes, serve_http_with, ServerOptions, SidecarConfig,
+    SidecarState,
 };
 
 const SECRET: &str = "a-locally-generated-secret-of-48-bytes!!";
@@ -284,6 +285,226 @@ fn issue_endpoint_mints_and_redeems() {
     );
     assert_eq!(bad_status, 400);
     assert!(bad.contains("scope_not_allowed"), "{bad}");
+}
+
+#[test]
+fn armed_issue_wire_carries_the_canonical_snake_case_execution_fields() {
+    // The challenge response is the canonical client wire: the optional
+    // security fields ride the stored-record schema's snake_case
+    // spellings (`execution_program`, `execution_version`), exactly the
+    // names the native solver and the platform clients parse — never a
+    // sidecar-private camelCase dialect (an execution-armed challenge
+    // under camelCase keys parsed as an unarmed one). The protocol
+    // fixture protocol/solution-token-v1/challenge-response-fixtures.json
+    // pins the same shapes.
+    let mut config = SidecarConfig::minimal(
+        SECRET.to_string(),
+        vec!["login".to_string()],
+        "http://127.0.0.1:0",
+    );
+    config.execution_key = Some(SECRET.to_string());
+    config.execution_version = 2;
+    let server = spawn(SidecarState::build(config));
+    let (status, wire) = post_json(
+        server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(status, 200, "{wire}");
+    let payload: serde_json::Value = serde_json::from_str(wire.trim_end()).expect("json body");
+    let program = payload["execution_program"]
+        .as_str()
+        .expect("the armed challenge response carries execution_program");
+    assert!(!program.is_empty(), "the program is the base64 blob");
+    assert_eq!(
+        payload["execution_version"], 2,
+        "the armed grammar version rides the canonical field"
+    );
+    // The camelCase dialect is gone, not additive: an old emitter's keys
+    // must never reappear beside the canonical ones.
+    assert!(payload.get("executionProgram").is_none());
+    assert!(payload.get("executionVersion").is_none());
+
+    // The unarmed issuance of the same endpoint carries neither
+    // spelling: the key is absent, exactly the pre-execution wire.
+    let plain = SidecarState::new(
+        SECRET.to_string(),
+        None,
+        vec!["login".to_string()],
+        "http://127.0.0.1:0",
+    );
+    let plain_server = spawn(plain);
+    let (plain_status, plain_wire) = post_json(
+        plain_server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(plain_status, 200, "{plain_wire}");
+    let plain_payload: serde_json::Value =
+        serde_json::from_str(plain_wire.trim_end()).expect("json body");
+    assert!(plain_payload.get("execution_program").is_none());
+    assert!(plain_payload.get("execution_version").is_none());
+}
+
+/// The structural shape of one challenge-response body: every key with
+/// its JSON type name. The wire's random values (nonce, salt, program,
+/// signed challenge) differ per mint, so the fixture pins the contract
+/// the values cannot: the exact key set and the exact value types.
+fn wire_shape(body: &serde_json::Value) -> std::collections::BTreeMap<String, &'static str> {
+    body.as_object()
+        .expect("a challenge-response body is a JSON object")
+        .iter()
+        .map(|(key, value)| {
+            let kind = match value {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                serde_json::Value::Number(_) => "decimal",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+                serde_json::Value::Null => "null",
+            };
+            (key.clone(), kind)
+        })
+        .collect()
+}
+
+#[test]
+fn challenge_response_wire_matches_the_golden_fixtures() {
+    // The four shapes the /issue endpoint emits, pinned against the
+    // protocol fixture: the sidecar's serializer is asserted to produce
+    // exactly the fixture's key set with exactly the fixture's value
+    // types for every shape, so a rename (camelCase or otherwise) or a
+    // type drift fails here before any client ever sees it. The plain
+    // sidecar serves the sha256, argon2id and rsw rows; the armed
+    // sidecar serves the execution row.
+    let fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/solution-token-v1/challenge-response-fixtures.json"
+        ))
+        .expect("the challenge-response fixture is readable"),
+    )
+    .expect("the challenge-response fixture is JSON");
+    let shapes = fixture["shapes"]
+        .as_array()
+        .expect("the fixture carries the shapes array");
+    assert_eq!(
+        shapes.len(),
+        4,
+        "one body per shape: plain sha256, plain argon2id, plain rsw, execution-armed"
+    );
+    for row in shapes {
+        // The canonical security fields are snake_case everywhere, and
+        // the camelCase dialect appears in no shape.
+        assert!(
+            row.get("executionProgram").is_none(),
+            "the camelCase dialect is fixture-banned"
+        );
+        assert!(
+            row.get("executionVersion").is_none(),
+            "the camelCase dialect is fixture-banned"
+        );
+        if row.get("execution_program").is_some() {
+            assert!(
+                row.get("execution_version").is_some(),
+                "an armed body carries both canonical execution fields"
+            );
+        }
+    }
+
+    let default_rung = parse_rung("sha18").expect("the default rung parses");
+    let mut plain_config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+    plain_config.plan = parse_scopes(Some("login=sha16,argon=argon16,rswscope=rsw"), default_rung)
+        .expect("the plan parses");
+    let rsw_fixture: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../protocol/rsw-identity-v1/fixtures.json"
+        ))
+        .expect("the rsw fixture is readable"),
+    )
+    .expect("the rsw fixture is JSON");
+    plain_config.rsw = Some(kiwicaptcha_verifier::config::RswTrapdoorConfig {
+        modulus_n: rsw_fixture["modulus_n_b64"]
+            .as_str()
+            .expect("modulus")
+            .to_string(),
+        lambda: rsw_fixture["lambda_b64"]
+            .as_str()
+            .expect("lambda")
+            .to_string(),
+        t: kiwicaptcha::challenge::MIN_RSW_T,
+    });
+    let plain_server = spawn(SidecarState::build(plain_config));
+
+    let mut armed_config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+    armed_config.plan = parse_scopes(Some("login=sha16"), default_rung).expect("the plan parses");
+    armed_config.execution_key = Some(SECRET.to_string());
+    armed_config.execution_version = 2;
+    let armed_server = spawn(SidecarState::build(armed_config));
+
+    let mint = |addr: SocketAddr, scope: &str| {
+        let (status, wire) = post_json(
+            addr,
+            "/issue",
+            &format!("{{\"scope\":\"{scope}\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+        );
+        assert_eq!(status, 200, "{wire}");
+        let body: serde_json::Value = serde_json::from_str(wire.trim_end()).expect("json body");
+        (wire_shape(&body), body)
+    };
+
+    // The live mint of each shape and the fixture row that describes
+    // it: the plain sha256 row, the argon2id row, the rsw row (its
+    // canonical rsw_modulus extra) and the execution-armed row (its
+    // canonical execution_program/execution_version extras).
+    type MintCase<'a> = (
+        &'a str,
+        SocketAddr,
+        &'a str,
+        Box<dyn Fn(&serde_json::Value) -> bool>,
+    );
+    let cases: Vec<MintCase<'_>> = vec![
+        (
+            "plain sha256",
+            plain_server.addr,
+            "login",
+            Box::new(|row: &serde_json::Value| {
+                row["algorithm"] == "sha256" && row.get("execution_program").is_none()
+            }),
+        ),
+        (
+            "plain argon2id",
+            plain_server.addr,
+            "argon",
+            Box::new(|row: &serde_json::Value| row["algorithm"] == "argon2id"),
+        ),
+        (
+            "plain rsw",
+            plain_server.addr,
+            "rswscope",
+            Box::new(|row: &serde_json::Value| row["algorithm"] == "rsw"),
+        ),
+        (
+            "execution-armed",
+            armed_server.addr,
+            "login",
+            Box::new(|row: &serde_json::Value| row.get("execution_program").is_some()),
+        ),
+    ];
+    for (label, addr, scope, matches) in cases {
+        let row = shapes
+            .iter()
+            .find(|row| matches(row))
+            .unwrap_or_else(|| panic!("the fixture carries the {label} shape"));
+        let (live_shape, live_body) = mint(addr, scope);
+        assert_eq!(
+            live_shape,
+            wire_shape(row),
+            "the live {label} challenge-response shape drifted from the fixture: live {live_body:?}"
+        );
+    }
 }
 
 #[test]

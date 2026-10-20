@@ -93,6 +93,37 @@ final class ExecutionVersionPolicyTest extends TestCase
         new ExecutionVersionPolicy(2, null, 0);
     }
 
+    public function testClientCapabilityReadsTheExplicitZeroAsCapabilityNone(): void
+    {
+        // The explicit zero (`0`, exactly, after trim) reads as the
+        // none capability: the client cannot execute the execution dimension at
+        // all, so every issuance surface must never arm it — a different
+        // statement from the v1 compatibility floor, which still allows
+        // an armed version-1 issuance.
+        self::assertSame(ExecutionVersionPolicy::CAPABILITY_NONE, ExecutionVersionPolicy::clientCapability('0'));
+        self::assertSame(ExecutionVersionPolicy::CAPABILITY_NONE, ExecutionVersionPolicy::clientCapability(' 0'));
+        self::assertSame(ExecutionVersionPolicy::CAPABILITY_NONE, ExecutionVersionPolicy::clientCapability("0\n"));
+    }
+
+    public function testClientCapabilityKeepsTheV1FloorAndAdvertisementSemantics(): void
+    {
+        $max = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
+        // Absence, emptiness and garbage degrade to the v1 floor — the
+        // dimension may still arm at version 1 — and never refuse.
+        foreach ([null, '', '   ', 'abc', '-1', '2.0', ' 2', '007', '00'] as $raw) {
+            self::assertSame(
+                1,
+                ExecutionVersionPolicy::clientCapability($raw),
+                'a malformed or absent advertisement ('.var_export($raw, true).') degrades to the v1 floor',
+            );
+        }
+        // A canonical advertisement reads as itself, capped at the
+        // binary's mintable maximum.
+        foreach ([1 => 1, 2 => 2, 3 => 3, $max => $max, $max + 1 => $max, 999 => $max] as $raw => $expected) {
+            self::assertSame($expected, ExecutionVersionPolicy::clientCapability((string) $raw), sprintf('advertisement %d', $raw));
+        }
+    }
+
     private function assertRequiredAboveCapIsRefused(ExecutionVersionPolicy $policy, int $required, string $label): void
     {
         foreach (['requirementSatisfiable', 'downgradeWindowExists'] as $method) {

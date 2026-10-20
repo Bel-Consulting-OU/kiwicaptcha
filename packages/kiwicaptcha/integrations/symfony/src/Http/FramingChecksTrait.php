@@ -140,6 +140,17 @@ trait FramingChecksTrait
     }
 
     /**
+     * Whether the query string carries a `_method` override. Request::
+     * getMethod() honors it the moment anything asks for the effective
+     * method, so the framing gate inspects the raw query bag before
+     * routing does.
+     */
+    private function hasQueryMethodOverride(Request $request): bool
+    {
+        return $request->query->has('_method');
+    }
+
+    /**
      * Whether a form body carries a `_method` override. A framework-built
      * request already parsed the form body into the request bag, so the
      * bag is authoritative. A request built without that parse is scanned

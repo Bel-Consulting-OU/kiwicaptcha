@@ -173,8 +173,22 @@ public enum Rsw {
 
         /// T sequential modular squarings, the rsw proof of time.
         public func squared(times t: Int, modulus: Modulus) -> Value {
+            // The probe-free form stays non-throwing for existing
+            // callers; the checked form below is what the solver uses.
+            // swiftlint:disable:next force_try
+            try! squared(times: t, modulus: modulus, isCancelled: { false })
+        }
+
+        /// The checked form: `isCancelled` runs every 256 squarings and
+        /// throws `CancellationError` when it fires, bounding the
+        /// cancel latency to at most 256 Montgomery multiplications.
+        public func squared(
+            times t: Int, modulus: Modulus,
+            isCancelled: () -> Bool
+        ) throws -> Value {
             var value = words
-            for _ in 0..<t {
+            for i in 0..<t {
+                if i & 255 == 0, isCancelled() { throw CancellationError() }
                 value = Rsw.montMultiply(value, value, modulus: modulus)
             }
             return Value(words: value)

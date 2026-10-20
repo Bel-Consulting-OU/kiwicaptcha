@@ -59,19 +59,39 @@ final class MethodOverrideFramingSubscriber implements EventSubscriberInterface
         if (!$this->ownsPath($request)) {
             return;
         }
+        // A query-string `_method` reaches Request::getMethod() before any
+        // listener can re-examine it, so the canonical query-framing
+        // refusal has to answer on the raw query bag ahead of routing.
+        if ($this->hasQueryMethodOverride($request)) {
+            $event->setResponse($this->framingRefusal(
+                'METHOD_OVERRIDE_IN_QUERY',
+                'The request carries a _method override in the query string; this endpoint rejects query-parameter framing.',
+            ));
+            return;
+        }
         $conflict = $this->methodOverrideConflict($request);
         if ($conflict === null) {
             return;
         }
+        $event->setResponse($this->framingRefusal('DUPLICATE_HEADER', $conflict));
+    }
+
+    /**
+     * The shared framing refusal document: a typed code, a stable
+     * message and the no-store cache posture of every framing error.
+     */
+    private function framingRefusal(string $code, string $message): JsonResponse
+    {
         $response = new JsonResponse(
-            ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => $conflict]],
+            ['error' => ['code' => $code, 'message' => $message]],
             Response::HTTP_BAD_REQUEST,
         );
         $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
         $response->headers->set('Pragma', 'no-cache');
         $response->headers->set('Referrer-Policy', 'no-referrer');
         $response->headers->set('X-Content-Type-Options', 'nosniff');
-        $event->setResponse($response);
+
+        return $response;
     }
 
     /**

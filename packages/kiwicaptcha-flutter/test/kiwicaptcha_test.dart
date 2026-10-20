@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -150,6 +152,23 @@ void main() {
         throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.unsupportedParams)),
       );
     });
+
+    test('refuses an rsw challenge without a modulus', () {
+      final rsw = KiwiChallenge(
+        nonce: nonce,
+        salt: salt,
+        algorithm: KiwiAlgorithm.rsw,
+        mKib: 0,
+        t: KiwiLimits.rswTMin,
+        p: 1,
+        targetBits: 0,
+        prefix: prefix,
+      );
+      expect(
+        () => validateKiwiChallenge(rsw),
+        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.unsupportedParams)),
+      );
+    });
   });
 
   group('low-difficulty solve', () {
@@ -163,6 +182,21 @@ void main() {
         '00f9718e2a0397b3ca8fe75c44499fccee788e243173dadea546bd4e45af6982',
       );
     });
+
+    test('a probe already firing at entry raises the typed cancelled error', () {
+      expect(
+        () => solveKiwiChallenge(shaChallenge(targetBits: 8), isCancelled: () => true),
+        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.cancelled)),
+      );
+    });
+
+    test('a never-firing probe does not disturb the solve', () {
+      final solution = solveKiwiChallenge(
+        shaChallenge(targetBits: 8),
+        isCancelled: () => false,
+      );
+      expect(solution.counter, 45);
+    });
   });
 
   group('siteverify body', () {
@@ -174,7 +208,8 @@ void main() {
     });
   });
 
-  Map<String, dynamic> challengeJson({int targetBits = 8}) => <String, dynamic>{
+  Map<String, dynamic> challengeJson({int targetBits = 8, int? ttlSecs, int? minDurationMs}) =>
+      <String, dynamic>{
         'nonce': nonce,
         'salt': salt,
         'algorithm': 'sha256',
@@ -183,6 +218,8 @@ void main() {
         'p': 1,
         'targetBits': targetBits,
         'prefix': prefix,
+        if (ttlSecs != null) 'ttlSecs': ttlSecs,
+        if (minDurationMs != null) 'minDurationMs': minDurationMs,
       };
 
   group('challenge parsing', () {
@@ -192,6 +229,7 @@ void main() {
       expect(parsed.salt, salt);
       expect(parsed.algorithm, KiwiAlgorithm.sha256);
       expect(parsed.ttlSecs, 0);
+      expect(parsed.minDurationMs, 0);
     });
 
     test('fromJson refuses malformed documents', () {
@@ -213,6 +251,38 @@ void main() {
     });
   });
 
+  group('interactive-client lifecycle v1', () {
+    test('the deadline helpers carry the safety margin', () {
+      expect(kiwiExpiresAtMs(1000000, 30), 1029000);
+      expect(kiwiExpiresAtMs(1000000, 0), 9223372036854775807);
+      expect(kiwiMinSubmitAtMs(1000000, 5000), 1005000);
+      expect(kiwiMinSubmitAtMs(1000000, -5), 1000000);
+    });
+
+    test('kiwiDeliveryDecision matches every shared vector', () {
+      final file = File('../../../protocol/interactive-client-v1/lifecycle-vectors.json');
+      final vectors =
+          json.decode(file.readAsStringSync()) as List<dynamic>;
+      expect(vectors, isNotEmpty, reason: 'the shared vectors must be present');
+      for (final entry in vectors) {
+        final vector = entry as Map<String, dynamic>;
+        final decision = kiwiDeliveryDecision(
+          vector['receivedAtMs'] as int,
+          vector['ttlSecs'] as int,
+          vector['minDurationMs'] as int,
+          vector['solveFinishedAtMs'] as int,
+          vector['nowMs'] as int,
+          cancelled: (vector['cancelled'] as bool?) ?? false,
+        );
+        final expected = vector['expect'] as Map<String, dynamic>;
+        final name = vector['name'] as String;
+        expect(decision.deliver, expected['deliver'], reason: name);
+        expect(decision.deliverAtMs, expected['deliverAtMs'], reason: name);
+        expect(decision.reason, expected['reason'], reason: name);
+      }
+    });
+  });
+
   group('widget lifecycle', () {
     setUp(() {
       widget.debugHttpPostOverride = null;
@@ -224,11 +294,28 @@ void main() {
       widget.debugSolveOverride = null;
     });
 
+    KiwiCaptcha captcha({
+      GlobalKey<widget.KiwiCaptchaState>? key,
+      bool autoStart = true,
+      void Function(String)? onVerify,
+      void Function(String)? onError,
+      void Function()? onExpire,
+    }) =>
+        KiwiCaptcha(
+          key: key,
+          endpoint: Uri.parse('https://kiwi.test/challenge'),
+          scope: 'login',
+          autoStart: autoStart,
+          onVerify: onVerify ?? (_) {},
+          onError: onError,
+          onExpire: onExpire,
+        );
+
     testWidgets('Retry restarts the flow after a failure', (tester) async {
       var calls = 0;
       final verified = <String>[];
       final errors = <String>[];
-      widget.debugHttpPostOverride = (url, body) async {
+      widget.debugHttpPostOverride = (url, body, headers) async {
         calls++;
         if (calls == 1) {
           return const widget.KiwiHttpResponse(statusCode: 503, body: 'down');
@@ -236,17 +323,13 @@ void main() {
         return widget.KiwiHttpResponse(
             statusCode: 200, body: json.encode(challengeJson()));
       };
-      widget.debugSolveOverride = (challenge) =>
+      widget.debugSolveOverride = (challenge, isCancelled) async =>
           const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
 
-      await tester.pumpWidget(MaterialApp(
-        home: KiwiCaptcha(
-          endpoint: Uri.parse('https://kiwi.test/challenge'),
-          scope: 'login',
-          onVerify: verified.add,
-          onError: errors.add,
-        ),
-      ));
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: verified.add,
+        onError: errors.add,
+      )));
       await tester.pump();
       await tester.pump();
 
@@ -267,21 +350,17 @@ void main() {
         (tester) async {
       final key = GlobalKey<widget.KiwiCaptchaState>();
       var verified = 0;
-      widget.debugHttpPostOverride = (url, body) async =>
+      widget.debugHttpPostOverride = (url, body, headers) async =>
           widget.KiwiHttpResponse(
               statusCode: 200, body: json.encode(challengeJson()));
-      widget.debugSolveOverride = (challenge) =>
+      widget.debugSolveOverride = (challenge, isCancelled) async =>
           const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
 
-      await tester.pumpWidget(MaterialApp(
-        home: KiwiCaptcha(
-          key: key,
-          endpoint: Uri.parse('https://kiwi.test/challenge'),
-          scope: 'login',
-          autoStart: false,
-          onVerify: (_) => verified++,
-        ),
-      ));
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        key: key,
+        autoStart: false,
+        onVerify: (_) => verified++,
+      )));
 
       expect(find.text('Idle'), findsOneWidget);
       expect(key.currentState, isNotNull);
@@ -292,6 +371,175 @@ void main() {
 
       expect(find.text('Success'), findsOneWidget);
       expect(verified, 1);
+    });
+
+    testWidgets('the challenge POST declares Kiwi-Execution-Max-Version: 0',
+        (tester) async {
+      final headersSeen = <Map<String, String>>[];
+      var verified = 0;
+      widget.debugHttpPostOverride = (url, body, headers) async {
+        headersSeen.add(headers);
+        return widget.KiwiHttpResponse(
+            statusCode: 200, body: json.encode(challengeJson()));
+      };
+      widget.debugSolveOverride = (challenge, isCancelled) async =>
+          const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: (_) => verified++,
+      )));
+      await tester.pump();
+      await tester.pump();
+
+      expect(verified, 1);
+      expect(headersSeen, hasLength(1));
+      expect(headersSeen.single['Kiwi-Execution-Max-Version'], '0');
+    });
+
+    testWidgets('a solve faster than minDurationMs defers delivery',
+        (tester) async {
+      var verified = 0;
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200,
+              body: json.encode(challengeJson(minDurationMs: 5000)));
+      widget.debugSolveOverride = (challenge, isCancelled) async =>
+          const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: (_) => verified++,
+      )));
+      await tester.pump();
+      await tester.pump();
+
+      // The solve finished, but the delivery floor holds the token.
+      expect(find.text('Working'), findsOneWidget);
+      expect(verified, 0);
+
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pump();
+
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, 1);
+    });
+
+    testWidgets('a solve still running at the deadline never delivers',
+        (tester) async {
+      var verified = 0;
+      var expired = 0;
+      final gate = Completer<KiwiSolution>();
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200,
+              body: json.encode(challengeJson(ttlSecs: 2)));
+      // The solve outlives the challenge: held until the test opens
+      // the gate.
+      widget.debugSolveOverride = (challenge, isCancelled) => gate.future;
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: (_) => verified++,
+        onExpire: () => expired++,
+      )));
+      await tester.pump();
+      expect(find.text('Working'), findsOneWidget);
+
+      // The expiry timer races the solve and wins.
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Expired'), findsOneWidget);
+      expect(expired, 1);
+
+      // The solve completes after the deadline: suppressed.
+      gate.complete(const KiwiSolution(counter: 45, durationMs: 1, hashHex: ''));
+      await tester.pump();
+      await tester.pump();
+
+      expect(verified, 0);
+      expect(find.text('Expired'), findsOneWidget);
+      expect(find.text('Retry'), findsOneWidget);
+    });
+
+    testWidgets('a superseded run delivers nothing', (tester) async {
+      var verified = 0;
+      final gate = Completer<widget.KiwiHttpResponse>();
+      var calls = 0;
+      widget.debugHttpPostOverride = (url, body, headers) {
+        calls++;
+        if (calls == 1) return gate.future;
+        return Future<widget.KiwiHttpResponse>.value(widget.KiwiHttpResponse(
+            statusCode: 200, body: json.encode(challengeJson())));
+      };
+      widget.debugSolveOverride = (challenge, isCancelled) async =>
+          const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+      final key = GlobalKey<widget.KiwiCaptchaState>();
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        key: key,
+        onVerify: (_) => verified++,
+      )));
+      await tester.pump();
+      expect(find.text('Working'), findsOneWidget);
+
+      // A newer generation starts while the first fetch is in flight.
+      key.currentState!.start();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, 1);
+
+      // The stale fetch completes: the old run must stay silent.
+      gate.complete(widget.KiwiHttpResponse(
+          statusCode: 200, body: json.encode(challengeJson())));
+      await tester.pump();
+      await tester.pump();
+
+      expect(verified, 1);
+      expect(find.text('Success'), findsOneWidget);
+      expect(find.text('Failed'), findsNothing);
+    });
+
+    testWidgets('the solve probe reports cancellation once superseded',
+        (tester) async {
+      var verified = 0;
+      bool probeCancelled = false;
+      final gate = Completer<void>();
+      var solveCalls = 0;
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200, body: json.encode(challengeJson()));
+      widget.debugSolveOverride = (challenge, isCancelled) async {
+        solveCalls++;
+        if (solveCalls == 1) {
+          await gate.future;
+          probeCancelled = isCancelled();
+          throw const KiwiSolveError.cancelled();
+        }
+        return const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+      };
+      final key = GlobalKey<widget.KiwiCaptchaState>();
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        key: key,
+        onVerify: (_) => verified++,
+      )));
+      await tester.pump();
+      expect(find.text('Working'), findsOneWidget);
+
+      key.currentState!.start();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, 1);
+
+      // The stale solve wakes up: its probe must report cancelled, and
+      // its typed cancelled error must surface nothing.
+      gate.complete();
+      await tester.pump();
+      await tester.pump();
+
+      expect(probeCancelled, isTrue);
+      expect(verified, 1);
+      expect(find.text('Success'), findsOneWidget);
+      expect(find.text('Failed'), findsNothing);
     });
   });
 }

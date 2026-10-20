@@ -663,6 +663,18 @@ jobs:
           curl -fsS -X POST -H 'Content-Type: application/json' -d '{"scope":"login"}' \
             http://127.0.0.1:8080/challenge > /tmp/exec-challenge.json
           grep -q '"execution_program"' /tmp/exec-challenge.json
+          # The explicit Kiwi-Execution-Max-Version: 0 capability (NONE):
+          # the same execution-armed deployment serves the plain challenge
+          # — no execution_program — because the client declared it cannot
+          # execute the dimension at all.
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            -H 'Kiwi-Execution-Max-Version: 0' -d '{"scope":"login"}' \
+            http://127.0.0.1:8080/challenge > /tmp/exec-challenge-zero.json
+          grep -q '"challenge"' /tmp/exec-challenge-zero.json
+          if grep -q '"execution_program"' /tmp/exec-challenge-zero.json; then
+            echo "the zero capability must never arm the execution dimension" >&2
+            exit 1
+          fi
           # A malformed token reaches the verifier under the armed profile
           # and answers the typed failure document, never a 500.
           curl -sS -X POST -H 'Content-Type: application/json' \
@@ -1407,6 +1419,18 @@ jobs:
         # handwritten Rust-side list cannot detect PHP-side drift; this
         # reads both sources directly.
         run: sh packages/kiwicaptcha/tools/verify-error-code-parity.sh
+
+      - name: challenge-response wire parity (golden fixture vs parsers)
+        # The challenge-response wire-vocabulary drift gate: the golden
+        # fixture protocol/solution-token-v1/challenge-response-fixtures.json
+        # pins one body per shape with the canonical snake_case security
+        # fields; this script validates the fixture's structural contract
+        # and grep-asserts every client parser references exactly those
+        # field names (never the banned camelCase dialect). The
+        # serializer half mints every shape through the real sidecar
+        # against the same fixture, in the Rust lane
+        # (cargo test -p kiwicaptcha-verifier --test sidecar).
+        run: python3 tools/ci/challenge-response-parity-check.py
 
       - name: docs-lint (prose lint, baseline ratchet)
         # Baseline ratchet: the committed baseline
@@ -2521,6 +2545,8 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: test
         run: npm test
+      - name: pack smoke (publish tarball installs and runs from a clean consumer)
+        run: npm run test:pack
 
   web-wrappers:
     name: Web wrappers (client-core + framework adapters)

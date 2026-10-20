@@ -33,6 +33,7 @@ class KiwiClientTest {
     @Volatile private var lastPath: String? = null
     @Volatile private var lastAccept: String? = null
     @Volatile private var lastContentType: String? = null
+    @Volatile private var lastExecutionMaxVersion: String? = null
     @Volatile private var lastBody: String? = null
 
     private fun challengeJson() = """
@@ -49,6 +50,7 @@ class KiwiClientTest {
             lastPath = request.path
             lastAccept = request.headers["accept"]
             lastContentType = request.headers["content-type"]
+            lastExecutionMaxVersion = request.headers["kiwi-execution-max-version"]
             lastBody = request.body
             TestHttpServer.Response(status, body)
         }
@@ -82,6 +84,12 @@ class KiwiClientTest {
         assertEquals("/challenge", lastPath)
         assertEquals("application/json", lastAccept)
         assertEquals("application/json", lastContentType)
+        // The execution capability declaration (protocol/interactive-client-v1):
+        // native clients cannot execute the execution dimension, and the
+        // header says so explicitly rather than by absence.
+        assertEquals("0", lastExecutionMaxVersion)
+        assertEquals("Kiwi-Execution-Max-Version", KiwiClient.EXECUTION_MAX_VERSION_HEADER)
+        assertEquals("0", KiwiClient.EXECUTION_MAX_VERSION)
         val sent = KiwiJsonReader.parseObject(lastBody ?: "")!!
         assertEquals("login", sent["scope"])
         assertEquals("sha256", sent["algorithm"])
