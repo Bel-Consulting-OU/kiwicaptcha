@@ -1,0 +1,44 @@
+# The KiwiCaptcha product website. Static output only: no JavaScript,
+# no external asset hosts, no feeds and no search index. The design
+# source of truth is KiwiCaptcha_Website.pdf (edition 4) and the
+# identity contract in packages/kiwicaptcha/design/IDENTITY.md.
+base_url = "/"
+title = "KiwiCaptcha"
+description = "Symfony-first adaptive anti-abuse. First-party control."
+default_language = "en"
+compile_sass = false
+build_search_index = false
+generate_feeds = false
+minify_html = true
+
+[markdown]
+render_emoji = false
+
+[extra]
+source_url = "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+family_url = "https://github.com/Bel-Consulting-OU"
+edition = "edition 4 / 12 October 2026"
+
+[[extra.nav]]
+label = "How it works"
+path = "/how-it-works/"
+
+[[extra.nav]]
+label = "Integration"
+path = "/integration/"
+
+[[extra.nav]]
+label = "Security"
+path = "/security/"
+
+[[extra.nav]]
+label = "Docs"
+path = "/docs/"
+
+[[extra.nav]]
+label = "Widget"
+path = "/playground/"
+
+[[extra.nav]]
+label = "Identity"
+path = "/brand/"

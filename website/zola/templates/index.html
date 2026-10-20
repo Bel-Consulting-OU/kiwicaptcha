@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}KiwiCaptcha — Your application. Your decision.{% endblock %}
+{% block description %}Computational checks, ownership factors and transaction-bound authorization under your application's policy. Symfony-first adaptive anti-abuse with first-party control.{% endblock %}
+{% block content %}
+<article>
+  <header class="home-hero">
+    <div class="hero-copy">
+      <p class="kicker">Symfony-first / Self-hosted adaptive anti-abuse</p>
+      <h1>Your application. Your&nbsp;decision.</h1>
+      <p class="lede">Computational checks, ownership factors and transaction-bound authorization under your application's policy. First-party runtime, explicit decisions and an auditable enforcement path.</p>
+      <div class="hero-actions">
+        <a class="button button-primary" href="/integration/">Explore integration →</a>
+        <a class="button button-secondary" href="/playground/">Try the widget design</a>
+      </div>
+      <p class="hero-note">Symfony-first enforcement. Portable verification clients. Your application owns acceptance.</p>
+    </div>
+    <aside class="hero-panel" aria-label="Illustrative component">
+      <span class="panel-rule" aria-hidden="true"></span>
+      <h2 class="panel-title">A check, with the decision in view.</h2>
+      <p class="field-label" id="hero-action-label">Protected action</p>
+      <p class="field-static" aria-labelledby="hero-action-label">Submit an application request</p>
+      {% set spec_state = "done" %}{% set spec_width = "w300" %}{% include "partials/widget.html" %}
+      <p class="mono-caption">Illustrative component / A completed check supplies a result. The host still verifies the result and enforces its disposition.</p>
+    </aside>
+  </header>
+
+  <div class="prose">
+    {{ section.content | safe }}
+  </div>
+</article>
+{% endblock %}

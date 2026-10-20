@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} — KiwiCaptcha{% endblock %}
+{% block description %}{{ page.extra.description | default(value=config.description) }}{% endblock %}
+{% block content %}
+<article class="page-body">
+  {% if page.extra.kicker %}
+  <header class="page-hero">
+    <p class="kicker">{{ page.extra.kicker }}</p>
+    <h1>{{ page.extra.headline | default(value=page.title) }}</h1>
+    {% if page.extra.lede %}<p class="lede">{{ page.extra.lede }}</p>{% endif %}
+  </header>
+  {% endif %}
+  <div class="prose">
+    {{ page.content | safe }}
+  </div>
+</article>
+{% endblock %}

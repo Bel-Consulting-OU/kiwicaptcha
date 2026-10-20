@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Identity — KiwiCaptcha{% endblock %}
+{% block description %}The KiwiCaptcha visual identity: the Spiral Lock masters, the fixed humanist lettering, the palette with measured contrast, the type system and the native downloads.{% endblock %}
+{% block content %}
+<article class="page-body">
+  <header class="page-hero">
+    <p class="kicker">IDENTITY / THE SPIRAL LOCK SYSTEM</p>
+    <h1>One mark. Fixed lettering.</h1>
+    <p class="lede">The Spiral Lock remains the canonical symbol. Fixed humanist lettering, the green palette with measured contrast and a clear reading rhythm give KiwiCaptcha a complete visual language within the Bel Consulting product family. The contract lives in <code>design/IDENTITY.md</code>; the packaged masters under <code>resources/</code> own the artwork.</p>
+  </header>
+  <div class="prose">
+    {{ page.content | safe }}
+  </div>
+</article>
+{% endblock %}

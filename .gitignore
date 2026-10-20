@@ -61,3 +61,14 @@ erl_crash.dump
 # Raw certifying-run payloads stay local; tools/client-perf/results/baseline.json
 # is the committed evidence record.
 tools/client-perf/results/physical-*.json
+
+# The website build copies canonical assets (fonts, brand masters, the
+# widget skin and the design PDFs) into Zola's static tree and writes
+# the generated site beside it. Sources of truth live in the repository;
+# these are build output.
+website/zola/static/fonts/
+website/zola/static/brand/
+website/zola/static/pdf/
+website/zola/static/css/widget.css
+website/zola/public/
+website/zola/.zones/
