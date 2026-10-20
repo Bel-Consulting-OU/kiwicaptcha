@@ -22,7 +22,7 @@ Edition 4, 12 October 2026. Each page explains one job, and every section carrie
 | --- | --- | --- |
 | Home | Explain mechanism and ownership | Hero with the decision-in-view component, why, mechanism, control, widget, privacy, economics, start, faq and identity sections. |
 | How it works | Give the proof its context | Four-step sequence, algorithms, cheap gates, single use, operation binding, factors, extensions. |
-| Integration | Give truthful setup routes | Layer roles, Symfony plane, cores, server SDKs, browser wrappers, native clients, sidecar, migration, source status. |
+| Integration | Give truthful setup routes | Layer roles, the complete plane, cores, server SDKs, browser wrappers, native clients, sidecar, migration, source status. |
 | Security | Keep decisions explicit | Bounded model, profiles, completable factors, operation authorization, outcomes, economics, verifier resources. |
 | Privacy | State the data contracts | First-party defaults, purpose-scoped evidence, strict posture, retention, claims registry. |
 | Docs | Map the operator documentation | Start, configure, operate, verify and reference routes into the repository guides. |

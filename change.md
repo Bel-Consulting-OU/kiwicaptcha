@@ -149,7 +149,7 @@ Plane 4 — Enforcement
 
 Plane 5 — Outcomes
 
-3.5.1 Framework bridges. Auto-enabled subscribers translate framework auth/security events into §1.5 outcomes. Symfony first (LoginFailureEvent/LoginSuccessEvent/CheckPassportEvent), then the bridges listed in Part 6. Idempotency key = HMAC(request id).
+3.5.1 Framework bridges. Auto-enabled subscribers translate framework auth/security events into §1.5 outcomes. the Symfony bridge (LoginFailureEvent/LoginSuccessEvent/CheckPassportEvent) and the bridges listed in Part 6 are equal first-class bridges. Idempotency key = HMAC(request id).
 
 Success-trust rule (new in apply_feedback, both cores): authenticationSuccess always credits principal; it credits session/source only when that identity's windowed failure ratio < θ and the target was not under spread attack. This blocks a credential stuffer with valid stolen credentials from farming source trust — without weakening a normal user's trust gain.
 

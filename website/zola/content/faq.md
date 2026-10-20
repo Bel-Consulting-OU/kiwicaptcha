@@ -16,8 +16,8 @@ lede = "Computation, factor completion and authorization are distinct. Every ans
 </div>
 
 <div class="qa">
-<h3>What is the complete first-class integration today?</h3>
-<p>Symfony is the current complete enforcement plane: issuance, risk decisions, step-up, quarantine and denial. Other language SDKs are verification/risk clients and middleware with their own capability contracts.</p>
+<h3>Which integrations are first-class?</h3>
+<p>All of them. The complete enforcement plane — issuance, risk decisions, step-up, quarantine and denial — ships as the Symfony bundle host integration, and the seven server SDKs, the PHP core, the browser and native clients and the verifier sidecar are first-class against the same Rust-defined contracts: decision, authority and rejection parity with the Rust engine is machine-checked across all of them.</p>
 </div>
 
 <div class="qa">

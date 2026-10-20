@@ -4,7 +4,7 @@
 # identity contract in packages/kiwicaptcha/design/IDENTITY.md.
 base_url = "/"
 title = "KiwiCaptcha"
-description = "Symfony-first adaptive anti-abuse. First-party control."
+description = "Self-hosted adaptive anti-abuse with first-class hosts on machine-checked parity with the Rust core."
 default_language = "en"
 compile_sass = false
 build_search_index = false

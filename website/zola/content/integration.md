@@ -14,15 +14,15 @@ lede = "The complete enforcement plane, a verification client and a browser wrap
 
 ## One product. Distinct integration roles.
 
-Symfony is the first-class full enforcement host today. The underlying language-neutral cores and SDKs remain independently useful, with explicit verification and client capabilities.
+Every integration is first-class. The language-neutral cores define the contracts, and each host — the Symfony bundle, the PHP core, every server SDK — carries them with machine-checked parity against the Rust core, with explicit verification and client capabilities.
 
 <div class="table-wrap">
 
 | Layer | Role | Boundary |
 | --- | --- | --- |
-| Symfony | Issuance, risk, factors, quarantine and denial | Current complete first-class enforcement integration. |
+| Symfony | Issuance, risk, factors, quarantine and denial | The complete enforcement plane as a host integration. |
 | Rust/PHP cores | Embedding issuance, verification and risk contracts | Host supplies its application integration and operating obligations. |
-| Server SDKs | Local verification, stores, middleware and outcome clients | Not equivalent full enforcement planes. |
+| Server SDKs | Local verification, stores, middleware and outcome clients | The same decision contracts at full parity; the host application composes enforcement. |
 | Browser wrappers | Shared script/render/event lifecycle | Tokens still require authoritative server verification. |
 | Native clients | Off-UI-thread work and client status/token assembly | Backend verifies; execution-armed/capability limits differ. |
 | Verifier sidecar | Local HTTP/Unix-socket verification for other hosts or delegated dimensions | Co-located service contract; not a third-party authorization service. |
@@ -37,7 +37,7 @@ Symfony is the first-class full enforcement host today. The underlying language-
 
 {{ kicker(text="symfony") }}
 
-## The complete plane starts in Symfony.
+## The complete plane, as a host integration.
 
 Follow the repository's manual installation guide, register the bundle, and provide the signing secret, canonical public origin and Redis DSN through the environment.
 
