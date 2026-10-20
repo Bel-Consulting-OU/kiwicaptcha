@@ -23,29 +23,29 @@ and digest contract: 17
 
 the engine method is recorded per run: offline-grammar (no local model consulted)
 
-The self-escalation mandate: run 10: no new finding this run: the synthesis escalates (combined forged-token + framing-ambiguity, synthesis budget raised to 231)
+The self-escalation mandate: run 11: no new finding this run: the synthesis escalates (combined forged-token + duplicate-key, synthesis budget raised to 289)
 
-The closed synthesis loop: the synthesis corpus was consumed end to end: 232 candidates triaged, 232 refuted deterministically (two-run hash gate), 0 findings filed, 0 unstable harnesses, 0 inconclusive, 0 harness errors, 0 classes without a harness
+The closed synthesis loop: the synthesis corpus was consumed end to end: 290 candidates triaged, 290 refuted deterministically (two-run hash gate), 0 findings filed, 0 unstable harnesses, 0 inconclusive, 0 harness errors, 0 classes without a harness
 
 | Attack class | Current economic result | Status | Evidence (actual measured scale) |
 | --- | --- | --- | --- |
-| D3.1 commodity no-JS bots | cost_per_accepted_abuse=unbounded accepted=0 | GREEN | measured: attempts=600 downscaled_from=100000; wall 4s |
-| D3.2 stealth headless | cost_per_accepted_abuse=unbounded accepted_abuses=0 solve_p95_ms=295 whitebox_pass_rate=1 | GREEN | measured: whitebox_attempted=25 whitebox_passed=25 whitebox_pass_rate=1 whitebox_class=full_knowledge_envelope_forger; wall 12s |
+| D3.1 commodity no-JS bots | cost_per_accepted_abuse=unbounded accepted=0 | GREEN | measured: attempts=600 downscaled_from=100000; wall 18s |
+| D3.2 stealth headless | cost_per_accepted_abuse=unbounded accepted_abuses=0 solve_p95_ms=298 whitebox_pass_rate=1 | GREEN | measured: whitebox_attempted=25 whitebox_passed=25 whitebox_pass_rate=1 whitebox_class=full_knowledge_envelope_forger; wall 18s |
 | D3.3 PoW farm economics | product-method provenance refused: driver is missing — not a Kernel subclass | RED | METHOD: the run claims the product itself (method: product) but does not carry a Kernel-subclass driver with container_overrides=0. Re-run through the real product kernel; a fixture measurement is never a pass. |
-| D3.4 proxy pools | cost_per_accepted_abuse=unbounded accepted=0 pool_ips=10000 | GREEN | measured: downscale=10000_of_1000000 factor=100x wire_sample=66_requests; downscale stated: 10000_of_1000000; wall 9s |
+| D3.4 proxy pools | cost_per_accepted_abuse=unbounded accepted=0 pool_ips=10000 | GREEN | measured: downscale=10000_of_1000000 factor=100x wire_sample=66_requests; downscale stated: 10000_of_1000000; wall 14s |
 | D3.5 credential stuffing | product-method provenance refused: driver is missing — not a Kernel subclass | RED | METHOD: the run claims the product itself but carries no Kernel-subclass driver with container_overrides=0. Re-run through the real product kernel. |
 | D3.6 token brokering | cost_per_accepted_relayed_abuse=unbounded accepted_relays=0 resale_value_of_solved_token=0 | GREEN | measured: relays_refused=4 stock_issued=30 embed_token_reads=; wall 4s |
 | D3.7 human solver farms | relayed_code_resale_value=single_use webauthn_phish_yield=0 cost_per_accepted_relayed_abuse_beyond_first=unbounded | GREEN | measured: totp_begin_rate_limited=9 of 10; wall 1s |
-| D3.8 AI agents | unauth_agent_cost=browser_price_per_solve verified_agent_within_quota=5 post_revocation_accepted=0 | GREEN | measured: unauth_solves=10 accepted=10 ladder_escalated=true verified_in_quota=5 quota_refused=3 revoked_accepted=0; wall 5s |
+| D3.8 AI agents | unauth_agent_cost=browser_price_per_solve verified_agent_within_quota=5 post_revocation_accepted=0 | GREEN | measured: unauth_solves=10 accepted=10 ladder_escalated=true verified_in_quota=5 quota_refused=3 revoked_accepted=0; wall 6s |
 | D3.9 risk-engine gaming | gaming_yield=zero farmed_offhome_credit=0 poisoned_bias_points=0 churned_escapes=0 | GREEN | measured: downscale=labels_are_the_full_100000 mechanisms_exact; downscale stated: labels_are_the_full_100000; wall 32s |
-| D3.10 infrastructure attacker | cost_per_accepted_abuse=unbounded accepted=0 backend=redis | GREEN | measured: tamper_classes=11 acceptance_among_tampered=0 backends=redis,sentinel,sqlite,files,sidecar; wall 2s |
-| D3.11 denial of service | garbage_verify_marginal_cost=cheap_phase_p99_2.0ms amplification_return=negative accepted_abuses=0 | GREEN | measured: bounds=5x_measured_baseline floors=2000ms_challenge_1000ms_probe; wall 21s |
-| D3.12 protocol and parser | cost_per_differential=infinite differentials=0 desyncs=0 sdk_green=7 | GREEN | measured: confusable_mutations=5000 sdk_green=7 differentials=0 desyncs=0 proxy_chain=absent; wall 31s |
-| D3.13 supply chain | tampered_driver_executions=0 mitm_yield=0 cost_per_accepted_supply_abuse=unbounded | GREEN | measured: tamper_legs=2 pollution_leg=1 csp_suites=4 page_errors_under_pollution=0 tampered_bytes=1_per_response; wall 53s |
-| D3.14 privacy adversary | reidentification_cost=infinite raw_hits=0 | GREEN | measured: sweeps profile-redis=575157 kernel-redis=36; wall 11s |
-| D3.15 multi-tenant | cross_tenant_reads_accepted=0 cross_tenant_replays_accepted=0 cost_per_accepted_cross_tenant_abuse=unbounded | GREEN | measured: tenants=2 namespace_corpus=8 cross_reads=3 replay_legs=3 shared_secret=yes; wall 1s |
-| D3.16 accessibility and compatibility | manual qualification pending | PENDING | PENDING: the automated lane held (0 of 5 assertions failed), but the recorded economics carry manual_qualification=pending; the required manual matrices have not passed. measured: qualification=pending engines=chromium specs=autofill-evidence.spec.mjs a11y.spec.mjs adversarial-portable.spec.mjs; wall 34s |
-| D3.17 cross-SDK parity attack | weakest_link=none rejection_divergences=0 decision_divergences=0 | GREEN | measured: decision_rows=27 authority_rows=13; wall 30s |
+| D3.10 infrastructure attacker | cost_per_accepted_abuse=unbounded accepted=0 backend=redis | GREEN | measured: tamper_classes=11 acceptance_among_tampered=0 backends=redis,sentinel,sqlite,files,sidecar; wall 1s |
+| D3.11 denial of service | garbage_verify_marginal_cost=cheap_phase_p99_4.34ms amplification_return=negative accepted_abuses=0 | GREEN | measured: bounds=5x_measured_baseline floors=2000ms_challenge_1000ms_probe; wall 30s |
+| D3.12 protocol and parser | cost_per_differential=infinite differentials=0 desyncs=0 sdk_green=7 | GREEN | measured: confusable_mutations=5000 sdk_green=7 differentials=0 desyncs=0 proxy_chain=absent; wall 35s |
+| D3.13 supply chain | tampered_driver_executions=0 mitm_yield=0 cost_per_accepted_supply_abuse=unbounded | GREEN | measured: tamper_legs=2 pollution_leg=1 csp_suites=4 page_errors_under_pollution=0 tampered_bytes=1_per_response; wall 55s |
+| D3.14 privacy adversary | reidentification_cost=infinite raw_hits=0 | GREEN | measured: sweeps profile-redis=1003803 kernel-redis=36; wall 29s |
+| D3.15 multi-tenant | cross_tenant_reads_accepted=0 cross_tenant_replays_accepted=0 cost_per_accepted_cross_tenant_abuse=unbounded | GREEN | measured: tenants=2 namespace_corpus=8 cross_reads=3 replay_legs=3 shared_secret=yes; wall 2s |
+| D3.16 accessibility and compatibility | manual qualification pending | PENDING | PENDING: the automated lane held (0 of 5 assertions failed), but the recorded economics carry manual_qualification=pending; the required manual matrices have not passed. measured: qualification=pending engines=chromium specs=autofill-evidence.spec.mjs a11y.spec.mjs adversarial-portable.spec.mjs; wall 36s |
+| D3.17 cross-SDK parity attack | weakest_link=none rejection_divergences=0 decision_divergences=0 | GREEN | measured: decision_rows=27 authority_rows=13; wall 45s |
 
 ## The bounds the engine holds itself to
 

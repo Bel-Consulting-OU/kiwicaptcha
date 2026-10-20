@@ -160,6 +160,22 @@
         "redRuns": 1,
         "campaignsInLedger": 17
       }
+    },
+    {
+      "run": 11,
+      "decidedAt": "2026-10-20T15:20:31Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "forged-token",
+        "duplicate-key"
+      ],
+      "priorSynthCount": 231,
+      "raisedSynthCount": 289,
+      "ledgerFacts": {
+        "greenRuns": 17,
+        "redRuns": 0,
+        "campaignsInLedger": 17
+      }
     }
   ]
 }

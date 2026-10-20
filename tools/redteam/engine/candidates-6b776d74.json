@@ -1,12 +1,12 @@
 {
   "schema": "kiwicaptcha.redteam.candidates/1",
   "seed": 1802988916,
-  "count": 232,
+  "count": 290,
   "modelNote": "no local model is configured (KIWI_RT_LOCAL_LLM_URL unset); the synthesis corpus is the deterministic seeded grammar and the novelty ordering is the documented no-op scorer",
   "escalation": {
     "combined": [
       "forged-token",
-      "framing-ambiguity"
+      "duplicate-key"
     ]
   },
   "candidates": [
@@ -375,6 +375,71 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-242",
+      "seed": 1078342400,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 999,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-270",
+      "seed": 545918208,
+      "class": "scope-confusable",
+      "mutation": "mac-transplant",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via mac-transplant against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 999,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-273",
+      "seed": 582038592,
+      "class": "clock-skew",
+      "mutation": "mac-transplant",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via mac-transplant against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 999,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-280",
+      "seed": 701364224,
+      "class": "forged-token",
+      "mutation": "mac-transplant",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via mac-transplant against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 999,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-282",
+      "seed": 1821357568,
+      "class": "scope-confusable",
+      "mutation": "mac-transplant",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via mac-transplant against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 999,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-008",
       "seed": 237125120,
       "class": "clock-skew",
@@ -518,6 +583,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-240",
+      "seed": 1650177280,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 978,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-187",
       "seed": 1028947200,
       "class": "forged-token",
@@ -570,6 +648,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-255",
+      "seed": 1063656192,
+      "class": "scope-confusable",
+      "mutation": "overlong-encoding",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via overlong-encoding against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 944,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-137",
       "seed": 1757316352,
       "class": "scope-confusable",
@@ -593,6 +684,45 @@
       "source": "deterministic-grammar",
       "expected": "rejected-or-refuted",
       "novelty": 924,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-233",
+      "seed": 123306496,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 920,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-260",
+      "seed": 1726214080,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 920,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-272",
+      "seed": 1054544896,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 920,
       "seen_in_run_history": 0
     },
     {
@@ -700,6 +830,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-257",
+      "seed": 1973531392,
+      "class": "scope-confusable",
+      "mutation": "case-fold-probe",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via case-fold-probe against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 908,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-020",
       "seed": 817472512,
       "class": "forged-token",
@@ -765,6 +908,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-266",
+      "seed": 737166592,
+      "class": "forged-token",
+      "mutation": "case-fold-probe",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via case-fold-probe against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 892,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-075",
       "seed": 252158464,
       "class": "clock-skew",
@@ -817,6 +973,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-289",
+      "seed": 1636079872,
+      "class": "forged-token",
+      "mutation": "duplicate-field",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via duplicate-field against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 848,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-032",
       "seed": 46904320,
       "class": "forged-token",
@@ -858,6 +1027,19 @@
     {
       "id": "C-185",
       "seed": 1834568192,
+      "class": "forged-token",
+      "mutation": "case-fold-probe",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via case-fold-probe against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 820,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-286",
+      "seed": 2112083200,
       "class": "forged-token",
       "mutation": "case-fold-probe",
       "target": "rust-sidecar/healthz",
@@ -1025,6 +1207,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-267",
+      "seed": 1736827136,
+      "class": "forged-token",
+      "mutation": "overlong-encoding",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via overlong-encoding against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 746,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-046",
       "seed": 1885505280,
       "class": "forged-token",
@@ -1077,6 +1272,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-283",
+      "seed": 910937656,
+      "class": "forged-token",
+      "mutation": "overlong-encoding",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via overlong-encoding against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 738,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-100",
       "seed": 1374638720,
       "class": "clock-skew",
@@ -1103,6 +1311,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-271",
+      "seed": 946505984,
+      "class": "clock-skew",
+      "mutation": "overlong-encoding",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via overlong-encoding against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 717,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-113",
       "seed": 2145590272,
       "class": "clock-skew",
@@ -1118,6 +1339,19 @@
     {
       "id": "C-171",
       "seed": 1555193344,
+      "class": "clock-skew",
+      "mutation": "byte-flip",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via byte-flip against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 700,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-274",
+      "seed": 745086784,
       "class": "clock-skew",
       "mutation": "byte-flip",
       "target": "reference-deployment/challenge",
@@ -1233,6 +1467,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-278",
+      "seed": 859648,
+      "class": "forged-token",
+      "mutation": "byte-flip",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via byte-flip against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 693,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-084",
       "seed": 1663574784,
       "class": "clock-skew",
@@ -1285,6 +1532,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-259",
+      "seed": 756552192,
+      "class": "clock-skew",
+      "mutation": "mac-transplant",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via mac-transplant against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 655,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-086",
       "seed": 1725110272,
       "class": "forged-token",
@@ -1300,6 +1560,19 @@
     {
       "id": "C-108",
       "seed": 1748028672,
+      "class": "forged-token",
+      "mutation": "overlong-encoding",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via overlong-encoding against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 641,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-246",
+      "seed": 1126413056,
       "class": "forged-token",
       "mutation": "overlong-encoding",
       "target": "reference-deployment/challenge",
@@ -1350,6 +1623,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-253",
+      "seed": 2055627520,
+      "class": "scope-confusable",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via mac-transplant against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 623,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-276",
+      "seed": 1252267008,
+      "class": "scope-confusable",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via mac-transplant against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 623,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-011",
       "seed": 1649843200,
       "class": "scope-confusable",
@@ -1376,16 +1675,29 @@
       "seen_in_run_history": 0
     },
     {
-      "id": "X-001",
-      "seed": 1089151488,
-      "class": "forged-token",
-      "mutation": "combined-lineage",
-      "target": "forged-token x framing-ambiguity (combined lineage against the newest surfaces)",
-      "corpus": "engine/runs escalation lineage",
-      "rationale": "self-escalation: forged-token combined with framing-ambiguity",
-      "source": "escalation-combine",
+      "id": "C-254",
+      "seed": 935003904,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
       "expected": "rejected-or-refuted",
-      "novelty": 584,
+      "novelty": 597,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-264",
+      "seed": 1330861824,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 597,
       "seen_in_run_history": 0
     },
     {
@@ -1425,6 +1737,19 @@
       "source": "deterministic-grammar",
       "expected": "rejected-or-refuted",
       "novelty": 583,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "X-001",
+      "seed": 1089151488,
+      "class": "forged-token",
+      "mutation": "combined-lineage",
+      "target": "forged-token x duplicate-key (combined lineage against the newest surfaces)",
+      "corpus": "engine/runs escalation lineage",
+      "rationale": "self-escalation: forged-token combined with duplicate-key",
+      "source": "escalation-combine",
+      "expected": "rejected-or-refuted",
+      "novelty": 570,
       "seen_in_run_history": 0
     },
     {
@@ -1623,6 +1948,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-239",
+      "seed": 1554587904,
+      "class": "forged-token",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via mac-transplant against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 518,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-245",
+      "seed": 191319040,
+      "class": "forged-token",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via mac-transplant against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 518,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-181",
       "seed": 1137663488,
       "class": "clock-skew",
@@ -1727,6 +2078,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-285",
+      "seed": 1605283328,
+      "class": "scope-confusable",
+      "mutation": "overlong-encoding",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via overlong-encoding against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 514,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-052",
       "seed": 672684288,
       "class": "forged-token",
@@ -1781,6 +2145,19 @@
     {
       "id": "C-106",
       "seed": 890246656,
+      "class": "forged-token",
+      "mutation": "case-fold-probe",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via case-fold-probe against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 510,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-247",
+      "seed": 330766144,
       "class": "forged-token",
       "mutation": "case-fold-probe",
       "target": "reference-deployment/verify",
@@ -2104,6 +2481,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-279",
+      "seed": 1102260224,
+      "class": "replay",
+      "mutation": "case-fold-probe",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "replay via case-fold-probe against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 432,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-033",
       "seed": 1159240704,
       "class": "clock-skew",
@@ -2221,6 +2611,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-288",
+      "seed": 289935104,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 411,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-158",
       "seed": 712172608,
       "class": "forged-token",
@@ -2236,6 +2639,19 @@
     {
       "id": "C-165",
       "seed": 1407052352,
+      "class": "forged-token",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via byte-flip against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 403,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-265",
+      "seed": 87108352,
       "class": "forged-token",
       "mutation": "byte-flip",
       "target": "rust-sidecar/healthz",
@@ -2299,6 +2715,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-250",
+      "seed": 794967040,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 385,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-169",
       "seed": 63198272,
       "class": "clock-skew",
@@ -2351,6 +2780,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-234",
+      "seed": 133300480,
+      "class": "clock-skew",
+      "mutation": "byte-flip",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via byte-flip against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 351,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-248",
+      "seed": 18637568,
+      "class": "clock-skew",
+      "mutation": "byte-flip",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via byte-flip against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 351,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-176",
       "seed": 1129737984,
       "class": "clock-skew",
@@ -2379,6 +2834,19 @@
     {
       "id": "C-093",
       "seed": 227722560,
+      "class": "clock-skew",
+      "mutation": "overlong-encoding",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via overlong-encoding against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 331,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-244",
+      "seed": 892537856,
       "class": "clock-skew",
       "mutation": "overlong-encoding",
       "target": "rust-sidecar/healthz",
@@ -2429,6 +2897,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-258",
+      "seed": 1376486400,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 326,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-263",
+      "seed": 783610624,
+      "class": "clock-skew",
+      "mutation": "case-fold-probe",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via case-fold-probe against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 326,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-021",
       "seed": 1590501120,
       "class": "scope-confusable",
@@ -2455,6 +2949,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-236",
+      "seed": 390883072,
+      "class": "scope-confusable",
+      "mutation": "mac-transplant",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via mac-transplant against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 325,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-269",
+      "seed": 539699712,
+      "class": "scope-confusable",
+      "mutation": "mac-transplant",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via mac-transplant against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 325,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-022",
       "seed": 1955123712,
       "class": "scope-confusable",
@@ -2470,6 +2990,19 @@
     {
       "id": "C-054",
       "seed": 1492693248,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 324,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-235",
+      "seed": 638796544,
       "class": "scope-confusable",
       "mutation": "byte-flip",
       "target": "rust-sidecar/healthz",
@@ -2598,6 +3131,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-268",
+      "seed": 1682326016,
+      "class": "forged-token",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via byte-flip against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 294,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-015",
       "seed": 1447331584,
       "class": "forged-token",
@@ -2702,6 +3248,45 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-237",
+      "seed": 708481600,
+      "class": "clock-skew",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via mac-transplant against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 259,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-238",
+      "seed": 949257472,
+      "class": "clock-skew",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via mac-transplant against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 259,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-287",
+      "seed": 2022711296,
+      "class": "clock-skew",
+      "mutation": "mac-transplant",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via mac-transplant against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 259,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-049",
       "seed": 319664768,
       "class": "forged-token",
@@ -2728,6 +3313,19 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-252",
+      "seed": 932774912,
+      "class": "forged-token",
+      "mutation": "duplicate-field",
+      "target": "rust-sidecar/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via duplicate-field against rust-sidecar/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 255,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-153",
       "seed": 942121984,
       "class": "clock-skew",
@@ -2741,8 +3339,34 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-277",
+      "seed": 2039886912,
+      "class": "clock-skew",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via byte-flip against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 228,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-089",
       "seed": 1692347456,
+      "class": "forged-token",
+      "mutation": "byte-flip",
+      "target": "reference-deployment/challenge",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via byte-flip against reference-deployment/challenge, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 220,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-261",
+      "seed": 294580224,
       "class": "forged-token",
       "mutation": "byte-flip",
       "target": "reference-deployment/challenge",
@@ -2871,6 +3495,45 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-251",
+      "seed": 588194816,
+      "class": "clock-skew",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/issue",
+      "corpus": "engine/surface-map.json",
+      "rationale": "clock-skew via byte-flip against rust-sidecar/issue, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 200,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-241",
+      "seed": 111120704,
+      "class": "forged-token",
+      "mutation": "duplicate-field",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via duplicate-field against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 193,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-262",
+      "seed": 731723520,
+      "class": "forged-token",
+      "mutation": "duplicate-field",
+      "target": "reference-deployment/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via duplicate-field against reference-deployment/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 193,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-043",
       "seed": 1998329344,
       "class": "scope-confusable",
@@ -2923,6 +3586,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-232",
+      "seed": 1211427648,
+      "class": "scope-confusable",
+      "mutation": "overlong-encoding",
+      "target": "rust-sidecar/issue",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via overlong-encoding against rust-sidecar/issue, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 186,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-275",
+      "seed": 39067136,
+      "class": "scope-confusable",
+      "mutation": "overlong-encoding",
+      "target": "rust-sidecar/issue",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via overlong-encoding against rust-sidecar/issue, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 186,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-016",
       "seed": 686960128,
       "class": "scope-confusable",
@@ -2943,6 +3632,32 @@
       "target": "rust-sidecar/issue",
       "corpus": "protocol/limits.json",
       "rationale": "scope-confusable via byte-flip against rust-sidecar/issue, corpus protocol/limits.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 181,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-249",
+      "seed": 1691925504,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/issue",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against rust-sidecar/issue, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 181,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-256",
+      "seed": 1116115968,
+      "class": "scope-confusable",
+      "mutation": "byte-flip",
+      "target": "rust-sidecar/issue",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via byte-flip against rust-sidecar/issue, corpus engine/surface-map.json",
       "source": "deterministic-grammar",
       "expected": "rejected-or-refuted",
       "novelty": 181,
@@ -2988,6 +3703,32 @@
       "seen_in_run_history": 0
     },
     {
+      "id": "C-243",
+      "seed": 858377216,
+      "class": "scope-confusable",
+      "mutation": "duplicate-field",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via duplicate-field against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 150,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-284",
+      "seed": 53030400,
+      "class": "scope-confusable",
+      "mutation": "duplicate-field",
+      "target": "rust-sidecar/verify",
+      "corpus": "engine/surface-map.json",
+      "rationale": "scope-confusable via duplicate-field against rust-sidecar/verify, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 150,
+      "seen_in_run_history": 0
+    },
+    {
       "id": "C-063",
       "seed": 1928876800,
       "class": "forged-token",
@@ -3016,6 +3757,19 @@
     {
       "id": "C-183",
       "seed": 432997632,
+      "class": "forged-token",
+      "mutation": "duplicate-field",
+      "target": "storage-matrix-deployment/healthz",
+      "corpus": "engine/surface-map.json",
+      "rationale": "forged-token via duplicate-field against storage-matrix-deployment/healthz, corpus engine/surface-map.json",
+      "source": "deterministic-grammar",
+      "expected": "rejected-or-refuted",
+      "novelty": 108,
+      "seen_in_run_history": 0
+    },
+    {
+      "id": "C-281",
+      "seed": 1145381752,
       "class": "forged-token",
       "mutation": "duplicate-field",
       "target": "storage-matrix-deployment/healthz",
