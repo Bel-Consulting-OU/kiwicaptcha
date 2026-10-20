@@ -30,7 +30,7 @@ test-fixtures = []
 [dependencies]
 sha2 = "0.10"
 argon2 = "0.5"
-hmac = "0.12"
+hmac = "0.13"
 hkdf = "0.12"
 base64 = "0.22"
 rand = "0.8"
