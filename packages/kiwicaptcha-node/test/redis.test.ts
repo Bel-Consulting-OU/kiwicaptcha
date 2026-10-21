@@ -20,14 +20,30 @@ import { verify } from '../src/verify.js';
 const SECRET = goldenVectors().hkdf.secret;
 
 async function reachable(): Promise<boolean> {
+  // A probe that leaks its socket keeps ioredis reconnect timers alive
+  // and prevents `node --test` from exiting. Teardown runs in finally;
+  // reconnection and the offline queue are off so a failure leaves no
+  // handles behind.
+  const probe: RedisClient = new Redis({
+    host: '127.0.0.1',
+    port: 6379,
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    reconnectOnError: () => false,
+    enableOfflineQueue: false,
+  });
   try {
-    const probe: RedisClient = new Redis({ host: '127.0.0.1', port: 6379, lazyConnect: true, maxRetriesPerRequest: 1 });
     await probe.connect();
     await probe.ping();
-    probe.disconnect();
     return true;
   } catch {
     return false;
+  } finally {
+    try {
+      probe.disconnect();
+    } catch {
+      // already closed
+    }
   }
 }
 

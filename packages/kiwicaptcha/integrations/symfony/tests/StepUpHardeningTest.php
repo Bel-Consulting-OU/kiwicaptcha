@@ -128,7 +128,7 @@ final class StepUpHardeningTest extends TestCase
         self::assertContains('context', $dimensions);
         self::assertNotContains('principal', $dimensions, 'the account backstop does not arm at 5 failures');
 
-        $contextKey = StepUpLockoutGuard::contextKeyOf($this->beginRequest());
+        $contextKey = $guard->contextKeyOf($this->beginRequest());
         $retryAfter = $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now, $contextKey);
         self::assertSame(300, $retryAfter, 'the first rung locks the failing context for 300 s');
         self::assertSame(0, $guard->retryAfterSecs(self::PRINCIPAL, self::TARGET, $this->now), 'the shared keys stay open below the backstop threshold');
@@ -168,7 +168,7 @@ final class StepUpHardeningTest extends TestCase
         $ticket = $this->ticketOf($begin);
         $code = (string) $this->sender->lastCode();
 
-        $contextKey = StepUpLockoutGuard::contextKeyOf($this->beginRequest());
+        $contextKey = $guard->contextKeyOf($this->beginRequest());
         for ($i = 0; $i < 5; ++$i) {
             $guard->registerFailure(self::PRINCIPAL, self::TARGET, $contextKey);
         }

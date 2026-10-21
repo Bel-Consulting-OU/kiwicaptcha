@@ -57,7 +57,7 @@ Ordinary deployments configure at the policy level: one
 ```yaml
 # config/packages/kiwi_captcha.yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility | ha_safe
     secret_key: '%env(KIWI_SECRET_KEY)%'
     public_base_url: '%env(KIWI_PUBLIC_URL)%'
     redis_dsn: '%env(KIWI_REDIS_DSN)%'

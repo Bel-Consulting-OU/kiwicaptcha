@@ -184,7 +184,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
                 'This account has no enrolled authenticator; enroll one before step-up.',
             );
         }
-        $contextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $contextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $trusted = $this->lockout?->isTrustedContext($request, $context->principalPseudonym, $now) ?? false;
         $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now, $contextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
@@ -249,7 +249,7 @@ final class TotpStepUpHandler implements StepUpHandlerInterface
     public function complete(Request $request): StepUpResult
     {
         $boundSessionId = StepUpSessionBinding::sessionId($request);
-        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $boundContextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {

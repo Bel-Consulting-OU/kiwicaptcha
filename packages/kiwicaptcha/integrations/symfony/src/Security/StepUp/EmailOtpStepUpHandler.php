@@ -86,7 +86,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
         // context (or the shared account/target backstops) is locked
         // out, no fresh challenge is minted — unless the request rides
         // the owner's trusted context, which may always begin.
-        $contextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $contextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $trusted = $this->lockout?->isTrustedContext($request, $context->principalPseudonym, $now) ?? false;
         $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now, $contextKey, $trusted) ?? 0;
         if ($retryAfter > 0) {
@@ -289,7 +289,7 @@ final class EmailOtpStepUpHandler implements StepUpHandlerInterface
     public function complete(Request $request): StepUpResult
     {
         $boundSessionId = StepUpSessionBinding::sessionId($request);
-        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $boundContextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {

@@ -366,7 +366,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         // no fresh challenge is minted. A WebAuthn begin for an
         // enrolled principal is the stronger-factor path: it bypasses
         // the shared locks (the assertion to come is the owner's proof).
-        $contextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $contextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $retryAfter = $this->lockout?->retryAfterSecs($context->principalPseudonym, $context->targetPseudonym, $now, $contextKey, true) ?? 0;
         if ($retryAfter > 0) {
             return $this->refusal(
@@ -433,7 +433,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public function complete(Request $request): StepUpResult
     {
         $boundSessionId = StepUpSessionBinding::sessionId($request);
-        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $boundContextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired) {
@@ -685,7 +685,7 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
     public function enrollComplete(Request $request): StepUpResult
     {
         $boundSessionId = StepUpSessionBinding::sessionId($request);
-        $boundContextKey = StepUpLockoutGuard::contextKeyOf($request);
+        $boundContextKey = $this->lockout?->contextKeyOf($request) ?? '';
         $now = $this->now();
         $resolved = $this->challengeOfRequest($request, $now);
         if ($resolved instanceof StepUpChallengeExpired || $resolved === null) {

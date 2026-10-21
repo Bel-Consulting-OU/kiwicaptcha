@@ -82,8 +82,10 @@ export async function delegateToSidecar(
         scope,
         remoteip: clientIp ?? undefined,
         expected_request_binding: expectedRequestBinding ?? '',
-        // Forwarded for wire completeness; the sidecar currently ignores
-        // them and the SDK runs the telemetry gate locally first.
+        // Forwarded so the sidecar runs the same gates at the
+        // delegation seam: it enforces the asserted telemetry posture
+        // and keys idempotent replays on the identity, while the SDK
+        // runs the telemetry gate locally first.
         enforce_telemetry: enforceTelemetry,
         operation_identity: operationIdentity ?? undefined,
       }),

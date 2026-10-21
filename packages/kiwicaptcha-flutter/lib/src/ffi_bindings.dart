@@ -80,7 +80,7 @@ typedef _RswSquareDart = int Function(
     Pointer<Uint8>, int, Pointer<Uint8>, int);
 
 typedef _SolveArgonNative = Int32 Function(Pointer<Uint8>, Uint32,
-    Pointer<Uint8>, Uint32, Uint32, Uint32, Uint32, Uint64, Pointer<Uint64>);
+    Pointer<Uint8>, Uint32, Uint32, Uint32, Uint32, Uint32, Pointer<Uint64>);
 typedef _SolveArgonDart = int Function(Pointer<Uint8>, int, Pointer<Uint8>,
     int, int, int, int, int, Pointer<Uint64>);
 

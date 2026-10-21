@@ -452,6 +452,23 @@ impl RecordStore for InstrumentedStore {
         self.record("commit", || self.inner.commit(nonce, record, valid));
     }
 
+    fn commit_with_mac(
+        &self,
+        nonce: &str,
+        record: &ChallengeRecord,
+        valid: bool,
+        operation_identity: Option<&str>,
+        mac: Option<&str>,
+    ) {
+        // Forward the authenticated seam so the wrapped store keeps the
+        // MAC an idempotent replay must verify; the instrumented op is
+        // still the commit the sequence assertions count.
+        self.record("commit", || {
+            self.inner
+                .commit_with_mac(nonce, record, valid, operation_identity, mac)
+        });
+    }
+
     fn counts(&self) -> (usize, usize) {
         self.record("counts", || self.inner.counts())
     }

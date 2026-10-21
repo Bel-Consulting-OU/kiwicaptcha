@@ -14,7 +14,7 @@ environment, and the DSN builds every Redis-backed service:
 ```yaml
 # config/packages/kiwi_captcha.yaml
 kiwi_captcha:
-    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | abuse_first | compatibility | ha_safe
     secret_key: '%env(KIWI_SECRET_KEY)%'
     public_base_url: '%env(KIWI_PUBLIC_URL)%'
     redis_dsn: '%env(KIWI_REDIS_DSN)%'
@@ -220,6 +220,72 @@ project's change document, Part 5, calls the default profile
 same derived knobs, the same chained step-up conditional, the same
 stage composition below. Either spelling is accepted everywhere the
 profile name appears; pick one and stay with it for readability.
+
+### The per-profile carrier matrix
+
+A scope's **carrier** is the enforcement that answers a step-up
+demand raised for it. The knobs behind a cell are
+`risk.scopes.<name>.carrier`, `risk.scopes.<name>.step_up_above`,
+`risk.scopes.<name>.login_step_up`, a `minimum` of `step_up`/`deny`,
+and the first-attempt novelty gate. Two rules bound every cell:
+
+- **Completable only.** A carrier counts when — and only when — the
+  matching factor is enabled in the same tree: `step_up_email` is the
+  anonymous email-ownership grant (mailbox proof, no session needed);
+  `email_otp`, `totp` and `webauthn` are principal ceremonies (the
+  acting account must exist). The doctor FAILs a scope that names a
+  carrier whose factor the container never wires.
+- **Novelty books login scopes only.** The first-attempt gate
+  evaluates `AuthenticationSuccess` / `AuthenticationFailure` events on
+  the firewalls `risk.login_scopes` maps (the abuse profiles default
+  that map to `{main: login}`), so novelty carries `login` and
+  `admin_login` and never `password_reset`, `signup` or `contact`.
+
+Profile × enforcement plane (from the processed tree, exactly what the
+doctor and the D3.3 economics campaign read):
+
+| Profile | risk plane | novelty | step-up plane | effective enforcement |
+|---|---|---|---|---|
+| `balanced` | off | `learn` (inert) | off | proof-of-work rungs only |
+| `privacy_strict` | off | `learn` (inert) | off (execution forced off) | proof-of-work rungs only |
+| `compatibility` | off | `learn` (inert) | off | proof-of-work rungs only |
+| `ha_safe` | off | `learn` (inert) | off | proof-of-work rungs only, plus the pinned-primary HA guard |
+| `high_abuse` / `abuse_first` | on | `enforce` | on, `email_ownership` on, WebAuthn composed as the default handler | the scope matrix below |
+
+A `financial_action` scope in a risk-off profile still *names* the
+`totp` carrier from the tree default; with the plane off no step-up
+demand is ever raised, the doctor reports risk disabled, and the scope
+stays a proof-of-work flow.
+
+Scope × carrier under `high_abuse` and `abuse_first` (byte-identical
+matrices):
+
+| Scope | Value class | Disposition floor | Carrier / gate | Completable by |
+|---|---|---|---|---|
+| `login` | standard | `allow` (proof of work) | first-attempt novelty under `novelty_enforcement: enforce` on the mapped firewall; `login_step_up: risk` withholds the session only when the engine decision is StepUp-or-stronger | principal factor (`totp` / `webauthn` / `email_otp`) |
+| `admin_login` | critical | `allow` (proof of work) | `login_step_up: always` — every interactive login waits for a principal factor even on an Allow; novelty applies as well | principal factor |
+| `password_reset` | standard | `allow` (proof of work) | `carrier: step_up_email` — the recovery leg is anonymous and is never credited to novelty, so it names its own grant | anonymous (mailbox ownership) |
+| `signup` | low | `allow` (proof of work) | `carrier: step_up_email` | anonymous (mailbox ownership) |
+| `contact` | low | `allow` (proof of work) | `step_up_above: 600` — only a scored decision above the rung escalates; the composed default handler (WebAuthn) answers it | principal factor |
+| `financial_action` | high | `allow` (issuance stays proof of work) | `carrier: email_otp` on the post-solve assessment, bound to the operation id and the protected contents (amount, currency, beneficiary), so one approval never authorizes another transfer | principal factor (the acting account) |
+
+Notes on the cells:
+
+- `login_step_up` accepts `risk` (the default: withhold only on a
+  StepUp-or-stronger decision) and `always` (withhold every
+  interactive login under the scope until a principal factor
+  completes). It is read by the post-credential gate
+  (`FirstAttemptLoginGuard`) through `risk.login_scopes`, never by the
+  challenge endpoint, so issuance stays a widget flow.
+- No shipped profile sets a `minimum: step_up` floor. A floor refuses
+  issuance with the typed step-up 403 **before any widget renders**,
+  which an anonymous visitor cannot complete; the carriers above are
+  the completable form of the same demand (see "The abuse_first
+  name").
+- The value-class economics gate credits exactly these cells: a class
+  is covered only when **every** scope of that class is covered by one
+  of them (novelty for the login scopes, a named completable carrier,
+  `step_up_above`, `login_step_up`, or a `deny` floor).
 
 ### Risk engine stage composition
 

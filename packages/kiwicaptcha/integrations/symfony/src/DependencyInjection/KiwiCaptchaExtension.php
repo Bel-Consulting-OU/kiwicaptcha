@@ -2269,6 +2269,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     new Reference('kiwi_captcha.step_up.store'),
                 ]))
                     ->setArgument('$notifyOwner', new Reference(LoggingStepUpOwnerNotifier::class))
+                    // The stateless network budget key resolves through
+                    // the canonical client IP issuance and risk bind —
+                    // wired unconditionally, like the resolver itself,
+                    // so a step-up lockout bucket can never disagree
+                    // with the bound identity.
+                    ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
                     ->setPublic(true));
 
                 // The anonymous email-ownership carrier (the step_up_email

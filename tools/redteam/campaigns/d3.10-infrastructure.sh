@@ -69,12 +69,29 @@ counter = rt.pow_solve(doc.body)
 print(rt.mint_token(str(doc.body["nonce"]), counter))
 PYSOLVE
     )
-    redis-cli -p "$MASTER_PORT" wait 1 2000 >/dev/null 2>&1
-    REPLICATED=$(redis-cli -p "$REPLICA_PORT" --scan --pattern 'kiwicaptcha:*' 2>/dev/null | head -n 1)
+    # WAIT-verified replication: WAIT is issued against the primary
+    # (its acked-return rides the fail detail), and a bounded scan
+    # window then proves the record is readable on the replica. A
+    # single fire-and-forget WAIT plus one scan raced the fresh-boot
+    # link under load and failed the leg while the link was healthy
+    # seconds later — the window absorbs that scheduling jitter but
+    # stays fail-closed: no record on the replica after the window is
+    # still a FAIL.
+    ACKS=$(redis-cli -p "$MASTER_PORT" wait 1 3000 2>/dev/null | tr -d '[:space:]')
+    REPLICATED=''
+    i=0
+    while [ "$i" -lt 10 ]; do
+        REPLICATED=$(redis-cli -p "$REPLICA_PORT" --scan --pattern 'kiwicaptcha:*' 2>/dev/null | head -n 1)
+        if [ -n "$REPLICATED" ]; then
+            break
+        fi
+        sleep 0.3
+        i=$((i + 1))
+    done
     if [ -n "$REPLICATED" ]; then
-        rt_report_pass "pending record replicated to the replica (WAIT verified topology)"
+        rt_report_pass "pending record replicated to the replica (WAIT verified topology, acks=${ACKS:-0})"
     else
-        rt_report_fail "pending record never reached the replica"
+        rt_report_fail "pending record never reached the replica (wait acks=${ACKS:-0}, scan empty after the bounded window)"
     fi
 
     redis-cli -p "$MASTER_PORT" shutdown nosave >/dev/null 2>&1
@@ -123,6 +140,9 @@ PYSOLVE
     printf 'ECONOMIC: %s sentinel failover_continuity=ok stale_primary=readonly\n' "$RT_CAMPAIGN"
 fi
 
-rt_metric "tamper_classes=11 acceptance_among_tampered=0 backends=redis,sentinel,sqlite,files,sidecar"
+# The metric names the backend THIS invocation exercised, never a
+# static composite. A composite GREEN without per-backend runs
+# overstates the evidence; the ledger shows the one backend that ran.
+rt_metric "tamper_classes=11 acceptance_among_tampered=0 backend=${KIWI_RT_BACKEND:-redis} (single backend per invocation; multi-backend coverage is a separate per-backend campaign)"
 
 rt_finish

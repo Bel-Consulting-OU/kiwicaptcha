@@ -19,6 +19,18 @@
 //!
 //! # Endpoints
 //!
+//! Both POST endpoints accept no query parameters: a query string on
+//! `/verify` or `/issue` answers 422 `QUERY_PARAMETERS_NOT_ALLOWED`,
+//! the public surface's code. Both bodies are typed strictly — unknown
+//! fields and mistyped values refuse (400 `bad_request`), so a garbage
+//! `scope` can never fall through a default. `/issue` reads the
+//! `Kiwi-Execution-Max-Version` header through the shared
+//! `clientCapability` interpretation (absent = the v1 floor, explicit
+//! `0` = never arm, canonical = clamped grammar): an explicit zero
+//! against an execution-armed deployment answers 422
+//! `CLIENT_EXECUTION_VERSION_UNSUPPORTED`, exactly like the Symfony
+//! controller.
+//!
 //! - `POST /verify` `{token, scope, remoteip, expected_request_binding?}`
 //!   — the provider JSON
 //!   shape (`success`, `challenge_ts`, `hostname`, `action`, `cdata`,
@@ -102,7 +114,7 @@ pub use server::{
     ListenAddr, PoolMetrics, ServerOptions,
 };
 pub use state::{default_profile, issue_wire_of, open_store, SidecarConfig, SidecarState};
-pub use store::{ConsumeOutcome, FileStore, MemoryStore, RecordMeta, RecordStore};
+pub use store::{ConsumeOutcome, FileStore, MemoryStore, RecordMeta, RecordStore, StoredSuccess};
 
 #[cfg(test)]
 mod tests {
@@ -121,7 +133,9 @@ mod tests {
         server::Request {
             method: method.to_string(),
             path: path.to_string(),
+            has_query: false,
             authorization: None,
+            execution_max_version: None,
             body: body.as_bytes().to_vec(),
         }
     }

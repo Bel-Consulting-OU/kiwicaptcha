@@ -149,16 +149,19 @@ $hasEnabledFactor = static function (array $risk): bool {
 // covered when the shipped posture carries it with a completable
 // enforcement, and the carriers are the product knobs themselves: the
 // disposition minimum (deny, or step_up over an enabled handler), the
-// enforcing novelty posture on the login scopes (login, admin_login
-// and the password_reset recovery leg the shipped posture assesses
-// under the same enforce decision), a named risk.scopes.<name>.carrier
-// whose factor the tree enables, the login_step_up always policy (the
-// post-credential gate withholds every session until a principal
-// factor, totp or webauthn, completes) and the step_up_above rung (the
-// risk-gated escalation over an enabled plane). A class is covered
-// only when EVERY scope of that class is covered (any-vs-all: one
-// covered scope never vouches for its class).
-$loginScopes = ["login", "admin_login", "password_reset"];
+// enforcing novelty posture on the login scopes (login and
+// admin_login — the first-attempt gate books only
+// AuthenticationSuccess/Failure on the mapped login firewalls, so a
+// scope like password_reset is never evaluated by novelty and is
+// covered through its own named carrier instead), a named
+// risk.scopes.<name>.carrier whose factor the tree enables,
+// the login_step_up always policy (the post-credential gate
+// withholds every session until a principal factor, totp or webauthn,
+// completes) and the step_up_above rung (the risk-gated escalation
+// over an enabled plane). A class is covered only when EVERY scope of
+// that class is covered (any-vs-all: one covered scope never vouches
+// for its class).
+$loginScopes = ["login", "admin_login"];
 $profiles = [];
 $classCarrier = [];
 foreach (["abuse_first", "balanced"] as $profileName) {
