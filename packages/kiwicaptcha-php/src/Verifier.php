@@ -150,6 +150,40 @@ final class Verifier
     private const SKEW_TOLERANCE_US = 5_000_000;
 
     /**
+     * A receipt magnitude that cannot be epoch microseconds in any
+     * plausible deployment: 1e17 us is ~3.2 million years after 1970.
+     * A larger value is a nanosecond clock — the literal reading of
+     * the `nowNs` parameter name. It must be folded back into the
+     * record's microsecond unit. Otherwise the minimum-duration floor
+     * silently passes every request: the gap becomes ~1e18 us and is
+     * never below the floor.
+     */
+    private const US_RECEIPT_MAGNITUDE_CEILING = 100_000_000_000_000_000;
+
+    /**
+     * Fold a caller-supplied receipt clock into epoch microseconds, the
+     * unit {@see self::issuedAtNs} and every duration check use.
+     *
+     * The parameter is named `nowNs` but its documented contract is
+     * microseconds; a caller that passes a true nanosecond clock hands
+     * a value 1000x too large, and the minimum-duration gate then
+     * computes an elapsed gap of ~1e18us and never trips. Reconciling
+     * by magnitude is safe in both directions: a legitimate microsecond
+     * receipt stays below the ceiling for millions of years, and a
+     * nanosecond receipt is always far above it.
+     */
+    private static function receiptMicros(?int $nowNs): int
+    {
+        if ($nowNs === null) {
+            return (int) (microtime(true) * 1_000_000);
+        }
+        if ($nowNs > self::US_RECEIPT_MAGNITUDE_CEILING) {
+            return intdiv($nowNs, 1000);
+        }
+        return $nowNs;
+    }
+
+    /**
      * Hard ceiling for a stored record's lifetime (expires_at - issued_at).
      * Issuance uses the configured TTL (default 120s); anything beyond 300s
      * cannot come from a KiwiCaptcha issuer and is rejected as malformed.
@@ -634,8 +668,10 @@ final class Verifier
         // floor of the cheap phase and the exposed server-measured solve
         // duration, see {@see self::measurableSolveDurationMs()}, read the
         // same receipt instant, never two separately timed microtime
-        // reads of one verification.
-        $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+        // reads of one verification. receiptMicros folds a nanosecond
+        // caller clock into microseconds so the floor cannot be
+        // silently disabled by the parameter's own name.
+        $receiptNs = self::receiptMicros($nowNs);
 
         // The execution evidence of this token, built once and shared by
         // the cheap phase, the compositional replay gate and every other
@@ -2565,7 +2601,7 @@ final class Verifier
             return VerifyError::MalformedRecord;
         }
         if ($floor > 0) {
-            $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+            $receiptNs = self::receiptMicros($nowNs);
             if ($receiptNs >= $record->issuedAtNs) {
                 if ($receiptNs - $record->issuedAtNs < $floor * 1_000) {
                     return VerifyError::TooFast;

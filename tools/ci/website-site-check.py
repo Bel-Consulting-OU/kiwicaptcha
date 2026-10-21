@@ -10,6 +10,7 @@ dangling local reference is a nonzero exit.
 
 from __future__ import annotations
 
+import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -145,6 +146,78 @@ def check_labels(root: Path) -> list[str]:
     return failures
 
 
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+    def channel(c: int) -> float:
+        s = c / 255.0
+        return s / 12.92 if s <= 0.04045 else ((s + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast_ratio(fg: tuple[int, int, int], bg: tuple[int, int, int]) -> float:
+    l1, l2 = sorted((_relative_luminance(fg), _relative_luminance(bg)), reverse=True)
+    return (l1 + 0.05) / (l2 + 0.05)
+
+
+def _parse_hex(value: str) -> tuple[int, int, int] | None:
+    v = value.strip().lstrip("#")
+    if len(v) == 3:
+        v = "".join(ch * 2 for ch in v)
+    if len(v) != 6:
+        return None
+    try:
+        return tuple(int(v[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def check_contrast(root: Path) -> list[str]:
+    """WCAG AA contrast of the prose text colors against the page background.
+
+    A textual Sage on Paper fell to ~2.3:1 once; this assertion catches
+    any prose text color below 4.5:1 (normal text). Decorative uses
+    (underline colors, fills, dividers) are out of scope.
+    """
+    css_path = root / "css" / "kiwi.css"
+    if not css_path.exists():
+        return [f"missing built css at {css_path}"]
+    css = css_path.read_text(encoding="utf-8")
+
+    vars_found: dict[str, str] = {}
+    for name, value in re.findall(r"--([a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{3,8})\s*;", css):
+        vars_found[name] = value
+
+    paper = _parse_hex(vars_found.get("paper", "#ffffff"))
+    if paper is None:
+        return ["css: --paper is missing or not a hex color"]
+
+    failures: list[str] = []
+    # Prose text selectors that sit on the paper background.
+    for rule in re.finditer(
+        r"\.(?:prose\s+\.kicker|kicker|prose\s+h2|prose\s+p|site-header[^{]*a)[^{]*\{([^}]*)\}",
+        css,
+    ):
+        body = rule.group(1)
+        color_match = re.search(r"color:\s*var\(--([a-z0-9-]+)\)", body) or re.search(
+            r"color:\s*(#[0-9a-fA-F]{3,8})", body
+        )
+        if not color_match:
+            continue
+        token = color_match.group(1)
+        fg_hex = vars_found.get(token, token) if not token.startswith("#") else token
+        fg = _parse_hex(fg_hex)
+        if fg is None:
+            continue
+        ratio = _contrast_ratio(fg, paper)
+        if ratio < 4.5:
+            selector = rule.group(0).split("{")[0].strip()
+            failures.append(
+                f"css: {selector} text color {fg_hex} on paper is {ratio:.2f}:1 (WCAG AA needs 4.5:1)"
+            )
+    return failures
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(f"usage: {argv[0]} <built-site-root>", file=sys.stderr)
@@ -160,6 +233,7 @@ def main(argv: list[str]) -> int:
     for page in pages:
         failures.extend(check_page(root, page))
     failures.extend(check_labels(root))
+    failures.extend(check_contrast(root))
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
     pages_n = len(pages)

@@ -87,8 +87,15 @@ describe('express middleware', () => {
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
 
-  after(() => {
-    server.close();
+  after(async () => {
+    // destroy() kills keepalive sockets (fetch/undici pools) that would
+    // otherwise keep the event loop alive after close() returns.
+    if (typeof server.closeAllConnections === 'function') {
+      server.closeAllConnections();
+    }
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
   });
 
   test('a valid form token passes and exposes the decision handle', async () => {

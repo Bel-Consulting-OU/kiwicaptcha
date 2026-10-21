@@ -27,6 +27,30 @@ use crate::rsw::RswTrapdoor;
 /// clock anomaly and the solution is rejected with [`VerifyError::TooFast`].
 pub const SKEW_TOLERANCE_US: u64 = 5_000_000;
 
+/// A receipt magnitude that cannot be epoch microseconds in any plausible
+/// deployment: 1e17 µs is ~3.2 million years after 1970. A larger value is a
+/// nanosecond clock (the literal reading of the `now_ns` parameter name).
+/// The PHP mirror is `Verifier::US_RECEIPT_MAGNITUDE_CEILING`.
+pub const US_RECEIPT_MAGNITUDE_CEILING: u64 = 100_000_000_000_000_000;
+
+/// Fold a caller-supplied receipt clock into epoch microseconds, the unit
+/// `issued_at_ns` and every duration check use.
+///
+/// The parameter is named `now_ns` but its documented contract is
+/// microseconds; a caller that passes a true nanosecond clock hands a value
+/// 1000x too large, and the minimum-duration gate then computes an elapsed
+/// gap of ~1e18 µs and never trips. Reconciling by magnitude is safe in both
+/// directions: a legitimate microsecond receipt stays below the ceiling for
+/// millions of years, and a nanosecond receipt is always far above it.
+/// The PHP mirror is `Verifier::receiptMicros()`.
+pub const fn fold_receipt_to_us(now_ns: u64) -> u64 {
+    if now_ns > US_RECEIPT_MAGNITUDE_CEILING {
+        now_ns / 1_000
+    } else {
+        now_ns
+    }
+}
+
 /// Compute the hash for the given record + counter.
 ///
 /// The computation is driven by the challenge's explicit [`PoWAlgorithm`],
@@ -1035,10 +1059,13 @@ pub(crate) fn measurable_solve_duration_ms(
     record: &ChallengeRecord,
     receipt_ns: u64,
 ) -> Option<u64> {
-    if record.server_mac.is_none() || record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
+    // Same unit fold as the minimum-duration floor: a nanosecond receipt
+    // must not fabricate a ~1e6x solve duration.
+    let receipt_us = fold_receipt_to_us(receipt_ns);
+    if record.server_mac.is_none() || record.issued_at_ns == 0 || receipt_us < record.issued_at_ns {
         return None;
     }
-    Some((receipt_ns - record.issued_at_ns) / 1_000)
+    Some((receipt_us - record.issued_at_ns) / 1_000)
 }
 
 /// The ExecutionChallengeV1 binding (hard), shared verbatim by
@@ -1438,13 +1465,16 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
     }
     if floor > 0 {
-        if ctx.now_ns >= ctx.record.issued_at_ns {
+        // Fold a nanosecond caller clock into microseconds so the floor
+        // cannot be silently disabled by the parameter's own name.
+        let now_us = fold_receipt_to_us(ctx.now_ns);
+        if now_us >= ctx.record.issued_at_ns {
             // High-resolution path: elapsed time between issuance and receipt,
             // both observed by the server clock. Both `now_ns` and
             // `issued_at_ns` are epoch microseconds (the names keep the `_ns`
             // suffix), so the ms floor is compared in the
             // same unit: ms -> µs (× 1_000).
-            let elapsed_us = ctx.now_ns - ctx.record.issued_at_ns;
+            let elapsed_us = now_us - ctx.record.issued_at_ns;
             if elapsed_us < floor.saturating_mul(1_000) {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
@@ -1454,7 +1484,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
             // we tolerate (skip the floor heuristic — the negative elapsed
             // time carries no timing signal); a larger skew means the clocks
             // are broken and the timing guarantee is void.
-            let skew = ctx.record.issued_at_ns - ctx.now_ns;
+            let skew = ctx.record.issued_at_ns - now_us;
             if skew > SKEW_TOLERANCE_US {
                 return VerifyOutcome::Invalid(VerifyError::TooFast);
             }
@@ -3016,6 +3046,52 @@ mod tests {
         assert_eq!(
             verify_solution(&mut ctx),
             VerifyOutcome::Invalid(VerifyError::TooFast)
+        );
+    }
+
+    #[test]
+    fn nanosecond_receipt_clock_cannot_disable_the_minimum_duration_floor() {
+        // Regression (parity with PHP Verifier::receiptMicros): the
+        // `now_ns` parameter is documented as epoch microseconds. A caller
+        // that passes a true nanosecond clock hands a value 1000x too
+        // large; before the unit fold the floor computed an elapsed gap of
+        // ~1e18 µs, never below the bound, and an immediate verify passed
+        // a 60 s floor. The magnitude fold must fire TooFast instead.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).unwrap();
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-32-bytes-0123456789abcd",
+            tenant: None,
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX),
+            now_ns: NOW_NS * 1_000, // nanoseconds, not microseconds
+            min_duration_ms: 60_000,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            execution_digest: None,
+            execution_trace: None,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            policy_version_floor: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_keyring: None,
+        };
+        assert_eq!(
+            verify_solution(&mut ctx),
+            VerifyOutcome::Invalid(VerifyError::TooFast),
+            "a nanosecond receipt clock must not disable the 60 s floor"
         );
     }
 

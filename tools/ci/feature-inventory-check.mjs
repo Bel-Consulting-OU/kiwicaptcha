@@ -69,6 +69,7 @@ const runners = [
   read("integrations-platforms/tests/run.sh"),
   read("tools/redteam/exit-criteria.sh"),
   read("tools/dogfood/dogfood.sh"),
+  read("website/build.sh"),
 ].join("\n");
 
 const allWorkflows = ci + "\n" + kiwiText;

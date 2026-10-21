@@ -393,7 +393,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
     }
     if (isolate != null) {
       if (run.cancelled) {
-        isolate.kill(priority: Isolate.immediatePriority);
+        isolate.kill(priority: Priority.immediate);
       } else {
         run.solveIsolate = isolate;
       }
@@ -450,7 +450,7 @@ class _KiwiRun {
     final wait = deliveryWait;
     if (wait != null && !wait.isCompleted) wait.complete();
     deliveryWait = null;
-    solveIsolate?.kill(priority: Isolate.immediatePriority);
+    solveIsolate?.kill(priority: Priority.immediate);
     solveIsolate = null;
     solvePort?.close();
     solvePort = null;
