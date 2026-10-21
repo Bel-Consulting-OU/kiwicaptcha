@@ -62,10 +62,23 @@ final class MethodOverrideFramingSubscriber implements EventSubscriberInterface
         // A query-string `_method` reaches Request::getMethod() before any
         // listener can re-examine it, so the canonical query-framing
         // refusal has to answer on the raw query bag ahead of routing.
+        // The documented security invariant for every unexpected query
+        // parameter — `_method` included — is 422
+        // QUERY_PARAMETERS_NOT_ALLOWED. On Symfony 6.4 the framework's
+        // HttpMethodParameterOverrideListener (priority 256) rewrites the
+        // verb before the router reads it; this subscriber (priority 512)
+        // therefore answers on the raw bag, preserving the 422 invariant
+        // instead of letting the framework's 405 leak out.
         if ($this->hasQueryMethodOverride($request)) {
+            // Also disable the framework override for this request so a
+            // later listener cannot rewrite the verb after us.
+            if (\method_exists($request, 'setMethodOverrideParameter')) {
+                $request->setMethodOverrideParameter(false);
+            }
             $event->setResponse($this->framingRefusal(
-                'METHOD_OVERRIDE_IN_QUERY',
-                'The request carries a _method override in the query string; this endpoint rejects query-parameter framing.',
+                'QUERY_PARAMETERS_NOT_ALLOWED',
+                'The challenge endpoint accepts no query parameters.',
+                Response::HTTP_UNPROCESSABLE_ENTITY,
             ));
             return;
         }
@@ -80,11 +93,11 @@ final class MethodOverrideFramingSubscriber implements EventSubscriberInterface
      * The shared framing refusal document: a typed code, a stable
      * message and the no-store cache posture of every framing error.
      */
-    private function framingRefusal(string $code, string $message): JsonResponse
+    private function framingRefusal(string $code, string $message, int $status = Response::HTTP_BAD_REQUEST): JsonResponse
     {
         $response = new JsonResponse(
             ['error' => ['code' => $code, 'message' => $message]],
-            Response::HTTP_BAD_REQUEST,
+            $status,
         );
         $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
         $response->headers->set('Pragma', 'no-cache');
