@@ -168,7 +168,7 @@ final class MethodOverrideFramingTest extends TestCase
         // moment anything asks, so the canonical query-framing refusal —
         // not the framework's 405 — has to answer first. The documented
         // security invariant for every unexpected query parameter is
-        // 422 QUERY_PARAMETERS_NOT_ALLOWED; `_method` is not an
+        // 422 `QUERY_PARAMETERS_NOT_ALLOWED`; `_method` is not an
         // exception.
         $request = $this->challengeRequest(path: '/kiwi-captcha/challenge?_method=DELETE');
         self::assertNotNull($this->dispatch($this->subscriber(), $request), 'the subscriber must answer a query override');
