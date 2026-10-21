@@ -64,7 +64,7 @@ final class MethodOverrideFramingSubscriber implements EventSubscriberInterface
         // refusal has to answer on the raw query bag ahead of routing.
         // The documented security invariant for every unexpected query
         // parameter — `_method` included — is 422
-        // QUERY_PARAMETERS_NOT_ALLOWED. On Symfony 6.4 the framework's
+        // `QUERY_PARAMETERS_NOT_ALLOWED`. On Symfony 6.4 the framework's
         // HttpMethodParameterOverrideListener (priority 256) rewrites the
         // verb before the router reads it; this subscriber (priority 512)
         // therefore answers on the raw bag, preserving the 422 invariant

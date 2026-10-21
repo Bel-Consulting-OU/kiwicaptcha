@@ -72,8 +72,8 @@ final class TokenMutationFuzzTest extends TestCase
     {
         // Sound oracle (not "counter+1 must fail"): every counter has an
         // independent 2^-d chance of satisfying the target, so two
-        // adjacent counters can BOTH be valid. The property under test
-        // is that the verifier's verdict MATCHES the reference proof
+        // adjacent counters can both be valid. The property under test
+        // is that the verifier's verdict matches the reference proof
         // calculation: a counter whose digest independently fails the
         // target must be refused, and a counter that independently
         // passes is a legitimate solve (not a bypass).
@@ -102,7 +102,7 @@ final class TokenMutationFuzzTest extends TestCase
         $out = $verifier->verify($tampered, self::SECRET, 'login', '203.0.113.50');
         self::assertFalse($out->isOk(), 'a counter whose digest fails the target must be refused');
 
-        // And a counter that independently PASSES must also be accepted
+        // And a counter that independently passes must also be accepted
         // by the verifier (proving the verifier is not just rejecting
         // every counter change — that would mask a different bug).
         $passCounter = null;
@@ -121,7 +121,7 @@ final class TokenMutationFuzzTest extends TestCase
             [$verifier2, $token2, $record2] = $this->verifier();
             $decoded2 = SolutionToken::decode($token2);
             $salt2 = base64_decode($record2->salt, true);
-            // Recompute against THIS stack's record.
+            // Recompute against this stack's record.
             $h = hash('sha256', $record2->prefix . $passCounter . $salt2, true);
             if (Verifier::leadingZeroBits($h) >= $record2->targetBits) {
                 $tokenPass = SolutionToken::create($decoded2->nonce, $passCounter, $decoded2->durationMs, $decoded2->telemetry)->encode();

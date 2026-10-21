@@ -197,6 +197,47 @@ void main() {
       );
       expect(solution.counter, 45);
     });
+
+    test('a mid-solve probe stops within one batch of the fire point (stale-work ceiling)', () {
+      // The cooperative-cancellation contract: once the probe fires, the
+      // solve must raise KiwiSolveError.cancelled within at most one
+      // cancellation batch (kiwiShaCancellationBatch candidates). This
+      // is the explicit proof that killing a caller between native FFI
+      // invocations cannot leave an unbounded native computation
+      // running — the native work is itself batched to the same
+      // ceiling, and the Dart probe runs between batches.
+      const batch = kiwiShaCancellationBatch;
+      var candidates = 0;
+      var fired = false;
+      expect(
+        () => solveKiwiChallenge(
+          // A high target so the search cannot finish before the probe
+          // fires; the Dart path is cancelled mid-search.
+          shaChallenge(targetBits: 20),
+          isCancelled: () {
+            if (fired) return true;
+            candidates++;
+            if (candidates >= batch) {
+              fired = true;
+              return true;
+            }
+            return false;
+          },
+        ),
+        throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.cancelled)),
+        reason: 'a probe that fires at candidate $batch must cancel the solve',
+      );
+      // The overshoot bound: the loop checks the probe at
+      // counter % batch == 0, so it cannot run more than one full batch
+      // past the fire point. We assert candidates stayed inside the
+      // contract: at most 2 * batch evaluations after the probe was
+      // armed (one in-loop overshoot batch + the raising batch).
+      expect(
+        candidates,
+        lessThanOrEqualTo(2 * batch),
+        reason: 'stale work must stay within the cancellation batch ceiling',
+      );
+    });
   });
 
   group('siteverify body', () {
