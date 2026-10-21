@@ -31,6 +31,9 @@ final class TokenMutationFuzzTest extends TestCase
     private const SECRET = 'mutation-fuzz-secret-0123456789abcdef';
 
     /** @return array{0: Verifier, 1: string} [verifier, token] */
+    /**
+     * @return array{0: Verifier, 1: string, 2: \KiwiCaptcha\ChallengeRecord} [verifier, token, record]
+     */
     private function verifier(): array
     {
         // The record must live in the verifier's storage; rebuild the
@@ -40,6 +43,8 @@ final class TokenMutationFuzzTest extends TestCase
         $storage = new ArrayStorage();
         $issuer = new Issuer($config, $storage, now: static fn (): int => $now);
         $ch = $issuer->issue('login', '203.0.113.50');
+        $record = $storage->find($ch->nonce);
+        \assert($record !== null);
         $salt = base64_decode($ch->salt, true);
         $c = 0;
         do {
@@ -50,7 +55,7 @@ final class TokenMutationFuzzTest extends TestCase
         $token = SolutionToken::create($ch->nonce, $c, 5000, [])->encode();
         $verifier = new Verifier($storage, now: static fn (): int => $now, acceptLegacyV1: true);
 
-        return [$verifier, $token];
+        return [$verifier, $token, $record];
     }
 
     public function testBaselineVerifiesOnceThenIsAlreadyConsumed(): void
@@ -65,20 +70,64 @@ final class TokenMutationFuzzTest extends TestCase
 
     public function testCounterMutationsAreNeverAccepted(): void
     {
-        [$verifier, $token] = $this->verifier();
+        // Sound oracle (not "counter+1 must fail"): every counter has an
+        // independent 2^-d chance of satisfying the target, so two
+        // adjacent counters can BOTH be valid. The property under test
+        // is that the verifier's verdict MATCHES the reference proof
+        // calculation: a counter whose digest independently fails the
+        // target must be refused, and a counter that independently
+        // passes is a legitimate solve (not a bypass).
+        [$verifier, $token, $record] = $this->verifier();
         $decoded = SolutionToken::decode($token);
-        // Deterministic counter perturbations: off-by-one both ways and
-        // a large jump. A proof that does not match the record's prefix
-        // must be refused, never accepted.
-        foreach ([+1, -1, +2, -17, +1000000] as $delta) {
-            $tampered = SolutionToken::create(
-                $decoded->nonce,
-                $decoded->counter + $delta,
-                $decoded->durationMs,
-                $decoded->telemetry,
-            )->encode();
-            $out = $verifier->verify($tampered, self::SECRET, 'login', '203.0.113.50');
-            self::assertFalse($out->isOk(), sprintf('counter%+d must not verify, got %s', $delta, $out->code()));
+        $salt = base64_decode($record->salt, true);
+
+        // Find a nearby counter whose digest independently fails the target.
+        $failCounter = null;
+        for ($d = 1; $d < 10000; $d++) {
+            $c = $decoded->counter + $d;
+            $h = hash('sha256', $record->prefix . $c . $salt, true);
+            if (Verifier::leadingZeroBits($h) < $record->targetBits) {
+                $failCounter = $c;
+                break;
+            }
+        }
+        self::assertNotNull($failCounter, 'searched 10000 counters without finding a failing one (implausible at 4-bit target)');
+
+        $tampered = SolutionToken::create(
+            $decoded->nonce,
+            $failCounter,
+            $decoded->durationMs,
+            $decoded->telemetry,
+        )->encode();
+        $out = $verifier->verify($tampered, self::SECRET, 'login', '203.0.113.50');
+        self::assertFalse($out->isOk(), 'a counter whose digest fails the target must be refused');
+
+        // And a counter that independently PASSES must also be accepted
+        // by the verifier (proving the verifier is not just rejecting
+        // every counter change — that would mask a different bug).
+        $passCounter = null;
+        for ($d = 1; $d < 10000; $d++) {
+            $c = $decoded->counter - $d;
+            if ($c < 0) {
+                break;
+            }
+            $h = hash('sha256', $record->prefix . $c . $salt, true);
+            if (Verifier::leadingZeroBits($h) >= $record->targetBits) {
+                $passCounter = $c;
+                break;
+            }
+        }
+        if ($passCounter !== null) {
+            [$verifier2, $token2, $record2] = $this->verifier();
+            $decoded2 = SolutionToken::decode($token2);
+            $salt2 = base64_decode($record2->salt, true);
+            // Recompute against THIS stack's record.
+            $h = hash('sha256', $record2->prefix . $passCounter . $salt2, true);
+            if (Verifier::leadingZeroBits($h) >= $record2->targetBits) {
+                $tokenPass = SolutionToken::create($decoded2->nonce, $passCounter, $decoded2->durationMs, $decoded2->telemetry)->encode();
+                $outPass = $verifier2->verify($tokenPass, self::SECRET, 'login', '203.0.113.50');
+                self::assertTrue($outPass->isOk(), 'a counter whose digest independently passes the target must verify: '.$outPass->code());
+            }
         }
     }
 

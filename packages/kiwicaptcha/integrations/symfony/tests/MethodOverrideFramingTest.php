@@ -166,15 +166,16 @@ final class MethodOverrideFramingTest extends TestCase
     {
         // A query-string _method is honored by Request::getMethod() the
         // moment anything asks, so the canonical query-framing refusal —
-        // not the framework's 405 — has to answer first.
-        // POST parameters land in the request bag; the override the
-        // framework honors lives in the query string itself.
+        // not the framework's 405 — has to answer first. The documented
+        // security invariant for every unexpected query parameter is
+        // 422 QUERY_PARAMETERS_NOT_ALLOWED; `_method` is not an
+        // exception.
         $request = $this->challengeRequest(path: '/kiwi-captcha/challenge?_method=DELETE');
         self::assertNotNull($this->dispatch($this->subscriber(), $request), 'the subscriber must answer a query override');
         $response = $this->dispatch($this->subscriber(), $request);
-        self::assertSame(400, $response->getStatusCode());
-        self::assertSame('METHOD_OVERRIDE_IN_QUERY', $this->errorCode($response));
-        self::assertStringContainsString('query string', json_decode((string) $response->getContent(), true)['error']['message']);
+        self::assertSame(422, $response->getStatusCode());
+        self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', $this->errorCode($response));
+        self::assertStringContainsString('query parameters', json_decode((string) $response->getContent(), true)['error']['message']);
     }
 
     public function testSingleOverrideKeepsTheFrameworkBehaviour(): void
