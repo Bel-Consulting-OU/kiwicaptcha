@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Security\StepUp;
 
+use BelConsulting\KiwiCaptchaBundle\Risk\AmbiguousForwardingException;
+use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use Symfony\Component\HttpFoundation\Request;
 
 /**
@@ -72,10 +74,23 @@ final class StepUpLockoutGuard
      *                                             (a lockout is armed
      *                                             or extended), not on
      *                                             every failure past
-     *                                             the threshold
+     *                                             the threshold.
      * @param \Closure|null               $now        the epoch-seconds
      *                                             clock override for
-     *                                             tests
+     *                                             tests.
+     * @param ClientIpResolver|null       $clientIpResolver the bundle's
+     *                                             canonical client-IP
+     *                                             policy. The budget key
+     *                                             resolves through it so
+     *                                             the lockout bucket can
+     *                                             never diverge from the
+     *                                             bound identity: a raw
+     *                                             framework answer can
+     *                                             disagree with the
+     *                                             configured trust list
+     *                                             and let a client rotate
+     *                                             its own bucket through
+     *                                             XFF.
      */
     public function __construct(
         private readonly StepUpChallengeStore $store,
@@ -83,6 +98,7 @@ final class StepUpLockoutGuard
         private readonly int $windowSecs = self::DEFAULT_WINDOW_SECS,
         private readonly ?StepUpOwnerNotifier $notifyOwner = null,
         private readonly ?\Closure $now = null,
+        private readonly ?ClientIpResolver $clientIpResolver = null,
     ) {
         if ($ladder === []) {
             throw new \InvalidArgumentException('The step-up lockout ladder must not be empty');
@@ -113,14 +129,27 @@ final class StepUpLockoutGuard
      * The budget key of the requesting context: the started session when
      * there is one, else the client's network bucket. Hashed, the store
      * keys carry opaque ids only, never a raw session id or address.
+     *
+     * The network bucket resolves through the bundle's ClientIpResolver
+     * — the same canonical IP issuance binds and the risk plane books —
+     * with the framework answer only when no resolver is wired (the
+     * legacy test posture). An ambiguous-forwarding refusal answers the
+     * empty identity (the shared anonymous bucket, fail closed), the
+     * same degradation the demand finalizer's reassess() applies.
      */
-    public static function contextKeyOf(Request $request): string
+    public function contextKeyOf(Request $request): string
     {
         $sessionId = StepUpSessionBinding::sessionId($request);
         if ($sessionId !== '') {
             return 'sess:'.hash('sha256', $sessionId);
         }
-        $ip = (string) ($request->getClientIp() ?? '');
+        try {
+            $ip = $this->clientIpResolver !== null
+                ? $this->clientIpResolver->resolve($request)
+                : (string) ($request->getClientIp() ?? '');
+        } catch (AmbiguousForwardingException) {
+            $ip = '';
+        }
 
         return $ip !== '' ? 'net:'.hash('sha256', $ip) : 'net:anonymous';
     }

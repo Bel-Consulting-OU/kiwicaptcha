@@ -258,13 +258,37 @@ function kiwiChallenge(): void
         // The execution dimension is armed exactly when the deployment
         // configured the execution key (the mirror of the bundle gate:
         // the key is the arming condition) and the client did not
-        // advertise the capability zero. The reference deployment has
-        // no mandatory-execution knob (arming is the key's only
-        // condition, with no required tier), so a NONE-capability
-        // client is served the plain challenge, never a refusal.
-        $challenge = $config->executionKey !== null && $capability !== ExecutionVersionPolicy::CAPABILITY_NONE
-            ? $issuer->issueWithExecutionField($scope, kiwiClientIp(), true, $requestBinding)
-            : $issuer->issue($scope, kiwiClientIp(), $requestBinding);
+        // advertise the capability zero.
+        //
+        // KIWI_EXECUTION_REQUIRED=1 is the mandatory-execution knob:
+        // when the operator relies on execution for abuse resistance, a
+        // NONE-capability client must be REFUSED, never silently served
+        // a weaker challenge. A bot does not have to truthfully
+        // advertise; without this knob the capability claim is an
+        // opt-out, not a security boundary.
+        $executionKey = $config->executionKey;
+        $mandatory = filter_var(getenv('KIWI_EXECUTION_REQUIRED') ?: '0', FILTER_VALIDATE_BOOLEAN);
+        if ($executionKey !== null && $capability === ExecutionVersionPolicy::CAPABILITY_NONE) {
+            if ($mandatory) {
+                http_response_code(403);
+                header('Content-Type: application/json');
+                header('Cache-Control: no-store, private, max-age=0');
+                echo json_encode([
+                    'error' => [
+                        'code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED',
+                        'message' => 'This deployment requires the execution dimension; your client advertises capability zero.',
+                    ],
+                ]), "\n";
+
+                return;
+            }
+            // Compatibility posture: serve the plain challenge.
+            $challenge = $issuer->issue($scope, kiwiClientIp(), $requestBinding);
+        } elseif ($executionKey !== null) {
+            $challenge = $issuer->issueWithExecutionField($scope, kiwiClientIp(), true, $requestBinding);
+        } else {
+            $challenge = $issuer->issue($scope, kiwiClientIp(), $requestBinding);
+        }
     } catch (\Throwable $e) {
         error_log(sprintf('kiwicaptcha deploy: challenge issuance failed: %s', $e->getMessage()));
         kiwiError('SERVICE_UNAVAILABLE', 'Challenge issuance is temporarily unavailable. Try again later.', 503);

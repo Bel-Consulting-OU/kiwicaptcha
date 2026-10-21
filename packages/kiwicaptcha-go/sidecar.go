@@ -66,11 +66,13 @@ type sidecarVerifyRequest struct {
 	// unbound; a non-empty string must match the record's signed
 	// request_binding exactly.
 	ExpectedRequestBinding *string `json:"expected_request_binding,omitempty"`
-	// EnforceTelemetry and OperationIdentity are forwarded for wire
-	// completeness; the sidecar currently ignores them and the SDK runs
-	// the telemetry gate locally first.
-	EnforceTelemetry   bool   `json:"enforce_telemetry,omitempty"`
-	OperationIdentity  string `json:"operation_identity,omitempty"`
+	// EnforceTelemetry and OperationIdentity are forwarded so the
+	// sidecar runs the same gates at the delegation seam: it enforces
+	// the asserted telemetry posture and keys idempotent replays on
+	// the identity, while the SDK still runs the telemetry gate
+	// locally first.
+	EnforceTelemetry  bool   `json:"enforce_telemetry,omitempty"`
+	OperationIdentity string `json:"operation_identity,omitempty"`
 }
 
 // sidecarExpectedBinding maps the SDK verification context onto the

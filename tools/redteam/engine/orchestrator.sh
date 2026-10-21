@@ -329,6 +329,24 @@ for campaign in $CAMPAIGNS; do
     fi
     log "campaign $campaign -> $verdict in ${duration}s (ledger: $(basename "$doc"))"
 
+    # The D3.10 multi-backend contract: this orchestrator drives one
+    # profile, so a PASS infrastructure run additionally drives the
+    # remaining required backends (redis, sentinel, sqlite, files) and
+    # requires each to end GREEN with its own profile-bound run
+    # document — the per-backend ledger rows the ledger grades the
+    # multi-backend claim against. A missing backend is a failed
+    # campaign slot, never a green row over partial evidence.
+    if [ "$campaign" = "d3.10-infrastructure" ] && [ "$verdict" = "PASS" ]; then
+        # shellcheck source=../lib/d310-backends.sh
+        . "$RT_DIR/lib/d310-backends.sh"
+        if rt_d310_run_backends "$campaign" "$(class_of "$campaign")" "$PROFILE" "$KIWI_RT_SEED" "$method_line" "$RT_DIR/runs/env" "$RUNS_DIR"; then
+            log "campaign $campaign multi-backend matrix green ($RT_D310_COVERED)"
+        else
+            log "campaign $campaign multi-backend matrix missing:$RT_D310_MISSING"
+            RESULT=1
+        fi
+    fi
+
     # ---------- the hybrid cycle (synthesis after each campaign) ----
     # A fresh corpus from the seeded LCG grammar, then the two-run
     # triage gate. The cycle seed is derived from the run seed and the

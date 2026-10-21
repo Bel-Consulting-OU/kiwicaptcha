@@ -270,12 +270,12 @@ function digestRefusal(run, campaign) {
  * refusals use; a missing one is left to the REQUIRED_FIELDS check
  * below, which names it as pre-upgrade evidence.
  */
-function shapeRefusal(run, campaign) {
+function shapeRefusal(run, campaign, profile = profileField, topology = topologyField) {
     if (run.campaign !== campaign) return "campaign name mismatch";
     if (run.seed !== seedArg) {
         return `seed ${JSON.stringify(run.seed)} != the ledger seed ${JSON.stringify(seedArg)}`;
     }
-    for (const [field, want] of [["profile", profileField], ["topology", topologyField]]) {
+    for (const [field, want] of [["profile", profile], ["topology", topology]]) {
         const got = run[field];
         if (got === undefined || got === null || got === "") continue;
         if (got !== want) {
@@ -375,6 +375,7 @@ function selectRun(campaign) {
             file: selected.file,
             note: null,
             newerRefusal: newest !== selected ? refusalNoteOf(newest, campaign) : null,
+            newerEv: newest !== selected ? newest : null,
             buriedRefusals: above,
             buriedFail: buriedFail ?? null,
         };
@@ -392,6 +393,44 @@ function selectRun(campaign) {
 const selections = new Map();
 for (const { campaign } of EXPECTED_CAMPAIGNS) {
     selections.set(campaign, selectRun(campaign));
+}
+
+// ---------- the D3.10 multi-backend contract ----------
+// The infrastructure campaign's spec matrix is every storage backend
+// the target matrix boots (the same set target.sh matrix defaults
+// to). A GREEN row therefore requires, under the current seed and the
+// current tree, one qualifying PASS run document PER required backend
+// — the per-backend rows the orchestrator's runner writes. A run
+// under a single profile, or a static `backends=` list in a metric
+// line, never satisfies it: the refusal names exactly which backend
+// runs are missing or why the newest document for one was refused.
+const D310_REQUIRED_BACKENDS = ["redis", "sentinel", "sqlite", "files"];
+
+function d310MultiBackendGap() {
+    const events = slotEvents.get("d3.10-infrastructure") ?? [];
+    // The NEWEST document per backend profile: events are
+    // filename-sorted, so a later event wins the slot — and when it
+    // refuses, the backend counts as missing with that refusal, never
+    // falling back to an older passing run silently.
+    const newestByProfile = new Map();
+    for (const ev of events) {
+        if (ev.kind !== "doc") continue;
+        const p = ev.run?.profile;
+        if (D310_REQUIRED_BACKENDS.includes(p)) newestByProfile.set(p, ev);
+    }
+    const missing = [];
+    for (const p of D310_REQUIRED_BACKENDS) {
+        const ev = newestByProfile.get(p);
+        if (ev === undefined) {
+            missing.push(`${p} (no run document under this seed)`);
+            continue;
+        }
+        const why =
+            digestRefusal(ev.run, "d3.10-infrastructure") ??
+            shapeRefusal(ev.run, "d3.10-infrastructure", p, topologyOf(p));
+        if (why !== null) missing.push(`${p} (${why})`);
+    }
+    return missing;
 }
 
 /**
@@ -468,16 +507,35 @@ function statusOf(run, campaign) {
  * document: a newer document was refused, and the fall-through to the
  * older qualifying run is stated in the row instead of hiding.
  */
-function evidenceSuffix(selection) {
+function evidenceSuffix(selection, campaign = null) {
+    // A D3.10 document bound to another required backend profile is not
+    // a refused leftover above this slot: it is that backend's own
+    // profile-bound row, and the multi-backend contract reads it as
+    // evidence for ITS backend. It is filtered here (and disclosed
+    // positively in the row itself); anything else — a stale digest, a
+    // FAIL result, a foreign profile outside the required set — still
+    // discloses.
+    const isRequiredBackendRow = (ev) =>
+        campaign === "d3.10-infrastructure" &&
+        ev?.kind === "doc" &&
+        D310_REQUIRED_BACKENDS.includes(ev.run?.profile) &&
+        digestRefusal(ev.run, campaign) === null &&
+        shapeRefusal(ev.run, campaign, ev.run.profile, topologyOf(ev.run.profile)) === null;
     const notes = [];
     if (selection.buriedFail) {
         notes.push(`a newer run of this campaign under the current tree and seed recorded FAIL (${selection.buriedFail.ev.file}); the row is RED until a fresh PASS supersedes it`);
     }
-    for (const { note } of selection.buriedRefusals ?? []) {
+    for (const { ev, note } of selection.buriedRefusals ?? []) {
+        if (isRequiredBackendRow(ev)) continue;
         notes.push(note.verdict);
     }
-    if (selection.newerRefusal && selection.newerRefusal !== (selection.buriedRefusals ?? []).slice(-1)[0]?.note) {
-        notes.push(selection.newerRefusal.verdict);
+    if (
+        selection.newerRefusal &&
+        selection.newerRefusal !== (selection.buriedRefusals ?? []).slice(-1)[0]?.note
+    ) {
+        if (!isRequiredBackendRow(selection.newerEv)) {
+            notes.push(selection.newerRefusal.verdict);
+        }
     }
     if (notes.length === 0) return "";
     // Identical refusal verdicts collapse to one mention with a count:
@@ -539,10 +597,30 @@ const threatRows = EXPECTED_CAMPAIGNS.map(({ campaign, attackClass }) => {
         status = "RED";
         evidence = `RED: ${sel.buriedFail.ev.file} recorded FAIL under the current tree and seed; the older PASS below it is not the newest word. ${evidence}`;
     }
+    if (campaign === "d3.10-infrastructure" && status === "GREEN") {
+        // The multi-backend contract: GREEN needs a qualifying run per
+        // required backend, and the run's own metric must name ITS
+        // backend — a static multi-backend list in a single-profile
+        // document is the old composite overclaim, refused here even
+        // when every per-backend row exists.
+        const missingBackends = d310MultiBackendGap();
+        if (missingBackends.length > 0) {
+            status = "RED";
+            evidence = `RED: multi-backend contract — required backend run(s) missing or refused: ${missingBackends.join("; ")}. A composite claim needs one fresh PASS run document per backend (${D310_REQUIRED_BACKENDS.join(", ")}). ${evidence}`;
+        }
+        const raw = sel.run?.metrics?.raw ?? "";
+        if (/\bbackends=/.test(raw)) {
+            status = "RED";
+            evidence = `RED: the selected run carries a static multi-backend claim (backends=...) while binding the single profile ${JSON.stringify(sel.run?.profile ?? profileField)}; the metric must read backend=<this run's backend>. ${evidence}`;
+        }
+        if (status === "GREEN") {
+            evidence = `${evidence}; multi-backend rows verified: ${D310_REQUIRED_BACKENDS.join(", ")} each profile-bound under the current seed and tree`;
+        }
+    }
     if (status === "PENDING") {
         return `| ${attackClass} | ${verdict} | PENDING | ${evidence} |`;
     }
-    return `| ${attackClass} | ${verdict} | ${status} | ${evidence}${evidenceSuffix(sel)} |`;
+    return `| ${attackClass} | ${verdict} | ${status} | ${evidence}${evidenceSuffix(sel, campaign)} |`;
 }).flat();
 
 // The method note and the engine-loop facts (escalations and triage),

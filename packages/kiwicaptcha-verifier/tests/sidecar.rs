@@ -305,10 +305,16 @@ fn armed_issue_wire_carries_the_canonical_snake_case_execution_fields() {
     config.execution_key = Some(SECRET.to_string());
     config.execution_version = 2;
     let server = spawn(SidecarState::build(config));
-    let (status, wire) = post_json(
+    // The advertised capability governs the minted grammar: the client
+    // asks for version 2 (its own ceiling), the node cap is 2, so the
+    // armed wire carries 2.
+    let body = format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}");
+    let (status, wire) = http(
         server.addr,
-        "/issue",
-        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+        &format!(
+            "POST /issue HTTP/1.1\r\nhost: sidecar.test\r\ncontent-type: application/json\r\nkiwi-execution-max-version: 2\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ),
     );
     assert_eq!(status, 200, "{wire}");
     let payload: serde_json::Value = serde_json::from_str(wire.trim_end()).expect("json body");
@@ -324,6 +330,22 @@ fn armed_issue_wire_carries_the_canonical_snake_case_execution_fields() {
     // must never reappear beside the canonical ones.
     assert!(payload.get("executionProgram").is_none());
     assert!(payload.get("executionVersion").is_none());
+
+    // An absent header is the v1 compatibility floor: the same armed
+    // endpoint mints the v1 grammar for a client that never advertises,
+    // exactly like the public controller's effectiveExecutionVersion.
+    let (status, wire) = post_json(
+        server.addr,
+        "/issue",
+        &format!("{{\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
+    );
+    assert_eq!(status, 200, "{wire}");
+    let payload: serde_json::Value = serde_json::from_str(wire.trim_end()).expect("json body");
+    assert!(payload["execution_program"].is_string(), "{wire}");
+    assert_eq!(
+        payload["execution_version"], 1,
+        "absent header = v1 floor: {wire}"
+    );
 
     // The unarmed issuance of the same endpoint carries neither
     // spelling: the key is absent, exactly the pre-execution wire.
@@ -543,7 +565,16 @@ fn the_unix_socket_surface_serves_the_same_handler() {
     use std::os::unix::net::UnixStream;
     let dir = std::env::temp_dir().join(format!("kiwi-sidecar-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("verify.sock");
+    // A nanosecond-unique socket name: the pid alone recurs across
+    // runs, and a stale socket file left by a crashed run makes the
+    // bind fail while the readiness loop sees the file and connects
+    // into a dead listener.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = dir.join(format!("verify-{unique}.sock"));
+    let _ = std::fs::remove_file(&path);
     let state = Arc::new(SidecarState::new(
         SECRET.to_string(),
         None,

@@ -205,7 +205,11 @@ final class ProtectionProfileDefaults
                 // post-credential gate withholds every session until a
                 // principal factor completes. The low signup names the
                 // step_up_email carrier: an anonymous visitor proves
-                // address ownership through the email grant. The low
+                // address ownership through the email grant. The
+                // password_reset recovery leg names the same grant (it
+                // is anonymous too, and the novelty gate never books
+                // it), so its escalation is completable without a
+                // session. The low
                 // contact carries step_up_above: only a scored decision
                 // above the rung escalates. The high financial_action
                 // names the email_otp carrier with no step_up_above
@@ -220,7 +224,14 @@ final class ProtectionProfileDefaults
                     'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
                     'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
-                    'password_reset' => ['value_class' => 'standard'],
+                    // The recovery leg is anonymous like signup, and it
+                    // never rides the first-attempt novelty gate (that
+                    // gate books only AuthenticationSuccess/Failure on
+                    // the mapped login firewalls): it names the same
+                    // email-ownership grant signup carries, so the
+                    // recovery flow's own mailbox proof answers its
+                    // step-up demand.
+                    'password_reset' => ['value_class' => 'standard', 'carrier' => 'step_up_email'],
                     'signup' => ['value_class' => 'low', 'carrier' => 'step_up_email'],
                     'contact' => ['value_class' => 'low', 'step_up_above' => 600],
                 ],
@@ -296,7 +307,11 @@ final class ProtectionProfileDefaults
                 // post-credential gate withholds every session until a
                 // principal factor completes. The low signup names the
                 // step_up_email carrier: an anonymous visitor proves
-                // address ownership through the email grant. The low
+                // address ownership through the email grant. The
+                // password_reset recovery leg names the same grant (it
+                // is anonymous too, and the novelty gate never books
+                // it), so its escalation is completable without a
+                // session. The low
                 // contact carries step_up_above: only a scored decision
                 // above the rung escalates. The high financial_action
                 // names the email_otp carrier with no step_up_above
@@ -311,7 +326,14 @@ final class ProtectionProfileDefaults
                     'financial_action' => ['carrier' => 'email_otp', 'value_class' => 'high', 'operation_identity_source' => 'request_attribute', 'operation_content_fields' => ['amount_minor', 'currency', 'beneficiary_id']],
                     'admin_login' => ['value_class' => 'critical', 'login_step_up' => 'always'],
                     'login' => ['value_class' => 'standard'],
-                    'password_reset' => ['value_class' => 'standard'],
+                    // The recovery leg is anonymous like signup, and it
+                    // never rides the first-attempt novelty gate (that
+                    // gate books only AuthenticationSuccess/Failure on
+                    // the mapped login firewalls): it names the same
+                    // email-ownership grant signup carries, so the
+                    // recovery flow's own mailbox proof answers its
+                    // step-up demand.
+                    'password_reset' => ['value_class' => 'standard', 'carrier' => 'step_up_email'],
                     'signup' => ['value_class' => 'low', 'carrier' => 'step_up_email'],
                     'contact' => ['value_class' => 'low', 'step_up_above' => 600],
                 ],

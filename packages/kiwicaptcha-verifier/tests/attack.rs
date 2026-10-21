@@ -381,7 +381,8 @@ fn json_body_attack_shapes_never_reach_the_verifier() {
         response.contains("bad_request"),
         "UTF-16 BOM body must be refused: {response}"
     );
-    // Non-string token members are missing tokens, never coerced.
+    // Non-string token members are refused by the typed parse, never
+    // coerced into a missing token.
     let (status, response) = verify(
         addr,
         "",
@@ -389,24 +390,37 @@ fn json_body_attack_shapes_never_reach_the_verifier() {
     );
     assert_eq!(status, 200, "{response}");
     assert!(
-        response.contains("missing-input-response"),
-        "numeric token must not coerce: {response}"
+        response.contains("bad_request"),
+        "numeric token must refuse at the typed parse: {response}"
     );
-    // Unknown fields are ignored, not honored as bindings.
+    // Unknown fields are refused, never honored as bindings or answer
+    // fields — and the clean shape still verifies.
     let token = issue_and_solve(addr, "", CLIENT_IP);
+    let (_, clean) = verify(
+        addr,
+        "",
+        &format!(
+            "{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"
+        ),
+    );
+    assert!(
+        clean.contains("\"kiwi-code\":\"ok\""),
+        "the clean shape still verifies: {clean}"
+    );
+    let forged_token = issue_and_solve(addr, "", CLIENT_IP);
     let (_, response) = verify(
         addr,
         "",
         &format!(
-            "{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"kiwi-code\":\"ok\",\"success\":true}}"
+            "{{\"token\":\"{forged_token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\",\"kiwi-code\":\"ok\",\"success\":true}}"
         ),
     );
     assert!(
-        response.contains("\"kiwi-code\":\"ok\""),
-        "a real solve verifies: {response}"
+        response.contains("bad_request"),
+        "request fields must refuse at the typed parse: {response}"
     );
     assert!(
-        !response.contains("\"success\":true,\"challenge_ts\":\"ok\""),
+        !response.contains("\"challenge_ts\":\"ok\""),
         "request fields never forge the answer: {response}"
     );
 }

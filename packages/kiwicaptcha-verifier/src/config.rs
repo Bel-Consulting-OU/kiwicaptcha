@@ -96,6 +96,24 @@ impl Rung {
         }
     }
 
+    /// True for the memory-hard rungs. Argon derivations are the
+    /// sidecar's dominant memory consumers (up to 64 MiB each); the
+    /// verify path admits them through a memory-weighted semaphore so
+    /// `workers * 64 MiB` can never become the process's working set.
+    pub fn is_argon(self) -> bool {
+        matches!(self, Rung::Argon16 | Rung::Argon32 | Rung::Argon64)
+    }
+
+    /// The memory cost in KiB the rung's derivation requires.
+    pub fn argon_m_kib(self) -> u32 {
+        match self {
+            Rung::Argon16 => 65536,
+            Rung::Argon32 => 65536,
+            Rung::Argon64 => 65536,
+            _ => 0,
+        }
+    }
+
     /// The proof-of-work profile the rung issues. The rsw rung carries no
     /// profile knobs (the trapdoor lives on the challenge config), so its
     /// profile pins the protocol values issuance expects.

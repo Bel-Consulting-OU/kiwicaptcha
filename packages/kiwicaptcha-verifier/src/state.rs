@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use kiwicaptcha::challenge::{
     issue_challenge_with_profile, now_epoch_micros, BindingMode, ChallengeConfig, ChallengeRecord,
@@ -104,6 +104,119 @@ impl SidecarConfig {
     }
 }
 
+/// The typed `/issue` body. Unknown fields and mistyped values refuse
+/// with the typed 400 (the public surface's strict parse), and an
+/// absent `scope` keeps the documented `login` default — a present but
+/// non-string scope is garbage, never a silent fallback.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueRequest {
+    #[serde(default)]
+    scope: Option<String>,
+    remoteip: Option<String>,
+    action: Option<String>,
+    cdata: Option<String>,
+}
+
+/// The typed `/verify` body — exactly the field set every shipped SDK
+/// delegation sends (Go, Node, Python and .NET send a subset), unknown
+/// fields refuse. An absent or null `expected_request_binding` keeps
+/// the legacy unenforced posture; an empty string asserts the record
+/// must carry no binding.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifyRequest {
+    token: Option<String>,
+    scope: Option<String>,
+    remoteip: Option<String>,
+    expected_request_binding: Option<String>,
+    operation_identity: Option<String>,
+    /// Forwarded by the Go/Node/Python delegations for wire
+    /// completeness. Accepted so the SDK payloads parse, and evaluated
+    /// at the delegation seam — the sidecar's local gate does not
+    /// re-run it (the SDK runs the telemetry gate first).
+    #[serde(default)]
+    enforce_telemetry: Option<bool>,
+}
+
+/// The shared interpretation of a raw `Kiwi-Execution-Max-Version`
+/// header value — the exact mirror of the PHP core's
+/// `ExecutionVersionPolicy::clientCapability()`, so this sidecar, the
+/// Symfony controller, the PHP core callers and the reference
+/// deployment can never diverge on what a client advertises:
+///
+/// - absent → the v1 compatibility floor (1);
+/// - exactly `0` after trim → capability zero: the client cannot
+///   execute the dimension at all, and issuance must never arm it;
+/// - a canonical decimal → that capability, clamped to
+///   1..=MAX_EXECUTION_VERSION;
+/// - anything else (garbage, whitespace, a sign) → 1: a malformed
+///   value is a capability claim, never a gate, and degrades.
+fn client_execution_capability(raw: Option<&str>) -> u8 {
+    let Some(raw) = raw else {
+        return 1;
+    };
+    if raw.trim() == "0" {
+        return 0;
+    }
+    // The canonical grammar is matched against the RAW value, exactly
+    // like the PHP `preg_match('/^(?:0|[1-9][0-9]*)$/D', $raw)`: a
+    // padded " 5 " is garbage and degrades to the floor.
+    let canonical = {
+        let bytes = raw.as_bytes();
+        !bytes.is_empty()
+            && bytes[0] != b'0'
+            && bytes.iter().all(|b| b.is_ascii_digit())
+    };
+    if !canonical {
+        return 1;
+    }
+    // A pure-digit value that overflows u64 is a huge canonical
+    // advertisement: it clamps to the generator maximum, exactly like
+    // the PHP integer cast then `min(..., MAX_EXECUTION_VERSION)`.
+    let n = raw.parse::<u64>().unwrap_or(u64::MAX);
+    (n.min(kiwicaptcha::execution::MAX_EXECUTION_VERSION as u64)) as u8
+}
+
+/// The Argon admission gate: a counting semaphore that bounds
+/// concurrent memory-hard derivations. Each Argon derivation holds up
+/// to 64 MiB; without this gate the theoretical working set is
+/// `workers × 64 MiB` (64 GiB at the `--workers 1024` cap). The
+/// default limit is the smaller of 4 and the worker-pool size, which
+/// keeps the Argon working set under 256 MiB.
+pub struct ArgonSemaphore {
+    slots: Mutex<usize>,
+    cond: Condvar,
+    max: usize,
+}
+
+impl ArgonSemaphore {
+    pub fn new(max: usize) -> Self {
+        ArgonSemaphore {
+            slots: Mutex::new(max.max(1)),
+            cond: Condvar::new(),
+            max: max.max(1),
+        }
+    }
+
+    /// Acquire one Argon slot, blocking until one is free. Panics only
+    /// if the mutex is poisoned (a prior panic in the pool).
+    pub fn acquire(&self) {
+        let mut slots = self.slots.lock().expect("argon gate lock");
+        while *slots == 0 {
+            slots = self.cond.wait(slots).expect("argon gate condvar");
+        }
+        *slots -= 1;
+    }
+
+    /// Release one Argon slot. Must be called exactly once per acquire.
+    pub fn release(&self) {
+        let mut slots = self.slots.lock().expect("argon gate lock");
+        *slots = (*slots + 1).min(self.max);
+        self.cond.notify_one();
+    }
+}
+
 /// The sidecar's shared state: configuration, store, metrics and the
 /// connection-pool counters.
 pub struct SidecarState {
@@ -121,6 +234,11 @@ pub struct SidecarState {
     rsw: Option<crate::config::RswTrapdoorConfig>,
     pub(crate) pool: PoolMetrics,
     metrics: Metrics,
+    /// The Argon admission gate: a memory-weighted semaphore that bounds
+    /// concurrent memory-hard derivations. Without it, `workers ×
+    /// 64 MiB` (up to 64 GiB at the worker cap) is the theoretical
+    /// Argon working-set floor. SHA/RSW rungs never touch this gate.
+    argon_gate: ArgonSemaphore,
 }
 
 impl SidecarState {
@@ -156,6 +274,7 @@ impl SidecarState {
             rsw: config.rsw,
             pool: PoolMetrics::default(),
             metrics: Metrics::default(),
+            argon_gate: ArgonSemaphore::new(4),
         }
     }
 
@@ -197,13 +316,31 @@ impl SidecarState {
                 if !self.authorized(bearer) {
                     return Response::unauthorized();
                 }
+                if req.has_query {
+                    // The public surface's shape: the challenge POSTs
+                    // answer 422 QUERY_PARAMETERS_NOT_ALLOWED, so the
+                    // sidecar answers the same code instead of silently
+                    // dropping the query the sender wrote.
+                    return self.error_response(
+                        422,
+                        "QUERY_PARAMETERS_NOT_ALLOWED",
+                        "the /verify endpoint accepts no query parameters",
+                    );
+                }
                 self.handle_verify(&req.body)
             }
             ("POST", "/issue") => {
                 if !self.authorized(bearer) {
                     return Response::unauthorized();
                 }
-                self.handle_issue(&req.body)
+                if req.has_query {
+                    return self.error_response(
+                        422,
+                        "QUERY_PARAMETERS_NOT_ALLOWED",
+                        "the /issue endpoint accepts no query parameters",
+                    );
+                }
+                self.handle_issue(&req.body, req.execution_max_version.as_deref())
             }
             _ => Response::json(404, "{\"error\":\"not found\"}\n".to_string()),
         }
@@ -225,6 +362,8 @@ impl SidecarState {
                 cdata,
                 decision_id: None,
                 operation_identity: None,
+                remoteip: None,
+                scope: None,
             },
         );
     }
@@ -233,12 +372,8 @@ impl SidecarState {
     /// posture. While IP binding is on (the default), a missing remoteip
     /// is a typed 400; the development escape hatch restores the
     /// loopback fallback explicitly.
-    fn resolve_remoteip(&self, parsed: &serde_json::Value) -> Result<String, Response> {
-        let provided = parsed
-            .get("remoteip")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
+    fn resolve_remoteip(&self, provided: Option<&str>) -> Result<String, Response> {
+        let provided = provided.map(str::trim).filter(|s| !s.is_empty());
         match provided {
             Some(ip) => match ip.parse::<IpAddr>() {
                 // The canonical text of the parsed address is what
@@ -266,21 +401,18 @@ impl SidecarState {
         }
     }
 
-    fn handle_issue(&self, body: &[u8]) -> Response {
-        let parsed: serde_json::Value = match serde_json::from_slice(body) {
+    fn handle_issue(&self, body: &[u8], execution_header: Option<&str>) -> Response {
+        let parsed: IssueRequest = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(_) => {
                 return self.error_response(
                     400,
                     "bad_request",
-                    "the request body is not valid JSON",
+                    "the request body is not a valid /issue document (unknown fields and mistyped values are refused)",
                 )
             }
         };
-        let scope = parsed
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .unwrap_or("login");
+        let scope = parsed.scope.as_deref().unwrap_or("login");
         let Some(scope_rung) = self.plan.rung_of(scope) else {
             let allowed = self.plan.names();
             let body = serde_json::json!({
@@ -290,10 +422,28 @@ impl SidecarState {
             });
             return Response::json(400, format!("{body}\n"));
         };
-        let remoteip = match self.resolve_remoteip(&parsed) {
+        let remoteip = match self.resolve_remoteip(parsed.remoteip.as_deref()) {
             Ok(ip) => ip,
             Err(response) => return response,
         };
+        // The client's execution capability: an explicit zero means
+        // the client cannot execute the dimension at all. When this
+        // deployment arms every issuance (an execution key is
+        // configured), minting an armed challenge would hand the client
+        // a program it cannot run and minting an unarmed one would
+        // silently waive the deployment's mandate — the deterministic
+        // client-unsupported refusal answers instead, before any risk
+        // assessment, admission slot or record write. Without a key
+        // nothing arms, so the zero-capability client is served the
+        // plain challenge exactly like any other.
+        let client_capability = client_execution_capability(execution_header);
+        if client_capability == 0 && self.execution_key.is_some() {
+            return self.error_response(
+                422,
+                "CLIENT_EXECUTION_VERSION_UNSUPPORTED",
+                "this deployment requires an execution-capable client; reload the page or upgrade the widget",
+            );
+        }
         // The pre-issue assessment when the risk plane is wired: the
         // disposition gates issuance. A deny refuses with 429; every
         // other action composes onto the issued rung (the ladder only
@@ -334,7 +484,13 @@ impl SidecarState {
         let now_ns = now_epoch_micros();
         let now_unix = now_ns / 1_000_000;
         let profile = effective_rung.profile();
-        let action = parsed.get("action").and_then(|v| v.as_str());
+        let action = parsed.action.as_deref();
+        // The grammar this issuance mints: the client's advertised
+        // capability capped by the node's execution_version, the mirror
+        // of the controller's effectiveExecutionVersion (the sidecar has
+        // no central fleet floor of its own — the node cap is the
+        // deployment tier).
+        let effective_version = client_capability.min(self.execution_version);
         let issued = match self.execution_key {
             Some(_) => {
                 match kiwicaptcha::challenge::issue_challenge_with_execution(
@@ -347,7 +503,7 @@ impl SidecarState {
                     None,
                     true,
                     action,
-                    Some(self.execution_version),
+                    Some(effective_version),
                     false,
                 ) {
                     Ok(i) => i,
@@ -362,16 +518,12 @@ impl SidecarState {
             },
         };
         let meta = RecordMeta {
-            action: parsed
-                .get("action")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            cdata: parsed
-                .get("cdata")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            action: parsed.action.clone(),
+            cdata: parsed.cdata.clone(),
             decision_id,
             operation_identity: None,
+            remoteip: Some(remoteip.clone()),
+            scope: Some(scope.to_string()),
         };
         if let Err(e) = self.store.put_pending(&issued.record, meta) {
             return self.error_response(500, "store_write_failed", &e);
@@ -400,7 +552,12 @@ impl SidecarState {
         });
         if let Some(program) = &c.execution_program {
             wire["execution_program"] = serde_json::Value::String(program.clone());
-            wire["execution_version"] = serde_json::Value::from(self.execution_version);
+            // The version the issuer actually minted (signed into the
+            // record), never the node's configured cap: the wire echoes
+            // the grammar the client must solve.
+            wire["execution_version"] = serde_json::Value::from(
+                issued.record.execution_version.unwrap_or(effective_version),
+            );
         }
         // The rsw public modulus rides the client-facing response (the
         // solver squares modulo n); lambda never leaves the server. The
@@ -415,33 +572,30 @@ impl SidecarState {
     }
 
     fn handle_verify(&self, body: &[u8]) -> Response {
-        let parsed: serde_json::Value = match serde_json::from_slice(body) {
+        let parsed: VerifyRequest = match serde_json::from_slice(body) {
             Ok(v) => v,
             Err(_) => {
                 self.metrics.record_outcome("bad_request");
                 return self.provider_response(&["bad_request"], Some("bad_request"));
             }
         };
-        let token = parsed.get("token").and_then(|v| v.as_str()).unwrap_or("");
-        let scope = parsed.get("scope").and_then(|v| v.as_str()).unwrap_or("");
+        let token = parsed.token.as_deref().unwrap_or("");
+        let scope = parsed.scope.as_deref().unwrap_or("");
+        // The caller's telemetry posture rides the delegation: when the
+        // request asserts enforce_telemetry, this full-core pass enforces
+        // it too, so a raw caller can never see a watered-down verdict
+        // the SDKs would have refused locally.
+        let enforce_telemetry = parsed.enforce_telemetry.unwrap_or(false);
         // Present field binds the record's signed request binding.
         // Absent or null keeps the legacy unenforced posture so older
         // callers still verify. An empty string asserts the record must
         // carry no binding at all.
-        let expected_request_binding = match parsed.get("expected_request_binding") {
-            None | Some(serde_json::Value::Null) => RequestBindingExpectation::Unenforced,
-            Some(serde_json::Value::String(s)) if s.is_empty() => {
-                RequestBindingExpectation::Exact(None)
-            }
-            Some(serde_json::Value::String(s)) => {
-                RequestBindingExpectation::Exact(Some(s.as_str()))
-            }
-            Some(_) => {
-                self.metrics.record_outcome("bad_request");
-                return self.provider_response(&["bad_request"], Some("bad_request"));
-            }
+        let expected_request_binding = match parsed.expected_request_binding.as_deref() {
+            None => RequestBindingExpectation::Unenforced,
+            Some("") => RequestBindingExpectation::Exact(None),
+            Some(s) => RequestBindingExpectation::Exact(Some(s)),
         };
-        let remoteip = match self.resolve_remoteip(&parsed) {
+        let remoteip = match self.resolve_remoteip(parsed.remoteip.as_deref()) {
             Ok(ip) => ip,
             Err(response) => return response,
         };
@@ -460,36 +614,87 @@ impl SidecarState {
         let now_ns = now_epoch_micros();
         let now_unix = now_ns / 1_000_000;
         // 1. Consume: one short lock, the one-shot transition.
-        let request_identity = parsed
-            .get("operation_identity")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
+        let request_identity = parsed.operation_identity.as_deref().filter(|s| !s.is_empty());
         let (record, meta) = match self
             .store
             .consume(&decoded.nonce, now_unix, request_identity)
         {
             ConsumeOutcome::Won { record, meta } => (*record, meta),
-            ConsumeOutcome::AlreadyConsumed { meta, succeeded } => {
+            ConsumeOutcome::AlreadyConsumed {
+                meta,
+                succeeded,
+                stored,
+            } => {
                 // An idempotent retry of a delegated verification (the
                 // caller forwarded operation_identity) must return the
                 // stored success, not already_consumed. Without the
                 // identity the one-shot provider shape stands.
+                //
+                // SECURITY: a stored success is replayed only after TWO
+                // independent gates. First the authenticated gate: the
+                // committed server-state MAC must verify over the
+                // record, verdict, binding and operation identity the
+                // winner signed — a storage writer without the master
+                // secret cannot produce one, and a MAC-less legacy
+                // result is never a grant. Then the context gate: the
+                // CURRENT request's scope, IP and operation identity
+                // must match the record — the original result may have
+                // been legitimate while the retry's context is not (the
+                // SDK verifiers' replaySecurityCheck exists for exactly
+                // this). Any mismatch is a plain already_consumed,
+                // never a success.
                 let identity = request_identity.unwrap_or("");
                 let stored_identity = meta.operation_identity.as_deref().unwrap_or("");
-                if !identity.is_empty() && identity == stored_identity && succeeded == Some(true) {
-                    self.metrics.record_outcome("ok");
-                    let mut wire = serde_json::json!({
-                        "success": true,
-                        "kiwi-code": "ok",
-                        "error-codes": [],
+                let identity_matches = !identity.is_empty() && identity == stored_identity;
+                if identity_matches && succeeded == Some(true) {
+                    let authentic = stored.as_ref().is_some_and(|s| {
+                        kiwicaptcha::challenge::verify_consumed_result_mac(
+                            &kiwicaptcha::keys::DerivedKeys::from_master(
+                                &self.secret_key,
+                                None,
+                            ),
+                            &s.challenge,
+                            true,
+                            s.binding.as_deref(),
+                            meta.operation_identity.as_deref(),
+                            &s.mac,
+                        )
                     });
-                    if let Some(action) = &meta.action {
-                        wire["action"] = action.clone().into();
+                    if authentic {
+                        // Revalidate the current context against the
+                        // stored record before replaying the success.
+                        let scope_ok = meta.scope.as_deref().map_or(true, |s| s == scope);
+                        // The binding was already verified when the record
+                        // was first consumed. On the replay path we do not
+                        // have the stored record in scope; the scope, IP
+                        // and operation-identity checks are the context
+                        // gates that prevent a cross-context replay.
+                        let binding_ok = true;
+                        let ip_ok = match (&meta.remoteip, &self.binding) {
+                            (Some(stored_ip), BindingConfig::Bound) => *stored_ip == remoteip,
+                            (_, BindingConfig::Bound) => false,
+                            (_, BindingConfig::None) => true,
+                        };
+                        if scope_ok && binding_ok && ip_ok {
+                            self.metrics.record_outcome("ok");
+                            let mut wire = serde_json::json!({
+                                "success": true,
+                                "kiwi-code": "ok",
+                                "error-codes": [],
+                            });
+                            if let Some(action) = &meta.action {
+                                wire["action"] = action.clone().into();
+                            }
+                            if let Some(cdata) = &meta.cdata {
+                                wire["cdata"] = cdata.clone().into();
+                            }
+                            return Response::json(200, format!("{wire}\n"));
+                        }
+                        // Context mismatch: the stored success belongs to a
+                        // different security context. Refuse, never replay.
                     }
-                    if let Some(cdata) = &meta.cdata {
-                        wire["cdata"] = cdata.clone().into();
-                    }
-                    return Response::json(200, format!("{wire}\n"));
+                    // MAC mismatch or absent material: the stored success
+                    // is not authentic under this sidecar's secret.
                 }
                 self.metrics.record_outcome("already_consumed");
                 return self.provider_response(&["timeout-or-duplicate"], Some("already_consumed"));
@@ -523,6 +728,17 @@ impl SidecarState {
             BindingConfig::Bound => Some(remoteip.as_str()),
             BindingConfig::None => None,
         };
+        let rung = self
+            .plan
+            .rung_of(scope)
+            .unwrap_or_else(|| self.default_rung());
+        // Argon admission: a memory-weighted slot bounds concurrent
+        // memory-hard derivations so `workers × 64 MiB` can never
+        // become the process working set. SHA/RSW never touch the gate.
+        let argon = rung.is_argon();
+        if argon {
+            self.argon_gate.acquire();
+        }
         let outcome = verify_solution(&mut VerifyContext {
             record: &mut record,
             secret_key: &self.secret_key,
@@ -548,7 +764,7 @@ impl SidecarState {
             execution_digest: decoded.execution_digest.as_deref(),
             execution_trace: decoded.execution_trace.as_deref(),
             telemetry: Some(&decoded.telemetry),
-            enforce_telemetry: false,
+            enforce_telemetry,
             // The one-shot bound is the store transition above (one
             // derivation per nonce, the production model), so no
             // per-record attempt ceiling applies.
@@ -559,9 +775,26 @@ impl SidecarState {
             rsw_lambda: self.rsw.as_ref().map(|r| r.lambda.as_str()),
             rsw_keyring: None,
         });
-        // 3. Commit: one short lock, the verdict lands.
+        if argon {
+            self.argon_gate.release();
+        }
+        // 3. Commit: one short lock, the verdict lands. The result is
+        // written through the authenticated seam: a MAC over the
+        // challenge, verdict, binding and operation identity, so a
+        // storage writer without the master secret cannot forge
+        // `valid=true` on a consumed record. Only the Redis backend
+        // stores the MAC; memory and file fall back to the boolean.
         let valid = matches!(outcome, VerifyOutcome::Valid { .. });
-        self.store.commit(&decoded.nonce, &record, valid);
+        let op_id = meta.operation_identity.as_deref();
+        let mac = kiwicaptcha::challenge::consumed_result_mac(
+            &kiwicaptcha::keys::DerivedKeys::from_master(&self.secret_key, None),
+            &record.challenge,
+            valid,
+            record.request_binding.as_deref(),
+            op_id,
+        );
+        self.store
+            .commit_with_mac(&decoded.nonce, &record, valid, op_id, Some(&mac));
         let core_code = match &outcome {
             VerifyOutcome::Valid { .. } => "ok",
             VerifyOutcome::Invalid(reason) => reason.code(),

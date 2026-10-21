@@ -73,7 +73,17 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub(crate) struct Request {
     pub method: String,
     pub path: String,
+    /// Whether the request target carried a query string. The path is
+    /// split off before routing, so this flag is what lets the handler
+    /// answer the public surface's `QUERY_PARAMETERS_NOT_ALLOWED` shape
+    /// instead of silently dropping the query.
+    pub has_query: bool,
     pub authorization: Option<String>,
+    /// The raw `Kiwi-Execution-Max-Version` header the client
+    /// advertised (first occurrence, like the public framework's
+    /// header bag), parsed by the handler through the shared
+    /// capability interpretation.
+    pub execution_max_version: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -138,6 +148,7 @@ impl Response {
             405 => "405 Method Not Allowed",
             408 => "408 Request Timeout",
             413 => "413 Payload Too Large",
+            422 => "422 Unprocessable Entity",
             429 => "429 Too Many Requests",
             503 => "503 Service Unavailable",
             _ => "500 Internal Server Error",
@@ -203,9 +214,11 @@ pub(crate) fn read_request<R: Read>(stream: &mut R) -> Result<Request, ReadFailu
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("").to_string();
     let path = target.split('?').next().unwrap_or("").to_string();
+    let has_query = target.contains('?');
     let mut content_length = 0usize;
     let mut content_length_seen = false;
     let mut authorization = None;
+    let mut execution_max_version = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -232,6 +245,12 @@ pub(crate) fn read_request<R: Read>(stream: &mut R) -> Result<Request, ReadFailu
                 ));
             }
             authorization = Some(value.to_string());
+        } else if name == "kiwi-execution-max-version" {
+            // First occurrence wins, the header-bag semantics the
+            // public framework surfaces share.
+            if execution_max_version.is_none() {
+                execution_max_version = Some(value.to_string());
+            }
         } else if name == "transfer-encoding" {
             // The reader understands only identity framing. A
             // Transfer-Encoding (chunked or otherwise) is refused
@@ -259,7 +278,9 @@ pub(crate) fn read_request<R: Read>(stream: &mut R) -> Result<Request, ReadFailu
     Ok(Request {
         method,
         path,
+        has_query,
         authorization,
+        execution_max_version,
         body,
     })
 }

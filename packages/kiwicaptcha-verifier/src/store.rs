@@ -44,6 +44,33 @@ pub struct RecordMeta {
     /// stored success; a different identity is a plain replay.
     #[serde(default)]
     pub operation_identity: Option<String>,
+    /// The remoteip the issue request presented. Stored so an idempotent
+    /// retry can revalidate the client address before replaying a
+    /// stored success (a different client is a plain already_consumed).
+    #[serde(default)]
+    pub remoteip: Option<String>,
+    /// The scope the challenge was issued for. Stored so an idempotent
+    /// retry can revalidate the scope before replaying a stored success
+    /// (a different scope is a plain already_consumed).
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// The authenticated material of a stored success: what an idempotent
+/// replay must MAC-verify before it may return that success. The MAC is
+/// the core's `consumed_result_mac` tag over the challenge, the verdict,
+/// the binding and the operation identity the commit signed. A success
+/// without one (a legacy envelope, or a writer that never held the
+/// master secret) carries `mac: None` and never replays as a success.
+#[derive(Debug, Clone)]
+pub struct StoredSuccess {
+    /// The record's challenge string — the MAC's first input.
+    pub challenge: String,
+    /// The record's request binding at commit time (the MAC input the
+    /// commit signed).
+    pub binding: Option<String>,
+    /// The stored server-state MAC tag.
+    pub mac: String,
 }
 
 /// The atomic consume decision: the caller either owns the single
@@ -62,6 +89,11 @@ pub enum ConsumeOutcome {
         meta: RecordMeta,
         /// The stored verdict of the first (winning) verification.
         succeeded: Option<bool>,
+        /// The MAC-verification material of the stored success, present
+        /// when a verdict was committed with a server-state MAC. The
+        /// replay path may return the stored success only after this
+        /// material verifies against the caller's own derived keys.
+        stored: Option<StoredSuccess>,
     },
     /// No record under the nonce, pending or consumed.
     NotFound,
@@ -91,6 +123,24 @@ pub trait RecordStore: Send + Sync {
     /// duplicate answer.
     fn commit(&self, nonce: &str, record: &ChallengeRecord, valid: bool);
 
+    /// Persist the derivation outcome together with a server-state MAC.
+    /// Every shipped backend stores the MAC alongside the verdict so a
+    /// later idempotent replay can re-verify it before returning the
+    /// stored success. The default falls back to [`Self::commit`] for
+    /// foreign stores that do not carry the material; their replays then
+    /// answer the duplicate vocabulary, never a success.
+    fn commit_with_mac(
+        &self,
+        nonce: &str,
+        record: &ChallengeRecord,
+        valid: bool,
+        operation_identity: Option<&str>,
+        mac: Option<&str>,
+    ) {
+        let _ = (operation_identity, mac);
+        self.commit(nonce, record, valid);
+    }
+
     /// The live record counts: pending, consumed (for `/metrics`).
     fn counts(&self) -> (usize, usize);
 
@@ -99,12 +149,16 @@ pub trait RecordStore: Send + Sync {
 }
 
 /// One live record: the challenge record, its metadata and, once
-/// committed, the verdict.
+/// committed, the verdict together with the MAC that authenticates it.
 #[derive(Debug, Clone)]
 struct Entry {
     record: ChallengeRecord,
     meta: RecordMeta,
     valid: Option<bool>,
+    /// The server-state MAC the commit signed the verdict with. `None`
+    /// before the commit, or when a legacy/plain commit landed without
+    /// one — such a verdict never replays as a success.
+    mac: Option<String>,
 }
 
 impl Entry {
@@ -113,7 +167,19 @@ impl Entry {
             record,
             meta,
             valid: None,
+            mac: None,
         }
+    }
+
+    /// The MAC-verification material this entry's stored verdict
+    /// carries, when it carries one.
+    fn stored_success(&self) -> Option<StoredSuccess> {
+        let mac = self.mac.clone()?;
+        Some(StoredSuccess {
+            challenge: self.record.challenge.clone(),
+            binding: self.record.request_binding.clone(),
+            mac,
+        })
     }
 }
 
@@ -173,6 +239,7 @@ impl MapState {
             Some(entry) => ConsumeOutcome::AlreadyConsumed {
                 meta: entry.meta.clone(),
                 succeeded: entry.valid,
+                stored: entry.stored_success(),
             },
             None => ConsumeOutcome::NotFound,
         }
@@ -208,6 +275,11 @@ impl Default for MemoryStore {
 impl RecordStore for MemoryStore {
     fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
         let mut state = self.state.lock().expect("store lock");
+        // Issue-time prune: a TTL-backed store must not depend on
+        // redemption traffic to reap issuance traffic. An attacker
+        // that issues and never verifies would otherwise retain
+        // expired challenges indefinitely.
+        state.prune_expired(record.issued_at);
         state
             .pending
             .insert(record.nonce.clone(), Entry::new(record.clone(), meta));
@@ -225,11 +297,19 @@ impl RecordStore for MemoryStore {
     }
 
     fn commit(&self, nonce: &str, record: &ChallengeRecord, valid: bool) {
-        let mut state = self.state.lock().expect("store lock");
-        if let Some(entry) = state.consumed.get_mut(nonce) {
-            entry.record = record.clone();
-            entry.valid = Some(valid);
-        }
+        self.commit_inner(nonce, record, valid, None);
+    }
+
+    fn commit_with_mac(
+        &self,
+        nonce: &str,
+        record: &ChallengeRecord,
+        valid: bool,
+        operation_identity: Option<&str>,
+        mac: Option<&str>,
+    ) {
+        let _ = operation_identity;
+        self.commit_inner(nonce, record, valid, mac);
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -239,6 +319,19 @@ impl RecordStore for MemoryStore {
 
     fn describe(&self) -> String {
         "in-process memory (volatile; a restart loses outstanding challenges)".to_string()
+    }
+}
+
+impl MemoryStore {
+    /// The shared commit seam: the verdict (and, when the caller signed
+    /// one, the MAC that authenticates it) lands on the consumed entry.
+    fn commit_inner(&self, nonce: &str, record: &ChallengeRecord, valid: bool, mac: Option<&str>) {
+        let mut state = self.state.lock().expect("store lock");
+        if let Some(entry) = state.consumed.get_mut(nonce) {
+            entry.record = record.clone();
+            entry.valid = Some(valid);
+            entry.mac = mac.map(str::to_string);
+        }
     }
 }
 
@@ -266,6 +359,11 @@ struct Envelope {
     record: ChallengeRecord,
     meta: RecordMeta,
     valid: Option<bool>,
+    /// The server-state MAC the commit signed the verdict with. Absent
+    /// on envelopes written before the authenticated seam (or by a
+    /// plain commit); such a verdict never replays as a success.
+    #[serde(default)]
+    mac: Option<String>,
 }
 
 impl FileStore {
@@ -337,6 +435,7 @@ impl FileStore {
                     record: envelope.record,
                     meta: envelope.meta,
                     valid: envelope.valid,
+                    mac: envelope.mac,
                 };
                 let nonce = entry.record.nonce.clone();
                 if state.pending.contains_key(&nonce) || state.consumed.contains_key(&nonce) {
@@ -403,6 +502,7 @@ impl FileStore {
                 record: entry.record.clone(),
                 meta: entry.meta.clone(),
                 valid: entry.valid,
+                mac: entry.mac.clone(),
             },
         )
     }
@@ -415,6 +515,12 @@ impl FileStore {
 impl RecordStore for FileStore {
     fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
         let mut state = self.state.lock().expect("store lock");
+        // Issue-time prune: a TTL-backed store must not depend on
+        // redemption traffic to reap issuance traffic.
+        let dropped = state.prune_expired(record.issued_at);
+        for gone in &dropped {
+            self.remove_persisted(gone);
+        }
         let entry = Entry::new(record.clone(), meta);
         // Write through before the map insert: a crash then leaves the
         // record either absent (the client re-issues) or pending. The
@@ -440,7 +546,14 @@ impl RecordStore for FileStore {
         // replays the duplicate answer on the next boot, which is the
         // one-shot contract: the record is burned even if the caller
         // never saw its answer.
-        if let Some(entry) = state.pending.remove(nonce) {
+        if let Some(mut entry) = state.pending.remove(nonce) {
+            // The winning operation identity lands in the entry BEFORE
+            // the consumed persist: the envelope on disk is what a
+            // restart (or a replay of the record) reads, so the identity
+            // must be part of the atomic flip, not an afterthought.
+            if let Some(identity) = operation_identity {
+                entry.meta.operation_identity = Some(identity.to_string());
+            }
             if let Err(e) = self.persist(STATE_CONSUMED, &entry) {
                 // The transition may or may not have landed; restore the
                 // pending entry in memory so the map stays consistent
@@ -451,10 +564,6 @@ impl RecordStore for FileStore {
             let meta = entry.meta.clone();
             let record = entry.record.clone();
             state.consumed.insert(nonce.to_string(), entry);
-            let mut meta = meta;
-            if let Some(identity) = operation_identity {
-                meta.operation_identity = Some(identity.to_string());
-            }
             return ConsumeOutcome::Won {
                 record: Box::new(record),
                 meta,
@@ -464,21 +573,26 @@ impl RecordStore for FileStore {
             Some(entry) => ConsumeOutcome::AlreadyConsumed {
                 meta: entry.meta.clone(),
                 succeeded: entry.valid,
+                stored: entry.stored_success(),
             },
             None => ConsumeOutcome::NotFound,
         }
     }
 
     fn commit(&self, nonce: &str, record: &ChallengeRecord, valid: bool) {
-        let mut state = self.state.lock().expect("store lock");
-        if let Some(entry) = state.consumed.get_mut(nonce) {
-            entry.record = record.clone();
-            entry.valid = Some(valid);
-            if self.persist(STATE_CONSUMED, entry).is_err() {
-                // Best effort: a lost commit only degrades a later
-                // replay to the undecided duplicate answer.
-            }
-        }
+        self.commit_inner(nonce, record, valid, None);
+    }
+
+    fn commit_with_mac(
+        &self,
+        nonce: &str,
+        record: &ChallengeRecord,
+        valid: bool,
+        operation_identity: Option<&str>,
+        mac: Option<&str>,
+    ) {
+        let _ = operation_identity;
+        self.commit_inner(nonce, record, valid, mac);
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -494,15 +608,45 @@ impl RecordStore for FileStore {
     }
 }
 
+impl FileStore {
+    /// The shared commit seam: the verdict (and, when the caller signed
+    /// one, the MAC) lands on the consumed entry and persists through
+    /// the atomic rename. Best effort: a lost commit only degrades a
+    /// later replay to the undecided duplicate answer.
+    fn commit_inner(&self, nonce: &str, record: &ChallengeRecord, valid: bool, mac: Option<&str>) {
+        let mut state = self.state.lock().expect("store lock");
+        if let Some(entry) = state.consumed.get_mut(nonce) {
+            entry.record = record.clone();
+            entry.valid = Some(valid);
+            entry.mac = mac.map(str::to_string);
+            if self.persist(STATE_CONSUMED, entry).is_err() {
+                // Best effort: a lost commit only degrades a later
+                // replay to the undecided duplicate answer.
+            }
+        }
+    }
+}
+
 #[cfg(feature = "redis-store")]
 /// The core crate's fused Redis verifier store: the production backend,
 /// key-compatible with the PHP bundle's Redis storage. The issuance-bound
-/// metadata (action, cdata, decision id) stays in-process on this
-/// backend, so a restart drops the provider metadata echo, never the
-/// challenge or replay state.
+/// metadata (action, cdata, decision id, scope, remoteip) rides a
+/// TTL-bound companion key (`<prefix><nonce>:smeta`) so a token minted
+/// on node A carries its provider metadata to node B; the operation
+/// identity and the MAC-authenticated verdict live in the core's own
+/// envelope (the authority both the replay gate and the MAC verify
+/// against). The node-local map is kept only as a read-through cache.
 pub struct RedisStore {
     inner: kiwicaptcha::redis_verify::RedisChallengeStore,
-    meta: Mutex<HashMap<String, RecordMeta>>,
+    /// A second handle on the same server for the sidecar metadata
+    /// companion keys (`<prefix><nonce>:smeta`). The challenge record
+    /// itself lives in the core envelope; action, cdata, scope and the
+    /// issued remoteip ride a TTL-bound companion key so a token minted
+    /// on node A carries its provider metadata to node B. The old
+    /// node-local map is kept only as a read-through cache.
+    meta_client: redis::Client,
+    meta_prefix: String,
+    meta: Mutex<HashMap<String, (u64, RecordMeta)>>,
 }
 
 #[cfg(feature = "redis-store")]
@@ -513,21 +657,81 @@ impl RedisStore {
     pub fn connect(url: &str, prefix: &str) -> Result<Self, String> {
         let client = redis::Client::open(url.to_string())
             .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
+        let meta_client = redis::Client::open(url.to_string())
+            .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
         let inner = kiwicaptcha::redis_verify::RedisChallengeStore::new(client, prefix);
         Ok(RedisStore {
             inner,
+            meta_client,
+            meta_prefix: prefix.to_string(),
             meta: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The companion metadata key: one per challenge, TTL-bound like
+    /// the record itself.
+    fn meta_key(&self, nonce: &str) -> String {
+        format!("{}{}:smeta", self.meta_prefix, nonce)
+    }
+
+    /// Write the provider metadata to Redis so any node can serve the
+    /// replay. Best effort: the local map still works for single-node.
+    fn write_meta(&self, nonce: &str, expires_at: u64, meta: &RecordMeta) {
+        let ttl = expires_at.saturating_sub(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        );
+        let Ok(mut conn) = self.meta_client.get_connection() else {
+            return;
+        };
+        let ttl_ms = (ttl.max(1) * 1000).min(2147483647) as i64;
+        let payload = serde_json::to_string(meta).unwrap_or_default();
+        let _: redis::RedisResult<()> = redis::cmd("SET")
+            .arg(self.meta_key(nonce))
+            .arg(payload)
+            .arg("PX")
+            .arg(ttl_ms)
+            .query(&mut conn);
+    }
+
+    /// Read the provider metadata: Redis first (multi-node), then the
+    /// local map (single-node fast path).
+    fn read_meta(&self, nonce: &str) -> RecordMeta {
+        if let Ok(mut conn) = self.meta_client.get_connection() {
+            let payload: redis::RedisResult<Option<String>> =
+                redis::cmd("GET").arg(self.meta_key(nonce)).query(&mut conn);
+            if let Ok(Some(json)) = payload {
+                if let Ok(meta) = serde_json::from_str::<RecordMeta>(&json) {
+                    return meta;
+                }
+            }
+        }
+        let map = self.meta.lock().expect("meta lock");
+        map.get(nonce)
+            .map(|(_, m)| m.clone())
+            .unwrap_or_default()
     }
 }
 
 #[cfg(feature = "redis-store")]
 impl RecordStore for RedisStore {
     fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
-        self.meta
-            .lock()
-            .expect("meta lock")
-            .insert(record.nonce.clone(), meta);
+        // Multi-node: write the provider metadata to the TTL-bound
+        // companion key BEFORE the local cache, so a token minted on
+        // this node carries its action/cdata to any peer.
+        self.write_meta(&record.nonce, record.expires_at, &meta);
+        let mut map = self.meta.lock().expect("meta lock");
+        // Issue-time prune: the local metadata map must not grow with
+        // issuance traffic that never redeems.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        map.retain(|_, (exp, _)| *exp > now);
+        map.insert(record.nonce.clone(), (record.expires_at, meta));
+        drop(map);
         self.inner
             .store(record)
             .map_err(|e| format!("redis store failed: {e}"))
@@ -539,30 +743,45 @@ impl RecordStore for RedisStore {
         _now_unix: u64,
         operation_identity: Option<&str>,
     ) -> ConsumeOutcome {
-        let meta = self
-            .meta
-            .lock()
-            .expect("meta lock")
-            .get(nonce)
-            .cloned()
-            .unwrap_or_default();
+        // Redis first: a token minted on another node must carry its
+        // action/cdata/scope/remoteip here. The local map is only a
+        // single-node cache.
+        let meta = self.read_meta(nonce);
         match self
             .inner
             .consume_with_operation_identity(nonce, operation_identity)
         {
             Ok(Some(consumed)) => {
+                // The envelope's recorded operation identity is the
+                // authority for both branches: it is what the core's
+                // replay gate and the commit MAC are signed against, and
+                // it rides the atomic consume write, so it survives a
+                // restart and reaches every node. The smeta companion
+                // (action/cdata/scope/remoteip/decision) never carries
+                // it, so a stale companion can never disagree here.
+                let mut meta = meta;
+                if consumed.operation_identity.is_some() {
+                    meta.operation_identity = consumed.operation_identity.clone();
+                }
                 if consumed.first {
                     ConsumeOutcome::Won {
                         record: Box::new(consumed.record),
                         meta,
                     }
                 } else {
+                    let succeeded = consumed.stored_result.as_ref().map(|r| r.valid);
+                    let stored = consumed.stored_result.as_ref().and_then(|r| {
+                        let mac = r.mac.clone()?;
+                        Some(StoredSuccess {
+                            challenge: consumed.record.challenge.clone(),
+                            binding: consumed.record.request_binding.clone(),
+                            mac,
+                        })
+                    });
                     ConsumeOutcome::AlreadyConsumed {
                         meta,
-                        // The stored verdict of the first verification;
-                        // an absent result is a consumed record whose
-                        // commit never landed.
-                        succeeded: consumed.stored_result.map(|result| result.valid),
+                        succeeded,
+                        stored,
                     }
                 }
             }
@@ -573,6 +792,32 @@ impl RecordStore for RedisStore {
 
     fn commit(&self, nonce: &str, _record: &ChallengeRecord, valid: bool) {
         let _ = self.inner.commit_result(nonce, valid, None);
+    }
+
+    fn commit_with_mac(
+        &self,
+        nonce: &str,
+        record: &ChallengeRecord,
+        valid: bool,
+        operation_identity: Option<&str>,
+        mac: Option<&str>,
+    ) {
+        // Record the winning operation identity so a same-operation
+        // retry can match it; the authenticated MAC is what makes the
+        // stored result non-forgeable by a writer without the secret.
+        if let Some(identity) = operation_identity {
+            let mut map = self.meta.lock().expect("meta lock");
+            if let Some(entry) = map.get_mut(nonce) {
+                entry.1.operation_identity = Some(identity.to_string());
+            }
+        }
+        // The binding rides the same value the MAC was signed over (the
+        // record's own request binding): the core's retained-result
+        // verification re-derives the tag from the STORED binding, so a
+        // commit that stored None while signing Some(...) would make
+        // every replay fail closed as malformed.
+        let binding = record.request_binding.as_deref();
+        let _ = self.inner.commit_result_with_mac(nonce, valid, binding, mac);
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -592,6 +837,16 @@ mod tests {
     };
 
     fn record(scope: &str) -> ChallengeRecord {
+        bound_record_inner(scope, None)
+    }
+
+    /// A record with an application transaction binding — the MAC's
+    /// binding input must ride the commit and the replay material.
+    fn bound_record(scope: &str) -> ChallengeRecord {
+        bound_record_inner(scope, Some("req-mac-1:abc.de-1"))
+    }
+
+    fn bound_record_inner(scope: &str, binding: Option<&str>) -> ChallengeRecord {
         let cfg = ChallengeConfig {
             secret_key: "kiwi-verifier-unit-test-secret-0123456789".to_string(),
             algorithm: PoWAlgorithm::Sha256,
@@ -624,7 +879,7 @@ mod tests {
             now_ns / 1_000_000,
             now_ns,
             0,
-            None,
+            binding,
         )
         .expect("issue")
         .record
@@ -679,6 +934,8 @@ mod tests {
                         cdata: None,
                         decision_id: None,
                         operation_identity: None,
+                        remoteip: None,
+                        scope: None,
                     },
                 )
                 .unwrap();
@@ -733,6 +990,145 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(FILE_STORE_MARKER), "someone-elses-store-9").unwrap();
         assert!(FileStore::open(&dir).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The authenticated commit leaves verification material behind on
+    /// BOTH in-process backends, so an idempotent replay can re-verify
+    /// the tag; a plain commit leaves none (its verdict never replays
+    /// as a success).
+    #[test]
+    fn commit_with_mac_leaves_replay_material_on_memory_and_file() {
+        let mac = "cd".repeat(32);
+        let check = |store: &dyn RecordStore, label: &str| {
+            let record = bound_record("login");
+            let nonce = record.nonce.clone();
+            store.put_pending(&record, RecordMeta::default()).unwrap();
+            let now = now_epoch_micros() / 1_000_000;
+            let won = store.consume(&nonce, now, Some("op-material-1"));
+            let (won_record, won_meta) = match won {
+                ConsumeOutcome::Won { record, meta } => (*record, meta),
+                other => panic!("[{label}] expected Won, got {other:?}"),
+            };
+            assert_eq!(
+                won_meta.operation_identity.as_deref(),
+                Some("op-material-1"),
+                "[{label}] the winning consume must carry the identity"
+            );
+            store.commit_with_mac(
+                &nonce,
+                &won_record,
+                true,
+                won_meta.operation_identity.as_deref(),
+                Some(&mac),
+            );
+            match store.consume(&nonce, now, Some("op-material-1")) {
+                ConsumeOutcome::AlreadyConsumed {
+                    succeeded,
+                    stored,
+                    meta,
+                    ..
+                } => {
+                    assert_eq!(succeeded, Some(true), "[{label}] the verdict stored");
+                    assert_eq!(
+                        meta.operation_identity.as_deref(),
+                        Some("op-material-1"),
+                        "[{label}] the replay still sees the identity"
+                    );
+                    let stored = stored.unwrap_or_else(|| panic!("[{label}] MAC material"));
+                    assert_eq!(stored.mac, mac, "[{label}] the signed tag rides along");
+                    assert_eq!(
+                        stored.challenge, record.challenge,
+                        "[{label}] the MAC's challenge input"
+                    );
+                    assert_eq!(
+                        stored.binding, record.request_binding,
+                        "[{label}] the MAC's binding input"
+                    );
+                }
+                other => panic!("[{label}] expected AlreadyConsumed, got {other:?}"),
+            }
+        };
+
+        check(&MemoryStore::new(), "memory");
+
+        let dir = std::env::temp_dir().join(format!(
+            "kiwi-file-store-material-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        check(&FileStore::open(&dir).expect("open"), "file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A plain (MAC-less) commit stores the verdict but no replay
+    /// material: its AlreadyConsumed answers `stored: None`, which the
+    /// handler refuses to replay as a success.
+    #[test]
+    fn a_plain_commit_leaves_no_replay_material() {
+        let store = MemoryStore::new();
+        let record = record("login");
+        let nonce = record.nonce.clone();
+        store.put_pending(&record, RecordMeta::default()).unwrap();
+        let now = now_epoch_micros() / 1_000_000;
+        assert!(matches!(
+            store.consume(&nonce, now, None),
+            ConsumeOutcome::Won { .. }
+        ));
+        store.commit(&nonce, &record, true);
+        match store.consume(&nonce, now, None) {
+            ConsumeOutcome::AlreadyConsumed {
+                succeeded,
+                stored,
+                ..
+            } => {
+                assert_eq!(succeeded, Some(true));
+                assert!(stored.is_none(), "a MAC-less verdict carries no material");
+            }
+            other => panic!("expected AlreadyConsumed, got {other:?}"),
+        }
+    }
+
+    /// The file backend records the winning operation identity INSIDE
+    /// the consumed envelope — the atomic flip — so a restart (or any
+    /// later reader) still matches an idempotent retry. Before the fix
+    /// the identity only rode the in-memory return value and the
+    /// envelope kept `null`, which made every file-backend retry a plain
+    /// already_consumed after a reopen.
+    #[test]
+    fn file_store_records_the_operation_identity_in_the_consumed_envelope() {
+        let dir = std::env::temp_dir().join(format!(
+            "kiwi-file-store-identity-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let nonce;
+        {
+            let store = FileStore::open(&dir).expect("open");
+            let r = record("login");
+            nonce = r.nonce.clone();
+            store.put_pending(&r, RecordMeta::default()).unwrap();
+            let now = now_epoch_micros() / 1_000_000;
+            match store.consume(&nonce, now, Some("op-envelope-1")) {
+                ConsumeOutcome::Won { meta, .. } => assert_eq!(
+                    meta.operation_identity.as_deref(),
+                    Some("op-envelope-1")
+                ),
+                other => panic!("expected Won, got {other:?}"),
+            }
+        }
+        {
+            let reopened = FileStore::open(&dir).expect("reopen");
+            let now = now_epoch_micros() / 1_000_000;
+            match reopened.consume(&nonce, now, Some("op-envelope-1")) {
+                ConsumeOutcome::AlreadyConsumed { meta, .. } => assert_eq!(
+                    meta.operation_identity.as_deref(),
+                    Some("op-envelope-1"),
+                    "the identity must survive the restart inside the envelope"
+                ),
+                other => panic!("expected AlreadyConsumed, got {other:?}"),
+            }
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
@@ -817,6 +1213,8 @@ mod redis_store_tests {
             cdata: None,
             decision_id: None,
             operation_identity: None,
+            remoteip: None,
+            scope: None,
         };
 
         // Store (pending) through the sidecar's Redis backend.
@@ -865,5 +1263,136 @@ mod redis_store_tests {
         let Some(url) = redis_url() else { return };
         let store = RedisStore::connect(&url, &prefix("describe")).expect("the store connects");
         assert!(store.describe().contains("redis"));
+    }
+
+    /// The multi-node contract: the operation identity rides the core's
+    /// consumed envelope (the authority), and the committed verdict
+    /// lands with its MAC AND the record's binding — the exact inputs a
+    /// replay on ANY node re-verifies. Before the fix the identity only
+    /// lived in the node-local map and the commit stored `binding: null`
+    /// while signing `Some(...)`, so every cross-node idempotent retry
+    /// either refused as a replay or failed the MAC as malformed.
+    #[test]
+    fn redis_store_rides_the_envelope_identity_binding_and_mac_to_any_node() {
+        let Some(url) = redis_url() else { return };
+        let prefix = prefix("macmaterial");
+        // A bound record: the MAC's binding input must be the record's
+        // own request binding, and the stored result must carry it.
+        let config = ChallengeConfig {
+            secret_key: SECRET.to_string(),
+            algorithm: kiwicaptcha::challenge::PoWAlgorithm::Sha256,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 4,
+            ttl_secs: 120,
+            min_duration_ms: None,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 8,
+            binding_mode: BindingMode::None,
+            policy_version: 1,
+            region: None,
+            issuer: None,
+            kid: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
+            tenant: None,
+        };
+        let now_ns = now_epoch_micros();
+        let record = issue_challenge(
+            &config,
+            "login",
+            "198.51.100.7",
+            now_ns / 1_000_000,
+            now_ns,
+            0,
+            Some("req-mac-node:abc.de-1"),
+        )
+        .expect("issue")
+        .record;
+        let nonce = record.nonce.clone();
+        let mac = "ef".repeat(32);
+        let binding = record.request_binding.clone();
+        assert!(binding.is_some(), "the probe record carries a binding");
+        let store = RedisStore::connect(&url, &prefix).expect("the store connects");
+        store
+            .put_pending(&record, RecordMeta::default())
+            .expect("the record stores");
+
+        // The winning consume records the identity in the envelope.
+        let now = now_epoch_micros() / 1_000_000;
+        let (won_record, won_meta) = match store.consume(&nonce, now, Some("op-node-2")) {
+            ConsumeOutcome::Won { record, meta } => (*record, meta),
+            other => panic!("expected the winning consume, got {other:?}"),
+        };
+        assert_eq!(
+            won_meta.operation_identity.as_deref(),
+            Some("op-node-2"),
+            "the winner's identity must come back from the envelope"
+        );
+
+        // The authenticated commit stores the verdict with the MAC and
+        // the binding the MAC was signed over.
+        store.commit_with_mac(&nonce, &won_record, true, Some("op-node-2"), Some(&mac));
+
+        // A retry reaching this store — the "other node" shape: same
+        // Redis, fresh store handle, no node-local map state — carries
+        // the identity, the verdict and the verification material.
+        let other_node = RedisStore::connect(&url, &prefix).expect("the store reconnects");
+        match other_node.consume(&nonce, now, Some("op-node-2")) {
+            ConsumeOutcome::AlreadyConsumed {
+                meta,
+                succeeded,
+                stored,
+            } => {
+                assert_eq!(
+                    meta.operation_identity.as_deref(),
+                    Some("op-node-2"),
+                    "the identity must reach a fresh node from the envelope"
+                );
+                assert_eq!(succeeded, Some(true));
+                let stored = stored.expect("the MAC material rides the envelope");
+                assert_eq!(stored.mac, mac);
+                assert_eq!(stored.challenge, record.challenge);
+                assert_eq!(stored.binding, binding);
+            }
+            other => panic!("expected AlreadyConsumed on the peer node, got {other:?}"),
+        }
+
+        // And the core envelope itself carries the binding the MAC was
+        // signed over — the input the core's own retained-result
+        // verification (the PHP bundle replaying the same record) uses.
+        match other_node
+            .inner
+            .consume_with_operation_identity(&nonce, Some("op-node-2"))
+        {
+            Ok(Some(consumed)) => {
+                let stored = consumed
+                    .stored_result
+                    .expect("the committed verdict is retained");
+                assert_eq!(
+                    stored.binding.as_deref(),
+                    binding.as_deref(),
+                    "the stored result binding must equal the MAC's binding input"
+                );
+                assert_eq!(stored.mac.as_deref(), Some(mac.as_str()));
+                assert_eq!(
+                    consumed.operation_identity.as_deref(),
+                    Some("op-node-2")
+                );
+            }
+            other => panic!("expected the consumed record, got {other:?}"),
+        }
+
+        // Cleanup so the prefixed keys never linger between runs.
+        let core = kiwicaptcha::redis_verify::RedisChallengeStore::new(
+            redis::Client::open(url.clone()).expect("url parses"),
+            prefix.clone(),
+        );
+        core.best_effort_delete(&nonce);
     }
 }
