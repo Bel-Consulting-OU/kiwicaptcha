@@ -103,6 +103,17 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     private array $records = [];
 
     /**
+     * The earliest expiresAt (seconds) among the live records, an O(1)
+     * expiry horizon. store() consults it before any scan: while
+     * `now < minExpiry + margin` nothing in the map can be dead, so the
+     * store path is O(1). A stale horizon (an entry removed lazily by
+     * entry()) costs one extra scan that removes nothing and recomputes.
+     * Without this the bounded-retention sweep was a full map scan on
+     * every insert — O(n) per store, O(n²) over a bench.
+     */
+    private int $minExpiry = PHP_INT_MAX;
+
+    /**
      * @param \Closure|null $now                  the clock override (epoch
      *                                            seconds) used for the
      *                                            resume-claim lease and the
@@ -159,11 +170,21 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         }
         // Bounded retention: expired entries never accumulate (they are
         // absent to every read anyway, see {@see self::entry()}), and a
-        // long-lived process never exceeds the hard cap — the evictions
-        // drop the entries that expire soonest first, mirroring what
-        // Redis key TTLs do for the other backend.
-        $this->pruneExpired();
+        // long-lived process never exceeds the hard cap. The sweep is
+        // gated by the earliest-expiry horizon so the hot path stays
+        // O(1): while nothing can be dead yet there is no scan. The
+        // evictions drop the entries that expire soonest first, mirroring
+        // what Redis key TTLs do for the other backend.
+        if ($this->nowInSeconds() >= $this->minExpiry + $this->retentionMarginSecs) {
+            $this->pruneExpired();
+        }
         $needed = (isset($this->records[$record->nonce]) ? 0 : 1) + \count($this->records) - $this->maxEntries;
+        if ($needed > 0) {
+            // Cap pressure: reclaim the dead first so a cache full of
+            // expired records does not evict live ones.
+            $this->pruneExpired();
+            $needed = (isset($this->records[$record->nonce]) ? 0 : 1) + \count($this->records) - $this->maxEntries;
+        }
         if ($needed > 0) {
             $byExpiry = [];
             foreach ($this->records as $nonce => $entry) {
@@ -174,8 +195,15 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
             for ($i = 0; $i < $needed; $i++) {
                 unset($this->records[$evictables[$i]]);
             }
+            $this->minExpiry = $this->records !== [] ? min(array_map(
+                static fn (array $e): int => $e['record']->expiresAt,
+                array_values($this->records),
+            )) : PHP_INT_MAX;
         }
         $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null, 'claim' => null, 'claimUntil' => null];
+        if ($record->expiresAt < $this->minExpiry) {
+            $this->minExpiry = $record->expiresAt;
+        }
     }
 
     public function find(string $nonce): ?ChallengeRecord
@@ -443,11 +471,15 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     private function pruneExpired(): void
     {
         $now = $this->nowInSeconds();
+        $min = PHP_INT_MAX;
         foreach ($this->records as $nonce => $entry) {
             if ($now >= $entry['record']->expiresAt + $this->retentionMarginSecs) {
                 unset($this->records[$nonce]);
+            } elseif ($entry['record']->expiresAt < $min) {
+                $min = $entry['record']->expiresAt;
             }
         }
+        $this->minExpiry = $min;
     }
 
     /**

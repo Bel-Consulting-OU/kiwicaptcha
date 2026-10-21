@@ -529,6 +529,23 @@ mod exec_evidence {
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--help" | "-h" => {
+                    println!(
+                        "kiwicaptcha-verifier exec-evidence: emit one armed execution-evidence record\n\n\
+                         Usage:\n  kiwicaptcha-verifier exec-evidence \\\n    \
+                           --secret KEY --scope SCOPE --action ACTION --version N \\\n    \
+                           --store-dir DIR\n\n\
+                         Options:\n  \
+                           --secret KEY     HMAC verification secret (32 bytes or more)\n  \
+                           --scope SCOPE    challenge scope (default login)\n  \
+                           --action NAME    challenge action (default default)\n  \
+                           --version N      execution version, 1..=MAX (default 1)\n  \
+                           --store-dir DIR  where to write the record store\n  \
+                           --help           this text\n\n\
+                         Prints one JSON document on stdout: {{record, nonce, trace, digest, program}}."
+                    );
+                    return Ok(());
+                }
                 "--secret" => {
                     i += 1;
                     secret = Some(args.get(i).ok_or("--secret needs a value")?.clone());

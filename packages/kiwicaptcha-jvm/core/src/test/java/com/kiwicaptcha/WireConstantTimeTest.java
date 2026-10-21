@@ -196,6 +196,13 @@ final class WireConstantTimeTest {
      * differences instead of piling onto one probe.
      */
     private static Map<String, double[]> runInterleavedRounds(byte[] base, byte[] first, byte[] last) {
+        // The equal baseline must compare two *distinct* arrays with
+        // identical contents. Comparing base with itself hands the JIT
+        // a reference-equality fast path (or a merged operand), which
+        // makes the equal measurement unrepresentative of a real
+        // two-array compare and inflates the noise floor against which
+        // the production delta is judged.
+        final byte[] equal = base.clone();
         List<String> slots = new ArrayList<>(List.of(
                 "control.first", "control.last", "control.equal",
                 "production.first", "production.last", "production.equal"));
@@ -210,7 +217,7 @@ final class WireConstantTimeTest {
         long sink = 0;
         for (var warm = 0; warm < WARMUP_CALLS; warm++) {
             for (String key : slots) {
-                sink ^= compareSlot(key, base, first, last) ? 1 : 0;
+                sink ^= compareSlot(key, base, first, last, equal) ? 1 : 0;
             }
         }
         if (sink != 0) {
@@ -225,7 +232,7 @@ final class WireConstantTimeTest {
                 long sinkRound = 0;
                 long start = System.nanoTime();
                 for (var call = 0; call < CALLS; call++) {
-                    sinkRound ^= compareSlot(key, base, first, last) ? 1 : 0;
+                    sinkRound ^= compareSlot(key, base, first, last, equal) ? 1 : 0;
                 }
                 long elapsed = System.nanoTime() - start;
                 if (sinkRound != 0) {
@@ -239,14 +246,14 @@ final class WireConstantTimeTest {
     }
 
     /** Dispatch one timed call so every slot shares the same call shape. */
-    private static boolean compareSlot(String key, byte[] base, byte[] first, byte[] last) {
+    private static boolean compareSlot(String key, byte[] base, byte[] first, byte[] last, byte[] equal) {
         return switch (key) {
             case "control.first" -> leaking(base, first);
             case "control.last" -> leaking(base, last);
-            case "control.equal" -> leaking(base, base);
+            case "control.equal" -> leaking(base, equal);
             case "production.first" -> Canonical.constantTimeEquals(base, first);
             case "production.last" -> Canonical.constantTimeEquals(base, last);
-            case "production.equal" -> Canonical.constantTimeEquals(base, base);
+            case "production.equal" -> Canonical.constantTimeEquals(base, equal);
             default -> throw new IllegalStateException(key);
         };
     }

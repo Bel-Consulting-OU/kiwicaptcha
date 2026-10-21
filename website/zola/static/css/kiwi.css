@@ -217,7 +217,7 @@ a { color: inherit; }
 .prose { max-width: var(--text-column); padding-bottom: 40px; }
 .prose > p, .prose > ol, .prose > ul { max-width: 46em; }
 .section { border-top: 1px solid var(--hairline); margin-top: 64px; padding-top: 40px; }
-.prose .kicker { color: var(--sage); font-size: 15px; letter-spacing: 0.06em; margin: 0 0 10px; }
+.prose .kicker { color: var(--teal-deep); font-size: 15px; letter-spacing: 0.06em; margin: 0 0 10px; }
 .prose h2 {
   font-weight: 800;
   font-size: clamp(36px, 4vw, 56px);
