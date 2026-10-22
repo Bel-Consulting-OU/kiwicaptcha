@@ -374,8 +374,8 @@ budget job. They are not the goal. The driver splits moved the
 server-armed and configuration-armed machinery (and the non-default
 locale packs) out of the always-loaded file, so the ordinary
 bootstrap — the bytes a plain SHA-256 English page downloads before
-any memory-hard challenge — is the eager core alone:   126876 bytes
-raw,    36725 gzip and    30887 brotli (the record's
+any memory-hard challenge — is the eager core alone:  128893 bytes
+raw,   37310 gzip and   31319 brotli (the record's
 `budgets.widget_driver` section, equality-gated). The compressed
 figure sits within the 37,000-byte cap after the step-up demand
 dialog and carrier-escalation wave added the interactive step-up

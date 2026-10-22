@@ -1,7 +1,8 @@
 package kiwicaptcha
 
 import (
-	"sort"
+	"container/heap"
+	"math"
 	"sync"
 	"time"
 )
@@ -15,7 +16,10 @@ import (
 // absent from every read and transition and is evicted lazily on
 // first observation. Store prunes expired entries and evicts the
 // earliest-expiring entries at the hard cap, so a long-lived process
-// never accumulates unbounded state.
+// never accumulates unbounded state. The per-store sweep is gated on
+// the earliest known expiry so a store call before that horizon is a
+// cheap comparison; cap eviction walks an expiry-ordered min-heap
+// instead of re-sorting every key.
 
 // DefaultMaxEntries is the store's entry cap.
 const DefaultMaxEntries = 10_000
@@ -28,12 +32,44 @@ type memoryEntry struct {
 	identity  string
 }
 
+// expiryItem is one heap key: the record's expiry and its nonce, so
+// equal expiries still break ties deterministically.
+type expiryItem struct {
+	expires int64
+	nonce   string
+}
+
+// expiryHeap is a min-heap on (expires, nonce).
+type expiryHeap []expiryItem
+
+func (h expiryHeap) Len() int { return len(h) }
+func (h expiryHeap) Less(i, j int) bool {
+	if h[i].expires != h[j].expires {
+		return h[i].expires < h[j].expires
+	}
+	return h[i].nonce < h[j].nonce
+}
+func (h expiryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *expiryHeap) Push(x any)   { *h = append(*h, x.(expiryItem)) }
+func (h *expiryHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
 // MemoryStorage is the in-process store adapter.
 type MemoryStorage struct {
 	mu         sync.Mutex
 	now        func() time.Time
 	maxEntries int
 	records    map[string]*memoryEntry
+	// nextExpiry is the earliest expires_at among live entries;
+	// math.MaxInt64 when empty. The per-store sweep only runs once
+	// now has reached it.
+	nextExpiry int64
+	byExpiry   expiryHeap
 }
 
 // NewMemoryStorage builds the in-process store.
@@ -42,6 +78,7 @@ func NewMemoryStorage() *MemoryStorage {
 		now:        time.Now,
 		maxEntries: DefaultMaxEntries,
 		records:    map[string]*memoryEntry{},
+		nextExpiry: math.MaxInt64,
 	}
 }
 
@@ -51,6 +88,7 @@ func NewMemoryStorageWithClock(now func() time.Time) *MemoryStorage {
 		now:        now,
 		maxEntries: DefaultMaxEntries,
 		records:    map[string]*memoryEntry{},
+		nextExpiry: math.MaxInt64,
 	}
 }
 
@@ -70,12 +108,47 @@ func (m *MemoryStorage) entry(nonce string) *memoryEntry {
 	return entry
 }
 
+// pruneExpired reclaims expired rows only once the earliest known
+// expiry has been reached; a full scan past that horizon is earned.
 func (m *MemoryStorage) pruneExpired() {
 	now := m.nowSecs()
+	if now < m.nextExpiry {
+		return
+	}
 	for nonce, entry := range m.records {
 		if now >= entry.record.ExpiresAt {
 			delete(m.records, nonce)
 		}
+	}
+	m.rebuildHorizon()
+}
+
+// rebuildHorizon rescans the live rows: the next sweep gate and the
+// heap are refreshed from scratch. Callers must hold the mutex.
+func (m *MemoryStorage) rebuildHorizon() {
+	m.nextExpiry = math.MaxInt64
+	m.byExpiry = make(expiryHeap, 0, len(m.records))
+	for nonce, entry := range m.records {
+		expires := entry.record.ExpiresAt
+		if expires < m.nextExpiry {
+			m.nextExpiry = expires
+		}
+		m.byExpiry = append(m.byExpiry, expiryItem{expires: expires, nonce: nonce})
+	}
+	heap.Init(&m.byExpiry)
+}
+
+// evictToCap drops the earliest-expiring live entries until one slot
+// is free for the incoming record. Stale heap items (deleted or
+// replaced rows) are skipped. Callers must hold the mutex.
+func (m *MemoryStorage) evictToCap() {
+	for len(m.records) >= m.maxEntries && m.byExpiry.Len() > 0 {
+		item := heap.Pop(&m.byExpiry).(expiryItem)
+		entry, ok := m.records[item.nonce]
+		if !ok || entry.record.ExpiresAt != item.expires {
+			continue // stale heap item
+		}
+		delete(m.records, item.nonce)
 	}
 }
 
@@ -85,21 +158,20 @@ func (m *MemoryStorage) StoreRecord(record *ChallengeRecord) error {
 	defer m.mu.Unlock()
 	m.pruneExpired()
 	if _, exists := m.records[record.Nonce]; !exists {
-		needed := len(m.records) + 1 - m.maxEntries
-		if needed > 0 {
-			nonces := make([]string, 0, len(m.records))
-			for nonce := range m.records {
-				nonces = append(nonces, nonce)
-			}
-			sort.Slice(nonces, func(i, j int) bool {
-				return m.records[nonces[i]].record.ExpiresAt < m.records[nonces[j]].record.ExpiresAt
-			})
-			for _, nonce := range nonces[:needed] {
-				delete(m.records, nonce)
-			}
+		if len(m.records)+1 > m.maxEntries {
+			m.evictToCap()
 		}
 	}
 	m.records[record.Nonce] = &memoryEntry{record: record}
+	heap.Push(&m.byExpiry, expiryItem{expires: record.ExpiresAt, nonce: record.Nonce})
+	if record.ExpiresAt < m.nextExpiry {
+		m.nextExpiry = record.ExpiresAt
+	}
+	// Compaction: deletes leave stale heap items; rescan once they
+	// dominate, so amortized cost stays O(1) per store.
+	if len(m.byExpiry) > 4*len(m.records)+64 {
+		m.rebuildHorizon()
+	}
 	return nil
 }
 

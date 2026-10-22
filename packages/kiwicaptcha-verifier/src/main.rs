@@ -67,6 +67,15 @@ Options:
                    maps to the rsw rung (env KIWI_RSW_MODULUS,
                    KIWI_RSW_LAMBDA, KIWI_RSW_T; generate with
                    tools/rsw-keygen)
+  --execution-key HEX, --execution-version N,
+                   --execution-required-version N
+                   the execution dimension: the arming key (env
+                   KIWI_EXECUTION_KEY), the node grammar cap 1..=6
+                   (env KIWI_EXECUTION_VERSION, default 1) and the
+                   server-owned mandate (env
+                   KIWI_EXECUTION_REQUIRED_VERSION; 0 = off, an armed
+                   request minting below it is refused with
+                   CLIENT_EXECUTION_VERSION_UNSUPPORTED)
   --help           this text
   --version        the crate version
 
@@ -103,6 +112,7 @@ struct Args {
     rsw_t: Option<String>,
     execution_key: Option<String>,
     execution_version: Option<String>,
+    execution_required_version: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -126,6 +136,7 @@ fn parse_args() -> Result<Args, String> {
         rsw_t: None,
         execution_key: None,
         execution_version: None,
+        execution_required_version: None,
     };
     let mut raw = std::env::args().skip(1);
     while let Some(flag) = raw.next() {
@@ -189,6 +200,11 @@ fn parse_args() -> Result<Args, String> {
             "--execution-version" => {
                 args.execution_version =
                     Some(raw.next().ok_or("--execution-version needs a value")?);
+            }
+            "--execution-required-version" => {
+                args.execution_required_version = Some(
+                    raw.next().ok_or("--execution-required-version needs a value")?,
+                );
             }
             other => return Err(format!("unknown argument: {other} (try --help)")),
         }
@@ -422,6 +438,22 @@ fn main() -> ExitCode {
         },
         None => 1,
     };
+    // The server-owned mandate: 0 (or unset) disables it; 1..=MAX is
+    // the required tier below which an armed issuance refuses.
+    let execution_required_version =
+        match env_or(args.execution_required_version, "KIWI_EXECUTION_REQUIRED_VERSION") {
+            Some(raw) => match raw.parse::<u8>() {
+                Ok(v) if v <= kiwicaptcha::execution::MAX_EXECUTION_VERSION => v,
+                _ => {
+                    eprintln!(
+                        "kiwicaptcha-verifier: --execution-required-version must be 0..={}",
+                        kiwicaptcha::execution::MAX_EXECUTION_VERSION
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
+            None => 0,
+        };
 
     let config = SidecarConfig {
         secret_key: secret,
@@ -435,6 +467,7 @@ fn main() -> ExitCode {
         rsw,
         execution_key,
         execution_version,
+        execution_required_version,
     };
     let rungs: Vec<String> = config
         .plan

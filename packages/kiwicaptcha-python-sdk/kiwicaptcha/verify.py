@@ -1160,6 +1160,16 @@ class Verifier:
             )
             if gate_outcome is not None:
                 return gate_outcome
+            # The exact binding expectation the cheap phase just applied,
+            # mapped onto the delegation wire (None = unenforced, "" =
+            # the record must be unbound) — the Go client's mapping.
+            wire_binding = None
+            if expectation.enforced:
+                wire_binding = (
+                    ""
+                    if not expectation.require_binding_presence or not peek.request_binding
+                    else expectation.expected
+                )
             ok, code = delegate_to_sidecar(
                 raw_token,
                 options.expected_scope,
@@ -1167,6 +1177,7 @@ class Verifier:
                 options.execution_policy,
                 enforce_telemetry=options.enforce_telemetry,
                 operation_identity=options.operation_identity,
+                expected_request_binding=wire_binding,
             )
             if ok:
                 # The sidecar's acceptance is a fresh full-core
@@ -1244,6 +1255,13 @@ class Verifier:
             # and its verdict maps onto the shared wire vocabulary. A
             # known code maps onto the enum, an unknown one stays the
             # deterministic deny (never widened into an acceptance).
+            wire_binding = None
+            if expectation.enforced:
+                wire_binding = (
+                    ""
+                    if not expectation.require_binding_presence or not peek.request_binding
+                    else expectation.expected
+                )
             ok, code = delegate_to_sidecar(
                 raw_token,
                 options.expected_scope,
@@ -1251,6 +1269,7 @@ class Verifier:
                 argon_delegate,
                 enforce_telemetry=options.enforce_telemetry,
                 operation_identity=options.operation_identity,
+                expected_request_binding=wire_binding,
             )
             if ok:
                 return VerifyOutcome.valid_outcome(

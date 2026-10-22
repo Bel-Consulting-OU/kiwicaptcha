@@ -18,7 +18,10 @@ defmodule Kiwicaptcha.Stores.Memory do
     GenServer.start_link(__MODULE__, %{
       rows: %{},
       ttl_margin: ttl_margin,
-      now: Keyword.get(opts, :now)
+      now: Keyword.get(opts, :now),
+      # The earliest retained_until among live rows (:infinity when
+      # empty). The per-store filter only runs once now has reached it.
+      next_expiry: :infinity
     })
   end
 
@@ -109,9 +112,27 @@ defmodule Kiwicaptcha.Stores.Memory do
   @impl GenServer
   def handle_call({:store, nonce, json, retained_until}, _from, state) do
     now = store_now(state)
-    rows = Map.filter(state.rows, fn {_n, row} -> now < row.retained_until end)
-    rows = Map.put(rows, nonce, %{json: json, retained_until: retained_until})
-    {:reply, :ok, %{state | rows: rows}}
+
+    # The full filter past the earliest known expiry is earned; before
+    # that horizon a store call is a cheap comparison. Reads keep the
+    # per-row check either way, so expired rows stay absent.
+    state =
+      if now >= state.next_expiry do
+        rows = Map.filter(state.rows, fn {_n, row} -> now < row.retained_until end)
+
+        next_expiry =
+          Enum.reduce(rows, :infinity, fn {_n, row}, acc ->
+            if row.retained_until < acc, do: row.retained_until, else: acc
+          end)
+
+        %{state | rows: rows, next_expiry: next_expiry}
+      else
+        state
+      end
+
+    next_expiry = if retained_until < state.next_expiry, do: retained_until, else: state.next_expiry
+    rows = Map.put(state.rows, nonce, %{json: json, retained_until: retained_until})
+    {:reply, :ok, %{state | rows: rows, next_expiry: next_expiry}}
   end
 
   def handle_call({:live_json, nonce}, _from, state) do

@@ -23,4 +23,10 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The delegation body builder is internal so the test suite can
+         pin the exact wire shape the sidecar parses. -->
+    <InternalsVisibleTo Include="KiwiCaptcha.Tests" />
+  </ItemGroup>
+
 </Project>

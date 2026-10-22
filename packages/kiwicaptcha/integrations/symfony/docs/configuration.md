@@ -1111,9 +1111,13 @@ there.
     #                                       # ms (null = derive from
     #                                       # difficulty); forced 0 under
     #                                       # strict
-    # enforce_telemetry: false              # reject bot-scored telemetry at
-    #                                       # verification time
-    #                                       # (defense-in-depth only)
+    # enforce_telemetry: false              # reject EMPTY and bot-scored
+    #                                       # telemetry at verification time
+    #                                       # (defense-in-depth only). Every
+    #                                       # mobile/native SDK solve carries
+    #                                       # {} and would be rejected: use it
+    #                                       # for browser-only traffic; the
+    #                                       # doctor WARNs while it is on
 ```
 
 The privacy modes themselves (strict vs standard, and why `binding_mode`

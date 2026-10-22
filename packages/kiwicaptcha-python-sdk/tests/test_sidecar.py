@@ -23,7 +23,7 @@ from kiwicaptcha.records import ChallengeRecord
 from kiwicaptcha.stores.memory import MemoryStorage
 from kiwicaptcha.sidecar import ExecutionPolicy
 from kiwicaptcha.tokens import SolutionToken
-from kiwicaptcha.verify import Verifier, VerifierConfig, VerifyOptions
+from kiwicaptcha.verify import RequestBindingExpectation, Verifier, VerifierConfig, VerifyOptions
 from tests.support import CLIENT_IP, NOW, minimal_program_b64, mint_v2_record, solve_sha
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -253,6 +253,71 @@ class DelegationVerdictTest(unittest.TestCase):
         kwargs = stub.call_args.kwargs
         self.assertTrue(kwargs.get("enforce_telemetry"))
         self.assertEqual("order-123", kwargs.get("operation_identity"))
+
+    def test_delegation_carries_the_binding_expectation(self):
+        # The record is unbound and the caller asserts it must stay so
+        # (exact(None)): the cheap phase passes locally and the wire
+        # carries the empty-string assertion the sidecar parses.
+        verifier, token, options = self._armed_setup(
+            telemetry={"et": [0, 12, 40]}
+        )
+        options.binding_expectation = RequestBindingExpectation.exact(None)
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.delegate_to_sidecar", return_value=(True, "ok")
+        ) as stub:
+            outcome = verifier.verify(token, options)
+        self.assertTrue(outcome.is_ok(), outcome.code)
+        kwargs = stub.call_args.kwargs
+        self.assertEqual("", kwargs.get("expected_request_binding"))
+
+        # Unenforced: the field stays None so the body omits it (the
+        # sidecar's unenforced posture), never a silent empty-string
+        # assertion the caller never made. The default posture is
+        # exact(None) (assert unbound), so the opt-out must be explicit.
+        verifier2, token2, options2 = self._armed_setup(telemetry={"et": [0, 12, 40]})
+        options2.binding_expectation = RequestBindingExpectation.unenforced()
+        with unittest.mock.patch(
+            "kiwicaptcha.verify.delegate_to_sidecar", return_value=(True, "ok")
+        ) as stub2:
+            outcome2 = verifier2.verify(token2, options2)
+        self.assertTrue(outcome2.is_ok(), outcome2.code)
+        self.assertIsNone(stub2.call_args.kwargs.get("expected_request_binding"))
+
+    def test_delegate_body_includes_the_binding_field(self):
+        # The transport itself: the JSON body carries the expectation.
+        policy = ExecutionPolicy(sidecar_url="http://127.0.0.1:9")
+        import json as _json
+        import urllib.request as _urllib_request
+        from kiwicaptcha import sidecar as _sidecar
+
+        captured = {}
+
+        class _FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return _json.dumps({"success": False, "kiwi-code": "execution_mismatch"}).encode()
+
+        def _fake_urlopen(request, timeout=None):
+            captured["body"] = _json.loads(request.data.decode())
+            return _FakeResponse()
+
+        with unittest.mock.patch.object(_urllib_request, "urlopen", _fake_urlopen):
+            _sidecar.delegate_to_sidecar(
+                "tok", "login", "203.0.113.7", policy,
+                enforce_telemetry=True, operation_identity="op-1",
+                expected_request_binding="",
+            )
+        body = captured["body"]
+        self.assertEqual("", body.get("expected_request_binding"))
+        self.assertTrue(body.get("enforce_telemetry"))
+        self.assertEqual("op-1", body.get("operation_identity"))
 
 
 if __name__ == "__main__":

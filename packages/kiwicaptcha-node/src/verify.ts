@@ -314,9 +314,10 @@ export async function verify(rawToken: string, options: VerifyOptions): Promise<
   const failure = cheapPhaseCheck(config, secrets, peek, token, evidence, true, receiptNs, delegateExecution);
   if (failure === null && delegateExecution) {
     // The opt-in telemetry gate runs locally BEFORE the delegation
-    // return: the sidecar's /verify API does not accept
-    // enforce_telemetry, so skipping it here would drop the caller's
-    // gate entirely.
+    // return, and the delegation forwards enforce_telemetry so the
+    // sidecar applies the same gate at its own verify seam: skipping
+    // it here would drop the caller's gate on the delegated path
+    // entirely.
     if (
       config.enforceTelemetry &&
       (Object.keys(token.telemetry).length === 0 ||

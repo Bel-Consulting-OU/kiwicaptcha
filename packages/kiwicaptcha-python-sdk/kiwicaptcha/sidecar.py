@@ -53,6 +53,7 @@ def delegate_to_sidecar(
     policy: ExecutionPolicy,
     enforce_telemetry: bool = False,
     operation_identity: Optional[str] = None,
+    expected_request_binding: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Hand one execution-armed verification to the sidecar.
 
@@ -63,19 +64,24 @@ def delegate_to_sidecar(
     with the record intact).
 
     ``enforce_telemetry`` and ``operation_identity`` ride along so a
-    sidecar that enforces either never sees a watered-down request:
-    the caller's telemetry posture and idempotency identity are the
-    verification's own, never silently dropped at the delegation
-    seam.
+    sidecar that enforces either never sees a watered-down request.
+    ``expected_request_binding`` (``None`` = the caller enforces no
+    binding, ``""`` = the record must be unbound) carries the exact
+    expectation the local cheap phase just applied, so the sidecar's
+    full-core pass enforces the same transaction contract — the Go and
+    Node delegations send the same field.
     """
     base = policy.sidecar_url.strip().rstrip("/")
-    body = json.dumps({
+    payload = {
         "token": raw_token,
         "scope": scope,
         "remoteip": client_ip,
         "enforce_telemetry": bool(enforce_telemetry),
         "operation_identity": operation_identity,
-    }).encode()
+    }
+    if expected_request_binding is not None:
+        payload["expected_request_binding"] = expected_request_binding
+    body = json.dumps(payload).encode()
     request = urllib.request.Request(
         f"{base}/verify",
         data=body,

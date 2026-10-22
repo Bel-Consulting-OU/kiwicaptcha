@@ -20,20 +20,29 @@ module KiwiCaptcha
       @mutex = Mutex.new
       @ttl_margin_secs = ttl_margin_secs
       @now = now || -> { Time.now.to_i }
+      # The earliest retained_until among live rows (nil when empty).
+      # The per-store sweep only runs once now has reached it.
+      @next_expiry = nil
     end
 
     # Store a pending record, replacing any record with the same nonce.
     def store(record)
-      sweep
       envelope = Record.to_json_record(record).merge(
         'state' => 'pending', 'consumed_result' => nil, 'operation_identity' => nil
       )
+      retained_until = record.expires_at + @ttl_margin_secs
+      # Sweep and insert share one critical section: the sweep mutates
+      # the row map and must not run outside the lock.
       @mutex.synchronize do
-        @rows[record.nonce] = MemoryRow.new(
-          JSON.generate(envelope),
-          'pending',
-          record.expires_at + @ttl_margin_secs
-        )
+        now = @now.call
+        if @next_expiry.nil? || now >= @next_expiry
+          @rows.delete_if { |_nonce, row| now >= row.retained_until }
+          @next_expiry = @rows.each_value.map(&:retained_until).min
+        end
+        @rows[record.nonce] = MemoryRow.new(JSON.generate(envelope), 'pending', retained_until)
+        if @next_expiry.nil? || retained_until < @next_expiry
+          @next_expiry = retained_until
+        end
       end
       nil
     end
@@ -155,13 +164,6 @@ module KiwiCaptcha
         record: decoded.record, consumed_now: false, consumed_before: true,
         consumed_result: decoded.result, operation_identity: decoded.identity
       )
-    end
-
-    def sweep
-      now = @now.call
-      @mutex.synchronize do
-        @rows.delete_if { |_nonce, row| now >= row.retained_until }
-      end
     end
   end
 end

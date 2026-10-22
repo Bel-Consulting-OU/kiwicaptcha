@@ -202,4 +202,67 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(counts.adds, 'a widget render must register zero matchMedia listeners').toBe(0);
     expect(counts.removes).toBe(0);
   });
+
+  test('a solve faster than the minimum duration waits the floor out before delivering', async ({ page }) => {
+    // Interactive-Client Lifecycle v1: the delivery floor. The fixture
+    // serves a solvable sha256 challenge with a 1200 ms floor; the
+    // widget must not reach data-state done before the floor elapses
+    // from RECEIPT of the challenge document.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          nonce: ('floor' + 'a'.repeat(38)).slice(0, 43) + '=',
+          salt: btoa('0123456789abcdef'),
+          prefix: 'x',
+          algorithm: 'sha256',
+          targetBits: 4,
+          mKib: 0,
+          t: 1,
+          p: 1,
+          ttlSecs: 60,
+          minDurationMs: 1200,
+        }),
+      });
+    });
+    const began = Date.now();
+    await page.goto('/');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    // The floor is measured from receipt (which is after page start):
+    // total elapsed therefore cannot beat the floor.
+    expect(Date.now() - began).toBeGreaterThanOrEqual(1100);
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+  });
+
+  test('a floor that would land at or after the expiry deadline is an expiry, never a wait', async ({ page }) => {
+    // ttlSecs 1 anchors the widget deadline at receipt + 750 ms (the
+    // quarter-TTL-capped margin); a 800 ms floor lands after it, so
+    // the gate refuses immediately — the widget must surface a
+    // non-done state and never deliver the token.
+    await page.route('**/challenge', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          nonce: ('latefloor' + 'a'.repeat(34)).slice(0, 43) + '=',
+          salt: btoa('fedcba9876543210'),
+          prefix: 'x',
+          algorithm: 'sha256',
+          targetBits: 4,
+          mKib: 0,
+          t: 1,
+          p: 1,
+          ttlSecs: 1,
+          minDurationMs: 800,
+        }),
+      });
+    });
+    await page.goto('/');
+    const widget = page.locator('[data-kiwi-widget]');
+    await expect(widget).toHaveAttribute('data-state', /failed|expired/, { timeout: 30_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token, 'a refused delivery never fills the token').toBe('');
+  });
 });

@@ -53,6 +53,18 @@ with the exact caps the browser driver enforces, dispatches, and packs
 the wire token (base64 of nonce.counter.duration.telemetry, rsw proof
 as the final 512-hex segment). Verification stays server-to-server.
 
+## Interactive-client lifecycle
+
+The package implements the Interactive-Client Lifecycle v1 delivery
+gate (protocol/interactive-client-v1): the expiry clock anchors at
+challenge-parse time, a solve that finishes after the deadline is
+refused with the typed `expired` refusal (the token is never handed
+out), and a solve that beat the minimum-duration floor waits out the
+floor before the token is packed. The pure decision
+(`deliveryDecision` / `expiresAtMs` / `minSubmitAtMs`) mirrors the
+Android reference and is pinned by every vector in
+`protocol/interactive-client-v1/lifecycle-vectors.json`.
+
 ## Tests
 
 `npm test` runs the Jest suite (ts-jest, `react-native` mapped onto a
@@ -61,7 +73,9 @@ validation refusals, the low-difficulty solve against a pinned
 counter, native dispatch and malformed-answer handling, bounded
 `onProgress` reporting on both solver paths, the optional
 `react-native-quick-crypto` branch, the full acquireToken flow against
-a mocked fetch, the siteverify body, and the native-contract reference
+a mocked fetch, the lifecycle vectors against the delivery gate (plus
+the wired floor-wait and typed-expired probes), the siteverify body,
+and the native-contract reference
 (a pure-JS mirror of the shipped Kotlin/Swift loop pinned to the
 shared vector — not a mock of a native run).
 `npm run typecheck` runs the strict `tsc --noEmit`.

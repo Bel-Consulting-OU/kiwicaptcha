@@ -9,11 +9,15 @@ an entry whose ``expires_at + retention_margin`` has passed is absent
 from every read and transition, and is evicted lazily on first
 observation. ``store`` prunes expired entries and evicts the
 earliest-expiring entries at the hard cap, so a long-lived process
-never accumulates unbounded state.
+never accumulates unbounded state. The per-store sweep is gated on the
+earliest known expiry so a store call before that horizon is a cheap
+comparison; cap eviction walks a heap ordered by (expiry, nonce)
+instead of re-sorting every key.
 """
 
+import heapq
 import time
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from ..records import ChallengeRecord
 from .base import (
@@ -27,6 +31,9 @@ from .base import (
 )
 
 DEFAULT_MAX_ENTRIES = 10_000
+
+# The sweep gate's "no known expiry" sentinel.
+_NO_EXPIRY = 2**63 - 1
 
 
 class _Entry:
@@ -63,11 +70,18 @@ class MemoryStorage:
         self._max_entries = max_entries
         self._retention_margin = retention_margin_secs
         self._records: Dict[str, _Entry] = {}
+        # The earliest effective expiry among live entries; the
+        # per-store sweep only runs once now has reached it.
+        self._next_expiry: int = _NO_EXPIRY
+        self._by_expiry: List[Tuple[int, str]] = []
 
     def _now_secs(self) -> int:
         if self._now is not None:
             return int(self._now())
         return int(time.time())
+
+    def _effective_expiry(self, entry: _Entry) -> int:
+        return entry.record.expires_at + self._retention_margin
 
     def _entry(self, nonce: str) -> Optional[_Entry]:
         entry = self._records.get(nonce)
@@ -80,6 +94,8 @@ class MemoryStorage:
 
     def _prune_expired(self) -> None:
         now = self._now_secs()
+        if now < self._next_expiry:
+            return
         dead = [
             nonce
             for nonce, entry in self._records.items()
@@ -87,19 +103,43 @@ class MemoryStorage:
         ]
         for nonce in dead:
             del self._records[nonce]
+        self._rebuild_horizon()
+
+    def _rebuild_horizon(self) -> None:
+        """Rescan the live rows: the next sweep gate and the heap refresh from scratch."""
+        self._next_expiry = _NO_EXPIRY
+        self._by_expiry = []
+        for nonce, entry in self._records.items():
+            expires = self._effective_expiry(entry)
+            if expires < self._next_expiry:
+                self._next_expiry = expires
+            self._by_expiry.append((expires, nonce))
+        heapq.heapify(self._by_expiry)
+
+    def _evict_to_cap(self) -> None:
+        """Drop the earliest-expiring live entries until one slot is free for the incoming record."""
+        while len(self._records) >= self._max_entries and self._by_expiry:
+            expires, nonce = heapq.heappop(self._by_expiry)
+            entry = self._records.get(nonce)
+            if entry is None or self._effective_expiry(entry) != expires:
+                continue  # stale heap item
+            del self._records[nonce]
 
     def store(self, record: ChallengeRecord) -> None:
         """Persist one pending record (single-use bounded retention)."""
         self._prune_expired()
         if record.nonce not in self._records:
-            needed = len(self._records) + 1 - self._max_entries
-            if needed > 0:
-                by_expiry = sorted(
-                    self._records, key=lambda n: self._records[n].record.expires_at
-                )
-                for nonce in by_expiry[:needed]:
-                    del self._records[nonce]
+            if len(self._records) + 1 > self._max_entries:
+                self._evict_to_cap()
         self._records[record.nonce] = _Entry(record)
+        expires = record.expires_at + self._retention_margin
+        heapq.heappush(self._by_expiry, (expires, record.nonce))
+        if expires < self._next_expiry:
+            self._next_expiry = expires
+        # Compaction: deletes leave stale heap items; rescan once they
+        # dominate, so amortized cost stays O(1) per store.
+        if len(self._by_expiry) > 4 * len(self._records) + 64:
+            self._rebuild_horizon()
 
     def find(self, nonce: str) -> Optional[ChallengeRecord]:
         entry = self._entry(nonce)

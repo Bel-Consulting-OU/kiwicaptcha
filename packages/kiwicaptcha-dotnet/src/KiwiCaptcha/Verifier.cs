@@ -1130,8 +1130,20 @@ public sealed class Verifier
             options.ClientIp, true, receiptNs, receiptSet, expectation, evidence, delegateExecution);
         if (failure == null && delegateExecution)
         {
+            // The caller's verification posture rides the delegation so
+            // the sidecar enforces the same gates it would: the exact
+            // binding expectation (the empty string asserts unbound,
+            // the Go client's mapping), the telemetry flag and the
+            // idempotency identity.
+            string? wireBinding = null;
+            if (expectation.Enforced)
+            {
+                wireBinding = !expectation.RequireBindingPresence || peek.RequestBinding.Length == 0
+                    ? ""
+                    : expectation.Expected;
+            }
             var delegated = options.ExecutionPolicy!.Delegate(rawToken, options.ExpectedScope,
-                options.ClientIp);
+                options.ClientIp, wireBinding, options.EnforceTelemetry, options.OperationIdentity);
             if (delegated.Ok)
             {
                 return VerifyOutcome.ValidOutcome(peek.Nonce, peek.RequestBinding, true, 0, false,
