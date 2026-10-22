@@ -17,11 +17,11 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use kiwicaptcha::challenge::{
     issue_challenge_with_profile, now_epoch_micros, BindingMode, ChallengeConfig, ChallengeRecord,
-    DEFAULT_RSW_T,
+    PoWAlgorithm, DEFAULT_RSW_T,
 };
 use kiwicaptcha::profile::ChallengeProfile;
 use kiwicaptcha::siteverify::siteverify_response_with_metadata;
@@ -35,7 +35,7 @@ use crate::config::{
 };
 use crate::riskplane::{compose_rung, disposition_json, RiskPlane};
 use crate::server::{constant_time_eq, PoolMetrics, Request, Response, METRICS_CONTENT_TYPE};
-use crate::store::{ConsumeOutcome, FileStore, MemoryStore, RecordMeta, RecordStore};
+use crate::store::{ConsumeOutcome, FileStore, MemoryStore, PeekOutcome, RecordMeta, RecordStore};
 
 /// The sidecar's counters: the verify outcomes and the risk-denied
 /// issues, for `/metrics`.
@@ -85,6 +85,20 @@ pub struct SidecarConfig {
     /// `CLIENT_EXECUTION_VERSION_UNSUPPORTED` answer — never silently
     /// downgraded to a weaker grammar, the controller's rule.
     pub execution_required_version: u8,
+    /// The Argon admission budget in KiB: the sum of in-flight
+    /// memory-hard derivations may never exceed it (the default four
+    /// 64 MiB derivations). Meters the RECORD's own m_kib, so mixed
+    /// Argon sizes share one honest memory bound.
+    pub argon_budget_kib: u64,
+    /// The hard live-pending-challenge ceiling (0 = no ceiling): TTL
+    /// bounds record AGE, never cardinality — at R issues/s a TTL of T
+    /// seconds holds about R×T live records — so an Internet-reachable
+    /// issuer needs its own bound. The in-process stores enforce it
+    /// exactly (their pending counts are O(1)); the Redis backend
+    /// reports no local pending count and leaves the ceiling to the
+    /// server's own limits and the risk plane's issuance rates, as
+    /// documented in `/doctor`.
+    pub max_pending: u64,
 }
 
 impl SidecarConfig {
@@ -108,6 +122,8 @@ impl SidecarConfig {
             execution_key: None,
             execution_version: 1,
             execution_required_version: 0,
+            max_pending: crate::config::DEFAULT_MAX_PENDING_CHALLENGES,
+            argon_budget_kib: ArgonSemaphore::DEFAULT_MAX_KIB,
         }
     }
 }
@@ -179,9 +195,7 @@ fn client_execution_capability(raw: Option<&str>) -> u8 {
     // padded " 5 " is garbage and degrades to the floor.
     let canonical = {
         let bytes = raw.as_bytes();
-        !bytes.is_empty()
-            && bytes[0] != b'0'
-            && bytes.iter().all(|b| b.is_ascii_digit())
+        !bytes.is_empty() && bytes[0] != b'0' && bytes.iter().all(|b| b.is_ascii_digit())
     };
     if !canonical {
         return 1;
@@ -200,47 +214,95 @@ fn client_execution_capability(raw: Option<&str>) -> u8 {
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value
-            .bytes()
-            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+        && value.bytes().all(
+            |b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'),
+        )
 }
 
-/// The Argon admission gate: a counting semaphore that bounds
-/// concurrent memory-hard derivations. Each Argon derivation holds up
-/// to 64 MiB; without this gate the theoretical working set is
-/// `workers × 64 MiB` (64 GiB at the `--workers 1024` cap). The
-/// default limit is the smaller of 4 and the worker-pool size, which
-/// keeps the Argon working set under 256 MiB.
+/// The shared operation-identity grammar: 1..=128 bytes of
+/// `[A-Za-z0-9_-]` — the core's `OperationIdentity` contract (the
+/// alphabet is what makes the Lua splice safe). Validated once at the
+/// HTTP boundary so Memory, File and Redis accept exactly the same
+/// identities instead of diverging (the Redis path already refuses
+/// through the core; the in-process stores would have accepted any
+/// string).
+fn valid_operation_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+}
+
+/// The Argon admission gate: a NONBLOCKING, memory-weighted budget
+/// bounding concurrent memory-hard derivations. Each admission is
+/// weighted by the record's own `m_kib` — the memory the derivation
+/// will actually claim — so mixed-size Argon challenges share one KiB
+/// budget (the default four 64 MiB derivations) and `workers × 64 MiB`
+/// can never become the process working set. Admission is a `try`:
+/// HTTP workers never sleep on this lock (a blocked worker pool is a
+/// starvation DoS), and exhaustion answers `capacity_exceeded` with the
+/// record left pending and retryable — the PHP
+/// `VerificationAdmissionGate` contract. SHA/RSW never touch the gate.
 pub struct ArgonSemaphore {
-    slots: Mutex<usize>,
-    cond: Condvar,
-    max: usize,
+    budget_kib: Mutex<u64>,
+    max_kib: u64,
 }
 
 impl ArgonSemaphore {
-    pub fn new(max: usize) -> Self {
+    /// The shipped default: four 64 MiB derivations.
+    pub const DEFAULT_MAX_KIB: u64 = 4 * 65_536;
+
+    /// A gate with the default budget.
+    pub fn new() -> Self {
+        Self::with_budget(Self::DEFAULT_MAX_KIB)
+    }
+
+    /// A gate with an explicit KiB budget (tests and tuning).
+    pub fn with_budget(max_kib: u64) -> Self {
         ArgonSemaphore {
-            slots: Mutex::new(max.max(1)),
-            cond: Condvar::new(),
-            max: max.max(1),
+            budget_kib: Mutex::new(max_kib),
+            max_kib,
         }
     }
 
-    /// Acquire one Argon slot, blocking until one is free. Panics only
-    /// if the mutex is poisoned (a prior panic in the pool).
-    pub fn acquire(&self) {
-        let mut slots = self.slots.lock().expect("argon gate lock");
-        while *slots == 0 {
-            slots = self.cond.wait(slots).expect("argon gate condvar");
+    /// Try to reserve `kib` of the budget. `false` means exhaustion:
+    /// the caller must refuse with `capacity_exceeded` and leave the
+    /// record untouched. Never blocks beyond the mutex itself.
+    pub fn try_acquire(&self, kib: u32) -> bool {
+        let kib = kib as u64;
+        if kib == 0 {
+            // A record with no declared memory cost claims no budget
+            // (verify_solution rejects the Argon parameters themselves
+            // if they are malformed; admission only meters the weight).
+            return true;
         }
-        *slots -= 1;
+        let mut budget = self.budget_kib.lock().expect("argon gate lock");
+        if *budget >= kib {
+            *budget -= kib;
+            true
+        } else {
+            false
+        }
     }
 
-    /// Release one Argon slot. Must be called exactly once per acquire.
-    pub fn release(&self) {
-        let mut slots = self.slots.lock().expect("argon gate lock");
-        *slots = (*slots + 1).min(self.max);
-        self.cond.notify_one();
+    /// Return a reservation. Must be called exactly once per
+    /// successful `try_acquire`; the budget clamps at the ceiling so a
+    /// stray release can never mint capacity.
+    pub fn release(&self, kib: u32) {
+        let kib = kib as u64;
+        if kib == 0 {
+            return;
+        }
+        let mut budget = self.budget_kib.lock().expect("argon gate lock");
+        *budget = (*budget + kib).min(self.max_kib);
+    }
+}
+
+impl Default for ArgonSemaphore {
+    /// The shipped default: four 64 MiB derivations.
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -259,13 +321,17 @@ pub struct SidecarState {
     execution_key: Option<String>,
     execution_version: u8,
     execution_required_version: u8,
+    max_pending: u64,
     rsw: Option<crate::config::RswTrapdoorConfig>,
     pub(crate) pool: PoolMetrics,
     metrics: Metrics,
-    /// The Argon admission gate: a memory-weighted semaphore that bounds
-    /// concurrent memory-hard derivations. Without it, `workers ×
+    /// The Argon admission gate: a nonblocking, memory-weighted budget
+    /// over the record's actual `m_kib`. Without it, `workers ×
     /// 64 MiB` (up to 64 GiB at the worker cap) is the theoretical
-    /// Argon working-set floor. SHA/RSW rungs never touch this gate.
+    /// Argon working-set floor. Admission is classified from the
+    /// AUTHENTICATED stored record (never the present-day scope rung),
+    /// so a risk-escalated or pre-reconfig Argon record still meters.
+    /// SHA/RSW rungs never touch this gate.
     argon_gate: ArgonSemaphore,
 }
 
@@ -300,10 +366,11 @@ impl SidecarState {
             execution_key: config.execution_key,
             execution_version: config.execution_version,
             execution_required_version: config.execution_required_version,
+            max_pending: config.max_pending,
             rsw: config.rsw,
             pool: PoolMetrics::default(),
             metrics: Metrics::default(),
-            argon_gate: ArgonSemaphore::new(4),
+            argon_gate: ArgonSemaphore::with_budget(config.argon_budget_kib),
         }
     }
 
@@ -470,6 +537,19 @@ impl SidecarState {
                 Some(binding)
             }
         };
+        // The live-pending ceiling: TTL bounds age, never cardinality.
+        // Refused before any risk work or store write; the record set
+        // is untouched and the client may retry shortly.
+        if self.max_pending > 0 && self.store.counts().0 as u64 >= self.max_pending {
+            return self.error_response(
+                503,
+                "challenge_store_full",
+                &format!(
+                    "the live pending-challenge ceiling of {} is reached; retry shortly or raise --max-pending-challenges",
+                    self.max_pending
+                ),
+            );
+        }
         let remoteip = match self.resolve_remoteip(parsed.remoteip.as_deref()) {
             Ok(ip) => ip,
             Err(response) => return response,
@@ -577,7 +657,14 @@ impl SidecarState {
                 }
             }
             None => match issue_challenge_with_profile(
-                &config, scope, &remoteip, now_unix, now_ns, 0, &profile, request_binding,
+                &config,
+                scope,
+                &remoteip,
+                now_unix,
+                now_ns,
+                0,
+                &profile,
+                request_binding,
             ) {
                 Ok(i) => i,
                 Err(e) => return self.error_response(500, "issue_failed", &e.to_string()),
@@ -687,8 +774,60 @@ impl SidecarState {
         };
         let now_ns = now_epoch_micros();
         let now_unix = now_ns / 1_000_000;
-        // 1. Consume: one short lock, the one-shot transition.
-        let request_identity = parsed.operation_identity.as_deref().filter(|s| !s.is_empty());
+        // 0. Consume input grammar: the identity is validated once at
+        // the HTTP boundary so Memory, File and Redis accept exactly
+        // the same shapes (the core's OperationIdentity contract:
+        // 1..=128 bytes of [A-Za-z0-9_-]).
+        let request_identity = parsed
+            .operation_identity
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        if let Some(identity) = request_identity {
+            if !valid_operation_identity(identity) {
+                self.metrics.record_outcome("bad_request");
+                return self.provider_response(&["bad_request"], Some("bad_request"));
+            }
+        }
+        // The canonical client IP the fresh derivation and the replay
+        // gate both bind against (computed once, before any store
+        // transition).
+        let client_ip = match self.binding {
+            BindingConfig::Bound => Some(remoteip.as_str()),
+            BindingConfig::None => None,
+        };
+        // 1. Peek: the pre-consume snapshot. Admission classifies from
+        // the AUTHENTICATED STORED RECORD's own algorithm and memory
+        // weight — never the present-day scope rung — so a
+        // risk-escalated SHA scope that minted Argon, or a scope
+        // reconfigured Argon→SHA while records are outstanding, still
+        // meters. An already-consumed record resolves its replay below
+        // without spending a scarce reservation (the PHP verifier's
+        // ordering). Admission is a try: exhaustion answers
+        // capacity_exceeded with the record left pending and retryable,
+        // and an HTTP worker never sleeps on the gate.
+        let admitted_kib: Option<u32> = match self.store.peek(&decoded.nonce, now_unix) {
+            PeekOutcome::Unavailable(_) => {
+                self.metrics.record_outcome("storage_unavailable");
+                return self.provider_response(&["internal-error"], Some("storage_unavailable"));
+            }
+            PeekOutcome::NotFound => {
+                self.metrics.record_outcome("record_not_found");
+                return self
+                    .provider_response(&["invalid-input-response"], Some("record_not_found"));
+            }
+            PeekOutcome::Consumed => None,
+            PeekOutcome::Pending(record) => {
+                if record.algorithm == PoWAlgorithm::Argon2id {
+                    if !self.argon_gate.try_acquire(record.m_kib) {
+                        return self.capacity_response();
+                    }
+                    Some(record.m_kib)
+                } else {
+                    None
+                }
+            }
+        };
+        // 2. Consume: one short lock, the one-shot transition.
         let (record, meta) = match self
             .store
             .consume(&decoded.nonce, now_unix, request_identity)
@@ -699,6 +838,14 @@ impl SidecarState {
                 succeeded,
                 stored,
             } => {
+                // The consume lost the race (or this was a replay
+                // against a peeked-consumed record): no derivation will
+                // run, so the admission reservation (if this path took
+                // one before the peek classified it as pending) goes
+                // back immediately.
+                if let Some(kib) = admitted_kib {
+                    self.argon_gate.release(kib);
+                }
                 // An idempotent retry of a delegated verification (the
                 // caller forwarded operation_identity) must return the
                 // stored success, not already_consumed. Without the
@@ -724,10 +871,7 @@ impl SidecarState {
                 if identity_matches && succeeded == Some(true) {
                     let authentic = stored.as_ref().is_some_and(|s| {
                         kiwicaptcha::challenge::verify_consumed_result_mac(
-                            &kiwicaptcha::keys::DerivedKeys::from_master(
-                                &self.secret_key,
-                                None,
-                            ),
+                            &kiwicaptcha::keys::DerivedKeys::from_master(&self.secret_key, None),
                             &s.record.challenge,
                             true,
                             s.record.request_binding.as_deref(),
@@ -746,18 +890,44 @@ impl SidecarState {
                         // core's own expectation check).
                         let binding_ok = match &expected_request_binding {
                             RequestBindingExpectation::Unenforced => true,
-                            RequestBindingExpectation::Exact(None) => s.record.request_binding.is_none(),
+                            RequestBindingExpectation::Exact(None) => {
+                                s.record.request_binding.is_none()
+                            }
                             RequestBindingExpectation::Exact(Some(want)) => {
                                 match s.record.request_binding.as_deref() {
-                                    Some(have) => constant_time_eq(have.as_bytes(), want.as_bytes()),
+                                    Some(have) => {
+                                        constant_time_eq(have.as_bytes(), want.as_bytes())
+                                    }
                                     None => false,
                                 }
                             }
                         };
-                        let ip_ok = match (&meta.remoteip, &self.binding) {
-                            (Some(stored_ip), BindingConfig::Bound) => *stored_ip == remoteip,
-                            (_, BindingConfig::Bound) => false,
-                            (_, BindingConfig::None) => true,
+                        // IP: the record's SIGNED binding tag is the
+                        // authority — re-derived from this request's
+                        // canonical client IP exactly like the fresh
+                        // derivation does (v1 legacy hash vs the
+                        // nonce-bound tag), constant-time compared.
+                        // Companion metadata (smeta.remoteip) never
+                        // authorizes a replay: a storage writer may
+                        // mutate it without holding the master secret.
+                        let ip_ok = if s.record.binding_tag.is_empty() {
+                            true
+                        } else if let Some(ip) = client_ip {
+                            let expected: Option<String> = match s.record.protocol_version {
+                                1 => Some(kiwicaptcha::challenge::hash_ip(ip, &self.secret_key)),
+                                _ => kiwicaptcha::challenge::binding_tag_for_tenant(
+                                    &s.record.nonce,
+                                    ip,
+                                    &self.secret_key,
+                                    None,
+                                )
+                                .ok(),
+                            };
+                            expected.as_deref().is_some_and(|tag| {
+                                constant_time_eq(tag.as_bytes(), s.record.binding_tag.as_bytes())
+                            })
+                        } else {
+                            false
                         };
                         if scope_ok && binding_ok && ip_ok {
                             self.metrics.record_outcome("ok");
@@ -784,11 +954,17 @@ impl SidecarState {
                 return self.provider_response(&["timeout-or-duplicate"], Some("already_consumed"));
             }
             ConsumeOutcome::NotFound => {
+                if let Some(kib) = admitted_kib {
+                    self.argon_gate.release(kib);
+                }
                 self.metrics.record_outcome("record_not_found");
                 return self
                     .provider_response(&["invalid-input-response"], Some("record_not_found"));
             }
             ConsumeOutcome::Unavailable(_) => {
+                if let Some(kib) = admitted_kib {
+                    self.argon_gate.release(kib);
+                }
                 self.metrics.record_outcome("storage_unavailable");
                 return self.provider_response(&["internal-error"], Some("storage_unavailable"));
             }
@@ -797,32 +973,21 @@ impl SidecarState {
         // a derivation blocked here sits after the consume transition
         // above has returned and before the commit below runs, holding
         // nothing — which is exactly the invariant the integration tests
-        // prove through this seam.
+        // prove through this seam. The admission reservation (argons
+        // only) IS held across the derivation: it is released after the
+        // proof returns, on every path below.
         derivation_gate::consult(&decoded.nonce);
-        // 2. Derive: no lock held. The scope's rung supplies the timing
+        // 3. Derive: no lock held. The scope's rung supplies the timing
         // floor even for a foreign injected record; the record's own
-        // floor rides on top (the verifier takes the max).
+        // floor rides on top (the verifier takes the max). The Argon
+        // admission itself was already classified and reserved from the
+        // RECORD before the consume (never from this rung).
         let mut record = record;
         let floor = self
             .plan
             .rung_of(scope)
             .unwrap_or_else(|| self.default_rung())
             .min_duration_ms();
-        let client_ip = match self.binding {
-            BindingConfig::Bound => Some(remoteip.as_str()),
-            BindingConfig::None => None,
-        };
-        let rung = self
-            .plan
-            .rung_of(scope)
-            .unwrap_or_else(|| self.default_rung());
-        // Argon admission: a memory-weighted slot bounds concurrent
-        // memory-hard derivations so `workers × 64 MiB` can never
-        // become the process working set. SHA/RSW never touch the gate.
-        let argon = rung.is_argon();
-        if argon {
-            self.argon_gate.acquire();
-        }
         let outcome = verify_solution(&mut VerifyContext {
             record: &mut record,
             secret_key: &self.secret_key,
@@ -859,10 +1024,10 @@ impl SidecarState {
             rsw_lambda: self.rsw.as_ref().map(|r| r.lambda.as_str()),
             rsw_keyring: None,
         });
-        if argon {
-            self.argon_gate.release();
+        if let Some(kib) = admitted_kib {
+            self.argon_gate.release(kib);
         }
-        // 3. Commit: one short lock, the verdict lands. The result is
+        // 4. Commit: one short lock, the verdict lands. The result is
         // written through the authenticated seam: a MAC over the
         // challenge, verdict, binding and operation identity, so a
         // storage writer without the master secret cannot forge
@@ -963,6 +1128,27 @@ impl SidecarState {
             "detail": detail,
         });
         Response::json(status, format!("{body}\n"))
+    }
+
+    /// The typed admission-exhaustion refusal: the core's
+    /// `capacity_exceeded` vocabulary (internal-error family — every
+    /// SDK maps it to the retryable storage disposition), the record
+    /// left pending and intact. Never a burn, never a block.
+    fn capacity_response(&self) -> Response {
+        self.metrics.record_outcome("capacity_exceeded");
+        let response = siteverify_response_with_metadata(
+            &VerifyOutcome::Invalid(kiwicaptcha::verify::VerifyError::CapacityExceeded),
+            None,
+            None,
+            None,
+        );
+        match serde_json::to_value(&response) {
+            Ok(mut value) => {
+                value["kiwi-code"] = serde_json::Value::String("capacity_exceeded".to_string());
+                Response::json(200, format!("{value}\n"))
+            }
+            Err(_) => self.provider_response(&["internal-error"], Some("capacity_exceeded")),
+        }
     }
 
     /// The provider failure shape with the additive core code (status

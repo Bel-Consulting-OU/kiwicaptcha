@@ -2726,13 +2726,18 @@ jobs:
         with:
           channel: stable
           cache: true
-      - name: test
-        run: flutter test
       - name: native FFI core (ABI golden-vector test + release dylib)
         working-directory: packages/kiwicaptcha-flutter/native
         run: |
           cargo test
           cargo build --release
+      # flutter test must see the solver library: the Dart bindings
+      # dlopen('libkiwicaptcha_solver.so') by bare name, which on Linux
+      # resolves through LD_LIBRARY_PATH to the workspace build output.
+      - name: test
+        run: flutter test
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
 
   feature-inventory:
     name: Feature inventory (every declared surface is wired)

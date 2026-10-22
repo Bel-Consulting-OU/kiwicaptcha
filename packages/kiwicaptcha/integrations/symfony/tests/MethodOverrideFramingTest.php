@@ -290,6 +290,74 @@ final class MethodOverrideFramingTest extends TestCase
         self::assertSame(405, $client->getResponse()->getStatusCode());
     }
 
+    /**
+     * The framework's HttpMethodParameterOverrideListener rewrites the
+     * verb from a query-string `_method` before the router reads it, so a
+     * plain kernel request would answer 405. The documented invariant for
+     * every unexpected query parameter is 422 `QUERY_PARAMETERS_NOT_ALLOWED`.
+     * The subscriber must win over both the override listener and the
+     * router on the real kernel, not just in a direct dispatch. The
+     * document must match the owning controller's own refusal, endpoint
+     * name included.
+     */
+    public function testKernelQueryMethodOverrideIs422Not405(): void
+    {
+        $cases = [
+            '/kiwi-captcha/challenge?_method=DELETE' => ['{"scope":"login"}', 'challenge endpoint'],
+            '/kiwi-captcha/challenge/cancel?_method=DELETE' => ['{"nonce":"abc"}', 'cancellation endpoint'],
+        ];
+        foreach ($cases as $uri => [$body, $endpointName]) {
+            $client = $this->browser();
+            $client->request('POST', $uri, [], [], [
+                'CONTENT_TYPE' => 'application/json',
+            ], $body);
+
+            $response = $client->getResponse();
+            self::assertSame(422, $response->getStatusCode(), $uri.' body='.(string) $response->getContent());
+            self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', $this->errorCode($response), $uri);
+            $message = json_decode((string) $response->getContent(), true)['error']['message'];
+            self::assertStringContainsString($endpointName, $message, $uri);
+        }
+    }
+
+    /**
+     * siteverify is a provider endpoint: every query-parameter refusal on
+     * it is the recaptcha-shaped 400 `{"success":false,"error-codes":
+     * ["bad-request"]}` (SiteVerifyController, pinned by the surface
+     * matrix), never the challenge-shaped error document. A query
+     * `_method` must not change the shape — it only has to beat the
+     * router's 405 first.
+     */
+    public function testKernelQueryMethodOverrideOnSiteverifyKeepsProviderShape(): void
+    {
+        $client = $this->browser();
+        $client->request('POST', '/kiwi-captcha/siteverify?_method=DELETE', [], [], [
+            'CONTENT_TYPE' => 'application/json',
+        ], '{"secret":"s","response":"x"}');
+
+        $response = $client->getResponse();
+        self::assertSame(400, $response->getStatusCode(), (string) $response->getContent());
+        $doc = json_decode((string) $response->getContent(), true);
+        self::assertFalse($doc['success']);
+        self::assertSame(['bad-request'], $doc['error-codes']);
+        self::assertArrayNotHasKey('error', $doc);
+    }
+
+    /**
+     * A query `_method` must not leak a rewritten verb into routing even
+     * when the client sends no body at all: the refusal is about the
+     * query string, so it fires regardless of payload.
+     */
+    public function testKernelQueryMethodOverrideWithoutBody(): void
+    {
+        $client = $this->browser();
+        $client->request('POST', '/kiwi-captcha/challenge?_method=PUT');
+
+        $response = $client->getResponse();
+        self::assertSame(422, $response->getStatusCode(), (string) $response->getContent());
+        self::assertSame('QUERY_PARAMETERS_NOT_ALLOWED', $this->errorCode($response));
+    }
+
     public function testKernelHeaderPlusFormFieldIsRejected(): void
     {
         $client = $this->browser();

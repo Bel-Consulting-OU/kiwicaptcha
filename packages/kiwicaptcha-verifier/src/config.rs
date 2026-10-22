@@ -19,6 +19,13 @@ use kiwicaptcha::profile::ChallengeProfile;
 /// purpose keys, so it is refused before the socket opens.
 pub const MIN_SECRET_BYTES: usize = kiwicaptcha::keys::MIN_MASTER_BYTES;
 
+/// The shipped live-pending-challenge ceiling: about 833 issues/s at a
+/// 120 s TTL before issuance refuses with `challenge_store_full`. TTL
+/// bounds age, not cardinality, so the generic store needs its own
+/// bound; `--max-pending-challenges` / `KIWI_MAX_PENDING_CHALLENGES`
+/// raise it (0 disables the ceiling explicitly).
+pub const DEFAULT_MAX_PENDING_CHALLENGES: u64 = 100_000;
+
 /// The placeholder secret the documentation shows. It is a label, not a
 /// credential: startup refuses it unless the operator passes the explicit
 /// development escape hatch.

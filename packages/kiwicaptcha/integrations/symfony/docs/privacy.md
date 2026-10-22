@@ -94,7 +94,7 @@ carries `{}` today, so enabling the gate rejects *all* of those solves
 at verification time; only browser-widget solves under a non-empty
 collection mode (`minimal`/`full`) can pass. Enable it for
 browser-only traffic, and leave it off for mixed or native traffic —
-the doctor names this decision as a WARN row whenever the gate is on.
+the doctor names this decision as a warning row whenever the gate is on.
 
 ## Coarse client context (risk-v2)
 

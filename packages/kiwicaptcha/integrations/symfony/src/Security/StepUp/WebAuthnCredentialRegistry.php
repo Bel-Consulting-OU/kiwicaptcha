@@ -42,7 +42,7 @@ final class WebAuthnCredentialRegistry
      * record. The marker carries a bounded TTL: a rolling-upgrade
      * window where an old node still writes un-indexed records heals
      * with one cursor walk after the marker lapses, never a permanent
-     * blind spot. PUBLIC so the tests can pin the steady-state path.
+     * blind spot. Public so the tests can pin the steady-state path.
      */
     public const BACKFILL_MARKER = 'credential:index-initialized';
 
@@ -84,19 +84,19 @@ final class WebAuthnCredentialRegistry
      * assertion ceremony compares the authenticator's user handle
      * against.
      *
-     * The discovery is the principal's own index set (SMEMBERS) — one
-     * bounded read of THIS principal's members — never a keyspace-wide
-     * `KEYS` walk: the pre-index lookup scanned every credential key on
-     * the server and deserialized every record on each ceremony, an
-     * O(keyspace) blocking round trip that grew with the deployment.
-     * The members arrive in one pipelined batch, so the steady state is
-     * two round trips (index + batch) whatever the DEPLOYMENT's total
+     * The discovery is the principal's own index set — one bounded
+     * read of the members of this principal, never a keyspace-wide
+     * scan. The pre-index lookup walked every credential key on the
+     * server and deserialized every record on each ceremony; that
+     * blocking round trip grew with the whole deployment. The members
+     * arrive in one pipelined batch, so the steady state is two round
+     * trips (index plus batch) whatever the deployment's total
      * credential count, and the batch holds only this principal's
      * records.
      *
      * On the first lookup after a fresh install (or once the backfill
      * marker lapses after a rolling upgrade), the index is built once
-     * from a cursor walk (`SCAN`, never `KEYS`), so pre-index records
+     * from a cursor walk, so pre-index records
      * stay visible without a migration step.
      *
      * @return list<CredentialRecord>
@@ -141,12 +141,12 @@ final class WebAuthnCredentialRegistry
 
     /**
      * The one-time cursor walk that builds every principal's index
-     * from the records already on the server (pre-index installs and
-     * the rolling-upgrade heal window). `SCAN` with a bounded COUNT
-     * walks the credential namespace without blocking Redis the way
-     * `KEYS` does; each record lands in its own principal's set
-     * (SADD is idempotent, so a concurrent save that indexed the same
-     * record changes nothing). The marker then pins the steady state:
+     * from the records already on the server: pre-index installs and
+     * the rolling-upgrade heal window. The walk uses a bounded count
+     * per iteration, so it never blocks Redis the way a full-keyspace
+     * scan does. Each record lands in its own principal's set; the set
+     * add is idempotent, so a concurrent save that indexed the same
+     * record changes nothing. The marker then pins the steady state:
      * a missing index means a credential-less principal.
      */
     private function backfillIndexes(): void
@@ -240,7 +240,7 @@ final class WebAuthnCredentialRegistry
         // Keep the principal's index in step with the record: the
         // allow-list lookup reads this set instead of scanning the
         // keyspace, so every write (not just the backfill) maintains
-        // it. SADD is idempotent; the index TTL refreshes with the
+        // it. The set add is idempotent; the index TTL refreshes with the
         // record's own lifetime and can only outlive a member, never
         // precede it.
         if ($record->userHandle !== '') {

@@ -164,6 +164,19 @@ Optional:
   interpretation the Symfony bundle controller and the PHP core
   `ExecutionVersionPolicy::clientCapability()` apply; every other
   header value, including absence, keeps the behavior above).
+- `KIWI_EXECUTION_REQUIRED=1` — refuse a capability-zero client with
+  `422 CLIENT_EXECUTION_VERSION_UNSUPPORTED` instead of serving it the
+  plain challenge (the operator asserts execution is mandatory; a bot
+  never has to advertise truthfully, so without the knob the claim is
+  an opt-out, not a boundary).
+- `KIWI_EXECUTION_MIN_VERSION` — the server-owned grammar floor
+  (`0` = off, the default; otherwise `1..6`): an armed request whose
+  effective tier — the client's advertised capability capped by the
+  binary's generator maximum — falls below this floor is refused with
+  `422 CLIENT_EXECUTION_VERSION_UNSUPPORTED`, never downgraded. The
+  negotiated tier is what the issuer mints (`min(capability, generator
+  maximum)`), so a client advertising `6` under a `6`-capable binary
+  receives the version-6 grammar rather than a silent v1.
 - `KIWI_RSW_MODULUS_N` / `KIWI_RSW_LAMBDA` — the rsw time-lock
   trapdoor pair. Both must be configured together; setting exactly one
   refuses startup with

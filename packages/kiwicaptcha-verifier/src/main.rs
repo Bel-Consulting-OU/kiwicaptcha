@@ -76,6 +76,15 @@ Options:
                    KIWI_EXECUTION_REQUIRED_VERSION; 0 = off, an armed
                    request minting below it is refused with
                    CLIENT_EXECUTION_VERSION_UNSUPPORTED)
+  --max-pending-challenges N
+                   hard live-pending-challenge ceiling; issuance
+                   refuses with challenge_store_full above it
+                   (env KIWI_MAX_PENDING_CHALLENGES; default 100000,
+                   0 = no ceiling)
+  --argon-budget-kib N
+                   the in-flight memory-hard derivation budget in
+                   KiB, metered per record m_kib (env
+                   KIWI_ARGON_BUDGET_KIB; default 262144 = 4 x 64 MiB)
   --help           this text
   --version        the crate version
 
@@ -113,6 +122,8 @@ struct Args {
     execution_key: Option<String>,
     execution_version: Option<String>,
     execution_required_version: Option<String>,
+    max_pending: Option<String>,
+    argon_budget_kib: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -137,6 +148,8 @@ fn parse_args() -> Result<Args, String> {
         execution_key: None,
         execution_version: None,
         execution_required_version: None,
+        max_pending: None,
+        argon_budget_kib: None,
     };
     let mut raw = std::env::args().skip(1);
     while let Some(flag) = raw.next() {
@@ -203,8 +216,16 @@ fn parse_args() -> Result<Args, String> {
             }
             "--execution-required-version" => {
                 args.execution_required_version = Some(
-                    raw.next().ok_or("--execution-required-version needs a value")?,
+                    raw.next()
+                        .ok_or("--execution-required-version needs a value")?,
                 );
+            }
+            "--max-pending-challenges" => {
+                args.max_pending =
+                    Some(raw.next().ok_or("--max-pending-challenges needs a value")?);
+            }
+            "--argon-budget-kib" => {
+                args.argon_budget_kib = Some(raw.next().ok_or("--argon-budget-kib needs a value")?);
             }
             other => return Err(format!("unknown argument: {other} (try --help)")),
         }
@@ -440,20 +461,49 @@ fn main() -> ExitCode {
     };
     // The server-owned mandate: 0 (or unset) disables it; 1..=MAX is
     // the required tier below which an armed issuance refuses.
-    let execution_required_version =
-        match env_or(args.execution_required_version, "KIWI_EXECUTION_REQUIRED_VERSION") {
-            Some(raw) => match raw.parse::<u8>() {
-                Ok(v) if v <= kiwicaptcha::execution::MAX_EXECUTION_VERSION => v,
+    let execution_required_version = match env_or(
+        args.execution_required_version,
+        "KIWI_EXECUTION_REQUIRED_VERSION",
+    ) {
+        Some(raw) => match raw.parse::<u8>() {
+            Ok(v) if v <= kiwicaptcha::execution::MAX_EXECUTION_VERSION => v,
+            _ => {
+                eprintln!(
+                    "kiwicaptcha-verifier: --execution-required-version must be 0..={}",
+                    kiwicaptcha::execution::MAX_EXECUTION_VERSION
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+        None => 0,
+    };
+    // The live-pending ceiling: 0 (or unset → the shipped default)
+    // disables/enables the bound explicitly.
+    let max_pending = match env_or(args.max_pending, "KIWI_MAX_PENDING_CHALLENGES") {
+        Some(raw) => {
+            match raw.parse::<u64>() {
+                Ok(v) => v,
                 _ => {
-                    eprintln!(
-                        "kiwicaptcha-verifier: --execution-required-version must be 0..={}",
-                        kiwicaptcha::execution::MAX_EXECUTION_VERSION
-                    );
+                    eprintln!("kiwicaptcha-verifier: --max-pending-challenges must be a non-negative integer");
                     return ExitCode::FAILURE;
                 }
-            },
-            None => 0,
-        };
+            }
+        }
+        None => kiwicaptcha_verifier::config::DEFAULT_MAX_PENDING_CHALLENGES,
+    };
+    // The Argon admission budget (KiB): one default 4 x 64 MiB.
+    let argon_budget_kib = match env_or(args.argon_budget_kib, "KIWI_ARGON_BUDGET_KIB") {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(v) => v,
+            _ => {
+                eprintln!(
+                    "kiwicaptcha-verifier: --argon-budget-kib must be a non-negative integer"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+        None => kiwicaptcha_verifier::state::ArgonSemaphore::DEFAULT_MAX_KIB,
+    };
 
     let config = SidecarConfig {
         secret_key: secret,
@@ -468,6 +518,8 @@ fn main() -> ExitCode {
         execution_key,
         execution_version,
         execution_required_version,
+        max_pending,
+        argon_budget_kib,
     };
     let rungs: Vec<String> = config
         .plan

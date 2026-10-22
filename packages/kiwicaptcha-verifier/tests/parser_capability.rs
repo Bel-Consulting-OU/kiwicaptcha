@@ -29,7 +29,12 @@ fn spawn_with(configure: impl FnOnce(&mut SidecarConfig)) -> SocketAddr {
 }
 
 /// One POST over a raw connection; returns (status, body).
-fn post(addr: SocketAddr, target: &str, body: &str, extra_headers: &[(&str, &str)]) -> (u16, String) {
+fn post(
+    addr: SocketAddr,
+    target: &str,
+    body: &str,
+    extra_headers: &[(&str, &str)],
+) -> (u16, String) {
     let mut headers = String::new();
     for (name, value) in extra_headers {
         headers.push_str(&format!("{name}: {value}\r\n"));
@@ -82,12 +87,20 @@ fn issue_refuses_a_mistyped_scope_instead_of_defaulting_to_login() {
     let addr = spawn();
     // A non-string scope used to fall through `as_str()` into the
     // `login` default; the typed parse refuses it as garbage.
-    let (status, body) = post(addr, "/issue", r#"{"scope":123,"remoteip":"198.51.100.7"}"#, &[]);
+    let (status, body) = post(
+        addr,
+        "/issue",
+        r#"{"scope":123,"remoteip":"198.51.100.7"}"#,
+        &[],
+    );
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("bad_request"), "{body}");
     // An ABSENT scope still takes the documented default.
     let (status, body) = post(addr, "/issue", r#"{"remoteip":"198.51.100.7"}"#, &[]);
-    assert_eq!(status, 200, "the absent scope keeps the login default: {body}");
+    assert_eq!(
+        status, 200,
+        "the absent scope keeps the login default: {body}"
+    );
 }
 
 #[test]
@@ -132,7 +145,12 @@ fn issue_and_verify_answer_the_public_422_for_query_parameters() {
     assert!(body.contains("QUERY_PARAMETERS_NOT_ALLOWED"), "{body}");
     // A bare '?' (empty query string) still counts: the sender wrote a
     // query, and the public shape refuses the shape, not its contents.
-    let (status, body) = post(addr, "/verify?", r#"{"token":"x","scope":"login","remoteip":"198.51.100.7"}"#, &[]);
+    let (status, body) = post(
+        addr,
+        "/verify?",
+        r#"{"token":"x","scope":"login","remoteip":"198.51.100.7"}"#,
+        &[],
+    );
     assert_eq!(status, 422, "{body}");
     assert!(body.contains("QUERY_PARAMETERS_NOT_ALLOWED"), "{body}");
     // The status line itself carries 422 (not the 500 fallback).
@@ -342,7 +360,10 @@ fn issue_validates_the_request_binding_like_the_controller() {
         r#"{"scope":"login","remoteip":"198.51.100.7","request_binding":""}"#,
         &[],
     );
-    assert_eq!(status, 200, "an empty binding is unbound, not invalid: {body}");
+    assert_eq!(
+        status, 200,
+        "an empty binding is unbound, not invalid: {body}"
+    );
     let (status, body) = post(
         addr,
         "/issue",
@@ -368,7 +389,10 @@ fn a_bound_record_enforces_the_exact_expectation_on_verify() {
         ),
     );
     assert_eq!(status, 200, "{ok}");
-    assert!(ok.contains(r#""kiwi-code":"ok""#), "the exact binding matches: {ok}");
+    assert!(
+        ok.contains(r#""kiwi-code":"ok""#),
+        "the exact binding matches: {ok}"
+    );
 
     // ...and asserting the record is unbound must not: the full chain
     // (sidecar issuance binding → core verify) is live, not parsed and
@@ -394,8 +418,8 @@ fn a_bound_record_enforces_the_exact_expectation_on_verify() {
 #[test]
 fn verify_answers_wrong_scope_for_an_out_of_plan_scope() {
     let addr = spawn(); // the plan is the default single login scope
-    // Out of plan: wrong_scope at the allow-list gate, before any
-    // token work — the SDK scopeAllowed shape.
+                        // Out of plan: wrong_scope at the allow-list gate, before any
+                        // token work — the SDK scopeAllowed shape.
     let (status, body) = post_json(
         addr,
         "/verify",
@@ -443,7 +467,10 @@ fn the_required_execution_version_refuses_a_weaker_grammar() {
         &[("kiwi-execution-max-version", "3")],
     );
     assert_eq!(status, 200, "{wire}");
-    assert!(wire.contains(r#""execution_version":3"#) || wire.contains("\"execution_version\": 3"), "{wire}");
+    assert!(
+        wire.contains(r#""execution_version":3"#) || wire.contains("\"execution_version\": 3"),
+        "{wire}"
+    );
     let (status, wire) = post(
         addr,
         "/issue",
@@ -451,5 +478,69 @@ fn the_required_execution_version_refuses_a_weaker_grammar() {
         &[("kiwi-execution-max-version", "6")],
     );
     assert_eq!(status, 200, "{wire}");
-    assert!(wire.contains("\"execution_version\":6") || wire.contains("\"execution_version\": 6"), "{wire}");
+    assert!(
+        wire.contains("\"execution_version\":6") || wire.contains("\"execution_version\": 6"),
+        "{wire}"
+    );
+}
+
+/// The full negotiation matrix the audit demanded: every required tier
+/// against every advertised capability (and the absent header). The
+/// rule mirrors the controller: an explicit zero never arms (refused
+/// whenever the deployment arms), and an armed request whose effective
+/// version (min(capability, node cap)) falls below the mandate is
+/// refused — never downgraded.
+#[test]
+fn required_version_negotiation_matrix() {
+    // (required, advertised capability header, node cap, must refuse)
+    let cases: &[(u8, Option<&str>, u8, bool)] = &[
+        // No mandate: everything armed is served (zero still refuses).
+        (0, None, 6, false),
+        (0, Some("6"), 6, false),
+        (0, Some("0"), 6, true),
+        // Mandate 1: any advertising client passes; the absent v1 floor passes.
+        (1, None, 6, false),
+        (1, Some("0"), 6, true),
+        (1, Some("1"), 6, false),
+        (1, Some("6"), 6, false),
+        // Mandate 4: the v1 floor and small caps are refused, 4/6 pass.
+        (4, None, 6, true),
+        (4, Some("0"), 6, true),
+        (4, Some("2"), 6, true),
+        (4, Some("4"), 6, false),
+        (4, Some("6"), 6, false),
+        // Mandate 6 with a node cap of 6: only a full-cap client passes.
+        (6, None, 6, true),
+        (6, Some("2"), 6, true),
+        (6, Some("6"), 6, false),
+        // Node cap below the mandate is refused for everyone armed:
+        // the effective version can never reach the mandate.
+        (4, Some("6"), 2, true),
+        (4, Some("2"), 2, true),
+    ];
+    for &(required, header, node_cap, must_refuse) in cases {
+        let addr = spawn_with(|c| {
+            c.execution_key = Some("01".repeat(32));
+            c.execution_version = node_cap;
+            c.execution_required_version = required;
+        });
+        let headers = header
+            .map(|h| vec![("kiwi-execution-max-version", h)])
+            .unwrap_or_default();
+        let (status, body) = post(addr, "/issue", ISSUE_BODY, &headers);
+        let label = format!("required={required} header={header:?} cap={node_cap}");
+        if must_refuse {
+            assert_eq!(status, 422, "{label}: {body}");
+            assert!(
+                body.contains("CLIENT_EXECUTION_VERSION_UNSUPPORTED"),
+                "{label}: {body}"
+            );
+        } else {
+            assert_eq!(status, 200, "{label}: {body}");
+            assert!(
+                !body.contains("CLIENT_EXECUTION_VERSION_UNSUPPORTED"),
+                "{label}: {body}"
+            );
+        }
+    }
 }

@@ -11,8 +11,8 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
  * The enforce_telemetry gate in its legal standard-privacy shape:
  * collection on (minimal), enforcement on. The doctor must name the
  * client-coverage decision this combination is — every mobile/native
- * SDK solve carries {} and is rejected — as a WARN row, not a silent
- * PASS.
+ * SDK solve carries {} and is rejected — as a warning row, not a
+ * silent pass.
  */
 final class DoctorTelemetryEnforcementKernel extends TestKernel
 {

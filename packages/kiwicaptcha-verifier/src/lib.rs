@@ -114,7 +114,9 @@ pub use server::{
     ListenAddr, PoolMetrics, ServerOptions,
 };
 pub use state::{default_profile, issue_wire_of, open_store, SidecarConfig, SidecarState};
-pub use store::{ConsumeOutcome, FileStore, MemoryStore, RecordMeta, RecordStore, StoredSuccess};
+pub use store::{
+    ConsumeOutcome, FileStore, MemoryStore, PeekOutcome, RecordMeta, RecordStore, StoredSuccess,
+};
 
 #[cfg(test)]
 mod tests {
