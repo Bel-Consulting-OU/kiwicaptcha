@@ -110,9 +110,9 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
      * sweep saw, or an insert recorded (0 until the first sweep). A
      * store before that instant cannot reclaim anything, so the
      * per-issuance full scan collapses to one integer compare — the
-     * pre-gate scan was O(live records) file reads + JSON decodes per
-     * issuance (O(n²) cumulative). Reads already answer "absent" for
-     * an expired envelope ({@see self::liveDecoded()}), so deferring
+     * pre-gate scan read and decoded every live record file on every
+     * issuance, O(n²) cumulative. Reads already answer "absent" for
+     * an expired envelope via {@see self::liveDecoded()}; deferring
      * reclamation never serves an expired record, and every insert
      * lowers the horizon so its own expiry always reopens the gate.
      */

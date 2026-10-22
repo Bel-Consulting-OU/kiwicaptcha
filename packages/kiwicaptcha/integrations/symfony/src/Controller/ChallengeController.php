@@ -760,6 +760,20 @@ final class ChallengeController
             );
         }
 
+        // Query-parameter hardening first: the endpoint accepts no
+        // query parameters, and the refusal must not depend on the
+        // effective method. On Symfony 6.4 a query-string method
+        // override makes Request::getMethod() report the overridden
+        // verb, so a method-first order answers the framing probe with
+        // 405 instead of the documented 422 — the framing refusal owns
+        // the precedence.
+        if ($request->query->count() > 0) {
+            return $this->privateJson(
+                ['error' => ['code' => 'QUERY_PARAMETERS_NOT_ALLOWED', 'message' => 'The challenge endpoint accepts no query parameters.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
+        }
+
         // Narrow HTTP: the endpoint is POST-only, enforced here too (the
         // route already restricts the method, but a direct invocation must
         // behave identically). An OPTIONS preflight is a non-POST method
@@ -2481,6 +2495,17 @@ final class ChallengeController
             return $this->privateJson(
                 ['error' => ['code' => 'DUPLICATE_HEADER', 'message' => $overrideConflict]],
                 Response::HTTP_BAD_REQUEST,
+            );
+        }
+
+        // Query-parameter hardening first: same precedence rule as the
+        // challenge endpoint — the 422 query refusal must not lose to a
+        // method check that the query-string override itself triggered
+        // (Symfony 6.4).
+        if ($request->query->count() > 0) {
+            return $this->privateJson(
+                ['error' => ['code' => 'QUERY_PARAMETERS_NOT_ALLOWED', 'message' => 'The cancellation endpoint accepts no query parameters.']],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
 

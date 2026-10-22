@@ -399,9 +399,7 @@ fn json_body_attack_shapes_never_reach_the_verifier() {
     let (_, clean) = verify(
         addr,
         "",
-        &format!(
-            "{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"
-        ),
+        &format!("{{\"token\":\"{token}\",\"scope\":\"login\",\"remoteip\":\"{CLIENT_IP}\"}}"),
     );
     assert!(
         clean.contains("\"kiwi-code\":\"ok\""),

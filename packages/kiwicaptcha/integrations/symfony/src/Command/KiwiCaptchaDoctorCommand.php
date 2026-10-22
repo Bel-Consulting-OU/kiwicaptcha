@@ -658,7 +658,7 @@ final class KiwiCaptchaDoctorCommand extends Command
 
     /**
      * The enforce_telemetry gate's client coverage. The verifier
-     * rejects EMPTY telemetry as well as bot-scored telemetry, and
+     * rejects empty telemetry as well as bot-scored telemetry, and
      * every mobile/native SDK solve (Android, iOS, Flutter, React
      * Native) carries `{}` — so with the gate on, all of those solves
      * are rejected at verification time. Only browser-widget solves

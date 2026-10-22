@@ -75,11 +75,7 @@ final class MethodOverrideFramingSubscriber implements EventSubscriberInterface
             if (\method_exists($request, 'setMethodOverrideParameter')) {
                 $request->setMethodOverrideParameter(false);
             }
-            $event->setResponse($this->framingRefusal(
-                'QUERY_PARAMETERS_NOT_ALLOWED',
-                'The challenge endpoint accepts no query parameters.',
-                Response::HTTP_UNPROCESSABLE_ENTITY,
-            ));
+            $event->setResponse($this->queryOverrideRefusal($request));
             return;
         }
         $conflict = $this->methodOverrideConflict($request);
@@ -90,15 +86,57 @@ final class MethodOverrideFramingSubscriber implements EventSubscriberInterface
     }
 
     /**
+     * The pre-router answer for a query-string `_method`: byte-identical
+     * to what the owning controller would have answered had routing let
+     * the request through. Routing would rewrite the verb to 405 first,
+     * so the subscriber has to reproduce each endpoint's own refusal.
+     * The challenge and cancellation endpoints answer the typed
+     * 422 `QUERY_PARAMETERS_NOT_ALLOWED` document with their own
+     * endpoint name. The siteverify provider endpoint answers its
+     * recaptcha-shaped 400 `{"success":false,"error-codes":["bad-request"]}`
+     * like every other siteverify query-parameter refusal
+     * ({@see SiteVerifyController}). A provider client parses
+     * `success`/`error-codes`, never `error.code`.
+     */
+    private function queryOverrideRefusal(Request $request): Response
+    {
+        $path = $request->getPathInfo();
+        if (str_ends_with($path, '/siteverify')) {
+            return $this->withFramingHeaders(
+                new JsonResponse(['success' => false, 'error-codes' => ['bad-request']], Response::HTTP_BAD_REQUEST),
+            );
+        }
+
+        $message = str_ends_with($path, '/challenge/cancel')
+            ? 'The cancellation endpoint accepts no query parameters.'
+            : 'The challenge endpoint accepts no query parameters.';
+
+        return $this->framingRefusal(
+            'QUERY_PARAMETERS_NOT_ALLOWED',
+            $message,
+            Response::HTTP_UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    /**
      * The shared framing refusal document: a typed code, a stable
      * message and the no-store cache posture of every framing error.
      */
     private function framingRefusal(string $code, string $message, int $status = Response::HTTP_BAD_REQUEST): JsonResponse
     {
-        $response = new JsonResponse(
-            ['error' => ['code' => $code, 'message' => $message]],
-            $status,
+        return $this->withFramingHeaders(
+            new JsonResponse(
+                ['error' => ['code' => $code, 'message' => $message]],
+                $status,
+            ),
         );
+    }
+
+    /**
+     * The no-store cache posture every framing error shares.
+     */
+    private function withFramingHeaders(Response $response): Response
+    {
         $response->headers->set('Cache-Control', 'no-store, private, max-age=0');
         $response->headers->set('Pragma', 'no-cache');
         $response->headers->set('Referrer-Policy', 'no-referrer');

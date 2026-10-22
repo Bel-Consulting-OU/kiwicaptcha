@@ -72,6 +72,7 @@ require __DIR__.'/health.php';
 // refuse exactly the same bytes.
 require __DIR__.'/framing.php';
 
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Verifier;
@@ -268,9 +269,30 @@ function kiwiChallenge(): void
         // opt-out, not a security boundary.
         $executionKey = $config->executionKey;
         $mandatory = filter_var(getenv('KIWI_EXECUTION_REQUIRED') ?: '0', FILTER_VALIDATE_BOOLEAN);
+        // The negotiated grammar tier: the client's capability capped
+        // by this binary's generator maximum — the mirror of the
+        // bundle controller's effectiveExecutionVersion(). An absent or
+        // legacy client floors at v1; an advertised v6 under a v6
+        // generator mints v6. The emitted record carries THIS tier, so
+        // the negotiation is a real negotiation, never a boolean
+        // execution yes/no that silently mints v1 either way.
+        $serverMax = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
+        $effective = max(1, min($capability, $serverMax));
+        // The tier mandate: KIWI_EXECUTION_MIN_VERSION (0 = off) refuses
+        // any armed request whose effective tier falls below it — the
+        // server-owned floor the client advertisement cannot argue
+        // down. KIWI_EXECUTION_REQUIRED=1 remains the separate
+        // refuse-capability-zero switch; together they express
+        // "must execute" and "must execute at least vN".
+        $minVersion = (int) (getenv('KIWI_EXECUTION_MIN_VERSION') ?: '0');
+        if ($minVersion < 0 || $minVersion > $serverMax) {
+            kiwiError('SERVICE_UNAVAILABLE', 'This deployment is misconfigured: KIWI_EXECUTION_MIN_VERSION must be within the generator maximum.', 500);
+
+            return;
+        }
         if ($executionKey !== null && $capability === ExecutionVersionPolicy::CAPABILITY_NONE) {
             if ($mandatory) {
-                http_response_code(403);
+                http_response_code(422);
                 header('Content-Type: application/json');
                 header('Cache-Control: no-store, private, max-age=0');
                 echo json_encode([
@@ -285,7 +307,26 @@ function kiwiChallenge(): void
             // Compatibility posture: serve the plain challenge.
             $challenge = $issuer->issue($scope, kiwiClientIp(), $requestBinding);
         } elseif ($executionKey !== null) {
-            $challenge = $issuer->issueWithExecutionField($scope, kiwiClientIp(), true, $requestBinding);
+            if ($effective < $minVersion) {
+                http_response_code(422);
+                header('Content-Type: application/json');
+                header('Cache-Control: no-store, private, max-age=0');
+                echo json_encode([
+                    'error' => [
+                        'code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED',
+                        'message' => sprintf('This deployment requires the execution version %d client; your effective tier is %d.', $minVersion, $effective),
+                    ],
+                ]), "\n";
+
+                return;
+            }
+            $challenge = $issuer->issueWithExecutionField(
+                $scope,
+                kiwiClientIp(),
+                true,
+                $requestBinding,
+                executionVersion: $effective,
+            );
         } else {
             $challenge = $issuer->issue($scope, kiwiClientIp(), $requestBinding);
         }

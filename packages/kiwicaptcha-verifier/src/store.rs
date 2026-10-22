@@ -75,6 +75,26 @@ pub struct StoredSuccess {
     pub mac: String,
 }
 
+/// The pre-consume snapshot: the admission gate and the capacity
+/// ceiling classify from THIS (the stored record), never from
+/// present-day configuration — the PHP verifier's runtime-state peek
+/// mirror. A cancelled record reports `NotFound` exactly like the PHP
+/// verifier's record-not-found answer for it.
+#[derive(Debug)]
+pub enum PeekOutcome {
+    /// The record exists and is pending: consumable and derivable.
+    Pending(Box<ChallengeRecord>),
+    /// The record is retained in the terminal consumed state; the
+    /// authoritative envelope still comes from `consume`.
+    Consumed,
+    /// No live record under the nonce (missing, cancelled, or expired
+    /// and swept by this call's prune).
+    NotFound,
+    /// The backend could not serve the snapshot; the record's state is
+    /// unknown and untouched.
+    Unavailable(String),
+}
+
 /// The atomic consume decision: the caller either owns the single
 /// derivation, or the record was already burned.
 #[derive(Debug)]
@@ -119,6 +139,15 @@ pub trait RecordStore: Send + Sync {
         now_unix: u64,
         operation_identity: Option<&str>,
     ) -> ConsumeOutcome;
+
+    /// The pre-consume snapshot: read-only classification of the
+    /// nonce's live state (expired records are pruned within the
+    /// call). The verify path peeks BEFORE admission so the Argon
+    /// gate meters the AUTHENTICATED stored record's algorithm and
+    /// memory weight — never the present-day scope rung — and so an
+    /// already-consumed record resolves its replay without ever
+    /// spending a scarce admission reservation.
+    fn peek(&self, nonce: &str, now_unix: u64) -> PeekOutcome;
 
     /// Persist the derivation outcome on the consumed record. Best
     /// effort: a lost commit only degrades a later replay to the
@@ -360,6 +389,18 @@ impl RecordStore for MemoryStore {
     ) {
         let _ = operation_identity;
         self.commit_inner(nonce, record, valid, mac);
+    }
+
+    fn peek(&self, nonce: &str, now_unix: u64) -> PeekOutcome {
+        let mut state = self.state.lock().expect("store lock");
+        state.prune_expired(now_unix);
+        if let Some(entry) = state.pending.get(nonce) {
+            return PeekOutcome::Pending(Box::new(entry.record.clone()));
+        }
+        if state.consumed.contains_key(nonce) {
+            return PeekOutcome::Consumed;
+        }
+        PeekOutcome::NotFound
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -652,6 +693,21 @@ impl RecordStore for FileStore {
         self.commit_inner(nonce, record, valid, mac);
     }
 
+    fn peek(&self, nonce: &str, now_unix: u64) -> PeekOutcome {
+        let mut state = self.state.lock().expect("store lock");
+        let dropped = state.prune_expired(now_unix);
+        for gone in &dropped {
+            self.remove_persisted(gone);
+        }
+        if let Some(entry) = state.pending.get(nonce) {
+            return PeekOutcome::Pending(Box::new(entry.record.clone()));
+        }
+        if state.consumed.contains_key(nonce) {
+            return PeekOutcome::Consumed;
+        }
+        PeekOutcome::NotFound
+    }
+
     fn counts(&self) -> (usize, usize) {
         let state = self.state.lock().expect("store lock");
         state.counts()
@@ -899,6 +955,19 @@ impl RecordStore for RedisStore {
         }
     }
 
+    fn peek(&self, nonce: &str, _now_unix: u64) -> PeekOutcome {
+        use kiwicaptcha::redis_verify::RuntimeState;
+        // One snapshot GET through the core's runtime-state seam: the
+        // consumed envelope is not needed here (the authoritative
+        // consume below supplies it), only the classification.
+        match self.inner.runtime_state(nonce) {
+            Ok(RuntimeState::Pending(record)) => PeekOutcome::Pending(record),
+            Ok(RuntimeState::Consumed(_)) => PeekOutcome::Consumed,
+            Ok(RuntimeState::Missing) | Ok(RuntimeState::Cancelled(_)) => PeekOutcome::NotFound,
+            Err(e) => PeekOutcome::Unavailable(format!("redis peek failed: {e}")),
+        }
+    }
+
     fn commit(&self, nonce: &str, _record: &ChallengeRecord, valid: bool) {
         let _ = self.inner.commit_result(nonce, valid, None);
     }
@@ -926,7 +995,9 @@ impl RecordStore for RedisStore {
         // commit that stored None while signing Some(...) would make
         // every replay fail closed as malformed.
         let binding = record.request_binding.as_deref();
-        let _ = self.inner.commit_result_with_mac(nonce, valid, binding, mac);
+        let _ = self
+            .inner
+            .commit_result_with_mac(nonce, valid, binding, mac);
     }
 
     fn counts(&self) -> (usize, usize) {
@@ -1173,10 +1244,8 @@ mod tests {
 
         check(&MemoryStore::new(), "memory");
 
-        let dir = std::env::temp_dir().join(format!(
-            "kiwi-file-store-material-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kiwi-file-store-material-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         check(&FileStore::open(&dir).expect("open"), "file");
         let _ = fs::remove_dir_all(&dir);
@@ -1199,9 +1268,7 @@ mod tests {
         store.commit(&nonce, &record, true);
         match store.consume(&nonce, now, None) {
             ConsumeOutcome::AlreadyConsumed {
-                succeeded,
-                stored,
-                ..
+                succeeded, stored, ..
             } => {
                 assert_eq!(succeeded, Some(true));
                 assert!(stored.is_none(), "a MAC-less verdict carries no material");
@@ -1218,10 +1285,8 @@ mod tests {
     /// already_consumed after a reopen.
     #[test]
     fn file_store_records_the_operation_identity_in_the_consumed_envelope() {
-        let dir = std::env::temp_dir().join(format!(
-            "kiwi-file-store-identity-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kiwi-file-store-identity-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let nonce;
         {
@@ -1231,10 +1296,9 @@ mod tests {
             store.put_pending(&r, RecordMeta::default()).unwrap();
             let now = now_epoch_micros() / 1_000_000;
             match store.consume(&nonce, now, Some("op-envelope-1")) {
-                ConsumeOutcome::Won { meta, .. } => assert_eq!(
-                    meta.operation_identity.as_deref(),
-                    Some("op-envelope-1")
-                ),
+                ConsumeOutcome::Won { meta, .. } => {
+                    assert_eq!(meta.operation_identity.as_deref(), Some("op-envelope-1"))
+                }
                 other => panic!("expected Won, got {other:?}"),
             }
         }
@@ -1274,9 +1338,14 @@ mod tests {
         // A fresh live record: its issue-time prune observes the stale
         // horizon (the stale expiry pulled it into the past) and reaps.
         let live = record("login");
-        store.put_pending(&live, RecordMeta::default()).expect("insert live");
+        store
+            .put_pending(&live, RecordMeta::default())
+            .expect("insert live");
         let (pending, _) = store.counts();
-        assert_eq!(pending, 1, "the expired record is swept, the live one stays");
+        assert_eq!(
+            pending, 1,
+            "the expired record is swept, the live one stays"
+        );
         assert!(
             matches!(
                 store.consume(&stale.nonce, now, None),
@@ -1351,7 +1420,9 @@ mod tests {
             prefill.push(record("login"));
         }
         for r in &prefill {
-            store.put_pending(r, RecordMeta::default()).expect("prefill");
+            store
+                .put_pending(r, RecordMeta::default())
+                .expect("prefill");
         }
         let mut ops = Vec::with_capacity(SWEEPS);
         for _ in 0..SWEEPS {
@@ -1617,10 +1688,7 @@ mod redis_store_tests {
                     "the stored result binding must equal the MAC's binding input"
                 );
                 assert_eq!(stored.mac.as_deref(), Some(mac.as_str()));
-                assert_eq!(
-                    consumed.operation_identity.as_deref(),
-                    Some("op-node-2")
-                );
+                assert_eq!(consumed.operation_identity.as_deref(), Some("op-node-2"));
             }
             other => panic!("expected the consumed record, got {other:?}"),
         }

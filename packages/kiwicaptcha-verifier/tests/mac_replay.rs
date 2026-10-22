@@ -28,6 +28,10 @@ enum Tamper {
     Forged,
     /// Drop the tag entirely (the legacy unauthenticated shape).
     Dropped,
+    /// Corrupt the companion metadata's remoteip on every consume
+    /// answer — the D3.10 storage-plane writer mutating the
+    /// unauthenticated sidecar companion after a legitimate success.
+    MetaRemoteip,
 }
 
 /// A memory store whose `commit_with_mac` is dishonest — the stand-in
@@ -52,15 +56,38 @@ impl RecordStore for TamperStore {
         now_unix: u64,
         operation_identity: Option<&str>,
     ) -> ConsumeOutcome {
-        self.inner.consume(nonce, now_unix, operation_identity)
+        let outcome = self.inner.consume(nonce, now_unix, operation_identity);
+        if matches!(self.mode, Tamper::MetaRemoteip) {
+            // The companion is NOT authenticated: rewrite the remoteip
+            // the sidecar stored alongside the record.
+            return match outcome {
+                ConsumeOutcome::Won { record, mut meta } => {
+                    meta.remoteip = Some("203.0.113.9".to_string());
+                    ConsumeOutcome::Won { record, meta }
+                }
+                ConsumeOutcome::AlreadyConsumed {
+                    mut meta,
+                    succeeded,
+                    stored,
+                } => {
+                    meta.remoteip = Some("203.0.113.9".to_string());
+                    ConsumeOutcome::AlreadyConsumed {
+                        meta,
+                        succeeded,
+                        stored,
+                    }
+                }
+                other => other,
+            };
+        }
+        outcome
     }
 
-    fn commit(
-        &self,
-        nonce: &str,
-        record: &kiwicaptcha::challenge::ChallengeRecord,
-        valid: bool,
-    ) {
+    fn peek(&self, nonce: &str, now_unix: u64) -> kiwicaptcha_verifier::store::PeekOutcome {
+        self.inner.peek(nonce, now_unix)
+    }
+
+    fn commit(&self, nonce: &str, record: &kiwicaptcha::challenge::ChallengeRecord, valid: bool) {
         self.inner.commit(nonce, record, valid);
     }
 
@@ -70,7 +97,7 @@ impl RecordStore for TamperStore {
         record: &kiwicaptcha::challenge::ChallengeRecord,
         valid: bool,
         operation_identity: Option<&str>,
-        _mac: Option<&str>,
+        mac: Option<&str>,
     ) {
         match self.mode {
             Tamper::Dropped => self.inner.commit(nonce, record, valid),
@@ -78,6 +105,12 @@ impl RecordStore for TamperStore {
                 let forged = "ab".repeat(32);
                 self.inner
                     .commit_with_mac(nonce, record, valid, operation_identity, Some(&forged));
+            }
+            // This mode tampers only the companion metadata: the MAC
+            // seam stays honest.
+            Tamper::MetaRemoteip => {
+                self.inner
+                    .commit_with_mac(nonce, record, valid, operation_identity, mac)
             }
         }
     }
@@ -309,6 +342,46 @@ fn replay_refuses_a_scope_mismatch_against_the_stored_record() {
     assert!(
         refused.contains(r#""kiwi-code":"already_consumed"#),
         "a cross-scope retry must never replay the stored success: {refused}"
+    );
+    assert!(!refused.contains(r#""success":true"#), "{refused}");
+}
+
+/// The replay-authorization boundary: companion metadata is NOT
+/// authenticated (the result MAC covers challenge/verdict/binding/
+/// identity — not smeta), so it must never authorize or deny a replay.
+/// A storage writer corrupting the companion's remoteip cannot break a
+/// legitimate retry (the record's SIGNED binding tag answers the IP
+/// question), and a retry from a DIFFERENT client IP is still refused
+/// because the record itself says so.
+#[test]
+fn replay_authorization_ignores_companion_metadata_and_binds_the_record() {
+    let addr = spawn(Some(Tamper::MetaRemoteip));
+    let token = issue_and_solve(addr);
+    let (status, ok) = post_json(addr, "/verify", &verify_body(&token, "op-meta-1"));
+    assert_eq!(status, 200, "{ok}");
+    assert!(ok.contains(r#""success":true"#), "{ok}");
+
+    // The companion now lies about the client IP; the retry from the
+    // REAL client still replays: authorization reads the record's
+    // signed binding tag, never smeta.remoteip.
+    let (status, retry) = post_json(addr, "/verify", &verify_body(&token, "op-meta-1"));
+    assert_eq!(status, 200, "{retry}");
+    assert!(
+        retry.contains(r#""kiwi-code":"ok"#) && retry.contains(r#""success":true"#),
+        "a corrupted companion must not deny the legitimate replay: {retry}"
+    );
+
+    // And a retry from a DIFFERENT client IP is refused even though
+    // the (tampered) companion could have been made to match it: the
+    // record's binding tag is the authority.
+    let cross = format!(
+        r#"{{"token":"{token}","scope":"login","remoteip":"203.0.113.42","operation_identity":"op-meta-1"}}"#
+    );
+    let (status, refused) = post_json(addr, "/verify", &cross);
+    assert_eq!(status, 200, "{refused}");
+    assert!(
+        refused.contains(r#""kiwi-code":"already_consumed"#),
+        "a cross-IP retry is refused by the record's signed binding: {refused}"
     );
     assert!(!refused.contains(r#""success":true"#), "{refused}");
 }

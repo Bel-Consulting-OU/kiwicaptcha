@@ -35,8 +35,8 @@ use kiwicaptcha_risk::store::{Observed, RiskStateStore, RiskStoreError};
 use kiwicaptcha_verifier::state::derivation_gate;
 use kiwicaptcha_verifier::{
     compose_rung, open_store, parse_rung, parse_scopes, scope_id, serve_http_with, validate_secret,
-    ConsumeOutcome, MemoryStore, RecordMeta, RecordStore, RiskPlane, ServerOptions, SidecarConfig,
-    SidecarState, StoreConfig, EXAMPLE_SECRET, MIN_SECRET_BYTES,
+    ConsumeOutcome, MemoryStore, PeekOutcome, RecordMeta, RecordStore, RiskPlane, ServerOptions,
+    SidecarConfig, SidecarState, StoreConfig, EXAMPLE_SECRET, MIN_SECRET_BYTES,
 };
 
 const SECRET: &str = "a-locally-generated-secret-of-48-bytes!!";
@@ -446,6 +446,10 @@ impl RecordStore for InstrumentedStore {
             }
             self.inner.consume(nonce, now_unix, operation_identity)
         })
+    }
+
+    fn peek(&self, nonce: &str, now_unix: u64) -> PeekOutcome {
+        self.record("peek", || self.inner.peek(nonce, now_unix))
     }
 
     fn commit(&self, nonce: &str, record: &ChallengeRecord, valid: bool) {

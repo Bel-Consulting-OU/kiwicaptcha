@@ -207,7 +207,7 @@ test.describe('KiwiCaptcha browser solver', () => {
     // Interactive-Client Lifecycle v1: the delivery floor. The fixture
     // serves a solvable sha256 challenge with a 1200 ms floor; the
     // widget must not reach data-state done before the floor elapses
-    // from RECEIPT of the challenge document.
+    // from receipt of the challenge document.
     await page.route('**/challenge', async (route) => {
       await route.fulfill({
         status: 200,

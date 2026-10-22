@@ -6,7 +6,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kiwicaptcha/kiwicaptcha.dart';
-import 'package:kiwicaptcha/src/solver.dart';
 import 'package:kiwicaptcha/src/widget.dart' as widget;
 
 void main() {
@@ -207,34 +206,38 @@ void main() {
       // running — the native work is itself batched to the same
       // ceiling, and the Dart probe runs between batches.
       const batch = kiwiShaCancellationBatch;
-      var candidates = 0;
+      // The probe runs at the contract cadence — once at entry
+      // (candidate 0), then once per cancellation batch, so the probe
+      // checkpoints are candidates 0, 2048, 4096, ... Fire at the
+      // candidate-`batch` checkpoint (the third probe call: entry,
+      // pre-batch, next pre-batch) — well before this challenge's
+      // deterministic solution (counter 978941 ≈ batch 478).
+      var probes = 0;
       var fired = false;
       expect(
         () => solveKiwiChallenge(
           // A high target so the search cannot finish before the probe
-          // fires; the Dart path is cancelled mid-search.
+          // fires; the solve is cancelled mid-search.
           shaChallenge(targetBits: 20),
           isCancelled: () {
-            if (fired) return true;
-            candidates++;
-            if (candidates >= batch) {
+            probes++;
+            if (!fired && probes >= 3) {
               fired = true;
-              return true;
             }
-            return false;
+            return fired;
           },
         ),
         throwsA(predicate((e) => e is KiwiSolveError && e.refusal == KiwiRefusal.cancelled)),
         reason: 'a probe that fires at candidate $batch must cancel the solve',
       );
-      // The overshoot bound: the loop checks the probe at
-      // counter % batch == 0, so it cannot run more than one full batch
-      // past the fire point. We assert candidates stayed inside the
-      // contract: at most 2 * batch evaluations after the probe was
-      // armed (one in-loop overshoot batch + the raising batch).
+      // The overshoot bound: the fire (probe call #3) raises inside the
+      // same checkpoint — no batch may start after it. Counting
+      // checkpoint calls: entry + one per batch + the raising call,
+      // plus at most one re-check — i.e. stale work stays within one
+      // batch (2 * batch candidates) of the fire point.
       expect(
-        candidates,
-        lessThanOrEqualTo(2 * batch),
+        probes,
+        lessThanOrEqualTo(4),
         reason: 'stale work must stay within the cancellation batch ceiling',
       );
     });
@@ -301,7 +304,7 @@ void main() {
     });
 
     test('kiwiDeliveryDecision matches every shared vector', () {
-      final file = File('../../../protocol/interactive-client-v1/lifecycle-vectors.json');
+      final file = File('../../protocol/interactive-client-v1/lifecycle-vectors.json');
       final vectors =
           json.decode(file.readAsStringSync()) as List<dynamic>;
       expect(vectors, isNotEmpty, reason: 'the shared vectors must be present');

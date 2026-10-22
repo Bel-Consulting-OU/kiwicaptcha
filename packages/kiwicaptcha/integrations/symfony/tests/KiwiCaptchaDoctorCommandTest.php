@@ -95,12 +95,12 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
 
         // The gate on under standard privacy (the only legal shape:
         // strict forces it off, collection-off is refused at compile):
-        // a WARN that names the consequence — every mobile/native SDK
+        // a warning row that names the consequence — every mobile/native SDK
         // solve carries {} and is rejected — still exit 0, because it
         // is a named operator decision, not a broken deployment.
         $tester = $this->doctor($this->containerFor(new DoctorTelemetryEnforcementKernel('test', true)));
         $tester->execute([]);
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'a WARN row never fails the doctor exit');
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'a warning row never fails the doctor exit');
         $display = $tester->getDisplay();
         self::assertStringContainsString('[WARN] Telemetry enforcement', $display, $display);
         self::assertStringContainsString('mobile/native SDK', $display, $display);

@@ -10,11 +10,11 @@ use KiwiCaptcha\Storage\FilesystemStorage;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The FilesystemStorage sweep horizon, probed fresh: the per-issuance
- * full scan is gated on the earliest retention, the gate never hides an
- * expired record from a read, and a soon-expiring insert always
- * reopens the gate at its own expiry — the three obligations the
- * horizon must keep for the O(n²)-to-O(1) issuance path to be safe.
+ * The FilesystemStorage sweep horizon, probed fresh. The per-issuance
+ * full scan is gated on the earliest retention. The gate never hides
+ * an expired record from a read, and a soon-expiring insert reopens
+ * the gate at its own expiry. Those are the three obligations the
+ * horizon keeps for the O(n²)-to-O(1) issuance path to be safe.
  */
 final class FilesystemStorageSweepHorizonTest extends TestCase
 {
@@ -79,7 +79,7 @@ final class FilesystemStorageSweepHorizonTest extends TestCase
             },
         );
 
-        // A record retained until CLOCK+160 (ttl 100 + margin 60).
+        // A record retained until the constant plus 160 (ttl 100 + margin 60).
         $store->store($this->record(1, self::CLOCK + 100));
         $path = (new \ReflectionMethod(FilesystemStorage::class, 'pathsFor'))
             ->invoke($store, $this->nonce(1))['record'];
@@ -90,7 +90,7 @@ final class FilesystemStorageSweepHorizonTest extends TestCase
         $horizon = new \ReflectionProperty(FilesystemStorage::class, 'nextSweepAt');
         self::assertGreaterThan($clock, $horizon->getValue($store), 'the gate is closed');
 
-        // The clock passes the retention: the NEXT issuance observes
+        // The clock passes the retention: the next issuance observes
         // the expired horizon and reaps the file in the same locked
         // transition as before the gate existed.
         $clock = self::CLOCK + 200;
@@ -113,7 +113,7 @@ final class FilesystemStorageSweepHorizonTest extends TestCase
         );
         $store->store($this->record(1, self::CLOCK + 100));
 
-        // The retention passes, and the gate is FORCED shut: no sweep
+        // The retention passes, and the gate is forced shut: no sweep
         // may run, yet the read must already answer "absent" — the
         // sweep is reclamation, never the expiry authority.
         $clock = self::CLOCK + 200;
@@ -142,12 +142,12 @@ final class FilesystemStorageSweepHorizonTest extends TestCase
             },
         );
 
-        // A long-lived record fixes the horizon far out.
+        // A long-lived record pins the horizon far out.
         $store->store($this->record(1, self::CLOCK + 250));
         $horizon = new \ReflectionProperty(FilesystemStorage::class, 'nextSweepAt');
         self::assertSame(self::CLOCK + 310, $horizon->getValue($store), 'retention = expiry + margin');
 
-        // A short-lived insert must LOWER the horizon to its own
+        // A short-lived insert must lower the horizon to its own
         // retention, so it — not the long-lived record — reaps first.
         $store->store($this->record(2, self::CLOCK + 50));
         self::assertSame(self::CLOCK + 110, $horizon->getValue($store), 'the insert lowers the horizon');

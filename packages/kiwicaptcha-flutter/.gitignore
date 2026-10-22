@@ -7,3 +7,6 @@ build/
 # cover a standalone checkout too. Never commit build artifacts.
 native/target/
 android/src/main/jniLibs/
+
+pubspec.lock
+/libkiwicaptcha_solver.dylib
