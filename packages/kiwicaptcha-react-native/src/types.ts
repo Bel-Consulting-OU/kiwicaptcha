@@ -62,7 +62,8 @@ export type KiwiSolveRefusal =
   | "difficulty-beyond-cap"
   | "unsupported-params"
   | "execution-unsupported"
-  | "solver-unavailable";
+  | "solver-unavailable"
+  | "expired";
 
 /** The error this package rejects with. `refusal` is machine-readable. */
 export class KiwiSolveError extends Error {

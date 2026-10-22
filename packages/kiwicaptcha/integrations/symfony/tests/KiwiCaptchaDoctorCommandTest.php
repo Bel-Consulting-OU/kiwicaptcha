@@ -27,6 +27,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHaSafeTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitOperatorManagedKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorSentinelRedisTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorTelemetryEnforcementKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorV3WriterTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\TestKernel;
 use PHPUnit\Framework\TestCase;
@@ -78,6 +79,32 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $kernel->boot();
         $command = $kernel->getContainer()->get('test.service_container')->get(KiwiCaptchaDoctorCommand::class);
         self::assertSame('kiwicaptcha:doctor', $command->getName());
+    }
+
+    public function testTelemetryEnforcementNamesTheNativeClientCoverageDecision(): void
+    {
+        // The default posture (gate off): the row exists and passes —
+        // every client shape can verify.
+        $default = $this->doctor($this->containerFor(new TestKernel('test', true)));
+        $default->execute([]);
+        self::assertStringContainsString(
+            '[PASS] Telemetry enforcement',
+            $default->getDisplay(),
+            'the off gate passes with every client shape able to verify'
+        );
+
+        // The gate on under standard privacy (the only legal shape:
+        // strict forces it off, collection-off is refused at compile):
+        // a WARN that names the consequence — every mobile/native SDK
+        // solve carries {} and is rejected — still exit 0, because it
+        // is a named operator decision, not a broken deployment.
+        $tester = $this->doctor($this->containerFor(new DoctorTelemetryEnforcementKernel('test', true)));
+        $tester->execute([]);
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'a WARN row never fails the doctor exit');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Telemetry enforcement', $display, $display);
+        self::assertStringContainsString('mobile/native SDK', $display, $display);
+        self::assertStringContainsString('empty telemetry is rejected', $display, $display);
     }
 
     public function testDoctorPassesOrWarnsOnTheDefaultTestKernel(): void

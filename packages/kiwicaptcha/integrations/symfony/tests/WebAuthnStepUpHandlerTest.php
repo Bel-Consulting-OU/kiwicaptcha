@@ -363,23 +363,31 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $handler = $this->handler();
         $this->enroll($handler, 'cred-A', 0);
         $redis = $this->fakeRedis();
+        // Steady state: the index backfill already ran (here: pinned
+        // explicitly so the measured round is the one every ceremony
+        // pays after the one-time cursor walk).
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, '1');
         $redis->batches = 0;
         $redis->batchedKeys = [];
+        $redis->commands = [];
 
         $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
         $document = $this->documentOf($begin);
 
-        // The lookup reads the discovered records in one pipelined
-        // batch: one read per discovered key, in discovery order. The
-        // ceremony therefore pays two store round trips whatever the
-        // deployment's enrolled credential count.
+        // The lookup reads the principal's index members and fetches
+        // them in one pipelined batch. The ceremony therefore pays two
+        // store round trips whatever the DEPLOYMENT's enrolled
+        // credential count — and never a keyspace-wide KEYS walk.
         self::assertSame(1, $redis->batches, 'the allow-list lookup is one pipelined batch');
         self::assertSame(
             [$this->credentialKey('cred-A')],
             $redis->batchedKeys,
-            'the batch carries one read per discovered credential key',
+            'the batch carries one read per indexed credential key of this principal',
         );
         self::assertSame(0, $redis->unservedCommands, 'every lookup read rides the batch, never a silently ignored call');
+        self::assertContains('SMEMBERS', $redis->commands, 'discovery is the principal index');
+        self::assertNotContains('KEYS', $redis->commands, 'HOLE: the registry fell back to a keyspace KEYS walk');
+        self::assertNotContains('SCAN', $redis->commands, 'the steady state never re-runs the backfill walk');
         self::assertSame(
             [WebAuthnTestVectors::base64Url('cred-A')],
             array_column($document['public_key']['allowCredentials'], 'id'),
@@ -401,21 +409,98 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $redis->values[$this->credentialKey('cred-EMPTY')] = '';
         $redis->values[$this->credentialKey('cred-GONE')] = 'value';
         $redis->expired[$this->credentialKey('cred-GONE')] = true;
-        $redis->batches = 0;
 
+        // First lookup: no marker yet, so the one-time cursor walk
+        // indexes the legacy values. Undecodable/gone bytes are skipped
+        // AT THE WALK (they never ride an index), and cred-B belongs to
+        // another principal: only A and C land in this principal's set.
+        $warmed = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertContains('SCAN', $redis->commands, 'the un-indexed deployment backfills once');
+        self::assertSame(
+            ['cred-A', 'cred-C'],
+            array_map(static fn (\Webauthn\CredentialRecord $record): string => $record->publicKeyCredentialId, $warmed),
+            'the warm-up walk already answers the readable principal records'
+        );
+
+        // A record corrupted AFTER it was indexed must still be skipped
+        // at lookup time — the batch-time filter the original contract
+        // pinned — while its index member keeps riding the batch.
+        $registry->saveCredentialSource($this->record('cred-D', self::PRINCIPAL, 4));
+        $redis->values[$this->credentialKey('cred-D')] = '{not-json';
+
+        // Steady state: the same lookup now costs one index read plus
+        // one batch, and the batch holds only THIS principal's members.
+        $redis->batches = 0;
+        $redis->batchedKeys = [];
+        $redis->commands = [];
         $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
 
-        self::assertSame(1, $redis->batches, 'the lookup is one pipelined batch');
+        self::assertSame(1, $redis->batches, 'the steady lookup is one pipelined batch');
         self::assertSame(
-            array_keys($redis->values),
+            [
+                $this->credentialKey('cred-A'),
+                $this->credentialKey('cred-C'),
+                $this->credentialKey('cred-D'),
+            ],
             $redis->batchedKeys,
-            'the batch carries one read per discovered record, in discovery order',
+            'the batch carries this principal\'s indexed records only, in index order'
         );
+        self::assertNotContains('KEYS', $redis->commands, 'HOLE: the registry fell back to a keyspace KEYS walk');
+        self::assertNotContains('SCAN', $redis->commands, 'the steady state never re-runs the backfill walk');
         self::assertSame(
             ['cred-A', 'cred-C'],
             array_map(static fn (\Webauthn\CredentialRecord $record): string => $record->publicKeyCredentialId, $found),
-            'the principal records come back in the batch order with the unreadable ones skipped',
+            'the principal records come back in the batch order with the corrupted one skipped',
         );
+    }
+
+    public function testALegacyUnindexedRecordIsIndexedOnceAndFoundThereafter(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        // The upgrade starting state: the record bytes exist (written
+        // by the current save path) but the index membership and the
+        // marker do not — exactly what a pre-index deployment carries.
+        $registry->saveCredentialSource($this->record('cred-LEGACY', self::PRINCIPAL, 7));
+        $indexKey = 'tests:webauthn:principal:'.hash('sha256', self::PRINCIPAL);
+        unset($redis->sets[$indexKey]);
+
+        $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertCount(1, $found, 'the cursor walk finds the pre-index record');
+        self::assertSame('cred-LEGACY', $found[0]->publicKeyCredentialId);
+        self::assertContains('SCAN', $redis->commands, 'the first lookup walks once');
+
+        // The marker now pins the steady state: the second lookup goes
+        // straight to the index, never another walk.
+        self::assertNotNull($redis->get('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER));
+        $redis->commands = [];
+        $again = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertCount(1, $again, 'the indexed record still answers');
+        self::assertNotContains('SCAN', $redis->commands, 'the steady state adds no further scan');
+        self::assertContains('SMEMBERS', $redis->commands, 'the steady lookup reads the index');
+    }
+
+    public function testSaveCredentialSourceMaintainsThePrincipalIndex(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        // Marker present from the start: any discovery must come from
+        // the index the save maintains — there is no backfill to lean on.
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, '1');
+        $registry->saveCredentialSource($this->record('cred-IDX', self::PRINCIPAL, 1));
+        $registry->saveCredentialSource($this->record('cred-IDX-OTHER', str_repeat('7', 32), 1));
+
+        $indexKey = 'tests:webauthn:principal:'.hash('sha256', self::PRINCIPAL);
+        self::assertSame(
+            [$this->credentialKey('cred-IDX')],
+            $redis->sets[$indexKey] ?? [],
+            'the save lands the record key in exactly its own principal index'
+        );
+        $redis->commands = [];
+        $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertCount(1, $found, 'the index answers the allow-list');
+        self::assertNotContains('SCAN', $redis->commands, 'no backfill runs when the marker is present');
+        self::assertNotContains('KEYS', $redis->commands, 'never a keyspace walk');
     }
 
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void
@@ -729,6 +814,12 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
     /** @var array<string, string> */
     public array $values = [];
 
+    /** Set members in insertion order: index key => member keys. */
+    public array $sets = [];
+
+    /** Every command the registry issued (upper-cased), for shape asserts. */
+    public array $commands = [];
+
     /** Keys the store answers null for: the record gone between the
      * discovery call and the batched read.
      *
@@ -767,9 +858,58 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
 
     public function keys($pattern)
     {
+        $this->commands[] = 'KEYS';
         $regex = '/^'.strtr(preg_quote((string) $pattern, '/'), ['\\*' => '.*', '\\?' => '.']).'$/';
 
         return array_values(array_filter(array_keys($this->values), static fn ($key) => preg_match($regex, (string) $key) === 1));
+    }
+
+    /** sadd: idempotent membership in insertion order. */
+    public function sadd($key, ...$members): int
+    {
+        $this->commands[] = 'SADD';
+        $key = (string) $key;
+        $this->sets[$key] ??= [];
+        $added = 0;
+        foreach ($members as $member) {
+            $member = (string) $member;
+            if (!\in_array($member, $this->sets[$key], true)) {
+                $this->sets[$key][] = $member;
+                ++$added;
+            }
+        }
+
+        return $added;
+    }
+
+    /** smembers: the members in insertion order, [] for a missing set. */
+    public function smembers($key): array
+    {
+        $this->commands[] = 'SMEMBERS';
+        return $this->sets[(string) $key] ?? [];
+    }
+
+    /** expire: served (the index TTL refresh), presence-aware. */
+    public function expire($key, $ttl): int
+    {
+        $this->commands[] = 'EXPIRE';
+        return isset($this->values[(string) $key]) || isset($this->sets[(string) $key]) ? 1 : 0;
+    }
+
+    /**
+     * SCAN in one shot (cursor '0' on the first reply): every value key
+     * matching the pattern, in insertion order — the steady-state fake
+     * never simulates a multi-batch cursor, and the registry's loop
+     * accepts a terminal first reply exactly like a small real scan.
+     */
+    public function scan($cursor, $options = []): array
+    {
+        $this->commands[] = 'SCAN';
+        $pattern = (string) ($options['MATCH'] ?? '*');
+        $regex = '/^'.strtr(preg_quote($pattern, '/'), ['\\*' => '.*', '\\?' => '.']).'$/';
+        $matched = array_values(array_filter(array_keys($this->values), static fn ($key) => preg_match($regex, (string) $key) === 1));
+
+        return ['0', $matched];
     }
 
     /**
@@ -843,10 +983,16 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
 
     public function __call($method, $arguments): mixed
     {
+        $this->commands[] = strtoupper((string) $method);
+
         return match (strtoupper((string) $method)) {
             'GET' => $this->get((string) ($arguments[0] ?? '')),
             'SETEX' => $this->setex((string) ($arguments[0] ?? ''), (int) ($arguments[1] ?? 0), (string) ($arguments[2] ?? '')),
             'KEYS' => $this->keys((string) ($arguments[0] ?? '')),
+            'SADD' => $this->sadd((string) ($arguments[0] ?? ''), ...array_slice($arguments, 1)),
+            'SMEMBERS' => $this->smembers((string) ($arguments[0] ?? '')),
+            'EXPIRE' => $this->expire((string) ($arguments[0] ?? ''), (int) ($arguments[1] ?? 0)),
+            'SCAN' => $this->scan($arguments[0] ?? '0', \is_array($arguments[1] ?? null) ? $arguments[1] : []),
             default => $this->unserved($method),
         };
     }

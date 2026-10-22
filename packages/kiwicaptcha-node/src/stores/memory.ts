@@ -38,6 +38,12 @@ export class MemoryStore implements StoreAdapter {
   private readonly rows = new Map<string, MemoryRow>();
   private readonly ttlMarginSecs: number;
   private readonly now: () => number;
+  /**
+   * The earliest retainedUntil among live rows (Infinity when empty).
+   * The per-store sweep only runs once now has reached it; reads keep
+   * their per-row check so an expired row is still absent on access.
+   */
+  private nextExpiry = Number.POSITIVE_INFINITY;
 
   constructor(options: MemoryStoreOptions = {}) {
     this.ttlMarginSecs = options.ttlMarginSecs ?? DEFAULT_TTL_MARGIN_SECS;
@@ -60,11 +66,15 @@ export class MemoryStore implements StoreAdapter {
   async store(record: ChallengeRecord): Promise<void> {
     this.sweep();
     const envelope = { ...challengeRecordToJson(record), state: 'pending', consumed_result: null, operation_identity: null };
+    const retainedUntil = record.expiresAt + this.ttlMarginSecs;
     this.rows.set(record.nonce, {
       envelopeJson: JSON.stringify(envelope),
       state: 'pending',
-      retainedUntil: record.expiresAt + this.ttlMarginSecs,
+      retainedUntil,
     });
+    if (retainedUntil < this.nextExpiry) {
+      this.nextExpiry = retainedUntil;
+    }
   }
 
   async find(nonce: string): Promise<ChallengeRecord | null> {
@@ -200,12 +210,26 @@ export class MemoryStore implements StoreAdapter {
     return { kind: 'corrupt' };
   }
 
+  /**
+   * Reclaims expired rows only once the earliest known expiry has
+   * been reached; a full scan past that horizon is earned.
+   */
   private sweep(): void {
     const now = this.now();
+    if (now < this.nextExpiry) {
+      return;
+    }
     for (const [nonce, row] of this.rows) {
       if (now >= row.retainedUntil) {
         this.rows.delete(nonce);
       }
     }
+    let horizon = Number.POSITIVE_INFINITY;
+    for (const row of this.rows.values()) {
+      if (row.retainedUntil < horizon) {
+        horizon = row.retainedUntil;
+      }
+    }
+    this.nextExpiry = horizon;
   }
 }

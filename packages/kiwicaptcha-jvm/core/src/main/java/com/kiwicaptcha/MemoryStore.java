@@ -1,10 +1,9 @@
 package com.kiwicaptcha;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 
 /**
  * In-memory storage: single process, non-persistent, a port of the
@@ -16,7 +15,10 @@ import java.util.Map;
  * absent from every read and transition and is evicted lazily on
  * first observation. storeRecord prunes expired entries and evicts
  * the earliest-expiring entries at the hard cap, so a long-lived
- * process never accumulates unbounded state.
+ * process never accumulates unbounded state. The per-store sweep is
+ * gated on the earliest known expiry so a store call before that
+ * horizon is a cheap comparison; cap eviction walks an expiry-ordered
+ * priority queue instead of re-sorting every key.
  */
 public final class MemoryStore implements Store.StoreAdapter, Store.ConsumedStateReader,
         Store.RuntimeStateReader, Store.AtomicDeleteIfPending, Store.OperationIdentityAware,
@@ -37,9 +39,29 @@ public final class MemoryStore implements Store.StoreAdapter, Store.ConsumedStat
         }
     }
 
+    /** One priority-queue key: the record's expiry and its nonce. */
+    private static final class ExpiryItem {
+        final long expires;
+        final String nonce;
+
+        ExpiryItem(long expires, String nonce) {
+            this.expires = expires;
+            this.nonce = nonce;
+        }
+    }
+
+    private static final Comparator<ExpiryItem> EXPIRY_ORDER =
+            Comparator.comparingLong((ExpiryItem item) -> item.expires).thenComparing(item -> item.nonce);
+
     private final LongSupplierClock clock;
     private final int maxEntries;
     private final Map<String, Entry> records = new HashMap<>();
+    /**
+     * The earliest expires_at among live entries; Long.MAX_VALUE when
+     * empty. The per-store sweep only runs once now has reached it.
+     */
+    private long nextExpiry = Long.MAX_VALUE;
+    private final PriorityQueue<ExpiryItem> byExpiry = new PriorityQueue<>(EXPIRY_ORDER);
 
     /** A long supplier in unix seconds, the injectable test clock. */
     public interface LongSupplierClock {
@@ -73,9 +95,39 @@ public final class MemoryStore implements Store.StoreAdapter, Store.ConsumedStat
         return entry;
     }
 
+    /** Reclaims expired rows only once the earliest known expiry has been reached. */
     private void pruneExpired() {
         long now = nowSecs();
+        if (now < nextExpiry) {
+            return;
+        }
         records.values().removeIf(e -> now >= e.record.expiresAt);
+        rebuildHorizon();
+    }
+
+    /** Rescans the live rows: the next sweep gate and the queue refresh from scratch. */
+    private void rebuildHorizon() {
+        nextExpiry = Long.MAX_VALUE;
+        byExpiry.clear();
+        for (Map.Entry<String, Entry> mapEntry : records.entrySet()) {
+            long expires = mapEntry.getValue().record.expiresAt;
+            if (expires < nextExpiry) {
+                nextExpiry = expires;
+            }
+            byExpiry.offer(new ExpiryItem(expires, mapEntry.getKey()));
+        }
+    }
+
+    /** Drops the earliest-expiring live entries until one slot is free for the incoming record. */
+    private void evictToCap() {
+        while (records.size() >= maxEntries && !byExpiry.isEmpty()) {
+            ExpiryItem item = byExpiry.poll();
+            Entry entry = records.get(item.nonce);
+            if (entry == null || entry.record.expiresAt != item.expires) {
+                continue; // stale queue item
+            }
+            records.remove(item.nonce);
+        }
     }
 
     private Store.ConsumedRecord consumedEnvelope(Entry entry) {
@@ -88,16 +140,20 @@ public final class MemoryStore implements Store.StoreAdapter, Store.ConsumedStat
         synchronized (this) {
             pruneExpired();
             if (!records.containsKey(record.nonce)) {
-                int needed = records.size() + 1 - maxEntries;
-                if (needed > 0) {
-                    List<String> nonces = new ArrayList<>(records.keySet());
-                    nonces.sort(Comparator.comparingLong(n -> records.get(n).record.expiresAt));
-                    for (int i = 0; i < needed; i++) {
-                        records.remove(nonces.get(i));
-                    }
+                if (records.size() + 1 > maxEntries) {
+                    evictToCap();
                 }
             }
             records.put(record.nonce, new Entry(record));
+            byExpiry.offer(new ExpiryItem(record.expiresAt, record.nonce));
+            if (record.expiresAt < nextExpiry) {
+                nextExpiry = record.expiresAt;
+            }
+            // Compaction: deletes leave stale queue items; rescan once
+            // they dominate, so amortized cost stays O(1) per store.
+            if (byExpiry.size() > 4 * records.size() + 64) {
+                rebuildHorizon();
+            }
         }
     }
 

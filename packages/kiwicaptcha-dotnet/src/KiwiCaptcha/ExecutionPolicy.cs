@@ -47,18 +47,21 @@ public sealed class ExecutionPolicy
     /// failure maps the sidecar's kiwi-code (the shared wire vocabulary)
     /// through verbatim, with the transport failures fail-closed
     /// (storage_unavailable keeps the retry disposition with the record
-    /// intact).
+    /// intact). The caller's verification posture rides the body —
+    /// expected binding, telemetry enforcement and the idempotency
+    /// identity — exactly like the Go, Node and Python delegations, so
+    /// the sidecar applies the same gates at its own verify seam.
     /// </summary>
-    public (bool Ok, string Code) Delegate(string rawToken, string scope, string clientIp)
+    public (bool Ok, string Code) Delegate(
+        string rawToken,
+        string scope,
+        string clientIp,
+        string? expectedRequestBinding = null,
+        bool enforceTelemetry = false,
+        string operationIdentity = "")
     {
-        var body = new StringBuilder();
-        body.Append("{\"token\":\"").Append(JsonEscape(rawToken));
-        body.Append("\",\"scope\":\"").Append(JsonEscape(scope)).Append("\"");
-        if (!string.IsNullOrEmpty(clientIp))
-        {
-            body.Append(",\"remoteip\":\"").Append(JsonEscape(clientIp)).Append("\"");
-        }
-        body.Append("}");
+        var body = BuildVerifyBody(rawToken, scope, clientIp, expectedRequestBinding,
+            enforceTelemetry, operationIdentity);
 
         using var client = new HttpClient(new SocketsHttpHandler
         {
@@ -67,7 +70,7 @@ public sealed class ExecutionPolicy
         client.Timeout = TimeSpan.FromMilliseconds(TimeoutMs);
         using var request = new HttpRequestMessage(HttpMethod.Post,
             SidecarUrl.Trim().TrimEnd('/') + "/verify");
-        request.Content = new StringContent(body.ToString(), Encoding.UTF8, "application/json");
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
         if (!string.IsNullOrEmpty(BearerToken))
         {
             request.Headers.Add("authorization", "Bearer " + BearerToken);
@@ -110,6 +113,48 @@ public sealed class ExecutionPolicy
                 ? (false, code.Groups[1].Value)
                 : (false, "execution_mismatch");
         }
+    }
+
+    /// <summary>
+    /// The delegation body, shaped exactly like the Go and Node
+    /// clients' bodies: token/scope always, remoteip when present, the
+    /// expected binding whenever the caller enforces one (the empty
+    /// string asserts the record must be unbound), the telemetry flag
+    /// when asserted (the sidecar enforces it at its own seam), and the
+    /// idempotency identity when present. Internal so the body-shape
+    /// probe pins every field the sidecar parses.
+    /// </summary>
+    internal static string BuildVerifyBody(
+        string rawToken,
+        string scope,
+        string clientIp,
+        string? expectedRequestBinding,
+        bool enforceTelemetry,
+        string operationIdentity)
+    {
+        var body = new StringBuilder();
+        body.Append("{\"token\":\"").Append(JsonEscape(rawToken));
+        body.Append("\",\"scope\":\"").Append(JsonEscape(scope)).Append('"');
+        if (!string.IsNullOrEmpty(clientIp))
+        {
+            body.Append(",\"remoteip\":\"").Append(JsonEscape(clientIp)).Append('"');
+        }
+        if (expectedRequestBinding != null)
+        {
+            body.Append(",\"expected_request_binding\":\"")
+                .Append(JsonEscape(expectedRequestBinding)).Append('"');
+        }
+        if (enforceTelemetry)
+        {
+            body.Append(",\"enforce_telemetry\":true");
+        }
+        if (!string.IsNullOrEmpty(operationIdentity))
+        {
+            body.Append(",\"operation_identity\":\"")
+                .Append(JsonEscape(operationIdentity)).Append('"');
+        }
+        body.Append('}');
+        return body.ToString();
     }
 
     private static string JsonEscape(string value)

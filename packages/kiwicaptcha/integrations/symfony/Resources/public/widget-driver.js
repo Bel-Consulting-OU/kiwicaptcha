@@ -524,6 +524,10 @@
       }
     }
     if (data.ttlSecs !== undefined && (typeof data.ttlSecs !== "number" || !isFinite(data.ttlSecs) || Math.floor(data.ttlSecs) !== data.ttlSecs || data.ttlSecs < 1 || data.ttlSecs > 300)) throw new Error("Challenge malformed");
+    // The Interactive-Client Lifecycle v1 delivery floor: an integer
+    // 0..(ttl*1000) when a TTL pins the ceiling (the same bound the RN
+    // validator applies).
+    if (data.minDurationMs !== undefined && (typeof data.minDurationMs !== "number" || !isFinite(data.minDurationMs) || Math.floor(data.minDurationMs) !== data.minDurationMs || data.minDurationMs < 0 || (data.ttlSecs !== undefined && data.minDurationMs >= data.ttlSecs * 1000))) throw new Error("Challenge malformed");
     // The optional ExecutionChallengeV1 program (base64): bounded,
     // non-empty, standard base64. When present the driver must run it —
     // a malformed program is a challenge-content failure, never a solve.
@@ -1738,6 +1742,11 @@
           if (!kiwiGenerationCurrent(widgetId, gen)) return;
         }
         if (riskApi && riskApi.renderDecoy) riskApi.renderDecoy(data, decoyState, tokenEl);
+        // The lifecycle clock anchors at receipt — the instant the
+        // challenge document is in hand — for BOTH the expiry deadline
+        // and the minimum-duration delivery floor (the shared
+        // contract's receivedAtMs).
+        var receivedAtMs = performance.now();
         // Receipt-anchored expiry (server TTL started at issuance).
         if (data.ttlSecs) {
           // The margin is capped at a quarter of the TTL so very short
@@ -1813,6 +1822,28 @@
         if (result && result.deadline) throw new Error("Expired");
         if (!result) throw new Error("Exhausted");
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        // Interactive-Client Lifecycle v1: the delivery floor. A solve
+        // that finished before the challenge's minimum duration waits
+        // the floor out before the token is packed (the wait aborts on
+        // a newer generation and re-checks the expiry deadline); a
+        // floor that would land at/after the deadline is an expiry,
+        // never a wait. The browser fixture mints minDurationMs 0, so
+        // this gate is a no-op under the qualification suites and only
+        // engages where a real deployment derives a floor.
+        if (data.minDurationMs > 0) {
+          var minSubmitAtMs = receivedAtMs + data.minDurationMs;
+          if (expiryDeadlineAt !== null && minSubmitAtMs >= expiryDeadlineAt) {
+            throw new Error("Expired");
+          }
+          while (performance.now() < minSubmitAtMs) {
+            if (!kiwiGenerationCurrent(widgetId, gen)) return;
+            if (expiryDeadlineAt !== null && performance.now() >= expiryDeadlineAt) {
+              throw new Error("Expired");
+            }
+            var floorWaitMs = minSubmitAtMs - performance.now();
+            await new Promise(function (resolve) { setTimeout(resolve, Math.min(50, floorWaitMs)); });
+          }
+        }
         var executionDigest = null;
         var executionTrace = null;
         if (data.execution_program) {

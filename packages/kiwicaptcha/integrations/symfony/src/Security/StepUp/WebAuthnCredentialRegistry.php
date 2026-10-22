@@ -31,6 +31,24 @@ final class WebAuthnCredentialRegistry
 {
     private const KEY_PREFIX = 'credential:';
 
+    /** The per-principal index key fragment (the pseudonym's hash). */
+    private const INDEX_PREFIX = 'principal:';
+
+    /**
+     * The one-time-backfill marker (`<prefix>` + this suffix). Present
+     * means: every credential on this server has been walked into its
+     * principal's index at least once — so a missing index set is a
+     * genuinely credential-less principal, never an un-indexed legacy
+     * record. The marker carries a bounded TTL: a rolling-upgrade
+     * window where an old node still writes un-indexed records heals
+     * with one cursor walk after the marker lapses, never a permanent
+     * blind spot. PUBLIC so the tests can pin the steady-state path.
+     */
+    public const BACKFILL_MARKER = 'credential:index-initialized';
+
+    /** The marker's lifetime: the rolling-upgrade heal window. */
+    private const BACKFILL_MARKER_TTL_SECS = 604_800;
+
     private readonly SerializerInterface $serializer;
 
     public function __construct(
@@ -66,21 +84,42 @@ final class WebAuthnCredentialRegistry
      * assertion ceremony compares the authenticator's user handle
      * against.
      *
-     * The matching records arrive in one pipelined batch: one discovery
-     * call plus one batched read, whatever the deployment's enrolled
-     * credential count. The filter below then runs over the values the
-     * batch already holds, in the key order, so the returned records and
-     * their order match a per-key walk.
+     * The discovery is the principal's own index set (SMEMBERS) — one
+     * bounded read of THIS principal's members — never a keyspace-wide
+     * `KEYS` walk: the pre-index lookup scanned every credential key on
+     * the server and deserialized every record on each ceremony, an
+     * O(keyspace) blocking round trip that grew with the deployment.
+     * The members arrive in one pipelined batch, so the steady state is
+     * two round trips (index + batch) whatever the DEPLOYMENT's total
+     * credential count, and the batch holds only this principal's
+     * records.
+     *
+     * On the first lookup after a fresh install (or once the backfill
+     * marker lapses after a rolling upgrade), the index is built once
+     * from a cursor walk (`SCAN`, never `KEYS`), so pre-index records
+     * stay visible without a migration step.
      *
      * @return list<CredentialRecord>
      */
     public function registeredCredentialsOf(string $principalPseudonym): array
     {
-        $keys = $this->redis->keys($this->prefix.self::KEY_PREFIX.'*');
-        if (!\is_array($keys) || $keys === []) {
+        if ($this->redis->get($this->prefix.self::BACKFILL_MARKER) === null) {
+            $this->backfillIndexes();
+        }
+        $members = $this->redis->smembers($this->indexKey($principalPseudonym));
+        if (!\is_array($members) || $members === []) {
             return [];
         }
-        $values = $this->readBatch(array_map(static fn ($key): string => (string) $key, $keys));
+        $keys = [];
+        foreach ($members as $member) {
+            if (\is_string($member) && $member !== '') {
+                $keys[] = $member;
+            }
+        }
+        if ($keys === []) {
+            return [];
+        }
+        $values = $this->readBatch($keys);
         $found = [];
         foreach ($values as $json) {
             if (!\is_string($json) || $json === '') {
@@ -98,6 +137,79 @@ final class WebAuthnCredentialRegistry
         }
 
         return $found;
+    }
+
+    /**
+     * The one-time cursor walk that builds every principal's index
+     * from the records already on the server (pre-index installs and
+     * the rolling-upgrade heal window). `SCAN` with a bounded COUNT
+     * walks the credential namespace without blocking Redis the way
+     * `KEYS` does; each record lands in its own principal's set
+     * (SADD is idempotent, so a concurrent save that indexed the same
+     * record changes nothing). The marker then pins the steady state:
+     * a missing index means a credential-less principal.
+     */
+    private function backfillIndexes(): void
+    {
+        $pattern = $this->prefix.self::KEY_PREFIX.'*';
+        $membersByIndex = [];
+        $cursor = '0';
+        $collect = [];
+        $flush = function () use (&$membersByIndex, &$collect): void {
+            if ($collect === []) {
+                return;
+            }
+            $chunk = $collect;
+            $collect = [];
+            $values = $this->readBatch($chunk);
+            foreach ($chunk as $i => $key) {
+                $json = $values[$i] ?? null;
+                if (!\is_string($json) || $json === '') {
+                    continue;
+                }
+                try {
+                    $record = $this->serializer->deserialize($json, CredentialRecord::class, 'json');
+                } catch (\Throwable) {
+                    continue;
+                }
+                if (!$record instanceof CredentialRecord || $record->userHandle === '') {
+                    continue;
+                }
+                $membersByIndex[$this->indexKey((string) $record->userHandle)][] = $key;
+            }
+        };
+        do {
+            $reply = $this->redis->scan($cursor, ['MATCH' => $pattern, 'COUNT' => 200]);
+            if (!\is_array($reply)) {
+                break;
+            }
+            $cursor = isset($reply[0]) ? (string) $reply[0] : (string) ($reply['cursor'] ?? '0');
+            $keys = $reply[1] ?? ($reply['keys'] ?? []);
+            if (\is_array($keys)) {
+                foreach ($keys as $key) {
+                    if (\is_string($key) && $key !== '') {
+                        $collect[] = $key;
+                    }
+                }
+            }
+            if (\count($collect) >= 500) {
+                $flush();
+            }
+        } while ($cursor !== '0' && $cursor !== '');
+        $flush();
+        foreach ($membersByIndex as $indexKey => $members) {
+            foreach ($members as $member) {
+                $this->redis->sadd($indexKey, $member);
+            }
+            $this->redis->expire($indexKey, $this->ttlSecs);
+        }
+        $this->redis->setex($this->prefix.self::BACKFILL_MARKER, self::BACKFILL_MARKER_TTL_SECS, '1');
+    }
+
+    /** The index set of one principal: members are the record keys. */
+    private function indexKey(string $principalPseudonym): string
+    {
+        return $this->prefix.self::INDEX_PREFIX.hash('sha256', $principalPseudonym);
     }
 
     public function saveCredentialSource(CredentialRecord $record): void
@@ -125,6 +237,17 @@ final class WebAuthnCredentialRegistry
             $this->ttlSecs,
             (string) $this->serializer->serialize($record, 'json'),
         );
+        // Keep the principal's index in step with the record: the
+        // allow-list lookup reads this set instead of scanning the
+        // keyspace, so every write (not just the backfill) maintains
+        // it. SADD is idempotent; the index TTL refreshes with the
+        // record's own lifetime and can only outlive a member, never
+        // precede it.
+        if ($record->userHandle !== '') {
+            $indexKey = $this->indexKey((string) $record->userHandle);
+            $this->redis->sadd($indexKey, $key);
+            $this->redis->expire($indexKey, $this->ttlSecs);
+        }
     }
 
     private function key(string $credentialId): string

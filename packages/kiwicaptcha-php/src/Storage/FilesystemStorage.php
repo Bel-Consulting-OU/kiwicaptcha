@@ -106,6 +106,19 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
     private readonly string $claimsDir;
 
     /**
+     * The sweep horizon: the earliest `retained_until` the last full
+     * sweep saw, or an insert recorded (0 until the first sweep). A
+     * store before that instant cannot reclaim anything, so the
+     * per-issuance full scan collapses to one integer compare — the
+     * pre-gate scan was O(live records) file reads + JSON decodes per
+     * issuance (O(n²) cumulative). Reads already answer "absent" for
+     * an expired envelope ({@see self::liveDecoded()}), so deferring
+     * reclamation never serves an expired record, and every insert
+     * lowers the horizon so its own expiry always reopens the gate.
+     */
+    private int $nextSweepAt = 0;
+
+    /**
      * @param string       $directory             the storage directory,
      *                                            created with mode
      *                                            0700 when absent;
@@ -300,6 +313,12 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
                 $this->encodeEnvelope($record, 'pending', null, null, $retainedUntil),
                 'challenge issuance',
             );
+            // The new record's own retention always reopens the sweep
+            // gate at its expiry (min keeps the horizon an upper bound
+            // of the true earliest retention).
+            if ($retainedUntil < $this->nextSweepAt) {
+                $this->nextSweepAt = $retainedUntil;
+            }
             // A fresh pending record carries no lease; a leftover claim
             // file would trip the pending-envelope guard.
             $this->removeClaim($paths['claim'], 'challenge issuance');
@@ -1102,17 +1121,22 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
     }
 
     /**
-     * Sweep retention on every issuance, mirroring the SQLite expiry
+     * Sweep retention on issuance, mirroring the SQLite expiry
      * index: records whose retention passed are removed together with
      * their claim fences, their lock files and their orphaned claims.
-     * The scan is linear in the live record count, the documented
-     * cost ceiling of this adapter. A record whose envelope cannot be
-     * decoded is never mutated by the sweep; it stays for the
-     * operator.
+     * The full scan is linear in the live record count but runs only
+     * when the sweep horizon {@see self::$nextSweepAt} says something
+     * can actually be dropped; every other issuance pays one integer
+     * compare. A record whose envelope cannot be decoded is never
+     * mutated by the sweep; it stays for the operator.
      */
     private function sweepExpiredRecords(): void
     {
         $now = $this->nowInSeconds();
+        if ($now < $this->nextSweepAt) {
+            return;
+        }
+        $earliest = \PHP_INT_MAX;
         foreach ($this->shardDirectories($this->recordsDir) as $shardDir) {
             $entries = @scandir($shardDir);
             if ($entries === false) {
@@ -1134,6 +1158,9 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
                 }
                 $retainedUntil = $envelope['retained_until'] ?? null;
                 if (!\is_int($retainedUntil) || $now < $retainedUntil) {
+                    if (\is_int($retainedUntil)) {
+                        $earliest = min($earliest, $retainedUntil);
+                    }
                     continue;
                 }
                 $stem = substr($entry, 0, -5);
@@ -1145,6 +1172,10 @@ final class FilesystemStorage implements AtomicStorageInterface, ConsumedStateRe
             }
         }
         $this->sweepOrphanedClaims();
+        // Recompute the horizon from the survivors: the next gate
+        // instant is the earliest retention this scan observed (or no
+        // instant at all when nothing decoded — inserts lower it).
+        $this->nextSweepAt = $earliest;
     }
 
     /**

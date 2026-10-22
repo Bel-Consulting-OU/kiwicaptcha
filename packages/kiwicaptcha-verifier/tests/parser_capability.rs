@@ -301,3 +301,155 @@ fn enforce_telemetry_rides_the_delegation_and_gates_the_verdict() {
         "the same token falls through to the proof gate: {unenforced}"
     );
 }
+
+// ------------------------- issuance binding, verify allow-list, mandate
+
+/// A headerless POST convenience for the probes below (the file's
+/// `post` carries the optional header list).
+fn post_json(addr: SocketAddr, target: &str, body: &str) -> (u16, String) {
+    post(addr, target, body, &[])
+}
+
+/// Issue + solve through a custom /issue body.
+fn issue_and_solve_body(addr: SocketAddr, issue_body: &str) -> String {
+    let (status, wire) = post_json(addr, "/issue", issue_body);
+    assert_eq!(status, 200, "{wire}");
+    let challenge = kiwicaptcha_solver::Challenge::from_json(&wire).expect("the wire parses");
+    let mut options = kiwicaptcha_solver::SolveOptions::default();
+    let solution = kiwicaptcha_solver::solve(&challenge, &mut options).expect("the solve succeeds");
+    solution.token(&challenge)
+}
+
+#[test]
+fn issue_validates_the_request_binding_like_the_controller() {
+    let addr = spawn();
+    // The shared identifier charset, same 422 code as the Symfony
+    // controller, refused before any state exists.
+    let (status, body) = post(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7","request_binding":"bad binding!"}"#,
+        &[],
+    );
+    assert_eq!(status, 422, "{body}");
+    assert!(body.contains("INVALID_REQUEST_BINDING"), "{body}");
+
+    // Present-but-empty normalizes to the unbound shape (the
+    // controller's rule) and a valid identifier signs through.
+    let (status, body) = post(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7","request_binding":""}"#,
+        &[],
+    );
+    assert_eq!(status, 200, "an empty binding is unbound, not invalid: {body}");
+    let (status, body) = post(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7","request_binding":"req-abc.1_x:2"}"#,
+        &[],
+    );
+    assert_eq!(status, 200, "a valid identifier signs through: {body}");
+}
+
+#[test]
+fn a_bound_record_enforces_the_exact_expectation_on_verify() {
+    let addr = spawn();
+    let token = issue_and_solve_body(
+        addr,
+        r#"{"scope":"login","remoteip":"198.51.100.7","request_binding":"req-tx-9"}"#,
+    );
+    // The exact expectation verifies...
+    let (status, ok) = post_json(
+        addr,
+        "/verify",
+        &format!(
+            r#"{{"token":"{token}","scope":"login","remoteip":"198.51.100.7","expected_request_binding":"req-tx-9"}}"#
+        ),
+    );
+    assert_eq!(status, 200, "{ok}");
+    assert!(ok.contains(r#""kiwi-code":"ok""#), "the exact binding matches: {ok}");
+
+    // ...and asserting the record is unbound must not: the full chain
+    // (sidecar issuance binding → core verify) is live, not parsed and
+    // ignored.
+    let token2 = issue_and_solve_body(
+        addr,
+        r#"{"scope":"login","remoteip":"198.51.100.7","request_binding":"req-tx-9"}"#,
+    );
+    let (status, refused) = post_json(
+        addr,
+        "/verify",
+        &format!(
+            r#"{{"token":"{token2}","scope":"login","remoteip":"198.51.100.7","expected_request_binding":""}}"#
+        ),
+    );
+    assert_eq!(status, 200, "{refused}");
+    assert!(
+        refused.contains(r#""kiwi-code":"request_binding_mismatch""#),
+        "the empty expectation on a bound record is refused: {refused}"
+    );
+}
+
+#[test]
+fn verify_answers_wrong_scope_for_an_out_of_plan_scope() {
+    let addr = spawn(); // the plan is the default single login scope
+    // Out of plan: wrong_scope at the allow-list gate, before any
+    // token work — the SDK scopeAllowed shape.
+    let (status, body) = post_json(
+        addr,
+        "/verify",
+        r#"{"token":"garbage","scope":"nope","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""kiwi-code":"wrong_scope""#), "{body}");
+    assert!(body.contains("invalid-input-response"), "{body}");
+    // In plan, garbage token: still the token gate (the allow-list did
+    // not swallow a valid scope's failures).
+    let (status, body) = post_json(
+        addr,
+        "/verify",
+        r#"{"token":"garbage","scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains(r#""kiwi-code":"malformed_token""#), "{body}");
+}
+
+#[test]
+fn the_required_execution_version_refuses_a_weaker_grammar() {
+    let addr = spawn_with(|c| {
+        c.execution_key = Some("01".repeat(32));
+        c.execution_version = 6;
+        c.execution_required_version = 3;
+    });
+    // Below the mandate (including the absent-header v1 floor): the
+    // deterministic refusal, never a downgrade.
+    for advertised in [Some("2"), None] {
+        let headers = advertised
+            .map(|h| vec![("kiwi-execution-max-version", h)])
+            .unwrap_or_default();
+        let (status, body) = post(addr, "/issue", ISSUE_BODY, &headers);
+        assert_eq!(status, 422, "advertised {advertised:?}: {body}");
+        assert!(
+            body.contains("CLIENT_EXECUTION_VERSION_UNSUPPORTED"),
+            "advertised {advertised:?}: {body}"
+        );
+    }
+    // At or above the mandate: armed at the effective tier.
+    let (status, wire) = post(
+        addr,
+        "/issue",
+        ISSUE_BODY,
+        &[("kiwi-execution-max-version", "3")],
+    );
+    assert_eq!(status, 200, "{wire}");
+    assert!(wire.contains(r#""execution_version":3"#) || wire.contains("\"execution_version\": 3"), "{wire}");
+    let (status, wire) = post(
+        addr,
+        "/issue",
+        ISSUE_BODY,
+        &[("kiwi-execution-max-version", "6")],
+    );
+    assert_eq!(status, 200, "{wire}");
+    assert!(wire.contains("\"execution_version\":6") || wire.contains("\"execution_version\": 6"), "{wire}");
+}

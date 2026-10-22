@@ -428,3 +428,46 @@ function modulusB64(): string {
   }
   return Buffer.from(bytes).toString("base64");
 }
+
+describe("acquireToken lifecycle gate (interactive-client v1)", () => {
+  it("waits out the min-duration floor before delivering", async () => {
+    const fetchImpl = jest.fn(
+      async () =>
+        new Response(JSON.stringify(shaChallenge({ ttlSecs: 120, minDurationMs: 400 })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+    const began = Date.now();
+    const token = await acquireToken({
+      endpoint: "https://api.example.com/kcaptcha/challenge",
+      scope: "login",
+      fetchImpl,
+    });
+    const elapsed = Date.now() - began;
+    // The floor is measured from parse time: delivery cannot beat it
+    // (small allowance for scheduling jitter only).
+    expect(elapsed).toBeGreaterThanOrEqual(350);
+    expect(Buffer.from(token, "base64").toString("utf8").startsWith(`${NONCE}.`)).toBe(true);
+  });
+
+  it("refuses with the typed expired refusal when the deadline is already gone", async () => {
+    // ttlSecs 1 anchors the deadline at parse time (received + 1000
+    // ms - 1000 ms safety margin): the gate refuses regardless of the
+    // solve's speed — the token is never handed out.
+    const fetchImpl = jest.fn(
+      async () =>
+        new Response(JSON.stringify(shaChallenge({ ttlSecs: 1, minDurationMs: 0 })), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    ) as unknown as typeof fetch;
+    await expect(
+      acquireToken({
+        endpoint: "https://api.example.com/kcaptcha/challenge",
+        scope: "login",
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ name: "KiwiSolveError", refusal: "expired" });
+  });
+});

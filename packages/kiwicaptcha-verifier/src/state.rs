@@ -78,6 +78,13 @@ pub struct SidecarConfig {
     /// The execution dimension protocol version of armed issuance,
     /// 1..=MAX_EXECUTION_VERSION.
     pub execution_version: u8,
+    /// The server-owned required execution tier: 0 = no mandate (the
+    /// default). When armed issuance would mint below this tier (the
+    /// client's capability capped by the node's execution_version), the
+    /// request is refused with the shared
+    /// `CLIENT_EXECUTION_VERSION_UNSUPPORTED` answer — never silently
+    /// downgraded to a weaker grammar, the controller's rule.
+    pub execution_required_version: u8,
 }
 
 impl SidecarConfig {
@@ -100,6 +107,7 @@ impl SidecarConfig {
             rsw: None,
             execution_key: None,
             execution_version: 1,
+            execution_required_version: 0,
         }
     }
 }
@@ -116,6 +124,13 @@ struct IssueRequest {
     remoteip: Option<String>,
     action: Option<String>,
     cdata: Option<String>,
+    /// The application transaction binding, signed into the record like
+    /// the Symfony controller signs it. Present-but-empty normalizes to
+    /// unbound (the controller's rule); any other value must match the
+    /// shared identifier charset or the request is refused with the
+    /// controller's 422 `INVALID_REQUEST_BINDING` before any state.
+    #[serde(default)]
+    request_binding: Option<String>,
 }
 
 /// The typed `/verify` body — exactly the field set every shipped SDK
@@ -178,6 +193,18 @@ fn client_execution_capability(raw: Option<&str>) -> u8 {
     (n.min(kiwicaptcha::execution::MAX_EXECUTION_VERSION as u64)) as u8
 }
 
+/// The shared identifier charset of scope, binding and action values:
+/// 1..=128 bytes of `[A-Za-z0-9._:-]` — the same shape the Symfony
+/// controller's `IDENTIFIER_PATTERN` enforces before anything reaches
+/// an issuer.
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b':' | b'-'))
+}
+
 /// The Argon admission gate: a counting semaphore that bounds
 /// concurrent memory-hard derivations. Each Argon derivation holds up
 /// to 64 MiB; without this gate the theoretical working set is
@@ -231,6 +258,7 @@ pub struct SidecarState {
     allow_no_remoteip: bool,
     execution_key: Option<String>,
     execution_version: u8,
+    execution_required_version: u8,
     rsw: Option<crate::config::RswTrapdoorConfig>,
     pub(crate) pool: PoolMetrics,
     metrics: Metrics,
@@ -271,6 +299,7 @@ impl SidecarState {
             allow_no_remoteip: config.allow_no_remoteip,
             execution_key: config.execution_key,
             execution_version: config.execution_version,
+            execution_required_version: config.execution_required_version,
             rsw: config.rsw,
             pool: PoolMetrics::default(),
             metrics: Metrics::default(),
@@ -422,6 +451,25 @@ impl SidecarState {
             });
             return Response::json(400, format!("{body}\n"));
         };
+        // The transaction binding, exactly the controller's contract:
+        // null/absent (and an empty string, normalized to null) is the
+        // unbound shape; anything else must match the shared identifier
+        // charset or the request is refused with 422
+        // INVALID_REQUEST_BINDING before any state exists.
+        let request_binding: Option<&str> = match parsed.request_binding.as_deref() {
+            None => None,
+            Some("") => None,
+            Some(binding) => {
+                if !valid_identifier(binding) {
+                    return self.error_response(
+                        422,
+                        "INVALID_REQUEST_BINDING",
+                        "request_binding must be 1-128 characters of [A-Za-z0-9._:-]",
+                    );
+                }
+                Some(binding)
+            }
+        };
         let remoteip = match self.resolve_remoteip(parsed.remoteip.as_deref()) {
             Ok(ip) => ip,
             Err(response) => return response,
@@ -437,11 +485,30 @@ impl SidecarState {
         // nothing arms, so the zero-capability client is served the
         // plain challenge exactly like any other.
         let client_capability = client_execution_capability(execution_header);
+        let effective_version = client_capability.min(self.execution_version);
         if client_capability == 0 && self.execution_key.is_some() {
             return self.error_response(
                 422,
                 "CLIENT_EXECUTION_VERSION_UNSUPPORTED",
                 "this deployment requires an execution-capable client; reload the page or upgrade the widget",
+            );
+        }
+        // The server-owned required tier (execution_required_version):
+        // the client capability is never an authority over the grammar
+        // a hostile solver must solve. An armed request that would mint
+        // below the mandate is refused deterministically — never
+        // downgraded to the weaker grammar — the controller's rule.
+        if self.execution_key.is_some()
+            && self.execution_required_version > 0
+            && effective_version < self.execution_required_version
+        {
+            return self.error_response(
+                422,
+                "CLIENT_EXECUTION_VERSION_UNSUPPORTED",
+                &format!(
+                    "this deployment requires the execution version {} client; reload the page or upgrade the widget",
+                    self.execution_required_version
+                ),
             );
         }
         // The pre-issue assessment when the risk plane is wired: the
@@ -490,7 +557,6 @@ impl SidecarState {
         // of the controller's effectiveExecutionVersion (the sidecar has
         // no central fleet floor of its own — the node cap is the
         // deployment tier).
-        let effective_version = client_capability.min(self.execution_version);
         let issued = match self.execution_key {
             Some(_) => {
                 match kiwicaptcha::challenge::issue_challenge_with_execution(
@@ -500,7 +566,7 @@ impl SidecarState {
                     now_unix,
                     now_ns,
                     0,
-                    None,
+                    request_binding,
                     true,
                     action,
                     Some(effective_version),
@@ -511,7 +577,7 @@ impl SidecarState {
                 }
             }
             None => match issue_challenge_with_profile(
-                &config, scope, &remoteip, now_unix, now_ns, 0, &profile, None,
+                &config, scope, &remoteip, now_unix, now_ns, 0, &profile, request_binding,
             ) {
                 Ok(i) => i,
                 Err(e) => return self.error_response(500, "issue_failed", &e.to_string()),
@@ -603,6 +669,14 @@ impl SidecarState {
             self.metrics.record_outcome("bad_request");
             return self.provider_response(&["missing-input-response"], Some("bad_request"));
         }
+        // The configured scope set is an allow-list on verification
+        // too, exactly like issuance and like every SDK verifier's
+        // scopeAllowed gate: a scope outside the plan answers
+        // wrong_scope in the provider envelope, never a record lookup.
+        if self.plan.rung_of(scope).is_none() {
+            self.metrics.record_outcome("wrong_scope");
+            return self.provider_response(&["invalid-input-response"], Some("wrong_scope"));
+        }
         let decoded = match SolutionToken::decode(token) {
             Ok(d) => d,
             Err(_) => {
@@ -637,10 +711,11 @@ impl SidecarState {
                 // winner signed — a storage writer without the master
                 // secret cannot produce one, and a MAC-less legacy
                 // result is never a grant. Then the context gate: the
-                // CURRENT request's scope, IP and operation identity
-                // must match the record — the original result may have
-                // been legitimate while the retry's context is not (the
-                // SDK verifiers' replaySecurityCheck exists for exactly
+                // CURRENT request's scope, binding expectation, IP and
+                // operation identity must all hold against the STORED
+                // RECORD — the original result may have been
+                // legitimate while the retry's context is not (the SDK
+                // verifiers' replaySecurityCheck exists for exactly
                 // this). Any mismatch is a plain already_consumed,
                 // never a success.
                 let identity = request_identity.unwrap_or("");
@@ -653,23 +728,32 @@ impl SidecarState {
                                 &self.secret_key,
                                 None,
                             ),
-                            &s.challenge,
+                            &s.record.challenge,
                             true,
-                            s.binding.as_deref(),
+                            s.record.request_binding.as_deref(),
                             meta.operation_identity.as_deref(),
                             &s.mac,
                         )
                     });
-                    if authentic {
-                        // Revalidate the current context against the
-                        // stored record before replaying the success.
-                        let scope_ok = meta.scope.as_deref().map_or(true, |s| s == scope);
-                        // The binding was already verified when the record
-                        // was first consumed. On the replay path we do not
-                        // have the stored record in scope; the scope, IP
-                        // and operation-identity checks are the context
-                        // gates that prevent a cross-context replay.
-                        let binding_ok = true;
+                    if let (true, Some(s)) = (authentic, stored.as_ref()) {
+                        // Scope: the record's own signed scope is the
+                        // authority; a retry under any other scope is a
+                        // plain replay.
+                        let scope_ok = s.record.scope == scope;
+                        // Binding: the exact-equality contract the fresh
+                        // derivation enforces, re-run against the stored
+                        // record's binding (constant time, like the
+                        // core's own expectation check).
+                        let binding_ok = match &expected_request_binding {
+                            RequestBindingExpectation::Unenforced => true,
+                            RequestBindingExpectation::Exact(None) => s.record.request_binding.is_none(),
+                            RequestBindingExpectation::Exact(Some(want)) => {
+                                match s.record.request_binding.as_deref() {
+                                    Some(have) => constant_time_eq(have.as_bytes(), want.as_bytes()),
+                                    None => false,
+                                }
+                            }
+                        };
                         let ip_ok = match (&meta.remoteip, &self.binding) {
                             (Some(stored_ip), BindingConfig::Bound) => *stored_ip == remoteip,
                             (_, BindingConfig::Bound) => false,
@@ -940,6 +1024,7 @@ impl SidecarState {
 
     fn render_doctor(&self) -> String {
         let secret_ok = self.secret_key.len() >= crate::config::MIN_SECRET_BYTES;
+        let store_probe = self.store.probe();
         let mut checks = Vec::new();
         checks.push(serde_json::json!({
             "name": "secret",
@@ -952,8 +1037,14 @@ impl SidecarState {
         }));
         checks.push(serde_json::json!({
             "name": "store",
-            "ok": true,
-            "detail": self.store.describe(),
+            // A real probe, not a constant: the Redis backend must
+            // answer a PING and the file store must list its records
+            // directory for this check to stay green.
+            "ok": store_probe.is_ok(),
+            "detail": match &store_probe {
+                Ok(fact) => format!("{} — probe: {fact}", self.store.describe()),
+                Err(reason) => format!("{} — probe FAILED: {reason}", self.store.describe()),
+            },
         }));
         checks.push(serde_json::json!({
             "name": "auth",
@@ -1099,5 +1190,64 @@ pub fn open_store(config: &StoreConfig) -> Result<Arc<dyn RecordStore>, String> 
         StoreConfig::Redis(url) => Err(format!(
             "KIWI_STORE={url} needs the redis-store build feature (rebuild with: cargo build --features redis-store); this build serves memory and file stores only"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pinned cross-language capability contract, consumed the way
+    /// the PHP `ExecutionCapabilityMatrixTest` consumes it: one
+    /// fixture, one interpretation, no issuer/parser disagreement.
+    const CAPABILITY_MATRIX: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../protocol/execution-v1/capability-matrix.json"
+    ));
+
+    #[test]
+    fn capability_matrix_fixture_pins_the_shared_policy() {
+        let matrix: serde_json::Value =
+            serde_json::from_str(CAPABILITY_MATRIX).expect("the capability matrix parses");
+        assert_eq!(
+            matrix["header"], "Kiwi-Execution-Max-Version",
+            "the sidecar parses exactly the fixture's header"
+        );
+
+        // Every native client advertises 0: capability none, never armed.
+        for id in ["android", "ios", "flutter", "react-native-native"] {
+            let client = matrix["clients"]
+                .as_array()
+                .expect("clients array")
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap_or_else(|| panic!("the matrix must pin {id}"));
+            assert_eq!(client["capability"], 0, "{id} must advertise capability 0");
+            assert_eq!(
+                client_execution_capability(Some("0")),
+                0,
+                "an explicit 0 reads as CAPABILITY_NONE for {id}"
+            );
+        }
+
+        // The shared interpretations, edge for edge with the PHP test.
+        for raw in [None, Some(""), Some("  "), Some("garbage")] {
+            assert_eq!(
+                client_execution_capability(raw),
+                1,
+                "absent/empty/whitespace/garbage reads as the v1 floor (got {raw:?})"
+            );
+        }
+        assert_eq!(client_execution_capability(Some("2")), 2);
+        assert_eq!(
+            client_execution_capability(Some("01")),
+            1,
+            "leading zeros are not canonical"
+        );
+        assert_eq!(
+            client_execution_capability(Some("99")),
+            kiwicaptcha::execution::MAX_EXECUTION_VERSION,
+            "a huge canonical advertisement clamps to the generator maximum"
+        );
     }
 }

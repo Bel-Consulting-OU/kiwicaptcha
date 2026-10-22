@@ -57,18 +57,20 @@ pub struct RecordMeta {
 }
 
 /// The authenticated material of a stored success: what an idempotent
-/// replay must MAC-verify before it may return that success. The MAC is
-/// the core's `consumed_result_mac` tag over the challenge, the verdict,
-/// the binding and the operation identity the commit signed. A success
-/// without one (a legacy envelope, or a writer that never held the
-/// master secret) carries `mac: None` and never replays as a success.
+/// replay must MAC-verify AND re-check context against before it may
+/// return that success. The MAC is the core's `consumed_result_mac` tag
+/// over the challenge, the verdict, the binding and the operation
+/// identity the commit signed. The full record rides along so the
+/// replay re-runs the CURRENT request's scope and binding expectation
+/// against the record itself — the same replay security check every SDK
+/// verifier performs — never against issuance metadata alone. A success
+/// without a MAC (a legacy envelope, or a writer that never held the
+/// master secret) carries no material and never replays as a success.
 #[derive(Debug, Clone)]
 pub struct StoredSuccess {
-    /// The record's challenge string — the MAC's first input.
-    pub challenge: String,
-    /// The record's request binding at commit time (the MAC input the
-    /// commit signed).
-    pub binding: Option<String>,
+    /// The consumed record as the store holds it: challenge, scope,
+    /// request binding and the rest of the signed issuance context.
+    pub record: Box<ChallengeRecord>,
     /// The stored server-state MAC tag.
     pub mac: String,
 }
@@ -146,6 +148,16 @@ pub trait RecordStore: Send + Sync {
 
     /// A short label for `/doctor` and the startup line.
     fn describe(&self) -> String;
+
+    /// One live backend probe for `/doctor`: `Ok` carries a short fact
+    /// about the answer, `Err` the refusal reason. The default is the
+    /// structural truth for the in-process stores (no external
+    /// dependency exists to reach); backends WITH an external
+    /// dependency must override it and prove the round trip — a doctor
+    /// store check that can never fail is not a check.
+    fn probe(&self) -> Result<String, String> {
+        Ok("in-process store, no external dependency to probe".to_string())
+    }
 }
 
 /// One live record: the challenge record, its metadata and, once
@@ -176,8 +188,7 @@ impl Entry {
     fn stored_success(&self) -> Option<StoredSuccess> {
         let mac = self.mac.clone()?;
         Some(StoredSuccess {
-            challenge: self.record.challenge.clone(),
-            binding: self.record.request_binding.clone(),
+            record: Box::new(self.record.clone()),
             mac,
         })
     }
@@ -186,21 +197,56 @@ impl Entry {
 /// The shared in-map state machine behind both the memory and the file
 /// backend. The mutex is the transition boundary: it covers only the
 /// bookkeeping, never a hash derivation.
-#[derive(Default)]
 struct MapState {
     pending: HashMap<String, Entry>,
     consumed: HashMap<String, Entry>,
+    /// The earliest `expires_at` across both maps (`u64::MAX` when both
+    /// are empty): the sweep gate. A sweep before that instant cannot
+    /// drop anything, so it is skipped; an expired entry necessarily
+    /// pulls this horizon to `<= now`, which opens the gate again —
+    /// every caller prunes before it looks a record up, so the gate can
+    /// never let an expired record answer a lookup. The invariant is
+    /// maintained at every insert (`note_expiry`), at every commit
+    /// (the replaced record's own expiry) and by the sweep's recompute.
+    next_expiry: u64,
+}
+
+impl Default for MapState {
+    fn default() -> Self {
+        MapState {
+            pending: HashMap::new(),
+            consumed: HashMap::new(),
+            next_expiry: u64::MAX,
+        }
+    }
 }
 
 impl MapState {
+    /// Lower the horizon to a newly inserted record's expiry.
+    fn note_expiry(&mut self, expires_at: u64) {
+        if expires_at < self.next_expiry {
+            self.next_expiry = expires_at;
+        }
+    }
+
     /// Drop expired records; returns their nonces so a durable backend
-    /// can remove the persisted envelopes too.
+    /// can remove the persisted envelopes too. Gated on
+    /// [`Self::next_expiry`]: one integer compare on the hot path
+    /// instead of a full-map retain per request (the pre-gate sweep was
+    /// O(live records) per insert — O(n²) cumulative for a long-lived
+    /// process holding a full TTL window).
     fn prune_expired(&mut self, now_unix: u64) -> Vec<String> {
+        if now_unix < self.next_expiry {
+            return Vec::new();
+        }
         let mut dropped = Vec::new();
+        let mut next = u64::MAX;
         self.pending.retain(|nonce, e| {
             let live = e.record.expires_at > now_unix;
             if !live {
                 dropped.push(nonce.clone());
+            } else {
+                next = next.min(e.record.expires_at);
             }
             live
         });
@@ -208,9 +254,12 @@ impl MapState {
             let live = e.record.expires_at > now_unix;
             if !live {
                 dropped.push(nonce.clone());
+            } else {
+                next = next.min(e.record.expires_at);
             }
             live
         });
+        self.next_expiry = next;
         dropped
     }
 
@@ -283,6 +332,7 @@ impl RecordStore for MemoryStore {
         state
             .pending
             .insert(record.nonce.clone(), Entry::new(record.clone(), meta));
+        state.note_expiry(record.expires_at);
         Ok(())
     }
 
@@ -331,6 +381,8 @@ impl MemoryStore {
             entry.record = record.clone();
             entry.valid = Some(valid);
             entry.mac = mac.map(str::to_string);
+            let expires_at = entry.record.expires_at;
+            state.note_expiry(expires_at);
         }
     }
 }
@@ -443,11 +495,15 @@ impl FileStore {
                         "duplicate record nonce across store files: {nonce}"
                     ));
                 }
+                let expires_at = entry.record.expires_at;
                 if envelope.state == STATE_CONSUMED {
                     state.consumed.insert(nonce, entry);
                 } else {
                     state.pending.insert(nonce, entry);
                 }
+                // A loaded expired envelope must pull the sweep horizon
+                // into the past so the first prune reaps it.
+                state.note_expiry(expires_at);
             }
         }
         Ok(())
@@ -527,6 +583,7 @@ impl RecordStore for FileStore {
         // reverse order could lose a record the map already served.
         self.persist(STATE_PENDING, &entry)?;
         state.pending.insert(record.nonce.clone(), entry);
+        state.note_expiry(record.expires_at);
         Ok(())
     }
 
@@ -606,6 +663,16 @@ impl RecordStore for FileStore {
             self.dir.display()
         )
     }
+
+    fn probe(&self) -> Result<String, String> {
+        // The live directory read: a store whose records directory
+        // vanished or lost its permission answers Err, so /doctor can
+        // actually fail.
+        let entries = fs::read_dir(&self.records_dir)
+            .map_err(|e| format!("records directory unreadable: {e}"))?;
+        let shards = entries.count();
+        Ok(format!("directory readable ({shards} shard entries)"))
+    }
 }
 
 impl FileStore {
@@ -615,14 +682,19 @@ impl FileStore {
     /// later replay to the undecided duplicate answer.
     fn commit_inner(&self, nonce: &str, record: &ChallengeRecord, valid: bool, mac: Option<&str>) {
         let mut state = self.state.lock().expect("store lock");
+        let mut expires_at = None;
         if let Some(entry) = state.consumed.get_mut(nonce) {
             entry.record = record.clone();
             entry.valid = Some(valid);
             entry.mac = mac.map(str::to_string);
+            expires_at = Some(entry.record.expires_at);
             if self.persist(STATE_CONSUMED, entry).is_err() {
                 // Best effort: a lost commit only degrades a later
                 // replay to the undecided duplicate answer.
             }
+        }
+        if let Some(expires_at) = expires_at {
+            state.note_expiry(expires_at);
         }
     }
 }
@@ -646,7 +718,28 @@ pub struct RedisStore {
     /// node-local map is kept only as a read-through cache.
     meta_client: redis::Client,
     meta_prefix: String,
-    meta: Mutex<HashMap<String, (u64, RecordMeta)>>,
+    meta: Mutex<MetaCache>,
+}
+
+#[cfg(feature = "redis-store")]
+/// The node-local read-through cache with its own sweep horizon: the
+/// per-put retain over every cached nonce was O(cache) per issuance
+/// (O(n²) cumulative); the horizon gates it to instants where a drop is
+/// actually possible, the same gate the in-process maps use.
+struct MetaCache {
+    map: HashMap<String, (u64, RecordMeta)>,
+    /// The earliest cached expiry (`u64::MAX` when empty).
+    next_expiry: u64,
+}
+
+#[cfg(feature = "redis-store")]
+impl MetaCache {
+    fn new() -> Self {
+        MetaCache {
+            map: HashMap::new(),
+            next_expiry: u64::MAX,
+        }
+    }
 }
 
 #[cfg(feature = "redis-store")]
@@ -664,7 +757,7 @@ impl RedisStore {
             inner,
             meta_client,
             meta_prefix: prefix.to_string(),
-            meta: Mutex::new(HashMap::new()),
+            meta: Mutex::new(MetaCache::new()),
         })
     }
 
@@ -708,8 +801,10 @@ impl RedisStore {
                 }
             }
         }
-        let map = self.meta.lock().expect("meta lock");
-        map.get(nonce)
+        let cache = self.meta.lock().expect("meta lock");
+        cache
+            .map
+            .get(nonce)
             .map(|(_, m)| m.clone())
             .unwrap_or_default()
     }
@@ -722,16 +817,31 @@ impl RecordStore for RedisStore {
         // companion key BEFORE the local cache, so a token minted on
         // this node carries its action/cdata to any peer.
         self.write_meta(&record.nonce, record.expires_at, &meta);
-        let mut map = self.meta.lock().expect("meta lock");
-        // Issue-time prune: the local metadata map must not grow with
-        // issuance traffic that never redeems.
+        let mut cache = self.meta.lock().expect("meta lock");
+        // Issue-time prune of the local metadata cache, horizon-gated:
+        // a sweep only runs when something can actually be dropped.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        map.retain(|_, (exp, _)| *exp > now);
-        map.insert(record.nonce.clone(), (record.expires_at, meta));
-        drop(map);
+        if now >= cache.next_expiry {
+            let mut next = u64::MAX;
+            cache.map.retain(|_, (exp, _)| {
+                let live = *exp > now;
+                if live {
+                    next = next.min(*exp);
+                }
+                live
+            });
+            cache.next_expiry = next;
+        }
+        cache
+            .map
+            .insert(record.nonce.clone(), (record.expires_at, meta));
+        if record.expires_at < cache.next_expiry {
+            cache.next_expiry = record.expires_at;
+        }
+        drop(cache);
         self.inner
             .store(record)
             .map_err(|e| format!("redis store failed: {e}"))
@@ -773,8 +883,7 @@ impl RecordStore for RedisStore {
                     let stored = consumed.stored_result.as_ref().and_then(|r| {
                         let mac = r.mac.clone()?;
                         Some(StoredSuccess {
-                            challenge: consumed.record.challenge.clone(),
-                            binding: consumed.record.request_binding.clone(),
+                            record: Box::new(consumed.record.clone()),
                             mac,
                         })
                     });
@@ -806,8 +915,8 @@ impl RecordStore for RedisStore {
         // retry can match it; the authenticated MAC is what makes the
         // stored result non-forgeable by a writer without the secret.
         if let Some(identity) = operation_identity {
-            let mut map = self.meta.lock().expect("meta lock");
-            if let Some(entry) = map.get_mut(nonce) {
+            let mut cache = self.meta.lock().expect("meta lock");
+            if let Some(entry) = cache.map.get_mut(nonce) {
                 entry.1.operation_identity = Some(identity.to_string());
             }
         }
@@ -826,6 +935,18 @@ impl RecordStore for RedisStore {
 
     fn describe(&self) -> String {
         "redis (the core crate's fused verifier store; multi-node capable)".to_string()
+    }
+
+    fn probe(&self) -> Result<String, String> {
+        let mut conn = self
+            .meta_client
+            .get_connection()
+            .map_err(|e| format!("connect failed: {e}"))?;
+        let pong: redis::RedisResult<String> = redis::cmd("PING").query(&mut conn);
+        match pong {
+            Ok(reply) => Ok(format!("redis answered PING ({reply})")),
+            Err(e) => Err(format!("PING failed: {e}")),
+        }
     }
 }
 
@@ -1038,11 +1159,11 @@ mod tests {
                     let stored = stored.unwrap_or_else(|| panic!("[{label}] MAC material"));
                     assert_eq!(stored.mac, mac, "[{label}] the signed tag rides along");
                     assert_eq!(
-                        stored.challenge, record.challenge,
+                        stored.record.challenge, record.challenge,
                         "[{label}] the MAC's challenge input"
                     );
                     assert_eq!(
-                        stored.binding, record.request_binding,
+                        stored.record.request_binding, record.request_binding,
                         "[{label}] the MAC's binding input"
                     );
                 }
@@ -1130,6 +1251,122 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The horizon gate keeps its two obligations: a live workload
+    /// never sweeps (the gate closes), and an expired record still
+    /// pulls the horizon into the past so the next call reaps it and
+    /// the expired nonce answers NotFound — never a Won consume.
+    #[test]
+    fn horizon_gate_reaps_expired_and_gates_live() {
+        let store = MemoryStore::new();
+        let now = now_epoch_micros() / 1_000_000;
+
+        // A fresh mint aged into the past: issued 400 s ago, expired
+        // 280 s ago (ttl 120 s).
+        let mut stale = record("login");
+        stale.issued_at = now - 400;
+        stale.expires_at = now - 280;
+        store
+            .put_pending(&stale, RecordMeta::default())
+            .expect("insert stale");
+
+        // A fresh live record: its issue-time prune observes the stale
+        // horizon (the stale expiry pulled it into the past) and reaps.
+        let live = record("login");
+        store.put_pending(&live, RecordMeta::default()).expect("insert live");
+        let (pending, _) = store.counts();
+        assert_eq!(pending, 1, "the expired record is swept, the live one stays");
+        assert!(
+            matches!(
+                store.consume(&stale.nonce, now, None),
+                ConsumeOutcome::NotFound
+            ),
+            "an expired nonce must answer NotFound, never Won"
+        );
+        assert!(matches!(
+            store.consume(&live.nonce, now, None),
+            ConsumeOutcome::Won { .. }
+        ));
+    }
+
+    /// The A/B prune bench (manual), same process, same population:
+    /// Phase A simulates the pre-gate behavior (sweep forced every
+    /// call), Phase B runs the shipped horizon gate. Issue cost is
+    /// measured outside the timed window.
+    /// `cargo test -p kiwicaptcha-verifier --release store_prune_horizon_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual A/B bench, not a gate"]
+    fn store_prune_horizon_bench() {
+        use std::time::Instant;
+        const LIVE: usize = 50_000;
+        const SWEEPS: usize = 5_000;
+        let now = now_epoch_micros() / 1_000_000;
+
+        let make_state = || {
+            let mut st = MapState::default();
+            for _ in 0..LIVE {
+                let r = record("login");
+                let expires = r.expires_at;
+                st.pending
+                    .insert(r.nonce.clone(), Entry::new(r, RecordMeta::default()));
+                st.note_expiry(expires);
+            }
+            st
+        };
+
+        // Phase A — the pre-gate behavior: an unconditional full sweep
+        // on every call (the horizon forced open each iteration).
+        let mut ungated = make_state();
+        let start = Instant::now();
+        for _ in 0..SWEEPS {
+            ungated.next_expiry = 0;
+            let dropped = ungated.prune_expired(now);
+            assert!(dropped.is_empty(), "the population is entirely live");
+        }
+        let ungated_elapsed = start.elapsed();
+
+        // Phase B — the shipped gate: all-live population, horizon in
+        // the future ⇒ one integer compare per call.
+        let mut gated = make_state();
+        let start = Instant::now();
+        for _ in 0..SWEEPS {
+            let dropped = gated.prune_expired(now);
+            assert!(dropped.is_empty());
+        }
+        let gated_elapsed = start.elapsed();
+
+        println!(
+            "prune A/B: {SWEEPS} sweeps over {LIVE} live records: ungated {ungated_elapsed:?} ({:.2} us/op) vs gated {gated_elapsed:?} ({:.4} us/op) — {:.0}x",
+            ungated_elapsed.as_micros() as f64 / SWEEPS as f64,
+            gated_elapsed.as_nanos() as f64 / SWEEPS as f64 / 1_000.0,
+            ungated_elapsed.as_secs_f64() / gated_elapsed.as_secs_f64().max(1e-12),
+        );
+
+        // End-to-end store path with the issuance cost excluded from
+        // the timed window: put_pending over the same population.
+        let store = MemoryStore::new();
+        let mut prefill = Vec::with_capacity(LIVE);
+        for _ in 0..LIVE {
+            prefill.push(record("login"));
+        }
+        for r in &prefill {
+            store.put_pending(r, RecordMeta::default()).expect("prefill");
+        }
+        let mut ops = Vec::with_capacity(SWEEPS);
+        for _ in 0..SWEEPS {
+            ops.push(record("login"));
+        }
+        let start = Instant::now();
+        for r in &ops {
+            store.put_pending(r, RecordMeta::default()).expect("op");
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "store path: {SWEEPS} inserts over {LIVE} live records in {elapsed:?} ({:.3} us/op, issuance excluded)",
+            elapsed.as_micros() as f64 / SWEEPS as f64
+        );
+        assert_eq!(store.counts().0, LIVE + SWEEPS);
     }
 }
 
@@ -1357,8 +1594,8 @@ mod redis_store_tests {
                 assert_eq!(succeeded, Some(true));
                 let stored = stored.expect("the MAC material rides the envelope");
                 assert_eq!(stored.mac, mac);
-                assert_eq!(stored.challenge, record.challenge);
-                assert_eq!(stored.binding, binding);
+                assert_eq!(stored.record.challenge, record.challenge);
+                assert_eq!(stored.record.request_binding, binding);
             }
             other => panic!("expected AlreadyConsumed on the peer node, got {other:?}"),
         }

@@ -92,7 +92,11 @@ impl RecordStore for TamperStore {
 }
 
 fn spawn(tamper: Option<Tamper>) -> SocketAddr {
-    let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+    spawn_scopes(vec![], tamper)
+}
+
+fn spawn_scopes(scopes: Vec<String>, tamper: Option<Tamper>) -> SocketAddr {
+    let mut config = SidecarConfig::minimal(SECRET.to_string(), scopes, "http://127.0.0.1:0");
     if let Some(mode) = tamper {
         config.store = Arc::new(TamperStore {
             inner: kiwicaptcha_verifier::MemoryStore::new(),
@@ -233,4 +237,78 @@ fn an_honest_commit_still_replays_its_stored_success() {
         other.contains("already_consumed") || other.contains("timeout-or-duplicate"),
         "{other}"
     );
+}
+
+// ------------------------------------------- cross-context replay gates
+
+/// The replay re-runs the binding expectation against the stored
+/// record: an idempotent retry that asserts a DIFFERENT binding than
+/// the record carries is a plain replay, never a success. Before the
+/// gate the sidecar hard-coded binding_ok = true, so any identity
+/// retry could cross binding contexts.
+#[test]
+fn replay_refuses_a_binding_expectation_mismatch() {
+    let addr = spawn(None);
+    let token = issue_and_solve(addr);
+    // The issued record is unbound; the first verify enforces nothing.
+    let first = format!(
+        r#"{{"token":"{token}","scope":"login","remoteip":"{CLIENT_IP}","operation_identity":"op-bind-1"}}"#
+    );
+    let (status, ok) = post_json(addr, "/verify", &first);
+    assert_eq!(status, 200, "{ok}");
+    assert!(ok.contains(r#""success":true"#), "{ok}");
+
+    // The same operation, now asserting a transaction binding the
+    // record does not carry: refused.
+    let mismatch = format!(
+        r#"{{"token":"{token}","scope":"login","remoteip":"{CLIENT_IP}","operation_identity":"op-bind-1","expected_request_binding":"req-tx-1"}}"#
+    );
+    let (status, refused) = post_json(addr, "/verify", &mismatch);
+    assert_eq!(status, 200, "{refused}");
+    assert!(
+        refused.contains(r#""kiwi-code":"already_consumed"#),
+        "a binding expectation the record cannot satisfy must never replay: {refused}"
+    );
+    assert!(!refused.contains(r#""success":true"#), "{refused}");
+
+    // The empty-string assertion (the record must be explicitly
+    // unbound) matches the unbound record and still replays — the
+    // gate checks the contract, it does not refuse every expectation.
+    let exact_unbound = format!(
+        r#"{{"token":"{token}","scope":"login","remoteip":"{CLIENT_IP}","operation_identity":"op-bind-1","expected_request_binding":""}}"#
+    );
+    let (status, matched) = post_json(addr, "/verify", &exact_unbound);
+    assert_eq!(status, 200, "{matched}");
+    assert!(
+        matched.contains(r#""kiwi-code":"ok"#) && matched.contains(r#""success":true"#),
+        "the exact-empty expectation on an unbound record still replays: {matched}"
+    );
+}
+
+/// The replay re-runs the SCOPE against the stored record itself (not
+/// the issuance metadata): a retry under another in-plan scope is a
+/// plain replay, never a success.
+#[test]
+fn replay_refuses_a_scope_mismatch_against_the_stored_record() {
+    let addr = spawn_scopes(vec!["login".to_string(), "signup".to_string()], None);
+    let token = issue_and_solve(addr); // issued for scope "login"
+    let first = format!(
+        r#"{{"token":"{token}","scope":"login","remoteip":"{CLIENT_IP}","operation_identity":"op-scope-1"}}"#
+    );
+    let (status, ok) = post_json(addr, "/verify", &first);
+    assert_eq!(status, 200, "{ok}");
+    assert!(ok.contains(r#""success":true"#), "{ok}");
+
+    // "signup" is in the plan (it passes the issuance allow-list), but
+    // the record's own scope is "login": the replay gate refuses.
+    let other_scope = format!(
+        r#"{{"token":"{token}","scope":"signup","remoteip":"{CLIENT_IP}","operation_identity":"op-scope-1"}}"#
+    );
+    let (status, refused) = post_json(addr, "/verify", &other_scope);
+    assert_eq!(status, 200, "{refused}");
+    assert!(
+        refused.contains(r#""kiwi-code":"already_consumed"#),
+        "a cross-scope retry must never replay the stored success: {refused}"
+    );
+    assert!(!refused.contains(r#""success":true"#), "{refused}");
 }

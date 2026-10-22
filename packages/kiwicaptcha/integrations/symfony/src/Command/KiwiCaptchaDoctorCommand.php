@@ -170,6 +170,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Public origin' => $this->checkPublicOrigin(),
             'Client-IP policy' => $this->checkClientIpPolicy(),
             'Continuity cookie' => $this->checkContinuityCookie(),
+            'Telemetry enforcement' => $this->checkTelemetryEnforcement(),
             'Risk Redis' => $this->checkRiskRedis(),
             'ASN dataset' => $this->checkAsnDataset(),
             'Principal-network store' => $this->checkPrincipalNetworks(),
@@ -653,6 +654,33 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return [self::LEVEL_WARN, 'symfony_global mode inherits the process-global trusted-proxy state; verify it matches this deployment'];
+    }
+
+    /**
+     * The enforce_telemetry gate's client coverage. The verifier
+     * rejects EMPTY telemetry as well as bot-scored telemetry, and
+     * every mobile/native SDK solve (Android, iOS, Flutter, React
+     * Native) carries `{}` — so with the gate on, all of those solves
+     * are rejected at verification time. Only browser-widget solves
+     * under a non-empty collection mode can pass. The compile already
+     * refuses the impossible combinations (strict mode forces the gate
+     * off; standard + gate + collection off is refused outright), so
+     * this row is the remaining operator decision: mixed or native
+     * traffic must not run under the gate.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkTelemetryEnforcement(): array
+    {
+        if (!($this->config['enforce_telemetry'] ?? false)) {
+            return ['PASS', 'enforce_telemetry off: every client shape (browser, native, server-side) can verify'];
+        }
+        $mode = (string) ($this->config['telemetry'] ?? 'off');
+
+        return [self::LEVEL_WARN, sprintf(
+            'enforce_telemetry is on with widget telemetry %s: empty telemetry is rejected at verify time and every mobile/native SDK solve (Android, iOS, Flutter, React Native) carries {} — those solves will all be rejected. Only browser-widget solves under this non-empty collection mode can pass; leave the gate off for mixed or native traffic',
+            $mode
+        )];
     }
 
     /**

@@ -88,6 +88,14 @@ forgeable, so it is never treated as the security boundary; see
 defense-in-depth only. The enforcement key is documented in
 [configuration.md](configuration.md#privacy-posture).
 
+The gate rejects **empty** telemetry as well as bot-scored telemetry.
+Every mobile/native SDK solution (Android, iOS, Flutter, React Native)
+carries `{}` today, so enabling the gate rejects *all* of those solves
+at verification time; only browser-widget solves under a non-empty
+collection mode (`minimal`/`full`) can pass. Enable it for
+browser-only traffic, and leave it off for mixed or native traffic —
+the doctor names this decision as a WARN row whenever the gate is on.
+
 ## Coarse client context (risk-v2)
 
 The widget collects **no device-capability or screen-size signals** unless

@@ -172,4 +172,36 @@ public class ExecutionPolicyTests
             Directory.Delete(storeDir, recursive: true);
         }
     }
+
+    /// <summary>
+    /// The delegation body carries every field the sidecar parses —
+    /// the parity contract with the Go, Node and Python clients. A
+    /// body that dropped expected_request_binding would leave the
+    /// sidecar's full-core pass enforcing a weaker posture than the
+    /// SDK's own cheap phase.
+    /// </summary>
+    [Fact]
+    public void DelegationBodyCarriesTheSharedVerificationPosture()
+    {
+        var minimal = ExecutionPolicy.BuildVerifyBody("tok", "login", "", null, false, "");
+        Assert.Equal("{\"token\":\"tok\",\"scope\":\"login\"}", minimal);
+
+        var full = ExecutionPolicy.BuildVerifyBody(
+            "tok", "login", "203.0.113.7", "", true, "op-abc_1");
+        Assert.Equal(
+            "{\"token\":\"tok\",\"scope\":\"login\",\"remoteip\":\"203.0.113.7\",\"expected_request_binding\":\"\",\"enforce_telemetry\":true,\"operation_identity\":\"op-abc_1\"}",
+            full);
+
+        var bound = ExecutionPolicy.BuildVerifyBody(
+            "tok", "login", "203.0.113.7", "req-1:abc.de", false, "");
+        Assert.Contains("\"expected_request_binding\":\"req-1:abc.de\"", bound);
+        Assert.DoesNotContain("enforce_telemetry", bound);
+        Assert.DoesNotContain("operation_identity", bound);
+
+        // Escaping stays canonical: a quote in the binding never
+        // forges a second field.
+        var escaped = ExecutionPolicy.BuildVerifyBody(
+            "tok", "login", "", "a\"b", false, "");
+        Assert.Contains("\"expected_request_binding\":\"a\\\"b\"", escaped);
+    }
 }
