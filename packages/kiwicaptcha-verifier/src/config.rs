@@ -26,6 +26,17 @@ pub const MIN_SECRET_BYTES: usize = kiwicaptcha::keys::MIN_MASTER_BYTES;
 /// raise it (0 disables the ceiling explicitly).
 pub const DEFAULT_MAX_PENDING_CHALLENGES: u64 = 100_000;
 
+/// The default total-live-record ceiling (pending + consumed
+/// tombstones): four times the pending bound, so the default pending
+/// window can be fully burned (every pending record consumed into a
+/// tombstone) without hitting the total bound, while a
+/// burn-and-reissue churn is still capped at a fixed multiple of the
+/// pending window until records expire. `--max-live-records` /
+/// `KIWI_MAX_LIVE_RECORDS` raise it (0 disables the ceiling
+/// explicitly; when both ceilings are on, a total bound below the
+/// pending bound is refused at startup).
+pub const DEFAULT_MAX_LIVE_RECORDS: u64 = 400_000;
+
 /// The placeholder secret the documentation shows. It is a label, not a
 /// credential: startup refuses it unless the operator passes the explicit
 /// development escape hatch.

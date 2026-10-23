@@ -200,7 +200,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
     try {
       final client = KiwiClient(endpoint: widget.endpoint, sitekey: widget.sitekey);
       final challenge = await client.fetchChallenge(scope: widget.scope);
-      if (!mounted || run.cancelled || run.generation != _generation) return;
+      if (!mounted || run.finished || run.generation != _generation) return;
 
       // Interactive-Client Lifecycle v1: the expiry clock starts at
       // parse time — never after solving.
@@ -210,7 +210,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
       bool pastDeadline() =>
           ttlSecs > 0 && DateTime.now().millisecondsSinceEpoch >= expiresAtMs;
       bool cancelledNow() =>
-          run.cancelled || run.generation != _generation || pastDeadline();
+          run.finished || run.generation != _generation || pastDeadline();
 
       if (pastDeadline()) {
         _surfaceExpired(run);
@@ -218,11 +218,12 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
       }
 
       // The expiry timer is armed at parse and races the solve; that
-      // race is correct and intended by the contract.
+      // race is correct and intended by the contract. Every terminal
+      // path stops this timer, so it can never fire after the run's
+      // outcome has been decided.
       if (ttlSecs > 0) {
         final remaining = expiresAtMs - DateTime.now().millisecondsSinceEpoch;
         run.expiryTimer = Timer(Duration(milliseconds: remaining > 0 ? remaining : 0), () {
-          if (run.cancelled || run.expired || run.generation != _generation) return;
           _surfaceExpired(run);
         });
       }
@@ -239,7 +240,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
       } else {
         solution = await _solveInIsolate(run, challenge, expiresAtMs);
       }
-      if (!mounted || run.cancelled || run.generation != _generation) return;
+      if (!mounted || run.finished || run.generation != _generation) return;
 
       final token = encodeKiwiToken(
         nonce: challenge.nonce,
@@ -269,7 +270,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
           challenge.minDurationMs,
           solveFinishedAtMs,
           nowMs,
-          cancelled: run.cancelled || run.generation != _generation,
+          cancelled: run.finished || run.generation != _generation,
         );
         if (decision.reason == kiwiReasonCancelled) return;
         if (decision.reason == kiwiReasonExpired) {
@@ -279,7 +280,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
         if (decision.reason == kiwiReasonDeliver) break;
         final wakeAtMs = decision.deliverAtMs;
         await _waitUntil(run, Duration(milliseconds: wakeAtMs > nowMs ? wakeAtMs - nowMs : 0));
-        if (!mounted || run.cancelled || run.generation != _generation) return;
+        if (!mounted || run.finished || run.generation != _generation) return;
         final real = DateTime.now().millisecondsSinceEpoch;
         // The timer only completes once its instant has passed in
         // whichever clock governs timers; keep that as the floor so a
@@ -293,13 +294,9 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
         _surfaceExpired(run);
         return;
       }
-      setState(() {
-        _status = 'Success';
-        _progress = 1;
-      });
-      widget.onVerify(token);
+      _finishSuccess(run, token);
     } on KiwiSolveError catch (error) {
-      if (!mounted || run.cancelled || run.expired || run.generation != _generation) {
+      if (!mounted || run.finished || run.generation != _generation) {
         return;
       }
       if (error.refusal == KiwiRefusal.cancelled) {
@@ -308,20 +305,12 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
         _surfaceExpired(run);
         return;
       }
-      setState(() {
-        _status = 'Failed';
-        _failed = true;
-      });
-      widget.onError?.call(error.toString());
+      _surfaceFailed(run, error.toString());
     } catch (error) {
-      if (!mounted || run.cancelled || run.expired || run.generation != _generation) {
+      if (!mounted || run.finished || run.generation != _generation) {
         return;
       }
-      setState(() {
-        _status = 'Failed';
-        _failed = true;
-      });
-      widget.onError?.call(error.toString());
+      _surfaceFailed(run, error.toString());
     }
   }
 
@@ -337,18 +326,43 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
     return completer.future;
   }
 
-  /// Surface the typed expired state exactly once per generation.
-  void _surfaceExpired(_KiwiRun run) {
-    if (run.cancelled || run.expired || run.generation != _generation || !mounted) {
+  /// Terminalize the run as Success: the CAS wins at most once, so a
+  /// later expiry-timer fire can neither flip the UI nor re-call
+  /// [KiwiCaptcha.onVerify] for a delivered run.
+  void _finishSuccess(_KiwiRun run, String token) {
+    if (!mounted || run.generation != _generation || !run.tryFinish(_KiwiOutcome.success)) {
       return;
     }
-    run.expired = true;
-    run.cancelSolve();
+    setState(() {
+      _status = 'Success';
+      _progress = 1;
+    });
+    widget.onVerify(token);
+  }
+
+  /// Surface the typed expired state exactly once per generation.
+  void _surfaceExpired(_KiwiRun run) {
+    if (!mounted || run.generation != _generation || !run.tryFinish(_KiwiOutcome.expired)) {
+      return;
+    }
     setState(() {
       _status = 'Expired';
       _failed = true;
     });
     widget.onExpire?.call();
+  }
+
+  /// Surface a failure through the same terminalization as success
+  /// and expiry: one callback per run, later timer fires are no-ops.
+  void _surfaceFailed(_KiwiRun run, String message) {
+    if (!mounted || run.generation != _generation || !run.tryFinish(_KiwiOutcome.failed)) {
+      return;
+    }
+    setState(() {
+      _status = 'Failed';
+      _failed = true;
+    });
+    widget.onError?.call(message);
   }
 
   /// Run [solveKiwiChallenge] in its own isolate. The isolate carries
@@ -391,7 +405,7 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
       }
     }
     if (isolate != null) {
-      if (run.cancelled) {
+      if (run.finished) {
         isolate.kill(priority: Isolate.immediate);
       } else {
         run.solveIsolate = isolate;
@@ -415,17 +429,26 @@ class KiwiCaptchaState extends State<KiwiCaptcha> {
   }
 }
 
+/// The single terminal outcome a run can surface. The absent outcome
+/// (null on [_KiwiRun.outcome]) means the run is still working.
+enum _KiwiOutcome { success, expired, failed }
+
 /// One start()-to-outcome run: the generation handle plus everything
 /// that must die with it — timers, the solver isolate, the awaiters.
 class _KiwiRun {
   final int generation;
 
-  /// Set when the run is superseded, cancelled or expired: no state,
-  /// no callback may ever come out of this run afterwards.
+  /// Set when the run is superseded or disposed: a silent death that
+  /// may never surface state or a callback.
   bool cancelled = false;
 
-  /// Set once the expired state has been surfaced for this run.
-  bool expired = false;
+  /// The one terminal outcome, CAS'd by [tryFinish]; null while the
+  /// run is still working.
+  _KiwiOutcome? outcome;
+
+  /// Whether the run has reached any terminal state (silent or
+  /// surfaced): nothing more may come out of it.
+  bool get finished => cancelled || outcome != null;
 
   Timer? expiryTimer;
   Timer? deliveryTimer;
@@ -436,12 +459,26 @@ class _KiwiRun {
 
   _KiwiRun(this.generation);
 
+  /// CAS from running into [next]: one terminal outcome per run. The
+  /// win stops every timer, the isolate and the pending awaiters, so
+  /// later timer fires are no-ops and no second callback can emit.
+  bool tryFinish(_KiwiOutcome next) {
+    if (finished) return false;
+    outcome = next;
+    _stop();
+    return true;
+  }
+
   /// Stop everything this run could still do: cancel the timers, kill
   /// the solver isolate, and complete the pending awaiters so the
-  /// suspended `execute()` resumes immediately and observes
-  /// [cancelled].
+  /// suspended `execute()` resumes immediately and observes the
+  /// terminal state.
   void cancelSolve() {
     cancelled = true;
+    _stop();
+  }
+
+  void _stop() {
     expiryTimer?.cancel();
     expiryTimer = null;
     deliveryTimer?.cancel();

@@ -1219,6 +1219,12 @@ pub const RECORD_META_MAC_DOMAIN: &str = "kiwi/record-meta/v1";
 /// Domain tag of the consumed-result MAC input.
 pub const CONSUMED_RESULT_MAC_DOMAIN: &str = "kiwi/consumed-result/v1";
 
+/// Domain tag of the sidecar companion-metadata MAC. smeta is written
+/// and read only by the sidecar nodes (PHP never touches the key), so
+/// this contract needs no cross-language mirror — but its domain must
+/// stay disjoint from the two shared MACs under the same purpose key.
+pub const COMPANION_META_MAC_DOMAIN: &str = "kiwi/smeta/v1";
+
 fn mac_lp(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(value.len().to_string().as_bytes());
     out.push(b':');
@@ -1360,6 +1366,69 @@ pub fn verify_consumed_result_mac(
     server_state_hmac_matches(
         derived.server_state_key(),
         &consumed_result_mac_input(challenge, valid, binding, operation_identity),
+        tag,
+    )
+}
+
+/// The exact sidecar companion-metadata MAC input bytes:
+/// `domain \n lp(challenge) \n opt(action) \n opt(cdata) \n opt(decision_id)`.
+/// Binds the issuance-bound presentation fields to the challenge they
+/// were minted with, so a storage writer that swaps `action` or
+/// `cdata` in the smeta companion can never make a success assert
+/// attacker-selected metadata (the reader drops unauthenticated
+/// fields instead of echoing them).
+pub fn companion_meta_mac_input(
+    challenge: &str,
+    action: Option<&str>,
+    cdata: Option<&str>,
+    decision_id: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(96 + challenge.len());
+    out.extend_from_slice(COMPANION_META_MAC_DOMAIN.as_bytes());
+    out.push(b'\n');
+    mac_lp(&mut out, challenge);
+    out.push(b'\n');
+    mac_opt(&mut out, action);
+    out.push(b'\n');
+    mac_opt(&mut out, cdata);
+    out.push(b'\n');
+    mac_opt(&mut out, decision_id);
+    out
+}
+
+/// The companion-metadata MAC (`smeta.mac`) under the server-state
+/// purpose key.
+pub fn companion_meta_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    action: Option<&str>,
+    cdata: Option<&str>,
+    decision_id: Option<&str>,
+) -> String {
+    server_state_hmac(
+        derived.server_state_key(),
+        &companion_meta_mac_input(challenge, action, cdata, decision_id),
+    )
+}
+
+/// True when `tag` is a well-formed companion-metadata MAC over the
+/// given challenge and presentation fields (constant time). A `None`
+/// tag (a legacy unsigned companion) never verifies: the reader must
+/// drop the fields rather than trust them.
+pub fn verify_companion_meta_mac(
+    derived: &DerivedKeys,
+    challenge: &str,
+    action: Option<&str>,
+    cdata: Option<&str>,
+    decision_id: Option<&str>,
+    tag: Option<&str>,
+) -> bool {
+    let Some(tag) = tag else {
+        return false;
+    };
+    server_state_hmac_matches(
+        derived.server_state_key(),
+        &companion_meta_mac_input(challenge, action, cdata, decision_id),
         tag,
     )
 }

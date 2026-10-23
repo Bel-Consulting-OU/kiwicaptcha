@@ -35,19 +35,58 @@ final class WebAuthnCredentialRegistry
     private const INDEX_PREFIX = 'principal:';
 
     /**
-     * The one-time-backfill marker (`<prefix>` + this suffix). Present
-     * means: every credential on this server has been walked into its
-     * principal's index at least once — so a missing index set is a
-     * genuinely credential-less principal, never an un-indexed legacy
-     * record. The marker carries a bounded TTL: a rolling-upgrade
-     * window where an old node still writes un-indexed records heals
-     * with one cursor walk after the marker lapses, never a permanent
-     * blind spot. Public so the tests can pin the steady-state path.
+     * The one-time-backfill marker (`<prefix>` + this suffix). Value:
+     * the Unix time of the last full walk (an age-less `1` from an
+     * earlier build is restamped on first sight). While the marker is
+     * younger than {@see self::INDEX_DUAL_READ_SECS}, lookups also run
+     * the bounded reconcile walk: a pre-index node can still write an
+     * un-indexed credential during a rolling upgrade, and index-only
+     * reads would hide it until the marker lapsed. Past the horizon
+     * the index is authoritative and no walk runs — a missing index
+     * set is then a genuinely credential-less principal. Public so the
+     * tests can pin the steady-state path.
      */
     public const BACKFILL_MARKER = 'credential:index-initialized';
 
     /** The marker's lifetime: the rolling-upgrade heal window. */
     private const BACKFILL_MARKER_TTL_SECS = 604_800;
+
+    /**
+     * How long after a backfill (or marker restamp) lookups keep
+     * reconciling against the keyspace: the rolling-upgrade window in
+     * which a pre-index node may still write credentials without
+     * maintaining the index. Long enough for any real deploy overlap;
+     * after it, the index alone decides.
+     */
+    public const INDEX_DUAL_READ_SECS = 86_400;
+
+    /**
+     * The atomic counter-rollback CAS: read, compare and write as ONE
+     * server-side transaction. A client-side GET-then-SETEX races —
+     * two valid concurrent assertions both read the stored counter,
+     * both pass the comparison, and the later write rewinds the
+     * persisted counter (6 then 5 lands 5), exactly the rollback the
+     * sign counter exists to expose. Redis serializes script
+     * executions, so the final counter is always the maximum that was
+     * ever written. Replies: 1 written, 0 refused (stored counter
+     * strictly higher). An unreadable prior record keeps the
+     * documented fail-open (no counter to defend without a readable
+     * prior).
+     */
+    private const SAVE_SCRIPT = <<<'LUA'
+local existing = redis.call('GET', KEYS[1])
+local incoming = tonumber(ARGV[3])
+if existing then
+  local ok, decoded = pcall(cjson.decode, existing)
+  if ok and type(decoded) == 'table' and type(decoded['counter']) == 'number' then
+    if incoming < decoded['counter'] then
+      return 0
+    end
+  end
+end
+redis.call('SETEX', KEYS[1], tonumber(ARGV[1]), ARGV[2])
+return 1
+LUA;
 
     private readonly SerializerInterface $serializer;
 
@@ -56,6 +95,7 @@ final class WebAuthnCredentialRegistry
         private readonly string $prefix,
         private readonly int $ttlSecs = 31_536_000,
         ?SerializerInterface $serializer = null,
+        private readonly int $indexDualReadSecs = self::INDEX_DUAL_READ_SECS,
     ) {
         $this->serializer = $serializer ?? (new WebauthnSerializerFactory(AttestationStatementSupportManager::create()))->create();
     }
@@ -103,8 +143,33 @@ final class WebAuthnCredentialRegistry
      */
     public function registeredCredentialsOf(string $principalPseudonym): array
     {
-        if ($this->redis->get($this->prefix.self::BACKFILL_MARKER) === null) {
+        $marker = $this->redis->get($this->prefix.self::BACKFILL_MARKER);
+        $dualRead = false;
+        if ($marker === null) {
             $this->backfillIndexes();
+        } else {
+            $raw = (string) $marker;
+            if ($raw === '1' || !ctype_digit($raw)) {
+                // Age-less marker from an earlier build: restamp it so
+                // the upgrade horizon closes a full dual-read window
+                // after this node first sees it, then reconcile now.
+                $this->redis->setex(
+                    $this->prefix.self::BACKFILL_MARKER,
+                    self::BACKFILL_MARKER_TTL_SECS,
+                    (string) \time(),
+                );
+                $dualRead = true;
+            } elseif (\time() < (int) $raw + $this->indexDualReadSecs) {
+                $dualRead = true;
+            }
+        }
+        // The rolling-upgrade window: a pre-index node writes records
+        // without SADDing them, so the index alone would hide them from
+        // this lookup (an enrolled key reading as credential-less until
+        // the marker lapsed). One bounded cursor walk reconciles the
+        // miss; past the horizon the walk never runs again.
+        if ($dualRead) {
+            $this->reconcileIndexes();
         }
         $members = $this->redis->smembers($this->indexKey($principalPseudonym));
         if (!\is_array($members) || $members === []) {
@@ -150,6 +215,22 @@ final class WebAuthnCredentialRegistry
      * a missing index means a credential-less principal.
      */
     private function backfillIndexes(): void
+    {
+        $this->reconcileIndexes();
+        $this->redis->setex(
+            $this->prefix.self::BACKFILL_MARKER,
+            self::BACKFILL_MARKER_TTL_SECS,
+            (string) \time(),
+        );
+    }
+
+    /**
+     * The bounded cursor walk without stamping the marker: the
+     * reconcile leg of a dual-read lookup (and the walk half of a
+     * fresh backfill). Idempotent index adds only — a record an old
+     * node wrote without SADDing it lands in its principal's set here.
+     */
+    private function reconcileIndexes(): void
     {
         $pattern = $this->prefix.self::KEY_PREFIX.'*';
         $membersByIndex = [];
@@ -203,7 +284,6 @@ final class WebAuthnCredentialRegistry
             }
             $this->redis->expire($indexKey, $this->ttlSecs);
         }
-        $this->redis->setex($this->prefix.self::BACKFILL_MARKER, self::BACKFILL_MARKER_TTL_SECS, '1');
     }
 
     /** The index set of one principal: members are the record keys. */
@@ -215,28 +295,22 @@ final class WebAuthnCredentialRegistry
     public function saveCredentialSource(CredentialRecord $record): void
     {
         $key = $this->key($record->publicKeyCredentialId);
-        // Counter rollback guard: a write that would lower the stored
-        // sign count is refused (fail-closed). A cloned or raced
-        // authenticator can then never rewind the counter and re-use an
-        // old assertion slot.
-        $existingJson = $this->redis->get($key);
-        if (\is_string($existingJson) && $existingJson !== '') {
-            try {
-                $existing = $this->serializer->deserialize($existingJson, CredentialRecord::class, 'json');
-                if ($existing instanceof CredentialRecord && $record->counter < $existing->counter) {
-                    return;
-                }
-            } catch (\Throwable) {
-                // Unreadable prior record: fall through and overwrite
-                // with the validated record (fail-closed on the
-                // counter is impossible without a readable prior).
-            }
-        }
-        $this->redis->setex(
+        // The rollback guard runs inside the write (see the save-script constant):
+        // the read-compare-write is one Lua transaction, never a
+        // GET followed by a SETEX another writer can interleave. The
+        // registry's redis seam is the Predis client interface, so the
+        // script runs through its EVAL command shape directly.
+        $written = $this->redis->eval(
+            self::SAVE_SCRIPT,
+            1,
             $key,
-            $this->ttlSecs,
+            (string) $this->ttlSecs,
             (string) $this->serializer->serialize($record, 'json'),
+            (string) $record->counter,
         );
+        if ((int) $written !== 1) {
+            return;
+        }
         // Keep the principal's index in step with the record: the
         // allow-list lookup reads this set instead of scanning the
         // keyspace, so every write (not just the backfill) maintains

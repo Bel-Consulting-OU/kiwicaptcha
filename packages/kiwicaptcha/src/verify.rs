@@ -7364,7 +7364,13 @@ mod wire_timing_tests {
     use super::ct_eq;
 
     const LENGTH: usize = 8192;
-    const ROUNDS: usize = 25;
+    // More best-of rounds, not a looser threshold: under a loaded box a
+    // min-of-25 picks up scheduler noise (the identical-input baseline
+    // inflates), the noise term multiplies the threshold, and the
+    // deliberately leaky control stops resolving. Min-of-200 keeps a
+    // clean slice even under contention while the assertion stays as
+    // strict as before.
+    const ROUNDS: usize = 200;
     const CALLS: usize = 10;
 
     fn measure(f: impl Fn(&[u8], &[u8]) -> bool, a: &[u8], b: &[u8]) -> f64 {

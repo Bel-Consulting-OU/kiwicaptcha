@@ -366,7 +366,9 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         // Steady state: the index backfill already ran (here: pinned
         // explicitly so the measured round is the one every ceremony
         // pays after the one-time cursor pass).
-        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, '1');
+                // An aged marker: the dual-read upgrade horizon has closed, so
+        // the lookup is index-only (the steady state these tests pin).
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, (string) (time() - WebAuthnCredentialRegistry::INDEX_DUAL_READ_SECS - 60));
         $redis->batches = 0;
         $redis->batchedKeys = [];
         $redis->commands = [];
@@ -428,8 +430,10 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $registry->saveCredentialSource($this->record('cred-D', self::PRINCIPAL, 4));
         $redis->values[$this->credentialKey('cred-D')] = '{not-json';
 
-        // Steady state: the same lookup now costs one index read plus
-        // one batch, and the batch holds only this principal's members.
+        // Close the dual-read horizon: past it the same lookup costs
+        // one index read plus one batch, and the batch holds only this
+        // principal's members (no reconcile walk).
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, (string) (time() - WebAuthnCredentialRegistry::INDEX_DUAL_READ_SECS - 60));
         $redis->batches = 0;
         $redis->batchedKeys = [];
         $redis->commands = [];
@@ -470,14 +474,92 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         self::assertSame('cred-LEGACY', $found[0]->publicKeyCredentialId);
         self::assertContains('SCAN', $redis->commands, 'the first lookup scans once');
 
-        // The marker now pins the steady state: the second lookup goes
-        // straight to the index, never another pass.
+        // The marker now pins the walk; past the dual-read horizon the
+        // second lookup goes straight to the index, never another pass.
         self::assertNotNull($redis->get('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER));
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, (string) (time() - WebAuthnCredentialRegistry::INDEX_DUAL_READ_SECS - 60));
         $redis->commands = [];
         $again = $registry->registeredCredentialsOf(self::PRINCIPAL);
         self::assertCount(1, $again, 'the indexed record still answers');
         self::assertNotContains('SCAN', $redis->commands, 'the steady state adds no further scan');
         self::assertContains('SMEMBERS', $redis->commands, 'the steady lookup reads the index');
+    }
+
+    /**
+     * The N-1 visibility window the auditor closed: a marker exists
+     * (backfill ran) but a pre-index node writes another credential without
+     * SADDing it. During the dual-read horizon the lookup reconciles
+     * with one bounded walk and the enrolled key stays visible — the
+     * 403 step_up_enrollment_required on a genuinely enrolled
+     * principal never fires. An age-less legacy marker restamps so its
+     * horizon actually closes later.
+     */
+    public function testAnUnindexedLegacyWriteStaysVisibleDuringTheDualReadWindow(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        // The previous build's age-less marker: present, but undatable.
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, '1');
+        $key = 'tests:webauthn:credential:'.hash('sha256', 'cred-N1');
+        $serialized = (string) json_encode([
+            'publicKeyCredentialId' => base64_encode('cred-N1'),
+            'type' => 'public-key',
+            'transports' => [],
+            'attestationType' => 'none',
+            'trustPath' => [],
+            'aaguid' => '00000000-0000-0000-0000-000000000000',
+            'credentialPublicKey' => base64_encode('key-material'),
+            'userHandle' => base64_encode('n1-principal'),
+            'counter' => 3,
+        ]);
+        // The old node's write: record bytes, no index membership.
+        $redis->setex($key, 31536000, $serialized);
+
+        $found = $registry->registeredCredentialsOf('n1-principal');
+        self::assertCount(1, $found, 'the reconcile walk surfaces the pre-index write: '.json_encode($redis->commands));
+        self::assertSame('cred-N1', $found[0]->publicKeyCredentialId);
+        self::assertContains('SCAN', $redis->commands, 'the open horizon reconciles with one walk');
+
+        // The age-less marker restamped: the horizon now has a date and
+        // will close one dual-read window from this moment.
+        $stamped = $redis->get('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER);
+        self::assertIsNumeric($stamped, 'the legacy marker is restamped');
+        self::assertGreaterThan(1_000_000_000, (int) $stamped, 'restamped to a real timestamp');
+    }
+
+    /**
+     * The fence closes: past the dual-read horizon the index alone
+     * decides (no walk ever runs again), and a record written without
+     * index membership by that point is outside the contract — the
+     * migration window is over, not the mechanism.
+     */
+    public function testTheDualReadWindowClosesAndIndexOnlyLookupsNeverWalkAgain(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, (string) (time() - WebAuthnCredentialRegistry::INDEX_DUAL_READ_SECS - 60));
+        // One indexed credential of the principal (the honest write)…
+        $registry->saveCredentialSource($this->record('cred-INDEXED', 'closed-principal', 1));
+        // …and one that a writer outside the contract left un-indexed.
+        $unindexed = 'tests:webauthn:credential:'.hash('sha256', 'cred-UNINDEXED');
+        $redis->setex($unindexed, 31536000, (string) json_encode([
+            'publicKeyCredentialId' => base64_encode('cred-UNINDEXED'),
+            'type' => 'public-key',
+            'transports' => [],
+            'attestationType' => 'none',
+            'trustPath' => [],
+            'aaguid' => '00000000-0000-0000-0000-000000000000',
+            'credentialPublicKey' => base64_encode('key-material'),
+            'userHandle' => base64_encode('closed-principal'),
+            'counter' => 1,
+        ]));
+
+        $redis->commands = [];
+        $found = $registry->registeredCredentialsOf('closed-principal');
+        self::assertCount(1, $found, 'the closed horizon answers from the index alone');
+        self::assertSame('cred-INDEXED', $found[0]->publicKeyCredentialId);
+        self::assertNotContains('SCAN', $redis->commands, 'past the horizon no walk ever runs');
+        self::assertNotContains('KEYS', $redis->commands, 'never a keyspace scan');
     }
 
     public function testSaveCredentialSourceMaintainsThePrincipalIndex(): void
@@ -486,7 +568,9 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $redis = $this->fakeRedis();
         // Marker present from the start: any discovery must come from
         // the index the save maintains — there is no backfill to lean on.
-        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, '1');
+                // An aged marker: the dual-read upgrade horizon has closed, so
+        // the lookup is index-only (the steady state these tests pin).
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, (string) (time() - WebAuthnCredentialRegistry::INDEX_DUAL_READ_SECS - 60));
         $registry->saveCredentialSource($this->record('cred-IDX', self::PRINCIPAL, 1));
         $registry->saveCredentialSource($this->record('cred-IDX-OTHER', str_repeat('7', 32), 1));
 
@@ -501,6 +585,49 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         self::assertCount(1, $found, 'the index answers the allow-list');
         self::assertNotContains('SCAN', $redis->commands, 'no backfill runs when the marker is present');
         self::assertNotContains('KEYS', $redis->commands, 'never a keyspace scan');
+    }
+
+    /**
+     * The rollback guard is one atomic CAS, never a GET-then-SETEX
+     * pair. A concurrent writer between those two commands is exactly
+     * how the persisted counter used to rewind: both writers read the
+     * old counter, both pass the client-side comparison, and the later
+     * write lands lower. The command shape pins the change; the
+     * counter outcomes pin the semantics.
+     */
+    public function testSaveCredentialSourceIsOneAtomicCasThatRefusesRollbacks(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+
+        // A fresh credential lands through exactly one CAS plus the
+        // index maintenance — never a bare GET/SETEX pair.
+        $registry->saveCredentialSource($this->record('cred-CAS', self::PRINCIPAL, 7));
+        self::assertSame(
+            ['EVAL', 'SADD', 'EXPIRE'],
+            $redis->commands,
+            'the save path is one atomic script, no client-side read-compare race'
+        );
+        $key = $this->credentialKey('cred-CAS');
+        $stored = json_decode((string) $redis->values[$key], true);
+        self::assertSame(7, $stored['counter'], 'the first write lands');
+
+        // A rollback is refused inside the transaction: the stored
+        // counter (and record bytes) survive untouched.
+        $redis->commands = [];
+        $registry->saveCredentialSource($this->record('cred-CAS', self::PRINCIPAL, 5));
+        self::assertSame(['EVAL'], $redis->commands, 'a refused CAS writes nothing else');
+        $stored = json_decode((string) $redis->values[$key], true);
+        self::assertSame(7, $stored['counter'], 'the rollback never lands');
+
+        // Equal counters stay allowed (the authenticator may repeat a
+        // zero increment); a forward counter replaces the record.
+        $registry->saveCredentialSource($this->record('cred-CAS', self::PRINCIPAL, 7));
+        $stored = json_decode((string) $redis->values[$key], true);
+        self::assertSame(7, $stored['counter'], 'an equal counter is not a rollback');
+        $registry->saveCredentialSource($this->record('cred-CAS', self::PRINCIPAL, 9));
+        $stored = json_decode((string) $redis->values[$key], true);
+        self::assertSame(9, $stored['counter'], 'a forward counter replaces the record');
     }
 
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void
@@ -994,8 +1121,38 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
             'SMEMBERS' => $this->smembers((string) ($arguments[0] ?? '')),
             'EXPIRE' => $this->expire((string) ($arguments[0] ?? ''), (int) ($arguments[1] ?? 0)),
             'SCAN' => $this->scan($arguments[0] ?? '0', \is_array($arguments[1] ?? null) ? $arguments[1] : []),
+            'EVAL' => $this->evalCounterCas($arguments),
             default => $this->unserved($method),
         };
+    }
+
+    /**
+     * The counter-rollback CAS in PHP, mirroring the registry's Lua:
+     * one atomic read-compare-write over the stored JSON (an unreadable
+     * prior falls through to the overwrite, like the script's failed
+     * cjson decode). Called through the executor's Predis shape:
+     * eval($script, $numKeys, $key, ...$argv).
+     *
+     * @param list<mixed> $arguments
+     */
+    private function evalCounterCas(array $arguments): int
+    {
+        $key = (string) ($arguments[2] ?? '');
+        $argv = \array_slice($arguments, 3);
+        $ttl = (int) ($argv[0] ?? 0);
+        $json = (string) ($argv[1] ?? '');
+        $incoming = (int) ($argv[2] ?? 0);
+        $existing = $this->get($key);
+        if (\is_string($existing) && $existing !== '') {
+            $decoded = json_decode($existing, true);
+            if (\is_array($decoded) && isset($decoded['counter']) && is_numeric($decoded['counter'])
+                && $incoming < (int) $decoded['counter']) {
+                return 0;
+            }
+        }
+        $this->setex($key, $ttl, $json);
+
+        return 1;
     }
 
     /** An unmodelled call: no arm answers it, and the count shows it. */
