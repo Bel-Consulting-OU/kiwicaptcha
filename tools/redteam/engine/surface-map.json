@@ -170,6 +170,7 @@
   "corpora": [
     "protocol/decision-v1/corpus.json",
     "protocol/execution-v1.json",
+    "protocol/execution-v1/capability-matrix.json",
     "protocol/interactive-client-v1/lifecycle-vectors.json",
     "protocol/limits.json",
     "protocol/risk-v1/asn-vectors.json",
@@ -218,7 +219,8 @@
     "kiwicaptcha-svelte",
     "kiwicaptcha-verifier",
     "kiwicaptcha-vue",
-    "kiwicaptcha-wasm"
+    "kiwicaptcha-wasm",
+    "kiwicaptcha-widget-system"
   ],
   "campaigns": [
     {
