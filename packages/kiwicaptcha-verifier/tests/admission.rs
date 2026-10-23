@@ -16,8 +16,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kiwicaptcha_verifier::state::derivation_gate;
+#[cfg(feature = "redis-store")]
+use kiwicaptcha_verifier::store::{AdmissionOutcome, CapacityLimits};
 use kiwicaptcha_verifier::{
-    parse_scopes, serve_http_with, ServerOptions, SidecarConfig, SidecarState,
+    parse_scopes, serve_http_with, RecordStore, ServerOptions, SidecarConfig, SidecarState,
 };
 
 const SECRET: &str = "a-locally-generated-secret-of-48-bytes!!";
@@ -70,6 +72,10 @@ fn issue_and_solve(addr: SocketAddr, scope: &str) -> String {
     let challenge = kiwicaptcha_solver::Challenge::from_json(&wire).expect("the wire parses");
     let mut options = kiwicaptcha_solver::SolveOptions::default();
     let solution = kiwicaptcha_solver::solve(&challenge, &mut options).expect("the solve succeeds");
+    // A sha16 solve can finish in well under the record's min-duration
+    // floor on a fast core; give the server clock the floor before the
+    // caller verifies, exactly like the widget's own floor wait.
+    std::thread::sleep(Duration::from_millis(10));
     solution.token(&challenge)
 }
 
@@ -324,5 +330,404 @@ fn operation_identity_grammar_is_enforced_before_any_transition() {
     assert!(
         body.contains(r#""kiwi-code":"ok""#),
         "the record was never burned by the grammar refusals: {body}"
+    );
+}
+
+/// Issue without solving; returns the minted nonce.
+fn issue_nonce(addr: SocketAddr) -> String {
+    let (status, wire) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 200, "{wire}");
+    kiwicaptcha_solver::Challenge::from_json(&wire)
+        .expect("the wire parses")
+        .nonce
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+/// Burn a solved challenge into a consumed tombstone: bump the proof
+/// counter inside the token so verification consumes the record and
+/// commits a failing verdict (the tombstone stays live until TTL).
+fn burn(addr: SocketAddr, token: &str) {
+    let raw = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token)
+        .expect("token is standard base64");
+    let text = String::from_utf8(raw).expect("token decodes utf-8");
+    let mut parts: Vec<String> = text.split('.').map(str::to_string).collect();
+    assert_eq!(parts.len(), 4, "token shape: {text}");
+    let counter: u64 = parts[1].parse().expect("numeric counter");
+    parts[1] = (counter + 1).to_string();
+    let tampered =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, parts.join("."));
+    let (status, body) = post_json(addr, "/verify", &verify_body(&tampered, "login", None));
+    assert_eq!(status, 200, "burn verify: {body}");
+    assert!(
+        body.contains(r#""success":false"#),
+        "the bumped counter must fail verification (and burn the record): {body}"
+    );
+}
+
+/// The wedge the pruned admission closes: a store whose pending slot
+/// is held ONLY by an expired record must reopen. The old pre-check
+/// counted raw map sizes, refused forever, and never ran the insert
+/// that would prune — a self-sustaining challenge_store_full.
+#[test]
+fn expired_records_never_wedge_the_pending_ceiling() {
+    let store: Arc<dyn RecordStore> = Arc::new(kiwicaptcha_verifier::MemoryStore::new());
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+        c.max_pending = 1;
+    });
+
+    // Fill the ceiling with a live record.
+    let nonce = issue_nonce(addr);
+    let now = unix_now();
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 503, "the live record holds the ceiling: {body}");
+    assert!(body.contains("challenge_store_full"), "{body}");
+
+    // Rewrite the stored entry as already-expired (same nonce): the map
+    // now holds a record the store would reap on sight, but the raw
+    // counts still say "full".
+    let template = match store.peek(&nonce, now) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => *record,
+        other => panic!("the issued record is pending: {other:?}"),
+    };
+    let mut expired = template.clone();
+    expired.expires_at = now.saturating_sub(10);
+    store
+        .put_pending(&expired, Default::default())
+        .expect("the expired rewrite lands");
+
+    // The pruned pre-check and the atomic admission both see through
+    // the expired entry: issuance reopens (the old counts() check
+    // refused here forever).
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(
+        status, 200,
+        "a full-of-expired store must reopen, not wedge: {body}"
+    );
+
+    // …and the ceiling still binds the fresh record.
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(
+        status, 503,
+        "the fresh record holds the ceiling again: {body}"
+    );
+    assert!(body.contains("challenge_store_full"), "{body}");
+    let (pending, _) = store.live_counts(unix_now());
+    assert_eq!(pending, 1, "exactly the fresh record is pending");
+}
+
+/// The check-then-insert race: fifty issuers hitting a cap of one at
+/// the same instant. The atomic admission admits exactly one; the old
+/// count-outside-the-lock path let several through.
+#[test]
+fn fifty_concurrent_issues_admit_exactly_one_at_cap_one() {
+    const CALLERS: usize = 50;
+    let store: Arc<dyn RecordStore> = Arc::new(kiwicaptcha_verifier::MemoryStore::new());
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+        c.max_pending = 1;
+    });
+    let barrier = Arc::new(std::sync::Barrier::new(CALLERS));
+    let mut handles = Vec::with_capacity(CALLERS);
+    for _ in 0..CALLERS {
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            post_json(
+                addr,
+                "/issue",
+                r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+            )
+        }));
+    }
+    let mut admitted = 0usize;
+    let mut refused = 0usize;
+    for handle in handles {
+        let (status, body) = handle.join().expect("issuer thread");
+        match status {
+            200 => admitted += 1,
+            503 => {
+                assert!(
+                    body.contains("challenge_store_full"),
+                    "typed refusal: {body}"
+                );
+                refused += 1;
+            }
+            other => panic!("unexpected status {other}: {body}"),
+        }
+    }
+    assert_eq!(admitted, 1, "exactly one issuer wins a cap of one");
+    assert_eq!(refused, CALLERS - 1, "every loser gets the typed 503");
+    let (pending, live) = store.live_counts(unix_now());
+    assert_eq!(
+        (pending, live),
+        (1, 1),
+        "the store holds exactly one record"
+    );
+}
+
+/// The total-live ceiling under burn-and-reissue churn: every burn
+/// frees a pending slot (the record moves to consumed) but keeps the
+/// record live, so without a live bound a client grows the store to
+/// burn_rate × TTL while the pending ceiling never trips.
+#[test]
+fn burn_churn_is_bounded_by_the_total_live_ceiling() {
+    let store: Arc<dyn RecordStore> = Arc::new(kiwicaptcha_verifier::MemoryStore::new());
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+        // The pending bound alone would allow this churn: three
+        // pending slots, two live records total.
+        c.max_pending = 3;
+        c.max_live_records = 2;
+    });
+
+    let token = issue_and_solve(addr, "login");
+    burn(addr, &token);
+    let (pending, live) = store.live_counts(unix_now());
+    assert_eq!((pending, live), (0, 1), "the burn freed pending, not live");
+
+    let token = issue_and_solve(addr, "login");
+    burn(addr, &token);
+    let (pending, live) = store.live_counts(unix_now());
+    assert_eq!((pending, live), (0, 2), "both tombstones are live");
+
+    // Pending has room (0 < 3) but the total bound is reached: the
+    // refusal must be the LIVE ceiling, not the pending one.
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 503, "the live ceiling refuses the churn: {body}");
+    assert!(body.contains("challenge_store_full"), "{body}");
+    assert!(
+        body.contains("total live-challenge ceiling"),
+        "the refusal names the ceiling that fired: {body}"
+    );
+}
+
+/// The multi-node bound: two sidecar states over two independent
+/// handles on the same Redis keyspace must share ONE ceiling (the
+/// admission is a server-side transaction, not a client-side count),
+/// consumed tombstones must keep occupying the live bound, and the
+/// score-prune must reopen the ceiling once the records expire.
+#[cfg(feature = "redis-store")]
+#[test]
+fn redis_admission_ceiling_is_one_transaction_across_handles() {
+    let url = ["TEST_REDIS_URL", "RISK_REDIS_URL"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| {
+            eprintln!("skipping redis admission test: no TEST_REDIS_URL/RISK_REDIS_URL");
+            String::new()
+        });
+    if url.is_empty() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let prefix = format!("kiwi-adv-adm-{stamp:x}:");
+    let store_a: Arc<dyn RecordStore> = Arc::new(
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("handle A"),
+    );
+    let store_b: Arc<dyn RecordStore> = Arc::new(
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("handle B"),
+    );
+
+    let addr_a = spawn_with(|c| {
+        c.store = Arc::clone(&store_a);
+        c.max_pending = 1;
+        c.max_live_records = 1;
+    });
+    let nonce = issue_nonce(addr_a);
+
+    // A second state with its OWN handle on the same keyspace: the
+    // server-side admission must refuse it against handle A's record.
+    let addr_b = spawn_with(|c| {
+        c.store = Arc::clone(&store_b);
+        c.max_pending = 1;
+        c.max_live_records = 1;
+    });
+    let (status, body) = post_json(
+        addr_b,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(
+        status, 503,
+        "the ceiling is one transaction across handles: {body}"
+    );
+    assert!(body.contains("challenge_store_full"), "{body}");
+
+    // Take the record template while it is still pending, then burn
+    // through handle A: the tombstone leaves pending but keeps
+    // occupying the total-live bound (shared index).
+    let now = unix_now();
+    let template = match store_a.peek(&nonce, now) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
+        other => panic!("the issued record is pending: {other:?}"),
+    };
+    let won = store_a.consume(&nonce, now, None);
+    assert!(
+        matches!(won, kiwicaptcha_verifier::ConsumeOutcome::Won { .. }),
+        "the record consumes: {won:?}"
+    );
+    let (pending, live) = store_b.live_counts(now);
+    assert_eq!(
+        (pending, live),
+        (0, 1),
+        "handle B sees the tombstone through the shared index"
+    );
+
+    // Full of tombstones at the live bound: another admission at the
+    // real clock is refused with the live ceiling.
+    let refused = store_b.try_put_pending(
+        &template,
+        Default::default(),
+        CapacityLimits {
+            max_pending: 1,
+            max_live: 1,
+        },
+        now,
+    );
+    assert_eq!(
+        refused,
+        AdmissionOutcome::LiveFull,
+        "the tombstone occupies the live bound across handles"
+    );
+
+    // Once the tombstone's expiry score is in the past, the same
+    // admission reopens — the prune runs inside the transaction.
+    let future = now + 10_000;
+    let (pending, live) = store_a.live_counts(future);
+    assert_eq!(
+        (pending, live),
+        (0, 0),
+        "the score-prune reaps the tombstone"
+    );
+    let mut fresh = template.clone();
+    fresh.nonce = format!("adv-adm-fresh-{stamp:x}");
+    fresh.issued_at = future;
+    fresh.expires_at = future + 90;
+    let admitted = store_b.try_put_pending(
+        &fresh,
+        Default::default(),
+        CapacityLimits {
+            max_pending: 1,
+            max_live: 1,
+        },
+        future,
+    );
+    assert_eq!(
+        admitted,
+        AdmissionOutcome::Admitted,
+        "expiry reopens the shared ceiling"
+    );
+
+    // Best-effort cleanup of this test's keyspace.
+    if let Ok(mut conn) = redis::Client::open(url)
+        .expect("redis url parses")
+        .get_connection()
+    {
+        let keys = [
+            format!("{prefix}admission:pending"),
+            format!("{prefix}admission:live"),
+            format!("{prefix}{nonce}"),
+            format!("{prefix}{nonce}:smeta"),
+            format!("{prefix}{}", fresh.nonce),
+            format!("{prefix}{}:smeta", fresh.nonce),
+            format!("{prefix}{}", template.nonce),
+            format!("{prefix}{}:smeta", template.nonce),
+        ];
+        let _: redis::RedisResult<i64> = redis::cmd("UNLINK").arg(&keys).query(&mut conn);
+    }
+}
+
+/// The legacy/foreign companion shape: presentation fields stored
+/// WITHOUT the sidecar's companion MAC (an old node's smeta during a
+/// rolling upgrade, or any writer that never held the secret). The
+/// success stands — the record and its proof are authentic — but the
+/// unsigned fields are dropped, never echoed: absence of a tag is not
+/// a license to trust the values.
+#[test]
+fn unsigned_companion_fields_are_dropped_on_success() {
+    let store: Arc<dyn RecordStore> = Arc::new(kiwicaptcha_verifier::MemoryStore::new());
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+    });
+    let token = issue_and_solve(addr, "login");
+    let nonce = kiwicaptcha_solver::Challenge::from_json(
+        &post_json(
+            addr,
+            "/issue",
+            r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+        )
+        .1,
+    )
+    .expect("wire parses")
+    .nonce;
+    let _ = nonce;
+
+    // Replace the stored companion with an unsigned one carrying
+    // presentation fields (the pre-MAC sidecar shape). Take the record
+    // from the store so the challenge bytes stay identical.
+    let now = unix_now();
+    let issued_nonce = kiwicaptcha::SolutionToken::decode(&token)
+        .expect("token decodes")
+        .nonce;
+    let record = match store.peek(&issued_nonce, now) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
+        other => panic!("pending after issue: {other:?}"),
+    };
+    store
+        .put_pending(
+            &record,
+            kiwicaptcha_verifier::RecordMeta {
+                action: Some("legacy-action".to_string()),
+                cdata: Some("legacy-cdata".to_string()),
+                scope: Some("login".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("the unsigned rewrite lands");
+
+    let (status, body) = post_json(addr, "/verify", &verify_body(&token, "login", None));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        body.contains(r#""kiwi-code":"ok""#),
+        "the authentic proof still succeeds: {body}"
+    );
+    assert!(
+        !body.contains("legacy-action") && !body.contains("legacy-cdata"),
+        "unsigned companion fields must never surface on the success: {body}"
+    );
+    assert!(
+        body.contains(r#""action":null"#),
+        "the presentation slot is null, not attacker-populated: {body}"
     );
 }

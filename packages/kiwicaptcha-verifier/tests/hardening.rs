@@ -163,6 +163,10 @@ fn solve_token(wire: &str) -> String {
     let challenge = kiwicaptcha_solver::Challenge::from_json(wire).expect("the wire parses");
     let mut options = kiwicaptcha_solver::SolveOptions::default();
     let solution = kiwicaptcha_solver::solve(&challenge, &mut options).expect("the solve succeeds");
+    // A sha16 solve can finish in well under the record's min-duration
+    // floor on a fast core; give the server clock the floor before the
+    // caller verifies, exactly like the widget's own floor wait.
+    std::thread::sleep(Duration::from_millis(10));
     solution.token(&challenge)
 }
 
@@ -430,6 +434,22 @@ impl InstrumentedStore {
 impl RecordStore for InstrumentedStore {
     fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
         self.record("put_pending", || self.inner.put_pending(record, meta))
+    }
+
+    fn try_put_pending(
+        &self,
+        record: &ChallengeRecord,
+        meta: RecordMeta,
+        limits: kiwicaptcha_verifier::store::CapacityLimits,
+        now_unix: u64,
+    ) -> kiwicaptcha_verifier::store::AdmissionOutcome {
+        self.record("try_put_pending", || {
+            self.inner.try_put_pending(record, meta, limits, now_unix)
+        })
+    }
+
+    fn live_counts(&self, now_unix: u64) -> (u64, u64) {
+        self.record("live_counts", || self.inner.live_counts(now_unix))
     }
 
     fn consume(

@@ -56,8 +56,8 @@
     }
   ],
   "server_invariants": [
-    "effective_version = max(1, min(client_capability, fleet_available))",
-    "capability 0 (explicit) never yields an execution-armed challenge",
+    "if client_capability == 0 (explicit): execution never arms; effective_version is none (special-cased before any arithmetic)",
+    "otherwise effective_version = min(client_capability, fleet_available), floored at 1 for armed issuance",
     "the response's execution_version never exceeds the client's advertised capability",
     "an absent header may arm at version 1 but never above fleet_available"
   ]

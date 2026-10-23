@@ -32,6 +32,10 @@ enum Tamper {
     /// answer — the D3.10 storage-plane writer mutating the
     /// unauthenticated sidecar companion after a legitimate success.
     MetaRemoteip,
+    /// Swap the companion's presentation fields (action/cdata) on every
+    /// consume answer — the storage writer forging business metadata
+    /// on an otherwise authentic success.
+    MetaAction,
 }
 
 /// A memory store whose `commit_with_mac` is dishonest — the stand-in
@@ -50,6 +54,20 @@ impl RecordStore for TamperStore {
         self.inner.put_pending(record, meta)
     }
 
+    fn try_put_pending(
+        &self,
+        record: &kiwicaptcha::challenge::ChallengeRecord,
+        meta: RecordMeta,
+        limits: kiwicaptcha_verifier::store::CapacityLimits,
+        now_unix: u64,
+    ) -> kiwicaptcha_verifier::store::AdmissionOutcome {
+        self.inner.try_put_pending(record, meta, limits, now_unix)
+    }
+
+    fn live_counts(&self, now_unix: u64) -> (u64, u64) {
+        self.inner.live_counts(now_unix)
+    }
+
     fn consume(
         &self,
         nonce: &str,
@@ -57,26 +75,37 @@ impl RecordStore for TamperStore {
         operation_identity: Option<&str>,
     ) -> ConsumeOutcome {
         let outcome = self.inner.consume(nonce, now_unix, operation_identity);
-        if matches!(self.mode, Tamper::MetaRemoteip) {
-            // The companion is NOT authenticated: rewrite the remoteip
-            // the sidecar stored alongside the record.
-            return match outcome {
-                ConsumeOutcome::Won { record, mut meta } => {
+        let swap = |mut meta: RecordMeta| -> RecordMeta {
+            match self.mode {
+                Tamper::MetaRemoteip => {
                     meta.remoteip = Some("203.0.113.9".to_string());
-                    ConsumeOutcome::Won { record, meta }
+                    meta
                 }
+                Tamper::MetaAction => {
+                    meta.action = Some("wire_transfer".to_string());
+                    meta.cdata = Some("amount=9000".to_string());
+                    meta
+                }
+                _ => meta,
+            }
+        };
+        if matches!(self.mode, Tamper::MetaRemoteip | Tamper::MetaAction) {
+            // The companion is NOT authenticated by itself: rewrite
+            // the fields a storage writer could overwrite in place.
+            return match outcome {
+                ConsumeOutcome::Won { record, meta } => ConsumeOutcome::Won {
+                    record,
+                    meta: swap(meta),
+                },
                 ConsumeOutcome::AlreadyConsumed {
-                    mut meta,
+                    meta,
                     succeeded,
                     stored,
-                } => {
-                    meta.remoteip = Some("203.0.113.9".to_string());
-                    ConsumeOutcome::AlreadyConsumed {
-                        meta,
-                        succeeded,
-                        stored,
-                    }
-                }
+                } => ConsumeOutcome::AlreadyConsumed {
+                    meta: swap(meta),
+                    succeeded,
+                    stored,
+                },
                 other => other,
             };
         }
@@ -108,7 +137,7 @@ impl RecordStore for TamperStore {
             }
             // This mode tampers only the companion metadata: the MAC
             // seam stays honest.
-            Tamper::MetaRemoteip => {
+            Tamper::MetaRemoteip | Tamper::MetaAction => {
                 self.inner
                     .commit_with_mac(nonce, record, valid, operation_identity, mac)
             }
@@ -190,6 +219,10 @@ fn issue_and_solve(addr: SocketAddr) -> String {
     let challenge = kiwicaptcha_solver::Challenge::from_json(&wire).expect("the wire parses");
     let mut options = kiwicaptcha_solver::SolveOptions::default();
     let solution = kiwicaptcha_solver::solve(&challenge, &mut options).expect("the solve succeeds");
+    // A sha16 solve can finish in well under the record's min-duration
+    // floor on a fast core; give the server clock the floor before the
+    // caller verifies, exactly like the widget's own floor wait.
+    std::thread::sleep(Duration::from_millis(10));
     solution.token(&challenge)
 }
 
@@ -384,4 +417,79 @@ fn replay_authorization_ignores_companion_metadata_and_binds_the_record() {
         "a cross-IP retry is refused by the record's signed binding: {refused}"
     );
     assert!(!refused.contains(r#""success":true"#), "{refused}");
+}
+
+/// The storage writer forges business metadata (action/cdata) on an
+/// otherwise authentic solve: the success itself must survive — it is
+/// a legitimate solve — but the attacker-selected values must never
+/// appear on the fresh success or on the idempotent replay. The
+/// companion MAC the issuer wrote at /issue covers those fields; a
+/// swap invalidates it and the reader drops the fields instead of
+/// echoing them.
+#[test]
+fn companion_metadata_forgery_never_reaches_a_success() {
+    let addr = spawn(Some(Tamper::MetaAction));
+    let token = issue_and_solve(addr);
+
+    let (status, first) = post_json(addr, "/verify", &verify_body(&token, "op-meta-1"));
+    assert_eq!(status, 200, "{first}");
+    assert!(
+        first.contains(r#""success":true"#),
+        "the solve itself stands: {first}"
+    );
+    assert!(
+        !first.contains("wire_transfer") && !first.contains("amount=9000"),
+        "the fresh success must never carry forged companion values: {first}"
+    );
+    assert!(
+        first.contains(r#""action":null"#) && first.contains(r#""cdata":null"#),
+        "a tampered companion nulls both presentation fields: {first}"
+    );
+
+    let (status, retry) = post_json(addr, "/verify", &verify_body(&token, "op-meta-1"));
+    assert_eq!(status, 200, "{retry}");
+    assert!(
+        retry.contains(r#""success":true"#),
+        "the idempotent replay still returns the authentic stored success: {retry}"
+    );
+    assert!(
+        !retry.contains("wire_transfer") && !retry.contains("amount=9000"),
+        "the replay must never surface the forged companion values: {retry}"
+    );
+    assert!(
+        !retry.contains(r#""action""#) && !retry.contains(r#""cdata""#),
+        "a tampered companion leaves no presentation fields on the replay: {retry}"
+    );
+}
+
+/// The honest control of the forgery probe: an untampered companion
+/// with a valid MAC still echoes its presentation fields, so the fix
+/// strips unauthenticated values, never legitimate ones.
+#[test]
+fn an_authenticated_companion_still_echoes_its_fields() {
+    let addr = spawn(None);
+    let (status, wire) = post_json(
+        addr,
+        "/issue",
+        &format!(
+            r#"{{"scope":"login","remoteip":"{CLIENT_IP}","action":"checkout","cdata":"cart-9"}}"#
+        ),
+    );
+    assert_eq!(status, 200, "{wire}");
+    let challenge = kiwicaptcha_solver::Challenge::from_json(&wire).expect("the wire parses");
+    let mut options = kiwicaptcha_solver::SolveOptions::default();
+    let solution = kiwicaptcha_solver::solve(&challenge, &mut options).expect("the solve succeeds");
+    let token = solution.token(&challenge);
+
+    let (status, first) = post_json(addr, "/verify", &verify_body(&token, "op-meta-2"));
+    assert_eq!(status, 200, "{first}");
+    assert!(first.contains(r#""success":true"#), "{first}");
+    assert!(
+        first.contains(r#""action":"checkout""#),
+        "a valid companion MAC keeps the honest action on the success: {first}"
+    );
+    assert!(
+        first.contains(r#""cdata":"cart-9""#),
+        "a valid companion MAC keeps the honest cdata on the success: {first}"
+    );
 }

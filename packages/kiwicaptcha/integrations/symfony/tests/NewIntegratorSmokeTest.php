@@ -170,8 +170,8 @@ final class NewIntegratorSmokeTest extends TestCase
             // every check. The abuse-first rsw gate (3.4.1) demands the
             // time-lock trapdoor pair: the kernel fixture stages it
             // (tools/rsw-keygen output, the shared test fixture pair),
-            // so the doctor reports the pre-armed inert posture instead
-            // of failing the run.
+            // so the doctor reports the configured adaptive rung as a
+            // pass instead of failing the run.
             $dsnClient = $container->get('kiwi_captcha.redis.dsn');
             $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
             $dsnClient->hset($monitor->policyKey(), 'min_protocol_version', 4);
@@ -183,8 +183,8 @@ final class NewIntegratorSmokeTest extends TestCase
             self::assertStringContainsString('[PASS] Risk Redis', $display, 'the risk Redis (the DSN client) answers PING');
             self::assertStringContainsString('[PASS] Storage atomicity', $display);
             self::assertStringContainsString('[PASS] Protocol-v3 writer', $display, 'the confirmed v4 floor satisfies the high_abuse decoy + execution contract');
-            self::assertStringContainsString('[WARN] RSW time-lock', $display, 'the staged pair clears the abuse-first rsw gate and reports the inert pre-armed posture');
-            self::assertStringContainsString('rsw_modulus_n/rsw_lambda are configured', $display, 'the staged trapdoor pair is what satisfies the gate');
+            self::assertStringContainsString('[PASS] RSW time-lock', $display, 'the staged pair clears the abuse-first rsw gate as the configured adaptive rung');
+            self::assertStringContainsString('rsw trapdoor configured: the adaptive rsw rung issues sequential time-lock challenges', $display, 'the staged trapdoor pair is what satisfies the gate');
             // The minimal smoke kernel wires the core infrastructure the
             // DSN-built services need but does not import the step-up
             // routes or configure real delivery senders, so the doctor

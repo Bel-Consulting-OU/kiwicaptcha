@@ -98,6 +98,10 @@ fn issue_and_solve(addr: SocketAddr, bearer: &str, remoteip: &str) -> String {
     let challenge = kiwicaptcha_solver::Challenge::from_json(wire).expect("the wire parses");
     let mut options = kiwicaptcha_solver::SolveOptions::default();
     let solution = kiwicaptcha_solver::solve(&challenge, &mut options).expect("the solve succeeds");
+    // A sha16 solve can finish in well under the record's min-duration
+    // floor on a fast core; give the server clock the floor before the
+    // caller verifies, exactly like the widget's own floor wait.
+    std::thread::sleep(Duration::from_millis(10));
     solution.token(&challenge)
 }
 

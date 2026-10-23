@@ -586,6 +586,179 @@ void main() {
       expect(find.text('Failed'), findsNothing);
     });
   });
+
+  group('single terminal outcome per run', () {
+    setUp(() {
+      widget.debugHttpPostOverride = null;
+      widget.debugSolveOverride = null;
+    });
+
+    tearDown(() {
+      widget.debugHttpPostOverride = null;
+      widget.debugSolveOverride = null;
+    });
+
+    KiwiCaptcha captcha({
+      GlobalKey<widget.KiwiCaptchaState>? key,
+      void Function(String)? onVerify,
+      void Function(String)? onError,
+      void Function()? onExpire,
+    }) =>
+        KiwiCaptcha(
+          key: key,
+          endpoint: Uri.parse('https://kiwi.test/challenge'),
+          scope: 'login',
+          onVerify: onVerify ?? (_) {},
+          onError: onError,
+          onExpire: onExpire,
+        );
+
+    testWidgets('a delivered token survives the armed expiry timer', (tester) async {
+      var verified = 0;
+      var expired = 0;
+      // ttlSecs 2 arms the expiry timer at parse for ~1s (deadline =
+      // received + 2s - the 1s safety margin); the solve wins easily.
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200, body: json.encode(challengeJson(ttlSecs: 2)));
+      widget.debugSolveOverride = (challenge, isCancelled) async =>
+          const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: (_) => verified++,
+        onExpire: () => expired++,
+      )));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, 1);
+
+      // Advance well past the TTL: the timer the run armed at parse
+      // must have been stopped by the success terminalization.
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
+
+      expect(verified, 1, reason: 'onVerify must fire exactly once');
+      expect(expired, 0, reason: 'a delivered run must never expire');
+      expect(find.text('Success'), findsOneWidget);
+      expect(find.text('Expired'), findsNothing);
+    });
+
+    testWidgets('expiry wins the race and stays terminal', (tester) async {
+      var verified = 0;
+      var expired = 0;
+      final gate = Completer<KiwiSolution>();
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200, body: json.encode(challengeJson(ttlSecs: 2)));
+      widget.debugSolveOverride = (challenge, isCancelled) => gate.future;
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: (_) => verified++,
+        onExpire: () => expired++,
+      )));
+      await tester.pump();
+      expect(find.text('Working'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('Expired'), findsOneWidget);
+      expect(expired, 1);
+      expect(verified, 0);
+
+      // The late solve and any further clock advances must be no-ops.
+      gate.complete(const KiwiSolution(counter: 45, durationMs: 1, hashHex: ''));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
+
+      expect(expired, 1, reason: 'onExpire must fire exactly once');
+      expect(verified, 0);
+      expect(find.text('Expired'), findsOneWidget);
+      expect(find.text('Success'), findsNothing);
+    });
+
+    testWidgets('a failure is terminal: the armed expiry timer never fires',
+        (tester) async {
+      var errors = 0;
+      var expired = 0;
+      var verified = 0;
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200, body: json.encode(challengeJson(ttlSecs: 2)));
+      widget.debugSolveOverride =
+          (challenge, isCancelled) async => throw KiwiSolveError.malformed('boom');
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        onVerify: (_) => verified++,
+        onError: (_) => errors++,
+        onExpire: () => expired++,
+      )));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Failed'), findsOneWidget);
+      expect(errors, 1);
+
+      // The parse-armed expiry timer outlives a non-terminal failure
+      // unless the failure itself stops it.
+      await tester.pump(const Duration(seconds: 10));
+      await tester.pump();
+
+      expect(errors, 1, reason: 'onError must fire exactly once');
+      expect(expired, 0, reason: 'a failed run must never expire');
+      expect(verified, 0);
+      expect(find.text('Failed'), findsOneWidget);
+      expect(find.text('Expired'), findsNothing);
+    });
+
+    testWidgets('supersede stops the old run\'s expiry timer', (tester) async {
+      var verified = 0;
+      var expired = 0;
+      final gate = Completer<void>();
+      var solveCalls = 0;
+      widget.debugHttpPostOverride = (url, body, headers) async =>
+          widget.KiwiHttpResponse(
+              statusCode: 200, body: json.encode(challengeJson(ttlSecs: 2)));
+      widget.debugSolveOverride = (challenge, isCancelled) async {
+        solveCalls++;
+        if (solveCalls == 1) {
+          await gate.future;
+          throw const KiwiSolveError.cancelled();
+        }
+        return const KiwiSolution(counter: 45, durationMs: 1, hashHex: '');
+      };
+      final key = GlobalKey<widget.KiwiCaptchaState>();
+
+      await tester.pumpWidget(MaterialApp(home: captcha(
+        key: key,
+        onVerify: (_) => verified++,
+        onExpire: () => expired++,
+      )));
+      await tester.pump();
+      expect(find.text('Working'), findsOneWidget);
+
+      // A newer generation starts while the first solve (and its
+      // armed expiry timer) is still live.
+      key.currentState!.start();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Success'), findsOneWidget);
+      expect(verified, 1);
+
+      // Past the first run's TTL: its cancelled timer must not flip
+      // the delivered UI or emit a late onExpire.
+      await tester.pump(const Duration(seconds: 10));
+      gate.complete();
+      await tester.pump();
+      await tester.pump();
+
+      expect(verified, 1);
+      expect(expired, 0);
+      expect(find.text('Success'), findsOneWidget);
+      expect(find.text('Expired'), findsNothing);
+    });
+  });
 }
 
 extension on KiwiChallenge {

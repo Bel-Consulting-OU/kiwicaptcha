@@ -35,7 +35,10 @@ use crate::config::{
 };
 use crate::riskplane::{compose_rung, disposition_json, RiskPlane};
 use crate::server::{constant_time_eq, PoolMetrics, Request, Response, METRICS_CONTENT_TYPE};
-use crate::store::{ConsumeOutcome, FileStore, MemoryStore, PeekOutcome, RecordMeta, RecordStore};
+use crate::store::{
+    AdmissionOutcome, CapacityLimits, ConsumeOutcome, FileStore, MemoryStore, PeekOutcome,
+    RecordMeta, RecordStore,
+};
 
 /// The sidecar's counters: the verify outcomes and the risk-denied
 /// issues, for `/metrics`.
@@ -93,12 +96,21 @@ pub struct SidecarConfig {
     /// The hard live-pending-challenge ceiling (0 = no ceiling): TTL
     /// bounds record AGE, never cardinality — at R issues/s a TTL of T
     /// seconds holds about R×T live records — so an Internet-reachable
-    /// issuer needs its own bound. The in-process stores enforce it
-    /// exactly (their pending counts are O(1)); the Redis backend
-    /// reports no local pending count and leaves the ceiling to the
-    /// server's own limits and the risk plane's issuance rates, as
-    /// documented in `/doctor`.
+    /// issuer needs its own bound. Every backend enforces it inside the
+    /// atomic admission (prune → count → compare → insert as one store
+    /// transition): the in-process stores hold their state lock across
+    /// the sequence, Redis runs it as one server-side Lua transaction
+    /// shared by all nodes on the keyspace, and the expired-record
+    /// prune is part of the admission itself so a full store reopens
+    /// the moment its records expire.
     pub max_pending: u64,
+    /// The hard total-live-record ceiling (0 = no ceiling): pending
+    /// AND consumed tombstones together. The pending ceiling alone is
+    /// not a resource bound — a client can issue, burn a candidate to
+    /// move the record into consumed, and issue again, keeping pending
+    /// slots free while store cardinality grows to burn_rate × TTL.
+    /// This ceiling closes that loop under the same atomic admission.
+    pub max_live_records: u64,
 }
 
 impl SidecarConfig {
@@ -123,6 +135,7 @@ impl SidecarConfig {
             execution_version: 1,
             execution_required_version: 0,
             max_pending: crate::config::DEFAULT_MAX_PENDING_CHALLENGES,
+            max_live_records: crate::config::DEFAULT_MAX_LIVE_RECORDS,
             argon_budget_kib: ArgonSemaphore::DEFAULT_MAX_KIB,
         }
     }
@@ -321,7 +334,8 @@ pub struct SidecarState {
     execution_key: Option<String>,
     execution_version: u8,
     execution_required_version: u8,
-    max_pending: u64,
+    /// The atomic store-admission ceilings (pending and total-live).
+    capacity: CapacityLimits,
     rsw: Option<crate::config::RswTrapdoorConfig>,
     pub(crate) pool: PoolMetrics,
     metrics: Metrics,
@@ -366,7 +380,10 @@ impl SidecarState {
             execution_key: config.execution_key,
             execution_version: config.execution_version,
             execution_required_version: config.execution_required_version,
-            max_pending: config.max_pending,
+            capacity: CapacityLimits {
+                max_pending: config.max_pending,
+                max_live: config.max_live_records,
+            },
             rsw: config.rsw,
             pool: PoolMetrics::default(),
             metrics: Metrics::default(),
@@ -387,6 +404,32 @@ impl SidecarState {
                 constant_time_eq(expected.as_bytes(), presented.as_bytes())
             }
         }
+    }
+
+    /// The companion metadata as it may be USED: `action`, `cdata` and
+    /// `decision_id` survive only when their MAC verifies over this
+    /// record's challenge (the tag the issuer wrote at /issue time).
+    /// A storage writer that swaps a field invalidates the tag and the
+    /// fields are dropped — the success itself is unaffected, the
+    /// risk confirmation id just never lands, and no attacker-chosen
+    /// value can reach a response. Presentation-only by contract:
+    /// applications must not authorize on these fields.
+    fn authenticated_meta(&self, mut meta: RecordMeta, challenge: &str) -> RecordMeta {
+        let derived = kiwicaptcha::keys::DerivedKeys::from_master(&self.secret_key, None);
+        let authentic = kiwicaptcha::challenge::verify_companion_meta_mac(
+            &derived,
+            challenge,
+            meta.action.as_deref(),
+            meta.cdata.as_deref(),
+            meta.decision_id.as_deref(),
+            meta.mac.as_deref(),
+        );
+        if !authentic {
+            meta.action = None;
+            meta.cdata = None;
+            meta.decision_id = None;
+        }
+        meta
     }
 
     /// The one request handler: pure over the parsed request, so the
@@ -444,23 +487,42 @@ impl SidecarState {
 
     /// Ingest a record minted elsewhere in this process (the embedder's
     /// own issuance path): the challenge must have been minted under
-    /// this sidecar's secret.
+    /// this sidecar's secret. The store ceilings apply here too — a
+    /// saturated store refuses the ingest exactly like /issue (the
+    /// embedder then serves a challenge its verifier will answer
+    /// record_not_found, the fail-closed shape of a refused write).
     pub fn inject_record(
         &self,
         record: ChallengeRecord,
         action: Option<String>,
         cdata: Option<String>,
     ) {
-        let _ = self.store.put_pending(
+        let _ = self.store.try_put_pending(
             &record,
-            RecordMeta {
-                action,
-                cdata,
-                decision_id: None,
-                operation_identity: None,
-                remoteip: None,
-                scope: None,
+            {
+                let mut meta = RecordMeta {
+                    action,
+                    cdata,
+                    decision_id: None,
+                    operation_identity: None,
+                    remoteip: None,
+                    scope: None,
+                    mac: None,
+                };
+                // Bind the ingest's presentation fields to the challenge
+                // exactly like /issue does (see companion_meta_mac).
+                let derived = kiwicaptcha::keys::DerivedKeys::from_master(&self.secret_key, None);
+                meta.mac = Some(kiwicaptcha::challenge::companion_meta_mac(
+                    &derived,
+                    &record.challenge,
+                    meta.action.as_deref(),
+                    meta.cdata.as_deref(),
+                    meta.decision_id.as_deref(),
+                ));
+                meta
             },
+            self.capacity,
+            record.issued_at,
         );
     }
 
@@ -537,18 +599,37 @@ impl SidecarState {
                 Some(binding)
             }
         };
-        // The live-pending ceiling: TTL bounds age, never cardinality.
-        // Refused before any risk work or store write; the record set
-        // is untouched and the client may retry shortly.
-        if self.max_pending > 0 && self.store.counts().0 as u64 >= self.max_pending {
-            return self.error_response(
-                503,
-                "challenge_store_full",
-                &format!(
-                    "the live pending-challenge ceiling of {} is reached; retry shortly or raise --max-pending-challenges",
-                    self.max_pending
-                ),
-            );
+        // The store ceilings as a PRUNED fast pre-check, before any
+        // risk work or store write: `live_counts` drops expired
+        // records within the call, so a store whose pending slots are
+        // all held by expired records reopens here instead of
+        // refusing forever (the count said full, the insert that
+        // would prune never ran). The pre-check is advisory — the
+        // authoritative bound is the atomic `try_put_pending` below,
+        // which owns the count/insert race across every backend.
+        if self.capacity.max_pending > 0 || self.capacity.max_live > 0 {
+            let now_unix = now_epoch_micros() / 1_000_000;
+            let (pending, live) = self.store.live_counts(now_unix);
+            if self.capacity.max_pending > 0 && pending >= self.capacity.max_pending {
+                return self.error_response(
+                    503,
+                    "challenge_store_full",
+                    &format!(
+                        "the live pending-challenge ceiling of {} is reached; retry shortly or raise --max-pending-challenges",
+                        self.capacity.max_pending
+                    ),
+                );
+            }
+            if self.capacity.max_live > 0 && live >= self.capacity.max_live {
+                return self.error_response(
+                    503,
+                    "challenge_store_full",
+                    &format!(
+                        "the total live-challenge ceiling of {} is reached; retry shortly or raise --max-live-records",
+                        self.capacity.max_live
+                    ),
+                );
+            }
         }
         let remoteip = match self.resolve_remoteip(parsed.remoteip.as_deref()) {
             Ok(ip) => ip,
@@ -670,16 +751,59 @@ impl SidecarState {
                 Err(e) => return self.error_response(500, "issue_failed", &e.to_string()),
             },
         };
-        let meta = RecordMeta {
+        let mut meta = RecordMeta {
             action: parsed.action.clone(),
             cdata: parsed.cdata.clone(),
             decision_id,
             operation_identity: None,
             remoteip: Some(remoteip.clone()),
             scope: Some(scope.to_string()),
+            mac: None,
         };
-        if let Err(e) = self.store.put_pending(&issued.record, meta) {
-            return self.error_response(500, "store_write_failed", &e);
+        // Bind the presentation fields to this challenge: the reader
+        // drops them whenever the stored tag does not verify, so a
+        // storage writer can never make the success assert a swapped
+        // action or cdata (sidecar-local contract; smeta is never
+        // written by PHP).
+        let derived = kiwicaptcha::keys::DerivedKeys::from_master(&self.secret_key, None);
+        meta.mac = Some(kiwicaptcha::challenge::companion_meta_mac(
+            &derived,
+            &issued.record.challenge,
+            meta.action.as_deref(),
+            meta.cdata.as_deref(),
+            meta.decision_id.as_deref(),
+        ));
+        // The authoritative admission: prune, both ceiling checks and
+        // the insert are ONE store transition (the fast pre-check
+        // above can race concurrent issuers; this cannot).
+        match self
+            .store
+            .try_put_pending(&issued.record, meta, self.capacity, now_unix)
+        {
+            AdmissionOutcome::Admitted => {}
+            AdmissionOutcome::PendingFull => {
+                return self.error_response(
+                    503,
+                    "challenge_store_full",
+                    &format!(
+                        "the live pending-challenge ceiling of {} is reached; retry shortly or raise --max-pending-challenges",
+                        self.capacity.max_pending
+                    ),
+                );
+            }
+            AdmissionOutcome::LiveFull => {
+                return self.error_response(
+                    503,
+                    "challenge_store_full",
+                    &format!(
+                        "the total live-challenge ceiling of {} is reached; retry shortly or raise --max-live-records",
+                        self.capacity.max_live
+                    ),
+                );
+            }
+            AdmissionOutcome::Failed(e) => {
+                return self.error_response(500, "store_write_failed", &e);
+            }
         }
         // The provider challenge wire (the camelCase PoW key set the
         // native solver parses), plus the additive profile and risk
@@ -930,6 +1054,11 @@ impl SidecarState {
                             false
                         };
                         if scope_ok && binding_ok && ip_ok {
+                            // A replay echoes nothing the companion MAC
+                            // does not cover: swap action/cdata in the
+                            // store and the success still returns, but
+                            // never with the attacker's values on it.
+                            let meta = self.authenticated_meta(meta, s.record.challenge.as_str());
                             self.metrics.record_outcome("ok");
                             let mut wire = serde_json::json!({
                                 "success": true,
@@ -969,6 +1098,12 @@ impl SidecarState {
                 return self.provider_response(&["internal-error"], Some("storage_unavailable"));
             }
         };
+        // The companion presentation fields authenticate against this
+        // record's challenge before anything reads them (the risk
+        // confirmation id and the success echo below): a tampered or
+        // legacy-unsigned companion contributes nothing instead of
+        // surfacing storage-writer-chosen metadata.
+        let meta = self.authenticated_meta(meta, &record.challenge);
         // The test-only derivation gate (never installed in production):
         // a derivation blocked here sits after the consume transition
         // above has returned and before the commit below runs, holding

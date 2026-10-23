@@ -37,7 +37,10 @@ comparison is constant-time (`hash_equals`).
 - `action` and `cdata` are bound at challenge issuance and returned from
   trusted server-side metadata after successful verification. A
   verification request can never supply them. A request-supplied action is
-  ignored; the server-bound metadata is what is returned.
+  ignored; the server-bound metadata is what is returned. They are
+  presentation-only context for the UI or analytics: never authorize a
+  transaction on them. The authoritative scope and request binding ride
+  the authenticated challenge record, never these echoed fields.
 
 ## Response semantics
 

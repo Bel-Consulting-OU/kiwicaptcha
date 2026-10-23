@@ -81,6 +81,12 @@ Options:
                    refuses with challenge_store_full above it
                    (env KIWI_MAX_PENDING_CHALLENGES; default 100000,
                    0 = no ceiling)
+  --max-live-records N
+                   hard total-live-record ceiling (pending plus
+                   consumed tombstones); issuance refuses with
+                   challenge_store_full above it (env
+                   KIWI_MAX_LIVE_RECORDS; default 400000,
+                   0 = no ceiling)
   --argon-budget-kib N
                    the in-flight memory-hard derivation budget in
                    KiB, metered per record m_kib (env
@@ -123,6 +129,7 @@ struct Args {
     execution_version: Option<String>,
     execution_required_version: Option<String>,
     max_pending: Option<String>,
+    max_live_records: Option<String>,
     argon_budget_kib: Option<String>,
 }
 
@@ -149,6 +156,7 @@ fn parse_args() -> Result<Args, String> {
         execution_version: None,
         execution_required_version: None,
         max_pending: None,
+        max_live_records: None,
         argon_budget_kib: None,
     };
     let mut raw = std::env::args().skip(1);
@@ -223,6 +231,9 @@ fn parse_args() -> Result<Args, String> {
             "--max-pending-challenges" => {
                 args.max_pending =
                     Some(raw.next().ok_or("--max-pending-challenges needs a value")?);
+            }
+            "--max-live-records" => {
+                args.max_live_records = Some(raw.next().ok_or("--max-live-records needs a value")?);
             }
             "--argon-budget-kib" => {
                 args.argon_budget_kib = Some(raw.next().ok_or("--argon-budget-kib needs a value")?);
@@ -491,6 +502,30 @@ fn main() -> ExitCode {
         }
         None => kiwicaptcha_verifier::config::DEFAULT_MAX_PENDING_CHALLENGES,
     };
+    // The total-live-record ceiling (pending + consumed tombstones):
+    // 0 (or unset → the shipped default) disables/enables it.
+    let max_live_records = match env_or(args.max_live_records, "KIWI_MAX_LIVE_RECORDS") {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(v) => v,
+            _ => {
+                eprintln!(
+                    "kiwicaptcha-verifier: --max-live-records must be a non-negative integer"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+        None => kiwicaptcha_verifier::config::DEFAULT_MAX_LIVE_RECORDS,
+    };
+    // Both ceilings on, but the total bound below the pending bound:
+    // the pending ceiling could never admit anything (every pending
+    // record is also a live record), so the configuration is refused
+    // at startup instead of serving an issuer that always 503s.
+    if max_pending > 0 && max_live_records > 0 && max_live_records < max_pending {
+        eprintln!(
+            "kiwicaptcha-verifier: --max-live-records ({max_live_records}) must be 0 (off) or at least --max-pending-challenges ({max_pending})"
+        );
+        return ExitCode::FAILURE;
+    }
     // The Argon admission budget (KiB): one default 4 x 64 MiB.
     let argon_budget_kib = match env_or(args.argon_budget_kib, "KIWI_ARGON_BUDGET_KIB") {
         Some(raw) => match raw.parse::<u64>() {
@@ -519,6 +554,7 @@ fn main() -> ExitCode {
         execution_version,
         execution_required_version,
         max_pending,
+        max_live_records,
         argon_budget_kib,
     };
     let rungs: Vec<String> = config

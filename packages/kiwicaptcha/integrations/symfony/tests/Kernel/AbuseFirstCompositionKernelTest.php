@@ -227,15 +227,16 @@ final class AbuseFirstCompositionKernelTest extends TestCase
         self::assertSame(200, $status);
         self::assertSame('sha256', $held['algorithm'], 'the issued challenge stays the sha family, never argon');
 
-        // The contrast: a non-spam mark keeps the legacy maximum-rung
-        // floor. The quarantine selection is the spam kind's treatment,
-        // never a general mark softening.
+        // The contrast: a non-spam mark keeps the Rsw mark floor (the
+        // MarksEscalation rule shipped with RSW-as-a-risk-action). The
+        // quarantine selection is the spam kind's treatment, never a
+        // general mark softening.
         $other = self::freshSession();
         $otherPseudonym = self::identityFactory()->sessionId($other);
         $store->writeMark('session', $otherPseudonym, 'fraudConfirmed', (int) floor(microtime(true) * 1000));
         $floored = self::gateway()->preIssue('login', '10.2.2.3', $other);
         self::assertFalse($floored->quarantined);
-        self::assertSame(RiskAction::Argon64, $floored->action, 'a non-spam mark keeps the maximum-rung floor');
+        self::assertSame(RiskAction::Rsw, $floored->action, 'a non-spam mark keeps the Rsw floor');
         self::assertContains(\KiwiCaptcha\Risk\RiskReason::MarkedIdentity->value, array_map(static fn ($r): string => $r->value, $floored->reasons));
     }
 
@@ -415,7 +416,7 @@ final class AbuseFirstCompositionKernelTest extends TestCase
         // The quarantine disposition of the marked identity and the
         // corroborated denial are both in the exporter's counters, by
         // canonical scope and action label.
-        self::assertMatchesRegularExpression('/kiwicaptcha_risk_decisions_total\{scope="10",action="argon64",band="\d+"\} [1-9]/', $body, 'the non-spam mark floor is counted');
+        self::assertMatchesRegularExpression('/kiwicaptcha_risk_decisions_total\{scope="10",action="rsw",band="\d+"\} [1-9]/', $body, 'the non-spam mark floor is counted');
         self::assertMatchesRegularExpression('/kiwicaptcha_risk_decisions_total\{scope="10",action="deny",band="\d+"\} [1-9]/', $body, 'the corroborated denial is counted');
         // The priced probe decisions of the storm leg live in that
         // kernel's own exporter (asserted there); this exporter counts

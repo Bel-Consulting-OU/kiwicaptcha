@@ -115,7 +115,8 @@ pub use server::{
 };
 pub use state::{default_profile, issue_wire_of, open_store, SidecarConfig, SidecarState};
 pub use store::{
-    ConsumeOutcome, FileStore, MemoryStore, PeekOutcome, RecordMeta, RecordStore, StoredSuccess,
+    AdmissionOutcome, CapacityLimits, ConsumeOutcome, FileStore, MemoryStore, PeekOutcome,
+    RecordMeta, RecordStore, StoredSuccess,
 };
 
 #[cfg(test)]

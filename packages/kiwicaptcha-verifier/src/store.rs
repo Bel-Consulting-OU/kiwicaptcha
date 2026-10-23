@@ -54,6 +54,15 @@ pub struct RecordMeta {
     /// (a different scope is a plain already_consumed).
     #[serde(default)]
     pub scope: Option<String>,
+    /// The companion MAC over `action`, `cdata` and `decision_id`
+    /// bound to the record's challenge (core `companion_meta_mac`).
+    /// The presentation fields are non-authoritative WITHOUT it: the
+    /// reader drops them (and the risk confirmation id) instead of
+    /// echoing values a storage writer may have swapped. smeta is a
+    /// sidecar-only key, so an old node's unsigned companion heals
+    /// within the record's own TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 /// The authenticated material of a stored success: what an idempotent
@@ -124,12 +133,85 @@ pub enum ConsumeOutcome {
     Unavailable(String),
 }
 
+/// The admission ceilings [`RecordStore::try_put_pending`] enforces
+/// atomically. `0` disables that ceiling. The pending ceiling bounds
+/// not-yet-redeemed challenges; the live ceiling bounds total live
+/// record cardinality (pending + consumed tombstones), so a
+/// burn-and-reissue churn that vacates pending slots still cannot grow
+/// the store past its total bound until records expire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapacityLimits {
+    pub max_pending: u64,
+    pub max_live: u64,
+}
+
+impl CapacityLimits {
+    /// No ceilings: admission only prunes and inserts.
+    pub const UNLIMITED: CapacityLimits = CapacityLimits {
+        max_pending: 0,
+        max_live: 0,
+    };
+}
+
+/// The result of one atomic admission attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdmissionOutcome {
+    /// The record is stored and counted under both ceilings.
+    Admitted,
+    /// The pending ceiling is already at its bound after the prune.
+    PendingFull,
+    /// The total-live ceiling is already at its bound after the prune.
+    LiveFull,
+    /// The backend failed before or during the write: the state is
+    /// not known to carry the record (Redis rolls its reservation
+    /// back; the in-process stores never reach the insert).
+    Failed(String),
+}
+
 /// The storage seam. Implementations must make [`RecordStore::consume`]
 /// atomic: exactly one caller observes [`ConsumeOutcome::Won`] per
 /// record, which is the one-shot bound (one derivation per nonce).
 pub trait RecordStore: Send + Sync {
     /// Insert a freshly issued record as pending.
-    fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String>;
+    fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
+        match self.try_put_pending(record, meta, CapacityLimits::UNLIMITED, record.issued_at) {
+            AdmissionOutcome::Admitted => Ok(()),
+            AdmissionOutcome::Failed(e) => Err(e),
+            // UNLIMITED limits can never report a ceiling.
+            AdmissionOutcome::PendingFull | AdmissionOutcome::LiveFull => {
+                Err("unlimited admission reported a capacity ceiling".to_string())
+            }
+        }
+    }
+
+    /// The atomic admission: prune, count, compare the ceilings and
+    /// insert as ONE store transition, never a check-then-insert pair
+    /// (two concurrent issuers must not both slip under a cap of one,
+    /// and expired records must be reaped by the admission itself so a
+    /// full store can reopen without redemption traffic). In-memory
+    /// backends hold their state lock across the whole sequence; Redis
+    /// runs the prune/count/compare/reserve half as one server-side Lua
+    /// transaction shared by every node on the keyspace, so the
+    /// ceiling holds across processes. `now_unix` is the admission
+    /// clock the prune uses. [`AdmissionOutcome::Failed`] carries a
+    /// backend error: the capacity ceilings themselves are never
+    /// errors.
+    fn try_put_pending(
+        &self,
+        record: &ChallengeRecord,
+        meta: RecordMeta,
+        limits: CapacityLimits,
+        now_unix: u64,
+    ) -> AdmissionOutcome;
+
+    /// The pruned live counts at `now_unix`: `(pending, pending +
+    /// consumed)`. Expired records are dropped within the call — the
+    /// issue path's fast pre-check must never count a record the
+    /// store would already reap (that is the self-sustaining wedge: a
+    /// full-of-expired store whose pre-check refuses forever because
+    /// the insert that would prune never runs). The pre-check is an
+    /// optimization; [`RecordStore::try_put_pending`] owns the bound.
+    fn live_counts(&self, now_unix: u64) -> (u64, u64);
 
     /// The atomic pending to consumed transition. Expired records are
     /// pruned within the same call.
@@ -172,7 +254,10 @@ pub trait RecordStore: Send + Sync {
         self.commit(nonce, record, valid);
     }
 
-    /// The live record counts: pending, consumed (for `/metrics`).
+    /// The map sizes: pending, consumed (for `/metrics`). Advisory and
+    /// unpruned — capacity decisions use the pruned
+    /// [`RecordStore::live_counts`] and the atomic
+    /// [`RecordStore::try_put_pending`], never this number.
     fn counts(&self) -> (usize, usize);
 
     /// A short label for `/doctor` and the startup line.
@@ -351,18 +436,44 @@ impl Default for MemoryStore {
 }
 
 impl RecordStore for MemoryStore {
-    fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
+    fn try_put_pending(
+        &self,
+        record: &ChallengeRecord,
+        meta: RecordMeta,
+        limits: CapacityLimits,
+        now_unix: u64,
+    ) -> AdmissionOutcome {
         let mut state = self.state.lock().expect("store lock");
         // Issue-time prune: a TTL-backed store must not depend on
         // redemption traffic to reap issuance traffic. An attacker
         // that issues and never verifies would otherwise retain
-        // expired challenges indefinitely.
-        state.prune_expired(record.issued_at);
+        // expired challenges indefinitely — and, worse, the prune
+        // must run inside the admission itself or a store that is
+        // full of expired records can never admit again (the count
+        // says full, the insert that would prune never runs).
+        state.prune_expired(now_unix);
+        if limits.max_pending > 0 && state.pending.len() as u64 >= limits.max_pending {
+            return AdmissionOutcome::PendingFull;
+        }
+        if limits.max_live > 0
+            && (state.pending.len() + state.consumed.len()) as u64 >= limits.max_live
+        {
+            return AdmissionOutcome::LiveFull;
+        }
         state
             .pending
             .insert(record.nonce.clone(), Entry::new(record.clone(), meta));
         state.note_expiry(record.expires_at);
-        Ok(())
+        AdmissionOutcome::Admitted
+    }
+
+    fn live_counts(&self, now_unix: u64) -> (u64, u64) {
+        let mut state = self.state.lock().expect("store lock");
+        state.prune_expired(now_unix);
+        (
+            state.pending.len() as u64,
+            (state.pending.len() + state.consumed.len()) as u64,
+        )
     }
 
     fn consume(
@@ -610,22 +721,52 @@ impl FileStore {
 }
 
 impl RecordStore for FileStore {
-    fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
+    fn try_put_pending(
+        &self,
+        record: &ChallengeRecord,
+        meta: RecordMeta,
+        limits: CapacityLimits,
+        now_unix: u64,
+    ) -> AdmissionOutcome {
         let mut state = self.state.lock().expect("store lock");
         // Issue-time prune: a TTL-backed store must not depend on
-        // redemption traffic to reap issuance traffic.
-        let dropped = state.prune_expired(record.issued_at);
+        // redemption traffic to reap issuance traffic, and the prune
+        // runs inside the admission so a full-of-expired store
+        // reopens on the next admission instead of wedging.
+        let dropped = state.prune_expired(now_unix);
         for gone in &dropped {
             self.remove_persisted(gone);
+        }
+        if limits.max_pending > 0 && state.pending.len() as u64 >= limits.max_pending {
+            return AdmissionOutcome::PendingFull;
+        }
+        if limits.max_live > 0
+            && (state.pending.len() + state.consumed.len()) as u64 >= limits.max_live
+        {
+            return AdmissionOutcome::LiveFull;
         }
         let entry = Entry::new(record.clone(), meta);
         // Write through before the map insert: a crash then leaves the
         // record either absent (the client re-issues) or pending. The
         // reverse order could lose a record the map already served.
-        self.persist(STATE_PENDING, &entry)?;
+        if let Err(e) = self.persist(STATE_PENDING, &entry) {
+            return AdmissionOutcome::Failed(e);
+        }
         state.pending.insert(record.nonce.clone(), entry);
         state.note_expiry(record.expires_at);
-        Ok(())
+        AdmissionOutcome::Admitted
+    }
+
+    fn live_counts(&self, now_unix: u64) -> (u64, u64) {
+        let mut state = self.state.lock().expect("store lock");
+        let dropped = state.prune_expired(now_unix);
+        for gone in &dropped {
+            self.remove_persisted(gone);
+        }
+        (
+            state.pending.len() as u64,
+            (state.pending.len() + state.consumed.len()) as u64,
+        )
     }
 
     fn consume(
@@ -864,11 +1005,26 @@ impl RedisStore {
             .map(|(_, m)| m.clone())
             .unwrap_or_default()
     }
-}
 
-#[cfg(feature = "redis-store")]
-impl RecordStore for RedisStore {
-    fn put_pending(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
+    /// The capacity index keys. Sibling namespaces of the record keys
+    /// (`{prefix}{nonce}`); a nonce is base64 and can never contain
+    /// the `:` that follows the prefix here, so no record can collide
+    /// with an index. The pending index drops a member on consume; the
+    /// live index keeps consumed tombstones until their score (the
+    /// record's `expires_at`) is pruned, so total cardinality stays
+    /// bounded under burn-and-reissue churn.
+    fn pending_idx_key(&self) -> String {
+        format!("{}admission:pending", self.meta_prefix)
+    }
+
+    fn live_idx_key(&self) -> String {
+        format!("{}admission:live", self.meta_prefix)
+    }
+
+    /// The record write itself (metadata companion, local cache,
+    /// core store), without any capacity accounting — the callers
+    /// either reserved capacity first or pass unlimited limits.
+    fn put_inner(&self, record: &ChallengeRecord, meta: RecordMeta) -> Result<(), String> {
         // Multi-node: write the provider metadata to the TTL-bound
         // companion key BEFORE the local cache, so a token minted on
         // this node carries its action/cdata to any peer.
@@ -903,6 +1059,127 @@ impl RecordStore for RedisStore {
             .map_err(|e| format!("redis store failed: {e}"))
     }
 
+    /// Release a reservation the record write could not honor. Best
+    /// effort: a lost rollback leaves index members whose score
+    /// expires with the record, which only over-counts until the
+    /// admission prune — never under-counts.
+    fn drop_reservation(&self, nonce: &str) {
+        if let Ok(mut conn) = self.meta_client.get_connection() {
+            let _: redis::RedisResult<i64> = redis::cmd("ZREM")
+                .arg(self.pending_idx_key())
+                .arg(nonce)
+                .query(&mut conn);
+            let _: redis::RedisResult<i64> = redis::cmd("ZREM")
+                .arg(self.live_idx_key())
+                .arg(nonce)
+                .query(&mut conn);
+        }
+    }
+}
+
+/// One server-side admission transaction, shared by every node on the
+/// keyspace: prune both capacity indexes by expiry score, compare the
+/// ceilings, and reserve the new record's members. Redis serializes
+/// script executions, so two concurrent issuers can never both observe
+/// a count below the cap the way a client-side check-then-insert can.
+/// Replies: 0 admitted, 1 pending ceiling, 2 live ceiling.
+#[cfg(feature = "redis-store")]
+const ADMISSION_LUA: &str = r#"
+local now = tonumber(ARGV[1])
+local max_pending = tonumber(ARGV[2])
+local max_live = tonumber(ARGV[3])
+local nonce = ARGV[4]
+local score = ARGV[5]
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
+if max_pending > 0 and redis.call('ZCARD', KEYS[1]) >= max_pending then
+  return 1
+end
+if max_live > 0 and redis.call('ZCARD', KEYS[2]) >= max_live then
+  return 2
+end
+redis.call('ZADD', KEYS[1], score, nonce)
+redis.call('ZADD', KEYS[2], score, nonce)
+return 0
+"#;
+
+/// Pruned live counts as one script: the same score-prune as the
+/// admission, then both cardinalities. The issue path's fast
+/// pre-check runs this instead of a raw card, so expired records can
+/// never wedge the pre-check into refusing a store that is already
+/// within its ceilings again.
+#[cfg(feature = "redis-store")]
+const LIVE_COUNTS_LUA: &str = r#"
+local now = tonumber(ARGV[1])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now)
+return {redis.call('ZCARD', KEYS[1]), redis.call('ZCARD', KEYS[2])}
+"#;
+
+#[cfg(feature = "redis-store")]
+impl RecordStore for RedisStore {
+    fn try_put_pending(
+        &self,
+        record: &ChallengeRecord,
+        meta: RecordMeta,
+        limits: CapacityLimits,
+        now_unix: u64,
+    ) -> AdmissionOutcome {
+        if limits == CapacityLimits::UNLIMITED {
+            return match self.put_inner(record, meta) {
+                Ok(()) => AdmissionOutcome::Admitted,
+                Err(e) => AdmissionOutcome::Failed(e),
+            };
+        }
+        let reserved: redis::RedisResult<i64> = {
+            let mut conn = match self.meta_client.get_connection() {
+                Ok(conn) => conn,
+                Err(e) => return AdmissionOutcome::Failed(format!("redis admission: {e}")),
+            };
+            redis::Script::new(ADMISSION_LUA)
+                .key(self.pending_idx_key())
+                .key(self.live_idx_key())
+                .arg(now_unix)
+                .arg(limits.max_pending)
+                .arg(limits.max_live)
+                .arg(&record.nonce)
+                .arg(record.expires_at)
+                .invoke(&mut conn)
+        };
+        match reserved {
+            Ok(0) => {
+                if let Err(e) = self.put_inner(record, meta) {
+                    self.drop_reservation(&record.nonce);
+                    return AdmissionOutcome::Failed(e);
+                }
+                AdmissionOutcome::Admitted
+            }
+            Ok(1) => AdmissionOutcome::PendingFull,
+            Ok(2) => AdmissionOutcome::LiveFull,
+            Ok(other) => AdmissionOutcome::Failed(format!("admission script replied {other}")),
+            Err(e) => AdmissionOutcome::Failed(format!("redis admission failed: {e}")),
+        }
+    }
+
+    fn live_counts(&self, now_unix: u64) -> (u64, u64) {
+        let reply: redis::RedisResult<Vec<i64>> = (|| {
+            let mut conn = self.meta_client.get_connection()?;
+            redis::Script::new(LIVE_COUNTS_LUA)
+                .key(self.pending_idx_key())
+                .key(self.live_idx_key())
+                .arg(now_unix)
+                .invoke(&mut conn)
+        })();
+        match reply {
+            Ok(v) if v.len() == 2 => ((v[0].max(0) as u64), (v[1].max(0) as u64)),
+            // A backend error makes the fast pre-check read as an
+            // empty store: this number is advisory only — the atomic
+            // admission script owns the ceiling and fails closed
+            // (Failed) when the backend cannot serve it.
+            _ => (0, 0),
+        }
+    }
+
     fn consume(
         &self,
         nonce: &str,
@@ -913,10 +1190,25 @@ impl RecordStore for RedisStore {
         // action/cdata/scope/remoteip here. The local map is only a
         // single-node cache.
         let meta = self.read_meta(nonce);
-        match self
+        let consumed = self
             .inner
-            .consume_with_operation_identity(nonce, operation_identity)
-        {
+            .consume_with_operation_identity(nonce, operation_identity);
+        // The record is no longer pending once the transition landed
+        // (or the nonce never existed): drop its pending-index member
+        // so the shared ceiling counts real pending work. The live
+        // index keeps the member — a consumed tombstone still occupies
+        // store cardinality until its expiry score is pruned. A
+        // backend error leaves the member alone: over-counting until
+        // the TTL prune is the safe direction, never a bypass.
+        if !consumed.is_err() {
+            if let Ok(mut conn) = self.meta_client.get_connection() {
+                let _: redis::RedisResult<i64> = redis::cmd("ZREM")
+                    .arg(self.pending_idx_key())
+                    .arg(nonce)
+                    .query(&mut conn);
+            }
+        }
+        match consumed {
             Ok(Some(consumed)) => {
                 // The envelope's recorded operation identity is the
                 // authority for both branches: it is what the core's
@@ -1128,6 +1420,7 @@ mod tests {
                         operation_identity: None,
                         remoteip: None,
                         scope: None,
+                        mac: None,
                     },
                 )
                 .unwrap();
@@ -1523,6 +1816,7 @@ mod redis_store_tests {
             operation_identity: None,
             remoteip: None,
             scope: None,
+            mac: None,
         };
 
         // Store (pending) through the sidecar's Redis backend.
