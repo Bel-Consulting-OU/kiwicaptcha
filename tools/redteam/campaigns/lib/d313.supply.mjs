@@ -130,6 +130,23 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
     // the measurement, so a leg that cannot reach it fails rather than
     // silently measuring the wrong thing.
     let controlled = false;
+    // Evidence of what the page itself was served for the guarded asset.
+    // The integrity attribute on the driver script means an executed
+    // solve is proof the served driver was untampered, so the verdict
+    // must key on this response, not on a separate probe fetch (a probe
+    // can race ahead of the script load and observe a different body).
+    let driverResponseTampered = null;
+    page.on("response", async (response) => {
+        try {
+            if (!/\/kiwi-captcha\/assets\/driver\./.test(response.url())) {
+                return;
+            }
+            const body = await response.text();
+            driverResponseTampered = body.includes("tampered by the MITM service worker");
+        } catch {
+            driverResponseTampered = null;
+        }
+    });
     for (let round = 0; round < 4 && !controlled; round++) {
         // The page's own registration signal, then activation, then a
         // reload so the active worker intercepts. Each round re-checks
@@ -165,10 +182,9 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
     if (controlled) {
         try {
             intercepting = await page.evaluate(async () => {
-                const entry = performance
-                    .getEntriesByType("resource")
-                    .map((e) => e.name)
-                    .find((n) => n.includes("/kiwi-captcha/assets/"));
+                const entries = performance.getEntriesByType("resource").map((e) => e.name);
+                const entry = entries.find((n) => /\/kiwi-captcha\/assets\/driver\./.test(n))
+                    ?? entries.find((n) => n.includes("/kiwi-captcha/assets/"));
                 if (!entry) {
                     return false;
                 }
@@ -178,19 +194,24 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
             });
         } catch {}
     }
-    if (!controlled || !intercepting) {
-        // No tampered byte ever reached the page, so the leg proved
-        // nothing. It reports that as its own outcome rather than a
-        // solve or a refusal, and the driver's verdict treats it as not
-        // satisfied.
+    const guardedTampered = driverResponseTampered === true;
+    if (!controlled || !intercepting || !guardedTampered) {
+        // The tampered guarded driver never provably reached the page,
+        // so the leg proved nothing. It reports that as its own outcome
+        // rather than a solve or a refusal, and the driver's verdict
+        // treats it as not satisfied: a leg that cannot serve its tamper
+        // must never pass quietly.
         results.sw_mitm = {
             service_worker: "not-controlling",
             solved_despite_mitm: null,
             widget_state: null,
             console_blocked: [],
-            inconclusive: controlled
-                ? "the service worker controlled the page but rewrote no asset, so the tamper was never served"
-                : "the service worker never controlled the page, so no tampered response was ever served",
+            driver_response_tampered: driverResponseTampered,
+            inconclusive: !controlled
+                ? "the service worker never controlled the page, so no tampered response was ever served"
+                : !intercepting
+                    ? "the service worker controlled the page but rewrote no asset, so the tamper was never served"
+                    : "the probe saw a rewritten asset but the page's own driver response was untampered (cache or timing race), so the guarded tamper was never served to the widget",
         };
         await context.close();
     } else {
@@ -209,6 +230,7 @@ const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] }
             solved_despite_mitm: solved,
             widget_state: badge,
             console_blocked: blocked.slice(0, 4),
+            driver_response_tampered: guardedTampered,
         };
         await context.close();
     }

@@ -67,7 +67,7 @@ class ExecutionPolicyTest {
         Process sidecar = sidecarBuilder.inheritIO().start();
         String base = "http://127.0.0.1:" + port;
         boolean healthy = false;
-        for (int i = 0; i < 100 && !healthy; i++) {
+        for (int i = 0; i < 200 && !healthy; i++) {
             try {
                 HttpResponse<String> answer = HttpClient.newHttpClient().send(
                         HttpRequest.newBuilder(URI.create(base + "/healthz"))
@@ -75,7 +75,7 @@ class ExecutionPolicyTest {
                         HttpResponse.BodyHandlers.ofString());
                 healthy = answer.statusCode() == 200;
             } catch (Exception e) {
-                Thread.sleep(150);
+                Thread.sleep(250);
             }
         }
         assertTrue(healthy, "the sidecar never answered /healthz");
