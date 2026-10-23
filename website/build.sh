@@ -18,7 +18,10 @@ cp "$design_fonts"/OFL-*.txt "$static_dir/fonts/"
 cp "$resources"/kiwi-mark.svg "$resources"/kiwi-lockup.svg "$resources"/kiwi-stacked.svg \
    "$resources"/kiwi-wordmark.svg "$resources"/kiwi-app-icon.svg "$resources"/kiwi-shield.svg \
    "$static_dir/brand/"
-cp "$resources"/widget.css "$static_dir/css/widget.css"
+cp "$repo_root/packages/kiwicaptcha-widget-system/widget-system.css" "$static_dir/css/widget-system.css"
+
+echo "== generate specimens from the pure renderers"
+node "$repo_root/packages/kiwicaptcha-widget-system/build-specimens.mjs"
 cp "$repo_root/lettering.json" "$static_dir/brand/lettering.json" 2>/dev/null ||
   cp "$repo_root/packages/kiwicaptcha/design/lettering.json" "$static_dir/brand/lettering.json"
 cp "$repo_root/KiwiCaptcha_Website.pdf" "$static_dir/pdf/"

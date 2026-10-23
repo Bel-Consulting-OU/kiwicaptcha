@@ -1,0 +1,374 @@
+/* KiwiCaptcha widget-system.css — the shared skin of the edition-6 widget
+   system (KiwiCaptcha_Visual_Identity.pdf, 23 October 2026). The compact
+   status surface and the factor task form share primitives and tokens;
+   they keep deliberately different task density. Both recolor the exact
+   Spiral Lock through currentColor; the component fetches no font.
+
+   Host typography is intentional: the approved website already self-hosts
+   Alegreya Sans, so its Medium face is the widget voice without a new
+   request. A different host supplies its family through --kc-font-family;
+   system fonts remain a tested fallback.
+
+   Embedding boundary: border-box, min-inline-size: 0 and scoped selectors
+   (or Shadow DOM). Margin, line-height, border and focus are explicit so
+   arbitrary global styles cannot leak into the component. */
+
+.kc-status,
+.kc-factor {
+  /* material */
+  --kc-paper: #F3F5EF;
+  --kc-surface: #FBFCF8;
+  --kc-ink: #08110C;
+  --kc-forest: #143D2B;
+  --kc-teal: #9EDFD4;
+  --kc-accent: #145C52;
+  --kc-muted: #53655A;
+  --kc-quiet: #65746A;
+  --kc-border: #D7DFD4;
+  --kc-control-border: #718176;
+  --kc-fill: transparent;
+  --kc-placeholder: #718176;
+  --kc-error: #9D3131;
+  --kc-error-fill: #EFE2DF;
+  --kc-primary-bg: #143D2B;
+  --kc-primary-fg: #FBFCF8;
+  --kc-muted-bg: #53655A;
+  --kc-muted-fg: #FBFCF8;
+  --kc-mark: #143D2B;
+  --kc-warning: #9D3131;
+  --kc-check: #143D2B;
+  --kc-close: #08110C;
+
+  /* geometry */
+  --kc-radius: 12px;
+  --kc-control-radius: 6px;
+  --kc-mark-size: 32px;
+  --kc-icon-size: 20px;
+  --kc-gutter: 14px;
+  --kc-hit: 44px;
+
+  /* type */
+  --kc-font-family: "Alegreya Sans", "Segoe UI", system-ui, sans-serif;
+  --kc-title-size: 20px;
+  --kc-title-line: 24px;
+  --kc-copy-size: 15px;
+  --kc-copy-line: 20px;
+  --kc-attribution-size: 12px;
+  --kc-attribution-line: 16px;
+
+  box-sizing: border-box;
+  border: 1px solid var(--kc-border);
+  border-radius: var(--kc-radius);
+  background: var(--kc-surface);
+  color: var(--kc-ink);
+  font-family: var(--kc-font-family);
+  font-weight: 500;
+  margin: 0;
+  min-inline-size: 0;
+  text-align: start;
+}
+.kc-status *,
+.kc-factor * { box-sizing: border-box; margin: 0; }
+
+.kc-theme-dark.kc-status,
+.kc-theme-dark.kc-factor {
+  --kc-surface: #102219;
+  --kc-ink: #F3F5EF;
+  --kc-muted: #92AA99;
+  --kc-quiet: #92AA99;
+  --kc-border: #344B3C;
+  --kc-control-border: #92AA99;
+  --kc-fill: transparent;
+  --kc-placeholder: #92AA99;
+  --kc-error: #F2A6A0;
+  --kc-error-fill: #273C2F;
+  --kc-primary-bg: #B3E2CB;
+  --kc-primary-fg: #102219;
+  --kc-muted-bg: #344B3C;
+  --kc-muted-fg: #B3E2CB;
+  --kc-mark: #B3E2CB;
+  --kc-warning: #F2A6A0;
+  --kc-check: #B3E2CB;
+  --kc-close: #F3F5EF;
+  --kc-accent: #B3E2CB;
+  border-color: #273C2F;
+}
+
+.kc-text-2x {
+  --kc-title-size: 40px;
+  --kc-title-line: 48px;
+  --kc-copy-size: 30px;
+  --kc-copy-line: 40px;
+  --kc-attribution-size: 24px;
+  --kc-attribution-line: 32px;
+}
+
+/* ── shared type primitives ─────────────────────────────────────── */
+.kc-title {
+  font-size: var(--kc-title-size);
+  line-height: var(--kc-title-line);
+  font-weight: 500;
+  color: var(--kc-ink);
+}
+.kc-explanation {
+  font-size: var(--kc-copy-size);
+  line-height: var(--kc-copy-line);
+  font-weight: 400;
+  color: var(--kc-muted);
+  margin-block-start: 5px;
+}
+.kc-attribution {
+  font-size: var(--kc-attribution-size);
+  line-height: var(--kc-attribution-line);
+  font-weight: 400;
+  color: var(--kc-quiet);
+}
+
+/* ── compact status surface (section 03) ────────────────────────── */
+.kc-status {
+  inline-size: 352px;
+  max-inline-size: 100%;
+  padding-block: 20px;
+  padding-inline: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kc-w240 { inline-size: 240px; }
+.kc-w280 { inline-size: 280px; }
+.kc-w320 { inline-size: 320px; }
+.kc-w352 { inline-size: 352px; }
+
+.kc-status-main {
+  display: grid;
+  grid-template-columns: var(--kc-mark-size) minmax(0, 1fr) var(--kc-icon-size);
+  column-gap: var(--kc-gutter);
+  align-items: start;
+}
+.kc-mark { color: var(--kc-mark); flex: none; display: block; }
+.kc-copy { min-inline-size: 0; }
+/* The flexible text column prevents ellipses and clipping: long translated
+   words wrap anywhere rather than spilling out of a narrow container. */
+.kc-copy p, .kc-heading, .kc-factor > .kc-explanation, .kc-caption,
+.kc-label, .kc-field-error, .kc-action, .kc-utility, .kc-primary {
+  overflow-wrap: anywhere;
+}
+.kc-state-icon {
+  inline-size: var(--kc-icon-size);
+  block-size: var(--kc-icon-size);
+  color: var(--kc-check);
+}
+.kc-state-icon--warning { color: var(--kc-warning); }
+.kc-state-icon .kc-icon { display: block; }
+
+.kc-status-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kc-gutter);
+  min-block-size: var(--kc-attribution-line);
+}
+.kc-status-foot:has(.kc-action) { min-block-size: var(--kc-hit); }
+
+/* recovery: 44 px target, text action, capability-driven */
+.kc-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: var(--kc-hit);
+  padding-inline: 0;
+  padding-block: 10px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  font-size: calc(var(--kc-title-size) * 0.8);
+  line-height: 1.4;
+  color: var(--kc-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+/* ── factor task form (section 06) ──────────────────────────────── */
+.kc-factor {
+  inline-size: 384px;
+  max-inline-size: 100%;
+  padding-block: 24px 20px;
+  padding-inline: 28px;
+  display: flex;
+  flex-direction: column;
+}
+.kc-fw240 { inline-size: 240px; }
+.kc-fw320 { inline-size: 320px; }
+.kc-fw384 { inline-size: 384px; }
+
+.kc-text-2x.kc-factor {
+  --kc-title-size: 56px;
+  --kc-title-line: 60px;
+  --kc-copy-size: 32px;
+  --kc-copy-line: 44px;
+}
+
+.kc-factor-head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-block-size: 26px;
+}
+.kc-mark--task { inline-size: 26px; block-size: 26px; }
+.kc-caption {
+  flex: 1;
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--kc-muted);
+}
+.kc-text-2x .kc-caption { font-size: 26px; line-height: 32px; }
+
+.kc-close {
+  position: absolute;
+  inset-block-start: -9px;
+  inset-inline-end: -12px;
+  inline-size: var(--kc-hit);
+  block-size: var(--kc-hit);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--kc-close);
+  cursor: pointer;
+}
+
+.kc-heading {
+  font-size: 28px;
+  line-height: 30px;
+  /* the design specimens set the 28 px heading with slight tight tracking */
+  letter-spacing: -0.017em;
+  font-weight: 500;
+  color: var(--kc-ink);
+  margin-block-start: 24px;
+}
+.kc-factor > .kc-explanation {
+  font-size: 16px;
+  line-height: 22px;
+  margin-block-start: 10px;
+}
+
+.kc-field { margin-block-start: 24px; }
+.kc-label {
+  display: block;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--kc-ink);
+}
+.kc-input {
+  display: block;
+  inline-size: 100%;
+  min-inline-size: 0;
+  margin-block-start: 8px;
+  block-size: 48px;
+  padding-block: 11px;
+  padding-inline: 12px;
+  border: 1px solid var(--kc-control-border);
+  border-radius: var(--kc-control-radius);
+  background: var(--kc-fill);
+  color: var(--kc-ink);
+  font: inherit;
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 24px;
+}
+.kc-input::placeholder { color: var(--kc-placeholder); opacity: 1; }
+.kc-input--code { font-size: 18px; }
+.kc-input[aria-invalid="true"] {
+  border-color: var(--kc-error);
+  background: var(--kc-error-fill);
+}
+.kc-field-error {
+  margin-block-start: 8px;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 400;
+  color: var(--kc-error);
+}
+
+/* one clear task: full-width primary, 48 px, 17/24 centered label */
+.kc-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 100%;
+  min-block-size: 48px;
+  margin-block-start: 24px;
+  padding-block: 12px;
+  padding-inline: 16px;
+  border: 0;
+  border-radius: var(--kc-control-radius);
+  background: var(--kc-primary-bg);
+  color: var(--kc-primary-fg);
+  font: inherit;
+  font-weight: 500;
+  font-size: 17px;
+  line-height: 24px;
+  cursor: pointer;
+}
+.kc-primary:disabled {
+  background: var(--kc-muted-bg);
+  color: var(--kc-muted-fg);
+  cursor: default;
+}
+
+/* utilities: 44 px text targets; no competing outline */
+.kc-utilities {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--kc-gutter);
+  margin-block-start: 8px;
+}
+.kc-utility {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: var(--kc-hit);
+  padding-inline: 0;
+  padding-block: 10px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 500;
+  font-size: 15px;
+  line-height: 20px;
+  color: var(--kc-accent);
+  cursor: pointer;
+}
+.kc-utility:disabled { color: var(--kc-quiet); cursor: default; }
+.kc-factor > .kc-attribution {
+  align-self: flex-end;
+  margin-block-start: 16px;
+}
+
+/* ── interaction discipline ─────────────────────────────────────── */
+.kc-action:focus-visible,
+.kc-close:focus-visible,
+.kc-primary:focus-visible,
+.kc-utility:focus-visible,
+.kc-input:focus-visible {
+  outline: 2px solid var(--kc-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kc-status *, .kc-factor * { transition: none !important; animation: none !important; }
+}
+
+@media (forced-colors: active) {
+  .kc-status, .kc-factor { border: 1px solid CanvasText; }
+  .kc-primary { border: 1px solid CanvasText; }
+  .kc-action, .kc-utility { text-decoration: underline; }
+}

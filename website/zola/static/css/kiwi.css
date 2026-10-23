@@ -14,6 +14,13 @@
 @font-face {
   font-family: "Alegreya Sans";
   font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/alegreyasans-500-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Alegreya Sans";
+  font-style: normal;
   font-weight: 700;
   font-display: swap;
   src: url("/fonts/alegreyasans-700-latin.woff2") format("woff2");
@@ -404,17 +411,8 @@ a { color: inherit; }
   margin: 30px 0 8px;
   max-width: none;
 }
-.spec-grid .kiwi-specimen { max-width: 352px; }
 .spec-item .mono-caption { margin-top: 12px; }
 
-/* The production widget stylesheet expects a light or dark host;
-   the site pins the light theme for the static specimens. */
-.kiwi-specimen {
-  --kiwi-bg: #ffffff;
-  --kiwi-text: #08110C;
-  --kiwi-text-muted: #5D625F;
-  color-scheme: light;
-}
 
 /* ── Identity board (brand page) ───────────────────────────── */
 .board {
@@ -484,7 +482,6 @@ a { color: inherit; }
   align-items: center;
   flex-wrap: wrap;
 }
-.board-widget .kiwi-container { max-width: 300px; }
 .board-widget-note { color: var(--paper); font-size: 16px; max-width: 15em; margin: 0; }
 .board-foot-row {
   display: flex;
@@ -589,11 +586,6 @@ a { color: inherit; }
 }
 
 /* ── Global specimen sizing and palette classes ───────────────── */
-.specimen--w240 { max-width: 240px; }
-.specimen--w300 { max-width: 300px; }
-.specimen--w352 { max-width: 352px; }
-.specimen--scale-2 { --kiwi-font-scale: 2; }
-
 .swatch--ink { background: var(--ink); }
 .swatch--forest { background: var(--forest); }
 .swatch--paper { background: var(--paper); }

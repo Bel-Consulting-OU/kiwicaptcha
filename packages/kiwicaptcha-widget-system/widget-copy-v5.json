@@ -1,0 +1,1090 @@
+{
+  "schema": "kiwicaptcha.widget-copy/5",
+  "edition": "edition 6 / 23 October 2026",
+  "status": "proposed translations; native-language review is a release task before release",
+  "source": "KiwiCaptcha_Visual_Identity.pdf sections 07-10 (factor sequence) and 12 (resilient layout)",
+  "note": "Original runtime packs remain unchanged in demo-locales.js, locales.js and the original kit. English strings are canonical and match widget-states.json and the factor specimens exactly.",
+  "interpolation": "code_copy interpolates {email}; hosts must keep interpolated values in bdi and escaped.",
+  "packs": {
+    "en": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Ready when needed",
+          "explanation": "Starts with your request.",
+          "action": null
+        },
+        "idle": {
+          "title": "Ready to retry",
+          "explanation": "Start a fresh check.",
+          "action": "Try again"
+        },
+        "connecting": {
+          "title": "Connecting",
+          "explanation": "Getting the check ready.",
+          "action": null
+        },
+        "solving": {
+          "title": "Checking your request",
+          "explanation": "Working in the background.",
+          "action": null
+        },
+        "done": {
+          "title": "Check complete",
+          "explanation": "You can continue.",
+          "action": null
+        },
+        "failed": {
+          "title": "Check interrupted",
+          "explanation": "Try again to continue.",
+          "action": "Try again"
+        },
+        "expired": {
+          "title": "Check expired",
+          "explanation": "Your form has been kept.",
+          "action": "Try again"
+        },
+        "worker-unavailable": {
+          "title": "Couldn't start the check",
+          "explanation": "Try again, or contact the site.",
+          "action": "Try again"
+        },
+        "execution-unavailable": {
+          "title": "Couldn't finish the check",
+          "explanation": "Try again, or contact the site.",
+          "action": "Try again"
+        },
+        "solver-mismatch": {
+          "title": "Update needed",
+          "explanation": "Reload to update the check.",
+          "action": "Reload"
+        }
+      },
+      "factor": {
+        "caption": "Email confirmation",
+        "close": "Close",
+        "requested": {
+          "title": "One more check",
+          "copy": "Confirm your email to continue.",
+          "primary": "Continue"
+        },
+        "address": {
+          "title": "Confirm your email",
+          "copy": "We'll send you a six-digit code.",
+          "label": "Email address",
+          "placeholder": "you@example.com",
+          "primary": "Send code"
+        },
+        "sending": {
+          "primary": "Sending…"
+        },
+        "delivery_error": {
+          "message": "We couldn't send the code. Try again.",
+          "primary": "Send code"
+        },
+        "code": {
+          "title": "Check your inbox",
+          "copy": "Enter the code sent to {email}.",
+          "label": "Verification code",
+          "primary": "Verify code"
+        },
+        "code_error": {
+          "message": "That code didn't match. Try again.",
+          "primary": "Verify code"
+        },
+        "expired": {
+          "message": "This code expired. Request a new one.",
+          "primary": "Get a new code"
+        },
+        "rate_limited": {
+          "message": "Too many attempts. Please wait before trying again.",
+          "primary": "Please wait"
+        },
+        "service_unavailable": {
+          "title": "Check unavailable",
+          "copy": "Try again, or contact the site if this continues.",
+          "primary": "Try again"
+        },
+        "response": {
+          "title": "Check complete",
+          "copy": "Return to the application to continue.",
+          "primary": "Continue"
+        },
+        "utility_change_email": "Change email",
+        "utility_resend": "Resend code"
+      }
+    },
+    "de": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Bereit, wenn nötig",
+          "explanation": "Startet mit Ihrer Anfrage.",
+          "action": null
+        },
+        "idle": {
+          "title": "Bereit zur Wiederholung",
+          "explanation": "Starten Sie eine neue Prüfung.",
+          "action": "Erneut"
+        },
+        "connecting": {
+          "title": "Verbindung",
+          "explanation": "Die Prüfung wird vorbereitet.",
+          "action": null
+        },
+        "solving": {
+          "title": "Ihre Anfrage wird geprüft",
+          "explanation": "Arbeitet im Hintergrund.",
+          "action": null
+        },
+        "done": {
+          "title": "Prüfung abgeschlossen",
+          "explanation": "Sie können fortfahren.",
+          "action": null
+        },
+        "failed": {
+          "title": "Prüfung unterbrochen",
+          "explanation": "Versuchen Sie es erneut, um fortzufahren.",
+          "action": "Erneut"
+        },
+        "expired": {
+          "title": "Prüfung abgelaufen",
+          "explanation": "Ihr Formular wurde behalten.",
+          "action": "Erneut"
+        },
+        "worker-unavailable": {
+          "title": "Prüfung konnte nicht starten",
+          "explanation": "Versuchen Sie es erneut oder kontaktieren Sie die Website.",
+          "action": "Erneut"
+        },
+        "execution-unavailable": {
+          "title": "Prüfung konnte nicht enden",
+          "explanation": "Versuchen Sie es erneut oder kontaktieren Sie die Website.",
+          "action": "Erneut"
+        },
+        "solver-mismatch": {
+          "title": "Aktualisierung nötig",
+          "explanation": "Laden Sie neu, um die Prüfung zu aktualisieren.",
+          "action": "Neu laden"
+        }
+      },
+      "factor": {
+        "caption": "E-Mail-Bestätigung",
+        "close": "Schließen",
+        "requested": {
+          "title": "Noch eine Prüfung",
+          "copy": "Bestätigen Sie Ihre E-Mail-Adresse, um fortzufahren.",
+          "primary": "Weiter"
+        },
+        "address": {
+          "title": "E-Mail-Adresse bestätigen",
+          "copy": "Wir senden Ihnen einen sechsstelligen Code.",
+          "label": "E-Mail-Adresse",
+          "placeholder": "sie@beispiel.com",
+          "primary": "Code senden"
+        },
+        "sending": {
+          "primary": "Wird gesendet…"
+        },
+        "delivery_error": {
+          "message": "Der Code konnte nicht gesendet werden. Versuchen Sie es erneut.",
+          "primary": "Code senden"
+        },
+        "code": {
+          "title": "Posteingang prüfen",
+          "copy": "Geben Sie den an {email} gesendeten Code ein.",
+          "label": "Bestätigungscode",
+          "primary": "Code bestätigen"
+        },
+        "code_error": {
+          "message": "Dieser Code hat nicht gestimmt. Versuchen Sie es erneut.",
+          "primary": "Code bestätigen"
+        },
+        "expired": {
+          "message": "Dieser Code ist abgelaufen. Fordern Sie einen neuen an.",
+          "primary": "Neuen Code anfordern"
+        },
+        "rate_limited": {
+          "message": "Zu viele Versuche. Bitte warten Sie, bevor Sie es erneut versuchen.",
+          "primary": "Bitte warten"
+        },
+        "service_unavailable": {
+          "title": "Prüfung nicht verfügbar",
+          "copy": "Versuchen Sie es erneut, oder kontaktieren Sie die Website, falls dies weitergeht.",
+          "primary": "Erneut versuchen"
+        },
+        "response": {
+          "title": "Prüfung abgeschlossen",
+          "copy": "Kehren Sie zur Anwendung zurück, um fortzufahren.",
+          "primary": "Weiter"
+        },
+        "utility_change_email": "E-Mail-Adresse ändern",
+        "utility_resend": "Code erneut senden"
+      }
+    },
+    "fr": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Prêt si nécessaire",
+          "explanation": "Commence avec votre demande.",
+          "action": null
+        },
+        "idle": {
+          "title": "Prêt à réessayer",
+          "explanation": "Lancez une nouvelle vérification.",
+          "action": "Réessayer"
+        },
+        "connecting": {
+          "title": "Connexion",
+          "explanation": "Préparation de la vérification.",
+          "action": null
+        },
+        "solving": {
+          "title": "Vérification de votre demande",
+          "explanation": "Traitement en arrière-plan.",
+          "action": null
+        },
+        "done": {
+          "title": "Vérification terminée",
+          "explanation": "Vous pouvez continuer.",
+          "action": null
+        },
+        "failed": {
+          "title": "Vérification interrompue",
+          "explanation": "Réessayez pour continuer.",
+          "action": "Réessayer"
+        },
+        "expired": {
+          "title": "Vérification expirée",
+          "explanation": "Votre formulaire a été conservé.",
+          "action": "Réessayer"
+        },
+        "worker-unavailable": {
+          "title": "Impossible de lancer la vérification",
+          "explanation": "Réessayez, ou contactez le site.",
+          "action": "Réessayer"
+        },
+        "execution-unavailable": {
+          "title": "Impossible de terminer la vérification",
+          "explanation": "Réessayez, ou contactez le site.",
+          "action": "Réessayer"
+        },
+        "solver-mismatch": {
+          "title": "Mise à jour nécessaire",
+          "explanation": "Rechargez pour mettre à jour la vérification.",
+          "action": "Recharger"
+        }
+      },
+      "factor": {
+        "caption": "Confirmation de l'e-mail",
+        "close": "Fermer",
+        "requested": {
+          "title": "Une vérification de plus",
+          "copy": "Confirmez votre e-mail pour continuer.",
+          "primary": "Continuer"
+        },
+        "address": {
+          "title": "Confirmez votre e-mail",
+          "copy": "Nous vous enverrons un code à six chiffres.",
+          "label": "Adresse e-mail",
+          "placeholder": "vous@exemple.com",
+          "primary": "Envoyer le code"
+        },
+        "sending": {
+          "primary": "Envoi…"
+        },
+        "delivery_error": {
+          "message": "Nous n'avons pas pu envoyer le code. Réessayez.",
+          "primary": "Envoyer le code"
+        },
+        "code": {
+          "title": "Vérifiez votre boîte de réception",
+          "copy": "Saisissez le code envoyé à {email}.",
+          "label": "Code de vérification",
+          "primary": "Vérifier le code"
+        },
+        "code_error": {
+          "message": "Ce code ne correspond pas. Réessayez.",
+          "primary": "Vérifier le code"
+        },
+        "expired": {
+          "message": "Ce code a expiré. Demandez-en un nouveau.",
+          "primary": "Obtenir un nouveau code"
+        },
+        "rate_limited": {
+          "message": "Trop de tentatives. Veuillez patienter avant de réessayer.",
+          "primary": "Veuillez patienter"
+        },
+        "service_unavailable": {
+          "title": "Vérification indisponible",
+          "copy": "Réessayez, ou contactez le site si cela continue.",
+          "primary": "Réessayer"
+        },
+        "response": {
+          "title": "Vérification terminée",
+          "copy": "Revenez à l'application pour continuer.",
+          "primary": "Continuer"
+        },
+        "utility_change_email": "Changer d'e-mail",
+        "utility_resend": "Renvoyer le code"
+      }
+    },
+    "es": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Listo cuando haga falta",
+          "explanation": "Empieza con tu solicitud.",
+          "action": null
+        },
+        "idle": {
+          "title": "Listo para reintentar",
+          "explanation": "Inicia una comprobación nueva.",
+          "action": "Reintentar"
+        },
+        "connecting": {
+          "title": "Conectando",
+          "explanation": "Preparando la comprobación.",
+          "action": null
+        },
+        "solving": {
+          "title": "Comprobando tu solicitud",
+          "explanation": "Trabajando en segundo plano.",
+          "action": null
+        },
+        "done": {
+          "title": "Comprobación completada",
+          "explanation": "Puedes continuar.",
+          "action": null
+        },
+        "failed": {
+          "title": "Comprobación interrumpida",
+          "explanation": "Reintenta para continuar.",
+          "action": "Reintentar"
+        },
+        "expired": {
+          "title": "Comprobación caducada",
+          "explanation": "Tu formulario se ha conservado.",
+          "action": "Reintentar"
+        },
+        "worker-unavailable": {
+          "title": "No se pudo iniciar la comprobación",
+          "explanation": "Reintenta, o contacta con el sitio.",
+          "action": "Reintentar"
+        },
+        "execution-unavailable": {
+          "title": "No se pudo terminar la comprobación",
+          "explanation": "Reintenta, o contacta con el sitio.",
+          "action": "Reintentar"
+        },
+        "solver-mismatch": {
+          "title": "Actualización necesaria",
+          "explanation": "Recarga para actualizar la comprobación.",
+          "action": "Recargar"
+        }
+      },
+      "factor": {
+        "caption": "Confirmación del correo",
+        "close": "Cerrar",
+        "requested": {
+          "title": "Una comprobación más",
+          "copy": "Confirma tu correo para continuar.",
+          "primary": "Continuar"
+        },
+        "address": {
+          "title": "Confirma tu correo",
+          "copy": "Te enviaremos un código de seis dígitos.",
+          "label": "Correo electrónico",
+          "placeholder": "tu@ejemplo.com",
+          "primary": "Enviar código"
+        },
+        "sending": {
+          "primary": "Enviando…"
+        },
+        "delivery_error": {
+          "message": "No pudimos enviar el código. Inténtalo de nuevo.",
+          "primary": "Enviar código"
+        },
+        "code": {
+          "title": "Revisa tu bandeja",
+          "copy": "Introduce el código enviado a {email}.",
+          "label": "Código de verificación",
+          "primary": "Verificar código"
+        },
+        "code_error": {
+          "message": "Ese código no coincide. Inténtalo de nuevo.",
+          "primary": "Verificar código"
+        },
+        "expired": {
+          "message": "Este código caducó. Pide uno nuevo.",
+          "primary": "Obtener un código nuevo"
+        },
+        "rate_limited": {
+          "message": "Demasiados intentos. Espera antes de volver a probar.",
+          "primary": "Espera, por favor"
+        },
+        "service_unavailable": {
+          "title": "Comprobación no disponible",
+          "copy": "Inténtalo de nuevo, o contacta con el sitio si esto continúa.",
+          "primary": "Reintentar"
+        },
+        "response": {
+          "title": "Comprobación completada",
+          "copy": "Vuelve a la aplicación para continuar.",
+          "primary": "Continuar"
+        },
+        "utility_change_email": "Cambiar de correo",
+        "utility_resend": "Reenviar código"
+      }
+    },
+    "it": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Pronto quando serve",
+          "explanation": "Inizia con la tua richiesta.",
+          "action": null
+        },
+        "idle": {
+          "title": "Pronto a riprovare",
+          "explanation": "Avvia un nuovo controllo.",
+          "action": "Riprova"
+        },
+        "connecting": {
+          "title": "Connessione",
+          "explanation": "Preparazione del controllo.",
+          "action": null
+        },
+        "solving": {
+          "title": "Controllo della tua richiesta",
+          "explanation": "Lavoro in corso.",
+          "action": null
+        },
+        "done": {
+          "title": "Controllo completato",
+          "explanation": "Puoi continuare.",
+          "action": null
+        },
+        "failed": {
+          "title": "Controllo interrotto",
+          "explanation": "Riprova per continuare.",
+          "action": "Riprova"
+        },
+        "expired": {
+          "title": "Controllo scaduto",
+          "explanation": "Il modulo è stato conservato.",
+          "action": "Riprova"
+        },
+        "worker-unavailable": {
+          "title": "Impossibile avviare il controllo",
+          "explanation": "Riprova, o contatta il sito.",
+          "action": "Riprova"
+        },
+        "execution-unavailable": {
+          "title": "Impossibile terminare il controllo",
+          "explanation": "Riprova, o contatta il sito.",
+          "action": "Riprova"
+        },
+        "solver-mismatch": {
+          "title": "Aggiornamento necessario",
+          "explanation": "Ricarica per aggiornare il controllo.",
+          "action": "Ricarica"
+        }
+      },
+      "factor": {
+        "caption": "Conferma dell'e-mail",
+        "close": "Chiudi",
+        "requested": {
+          "title": "Un controllo in più",
+          "copy": "Conferma la tua e-mail per continuare.",
+          "primary": "Continua"
+        },
+        "address": {
+          "title": "Conferma la tua e-mail",
+          "copy": "Ti invieremo un codice di sei cifre.",
+          "label": "Indirizzo e-mail",
+          "placeholder": "tu@esempio.com",
+          "primary": "Invia codice"
+        },
+        "sending": {
+          "primary": "Invio…"
+        },
+        "delivery_error": {
+          "message": "Non siamo riusciti a inviare il codice. Riprova.",
+          "primary": "Invia codice"
+        },
+        "code": {
+          "title": "Controlla la posta",
+          "copy": "Inserisci il codice inviato a {email}.",
+          "label": "Codice di verifica",
+          "primary": "Verifica codice"
+        },
+        "code_error": {
+          "message": "Quel codice non corrisponde. Riprova.",
+          "primary": "Verifica codice"
+        },
+        "expired": {
+          "message": "Questo codice è scaduto. Richiedine uno nuovo.",
+          "primary": "Ottieni un nuovo codice"
+        },
+        "rate_limited": {
+          "message": "Troppi tentativi. Attendi prima di riprovare.",
+          "primary": "Attendi, per favore"
+        },
+        "service_unavailable": {
+          "title": "Controllo non disponibile",
+          "copy": "Riprova, o contatta il sito se continua.",
+          "primary": "Riprova"
+        },
+        "response": {
+          "title": "Controllo completato",
+          "copy": "Torna all'applicazione per continuare.",
+          "primary": "Continua"
+        },
+        "utility_change_email": "Cambia e-mail",
+        "utility_resend": "Invia di nuovo il codice"
+      }
+    },
+    "nl": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Klaar wanneer nodig",
+          "explanation": "Begint met je verzoek.",
+          "action": null
+        },
+        "idle": {
+          "title": "Klaar om opnieuw te proberen",
+          "explanation": "Start een nieuwe controle.",
+          "action": "Opnieuw"
+        },
+        "connecting": {
+          "title": "Verbinden",
+          "explanation": "De controle wordt klaargezet.",
+          "action": null
+        },
+        "solving": {
+          "title": "Je verzoek wordt gecontroleerd",
+          "explanation": "Werkt op de achtergrond.",
+          "action": null
+        },
+        "done": {
+          "title": "Controle voltooid",
+          "explanation": "Je kunt doorgaan.",
+          "action": null
+        },
+        "failed": {
+          "title": "Controle onderbroken",
+          "explanation": "Probeer opnieuw om door te gaan.",
+          "action": "Opnieuw"
+        },
+        "expired": {
+          "title": "Controle verlopen",
+          "explanation": "Je formulier is bewaard.",
+          "action": "Opnieuw"
+        },
+        "worker-unavailable": {
+          "title": "Controle kon niet starten",
+          "explanation": "Probeer opnieuw, of neem contact op met de site.",
+          "action": "Opnieuw"
+        },
+        "execution-unavailable": {
+          "title": "Controle kon niet eindigen",
+          "explanation": "Probeer opnieuw, of neem contact op met de site.",
+          "action": "Opnieuw"
+        },
+        "solver-mismatch": {
+          "title": "Update nodig",
+          "explanation": "Laad opnieuw om de controle te updaten.",
+          "action": "Herladen"
+        }
+      },
+      "factor": {
+        "caption": "E-mailbevestiging",
+        "close": "Sluiten",
+        "requested": {
+          "title": "Nog één controle",
+          "copy": "Bevestig je e-mail om door te gaan.",
+          "primary": "Doorgaan"
+        },
+        "address": {
+          "title": "Bevestig je e-mail",
+          "copy": "We sturen je een code van zes cijfers.",
+          "label": "E-mailadres",
+          "placeholder": "jij@voorbeeld.com",
+          "primary": "Code versturen"
+        },
+        "sending": {
+          "primary": "Versturen…"
+        },
+        "delivery_error": {
+          "message": "We konden de code niet versturen. Probeer opnieuw.",
+          "primary": "Code versturen"
+        },
+        "code": {
+          "title": "Controleer je inbox",
+          "copy": "Voer de code in die naar {email} is gestuurd.",
+          "label": "Verificatiecode",
+          "primary": "Code verifiëren"
+        },
+        "code_error": {
+          "message": "Die code klopt niet. Probeer opnieuw.",
+          "primary": "Code verifiëren"
+        },
+        "expired": {
+          "message": "Deze code is verlopen. Vraag een nieuwe aan.",
+          "primary": "Nieuwe code krijgen"
+        },
+        "rate_limited": {
+          "message": "Te veel pogingen. Wacht even voordat je opnieuw probeert.",
+          "primary": "Even wachten"
+        },
+        "service_unavailable": {
+          "title": "Controle niet beschikbaar",
+          "copy": "Probeer opnieuw, of neem contact op met de site als dit doorgaat.",
+          "primary": "Opnieuw proberen"
+        },
+        "response": {
+          "title": "Controle voltooid",
+          "copy": "Ga terug naar de applicatie om door te gaan.",
+          "primary": "Doorgaan"
+        },
+        "utility_change_email": "E-mail wijzigen",
+        "utility_resend": "Code opnieuw versturen"
+      }
+    },
+    "pl": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Gotowy, gdy potrzeba",
+          "explanation": "Zaczyna się od Twojego żądania.",
+          "action": null
+        },
+        "idle": {
+          "title": "Gotowy do ponowienia",
+          "explanation": "Rozpocznij nową kontrolę.",
+          "action": "Ponów"
+        },
+        "connecting": {
+          "title": "Łączenie",
+          "explanation": "Przygotowywanie kontroli.",
+          "action": null
+        },
+        "solving": {
+          "title": "Sprawdzamy Twoje żądanie",
+          "explanation": "Praca w tle.",
+          "action": null
+        },
+        "done": {
+          "title": "Kontrola zakończona",
+          "explanation": "Możesz kontynuować.",
+          "action": null
+        },
+        "failed": {
+          "title": "Kontrola przerwana",
+          "explanation": "Spróbuj ponownie, aby kontynuować.",
+          "action": "Ponów"
+        },
+        "expired": {
+          "title": "Kontrola wygasła",
+          "explanation": "Twój formularz został zachowany.",
+          "action": "Ponów"
+        },
+        "worker-unavailable": {
+          "title": "Nie udało się uruchomić kontroli",
+          "explanation": "Spróbuj ponownie lub skontaktuj się ze stroną.",
+          "action": "Ponów"
+        },
+        "execution-unavailable": {
+          "title": "Nie udało się zakończyć kontroli",
+          "explanation": "Spróbuj ponownie lub skontaktuj się ze stroną.",
+          "action": "Ponów"
+        },
+        "solver-mismatch": {
+          "title": "Wymagana aktualizacja",
+          "explanation": "Przeładuj, aby zaktualizować kontrolę.",
+          "action": "Przeładuj"
+        }
+      },
+      "factor": {
+        "caption": "Potwierdzenie e-maila",
+        "close": "Zamknij",
+        "requested": {
+          "title": "Jeszcze jedna kontrola",
+          "copy": "Potwierdź swój e-mail, aby kontynuować.",
+          "primary": "Kontynuuj"
+        },
+        "address": {
+          "title": "Potwierdź swój e-mail",
+          "copy": "Wyślemy Ci sześciocyfrowy kod.",
+          "label": "Adres e-mail",
+          "placeholder": "ty@przyklad.com",
+          "primary": "Wyślij kod"
+        },
+        "sending": {
+          "primary": "Wysyłanie…"
+        },
+        "delivery_error": {
+          "message": "Nie udało się wysłać kodu. Spróbuj ponownie.",
+          "primary": "Wyślij kod"
+        },
+        "code": {
+          "title": "Sprawdź skrzynkę",
+          "copy": "Wpisz kod wysłany na {email}.",
+          "label": "Kod weryfikacyjny",
+          "primary": "Zweryfikuj kod"
+        },
+        "code_error": {
+          "message": "Ten kod nie pasuje. Spróbuj ponownie.",
+          "primary": "Zweryfikuj kod"
+        },
+        "expired": {
+          "message": "Ten kod wygasł. Poproś o nowy.",
+          "primary": "Uzyskaj nowy kod"
+        },
+        "rate_limited": {
+          "message": "Za dużo prób. Poczekaj, zanim spróbujesz ponownie.",
+          "primary": "Poczekaj"
+        },
+        "service_unavailable": {
+          "title": "Kontrola niedostępna",
+          "copy": "Spróbuj ponownie lub skontaktuj się ze stroną, jeśli to trwa.",
+          "primary": "Spróbuj ponownie"
+        },
+        "response": {
+          "title": "Kontrola zakończona",
+          "copy": "Wróć do aplikacji, aby kontynuować.",
+          "primary": "Kontynuuj"
+        },
+        "utility_change_email": "Zmień e-mail",
+        "utility_resend": "Wyślij kod ponownie"
+      }
+    },
+    "pt": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Pronto quando preciso",
+          "explanation": "Começa com o seu pedido.",
+          "action": null
+        },
+        "idle": {
+          "title": "Pronto para repetir",
+          "explanation": "Inicie uma nova verificação.",
+          "action": "Repetir"
+        },
+        "connecting": {
+          "title": "A ligar",
+          "explanation": "A preparar a verificação.",
+          "action": null
+        },
+        "solving": {
+          "title": "A verificar o seu pedido",
+          "explanation": "A trabalhar em segundo plano.",
+          "action": null
+        },
+        "done": {
+          "title": "Verificação concluída",
+          "explanation": "Pode continuar.",
+          "action": null
+        },
+        "failed": {
+          "title": "Verificação interrompida",
+          "explanation": "Tente novamente para continuar.",
+          "action": "Repetir"
+        },
+        "expired": {
+          "title": "Verificação expirada",
+          "explanation": "O seu formulário foi mantido.",
+          "action": "Repetir"
+        },
+        "worker-unavailable": {
+          "title": "Não foi possível iniciar a verificação",
+          "explanation": "Tente novamente ou contacte o site.",
+          "action": "Repetir"
+        },
+        "execution-unavailable": {
+          "title": "Não foi possível terminar a verificação",
+          "explanation": "Tente novamente ou contacte o site.",
+          "action": "Repetir"
+        },
+        "solver-mismatch": {
+          "title": "Atualização necessária",
+          "explanation": "Recarregue para atualizar a verificação.",
+          "action": "Recarregar"
+        }
+      },
+      "factor": {
+        "caption": "Confirmação do e-mail",
+        "close": "Fechar",
+        "requested": {
+          "title": "Mais uma verificação",
+          "copy": "Confirme o seu e-mail para continuar.",
+          "primary": "Continuar"
+        },
+        "address": {
+          "title": "Confirme o seu e-mail",
+          "copy": "Enviaremos um código de seis dígitos.",
+          "label": "Endereço de e-mail",
+          "placeholder": "voce@exemplo.com",
+          "primary": "Enviar código"
+        },
+        "sending": {
+          "primary": "A enviar…"
+        },
+        "delivery_error": {
+          "message": "Não foi possível enviar o código. Tente novamente.",
+          "primary": "Enviar código"
+        },
+        "code": {
+          "title": "Verifique a sua caixa de entrada",
+          "copy": "Introduza o código enviado para {email}.",
+          "label": "Código de verificação",
+          "primary": "Verificar código"
+        },
+        "code_error": {
+          "message": "Esse código não corresponde. Tente novamente.",
+          "primary": "Verificar código"
+        },
+        "expired": {
+          "message": "Este código expirou. Peça um novo.",
+          "primary": "Obter novo código"
+        },
+        "rate_limited": {
+          "message": "Demasiadas tentativas. Aguarde antes de tentar novamente.",
+          "primary": "Aguarde"
+        },
+        "service_unavailable": {
+          "title": "Verificação indisponível",
+          "copy": "Tente novamente, ou contacte o site se isto continuar.",
+          "primary": "Tentar novamente"
+        },
+        "response": {
+          "title": "Verificação concluída",
+          "copy": "Regresse à aplicação para continuar.",
+          "primary": "Continuar"
+        },
+        "utility_change_email": "Alterar e-mail",
+        "utility_resend": "Reenviar código"
+      }
+    },
+    "pt-br": {
+      "dir": "ltr",
+      "states": {
+        "pending": {
+          "title": "Pronto quando precisar",
+          "explanation": "Começa com a sua solicitação.",
+          "action": null
+        },
+        "idle": {
+          "title": "Pronto para tentar de novo",
+          "explanation": "Inicie uma nova verificação.",
+          "action": "Tentar novamente"
+        },
+        "connecting": {
+          "title": "Conectando",
+          "explanation": "Preparando a verificação.",
+          "action": null
+        },
+        "solving": {
+          "title": "Verificando sua solicitação",
+          "explanation": "Trabalhando em segundo plano.",
+          "action": null
+        },
+        "done": {
+          "title": "Verificação concluída",
+          "explanation": "Você pode continuar.",
+          "action": null
+        },
+        "failed": {
+          "title": "Verificação interrompida",
+          "explanation": "Tente novamente para continuar.",
+          "action": "Tentar novamente"
+        },
+        "expired": {
+          "title": "Verificação expirada",
+          "explanation": "Seu formulário foi mantido.",
+          "action": "Tentar novamente"
+        },
+        "worker-unavailable": {
+          "title": "Não foi possível iniciar a verificação",
+          "explanation": "Tente novamente ou fale com o site.",
+          "action": "Tentar novamente"
+        },
+        "execution-unavailable": {
+          "title": "Não foi possível concluir a verificação",
+          "explanation": "Tente novamente ou fale com o site.",
+          "action": "Tentar novamente"
+        },
+        "solver-mismatch": {
+          "title": "Atualização necessária",
+          "explanation": "Recarregue para atualizar a verificação.",
+          "action": "Recarregar"
+        }
+      },
+      "factor": {
+        "caption": "Confirmação do e-mail",
+        "close": "Fechar",
+        "requested": {
+          "title": "Mais uma verificação",
+          "copy": "Confirme seu e-mail para continuar.",
+          "primary": "Continuar"
+        },
+        "address": {
+          "title": "Confirme seu e-mail",
+          "copy": "Enviaremos um código de seis dígitos.",
+          "label": "Endereço de e-mail",
+          "placeholder": "voce@exemplo.com",
+          "primary": "Enviar código"
+        },
+        "sending": {
+          "primary": "Enviando…"
+        },
+        "delivery_error": {
+          "message": "Não conseguimos enviar o código. Tente novamente.",
+          "primary": "Enviar código"
+        },
+        "code": {
+          "title": "Verifique sua caixa de entrada",
+          "copy": "Digite o código enviado para {email}.",
+          "label": "Código de verificação",
+          "primary": "Verificar código"
+        },
+        "code_error": {
+          "message": "Esse código não corresponde. Tente novamente.",
+          "primary": "Verificar código"
+        },
+        "expired": {
+          "message": "Este código expirou. Peça um novo.",
+          "primary": "Obter novo código"
+        },
+        "rate_limited": {
+          "message": "Muitas tentativas. Aguarde antes de tentar de novo.",
+          "primary": "Aguarde"
+        },
+        "service_unavailable": {
+          "title": "Verificação indisponível",
+          "copy": "Tente novamente ou fale com o site se isso continuar.",
+          "primary": "Tentar novamente"
+        },
+        "response": {
+          "title": "Verificação concluída",
+          "copy": "Volte ao aplicativo para continuar.",
+          "primary": "Continuar"
+        },
+        "utility_change_email": "Alterar e-mail",
+        "utility_resend": "Reenviar código"
+      }
+    },
+    "ar": {
+      "dir": "rtl",
+      "states": {
+        "pending": {
+          "title": "جاهز عند الحاجة",
+          "explanation": "يبدأ مع طلبك.",
+          "action": null
+        },
+        "idle": {
+          "title": "جاهز لإعادة المحاولة",
+          "explanation": "ابدأ فحصًا جديدًا.",
+          "action": "إعادة المحاولة"
+        },
+        "connecting": {
+          "title": "جارٍ الاتصال",
+          "explanation": "جارٍ تجهيز الفحص.",
+          "action": null
+        },
+        "solving": {
+          "title": "جارٍ التحقق من طلبك",
+          "explanation": "يعمل في الخلفية.",
+          "action": null
+        },
+        "done": {
+          "title": "اكتمل الفحص",
+          "explanation": "يمكنك المتابعة.",
+          "action": null
+        },
+        "failed": {
+          "title": "توقّف الفحص",
+          "explanation": "حاول إجراء فحص الأمان مرة أخرى.",
+          "action": "إعادة المحاولة"
+        },
+        "expired": {
+          "title": "انتهت صلاحية الفحص",
+          "explanation": "تم الاحتفاظ ببياناتك.",
+          "action": "إعادة المحاولة"
+        },
+        "worker-unavailable": {
+          "title": "تعذّر بدء الفحص",
+          "explanation": "حاول مرة أخرى، أو اتصل بالموقع.",
+          "action": "إعادة المحاولة"
+        },
+        "execution-unavailable": {
+          "title": "تعذّر إنهاء الفحص",
+          "explanation": "حاول مرة أخرى، أو اتصل بالموقع.",
+          "action": "إعادة المحاولة"
+        },
+        "solver-mismatch": {
+          "title": "مطلوب تحديث",
+          "explanation": "أعد التحميل لتحديث الفحص.",
+          "action": "إعادة التحميل"
+        }
+      },
+      "factor": {
+        "caption": "تأكيد البريد الإلكتروني",
+        "close": "إغلاق",
+        "requested": {
+          "title": "فحص واحد آخر",
+          "copy": "أكّد بريدك الإلكتروني للمتابعة.",
+          "primary": "متابعة"
+        },
+        "address": {
+          "title": "أكّد بريدك الإلكتروني",
+          "copy": "سنرسل إليك رمزًا مكوّنًا من ستة أرقام.",
+          "label": "البريد الإلكتروني",
+          "placeholder": "you@example.com",
+          "primary": "إرسال الرمز"
+        },
+        "sending": {
+          "primary": "جارٍ الإرسال…"
+        },
+        "delivery_error": {
+          "message": "تعذّر إرسال الرمز. حاول مرة أخرى.",
+          "primary": "إرسال الرمز"
+        },
+        "code": {
+          "title": "صندوق الوارد",
+          "copy": "أدخل الرمز المرسل إلى {email}.",
+          "label": "رمز التحقق",
+          "primary": "تحقّق من الرمز"
+        },
+        "code_error": {
+          "message": "لم يطابق هذا الرمز. حاول مرة أخرى.",
+          "primary": "تحقّق من الرمز"
+        },
+        "expired": {
+          "message": "انتهت صلاحية هذا الرمز. اطلب رمزًا جديدًا.",
+          "primary": "احصل على رمز جديد"
+        },
+        "rate_limited": {
+          "message": "محاولات كثيرة. انتظر قبل المحاولة مجددًا.",
+          "primary": "انتظر من فضلك"
+        },
+        "service_unavailable": {
+          "title": "التحقق غير متاح",
+          "copy": "حاول مرة أخرى، أو اتصل بالموقع إذا استمرت المشكلة.",
+          "primary": "حاول مرة أخرى"
+        },
+        "response": {
+          "title": "اكتمل الفحص",
+          "copy": "عد إلى التطبيق للمتابعة.",
+          "primary": "متابعة"
+        },
+        "utility_change_email": "تغيير البريد الإلكتروني",
+        "utility_resend": "إعادة إرسال الرمز"
+      }
+    }
+  }
+}

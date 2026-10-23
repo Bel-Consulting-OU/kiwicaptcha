@@ -80,7 +80,7 @@ Edition 3, 11 October 2026. The prior live implementation carried four pages wit
       <p class="panel-title">A form, with less interruption.</p>
       <p class="field-label" id="prior-email-label">Email address</p>
       <input type="email" aria-labelledby="prior-email-label" placeholder="you@example.com" readonly>
-      {{ widget(state="solving") }}
+      {{ prior_widget() }}
       <p class="mono-caption">Illustrative host form / no solver runs here.</p>
     </div>
   </div>
