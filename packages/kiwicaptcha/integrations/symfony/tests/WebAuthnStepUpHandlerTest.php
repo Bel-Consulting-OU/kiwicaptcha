@@ -630,6 +630,26 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         self::assertSame(9, $stored['counter'], 'a forward counter replaces the record');
     }
 
+    /**
+     * The documented fail-open of the counter CAS: an unreadable prior
+     * record carries no counter to defend, so a forward write lands
+     * over the corrupt bytes (the script only refuses a readable
+     * strictly-higher counter). Corrupt bytes never freeze the
+     * credential forever.
+     */
+    public function testAnUnreadablePriorRecordNeverWedgesTheCredential(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        $key = $this->credentialKey('cred-CORRUPT');
+        $redis->values[$key] = '{broken-json';
+
+        $registry->saveCredentialSource($this->record('cred-CORRUPT', self::PRINCIPAL, 5));
+        $stored = json_decode((string) $redis->values[$key], true);
+        self::assertSame(5, $stored['counter'], 'an unreadable prior is overwritten by the validated write');
+        self::assertSame(['EVAL', 'SADD', 'EXPIRE'], $redis->commands, 'still one atomic script');
+    }
+
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void
     {
         // The enrollment precondition: a completed step-up for the same

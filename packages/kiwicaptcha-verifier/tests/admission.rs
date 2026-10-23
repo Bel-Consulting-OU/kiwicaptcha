@@ -731,3 +731,408 @@ fn unsigned_companion_fields_are_dropped_on_success() {
         "the presentation slot is null, not attacker-populated: {body}"
     );
 }
+
+// ── binary-level probes: the shipped flags, not just the library ────
+
+/// A 48-byte non-published secret for spawned-binary probes (validate_secret
+/// refuses the documented examples and anything under 32 bytes).
+const E2E_SECRET: &str = "e2e-admission-secret-0123456789abcdef-XYZW!";
+
+/// The startup contract: a total-live bound below the pending bound can
+/// never admit anything (every pending record is also live), so the
+/// binary refuses the configuration instead of serving an issuer that
+/// always answers challenge_store_full. This pins the CLI/env path, not
+/// just the library struct.
+#[test]
+fn live_below_pending_is_refused_by_the_binary_at_startup() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_kiwicaptcha-verifier"))
+        .args([
+            "--secret",
+            E2E_SECRET,
+            "--listen",
+            "http://127.0.0.1:0",
+            "--max-pending-challenges",
+            "100",
+            "--max-live-records",
+            "50",
+        ])
+        .output()
+        .expect("the verifier binary spawns");
+    assert!(
+        !output.status.success(),
+        "the inverted ceilings must refuse startup"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "--max-live-records (50) must be 0 (off) or at least --max-pending-challenges (100)"
+        ),
+        "the refusal names both knobs: {stderr}"
+    );
+}
+
+/// The flag-wired ceiling, end to end through the shipped binary: a
+/// child process with `--max-live-records 2` must refuse the third
+/// live record after two issue→burn cycles with the LIVE message, and
+/// the equal pending bound never trips on the burn path. Library-level
+/// probes cannot see a mis-wired CLI/env path.
+#[test]
+fn the_live_ceiling_reaches_the_shipped_binary() {
+    // An ephemeral loopback port the child will bind.
+    let probe = TcpListener::bind("127.0.0.1:0").expect("port probe");
+    let port = probe.local_addr().expect("probe addr").port();
+    drop(probe);
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_kiwicaptcha-verifier"))
+        .args([
+            "--secret",
+            E2E_SECRET,
+            "--listen",
+            &format!("http://127.0.0.1:{port}"),
+            "--max-pending-challenges",
+            "2",
+            "--max-live-records",
+            "2",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the verifier binary spawns");
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+
+    // Readiness owns the dial loop (post_json panics on a refused
+    // connect) and NEVER issues: a probe issue would itself consume a
+    // live slot of the tiny ceiling under test.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the spawned binary never started serving"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Record 1: issued and burned into a consumed tombstone (live 1).
+    let token = issue_and_solve(addr, "login");
+    burn(addr, &token);
+    // Record 2: issued and burned (live 2 — the bound).
+    let token = issue_and_solve(addr, "login");
+    burn(addr, &token);
+    // Record 3: the total-live ceiling refuses — the message names the
+    // LIVE bound even though the pending bound (5) has room.
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 503, "the third live record is refused: {body}");
+    assert!(body.contains("challenge_store_full"), "{body}");
+    assert!(
+        body.contains("total live-challenge ceiling of 2"),
+        "the refusal names the flag-wired live ceiling: {body}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The embedder ingest path shares the store ceiling: `inject_record`
+/// drops a record when the store is at its bound (fail-closed, the
+/// caller's challenge then answers record_not_found), and an explicit
+/// 0/0 turns both ceilings off.
+#[test]
+fn inject_record_honors_the_ceiling_and_the_off_switch() {
+    let store: Arc<dyn RecordStore> = Arc::new(kiwicaptcha_verifier::MemoryStore::new());
+    // Mint one real record through a server whose ceilings are off.
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+        c.max_pending = 0;
+        c.max_live_records = 0;
+    });
+    let token = issue_and_solve(addr, "login");
+    let issued_nonce = kiwicaptcha::SolutionToken::decode(&token)
+        .expect("token decodes")
+        .nonce;
+    let template = match store.peek(&issued_nonce, unix_now()) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
+        other => panic!("pending after issue: {other:?}"),
+    };
+
+    // Explicit off: both injections land next to the issued record.
+    let off = SidecarState::build({
+        let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+        config.store = Arc::clone(&store);
+        config.max_pending = 0;
+        config.max_live_records = 0;
+        config
+    });
+    let mut a = template.clone();
+    a.nonce = "inject-off-a".to_string();
+    let mut b = template.clone();
+    b.nonce = "inject-off-b".to_string();
+    off.inject_record(a.clone(), Some("checkout".to_string()), None);
+    off.inject_record(b.clone(), None, Some("cart".to_string()));
+    assert_eq!(
+        store.live_counts(unix_now()),
+        (3, 3),
+        "ceilings at 0 admit every ingest"
+    );
+    assert!(matches!(
+        store.peek("inject-off-a", unix_now()),
+        kiwicaptcha_verifier::PeekOutcome::Pending(_)
+    ));
+
+    // A capped state over the SAME store: the next ingest is refused
+    // silently (the documented fail-closed shape of inject_record).
+    let capped = SidecarState::build({
+        let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
+        config.store = Arc::clone(&store);
+        config.max_pending = 1;
+        config.max_live_records = 1;
+        config
+    });
+    let mut c = template.clone();
+    c.nonce = "inject-capped-c".to_string();
+    capped.inject_record(c.clone(), None, None);
+    assert_eq!(
+        store.live_counts(unix_now()),
+        (3, 3),
+        "a saturated store never takes the ingest"
+    );
+    assert!(
+        matches!(
+            store.peek("inject-capped-c", unix_now()),
+            kiwicaptcha_verifier::PeekOutcome::NotFound
+        ),
+        "the refused ingest never becomes verifiable"
+    );
+}
+
+/// The durable backend's copy of the atomic admission: pending and
+/// total-live ceilings on disk, the tombstone counting toward live, and
+/// the TTL-prune reopening the capacity AND reaping the envelope files
+/// (a capacity wedge would otherwise also be a disk leak).
+#[test]
+fn file_store_ceiling_reopens_and_reaps_its_envelopes() {
+    let dir = std::env::temp_dir().join(format!(
+        "kiwi-adm-file-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let store: Arc<dyn RecordStore> =
+        Arc::new(kiwicaptcha_verifier::FileStore::open(&dir).expect("store opens"));
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+        c.max_pending = 1;
+        c.max_live_records = 2;
+    });
+
+    let token = issue_and_solve(addr, "login");
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(
+        status, 503,
+        "the pending bound holds on the file store: {body}"
+    );
+    assert!(body.contains("live pending-challenge ceiling"), "{body}");
+    burn(addr, &token);
+
+    // One tombstone (live) + free pending slot: issuance reopens.
+    let token2 = issue_and_solve(addr, "login");
+    burn(addr, &token2);
+    let (status, body) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(
+        status, 503,
+        "both tombstones fill the total-live bound: {body}"
+    );
+    assert!(body.contains("total live-challenge ceiling of 2"), "{body}");
+    let (pending, live) = store.live_counts(unix_now());
+    assert_eq!((pending, live), (0, 2), "two consumed envelopes are live");
+
+    // Past the record TTL: the pruned counts reopen admission AND the
+    // envelope files are gone from disk (no capacity wedge, no leak).
+    let future = unix_now() + 10_000;
+    let (pending, live) = store.live_counts(future);
+    assert_eq!((pending, live), (0, 0), "the TTL prunes the tombstones");
+    // The directory carries the store marker plus a records/ tree; the
+    // prune must leave ZERO persisted envelopes inside it.
+    let mut envelopes = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(current) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "json") {
+                    envelopes.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        envelopes.is_empty(),
+        "the pruned envelopes are reaped from disk: {envelopes:?}"
+    );
+    let (status, _) = post_json(
+        addr,
+        "/issue",
+        r#"{"scope":"login","remoteip":"198.51.100.7"}"#,
+    );
+    assert_eq!(status, 200, "capacity reopens after the TTL prune");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fail-closed admission on a corrupted Redis keyspace: the capacity
+/// index (wrong type) or the record slot (wrong type) must surface as
+/// a Failed admission — never a silent bypass of the bound, never a
+/// phantom reservation — and recovery is one DEL away.
+#[cfg(feature = "redis-store")]
+#[test]
+fn redis_admission_fails_closed_on_corrupt_slots_then_recovers() {
+    let url = ["TEST_REDIS_URL", "RISK_REDIS_URL"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default();
+    if url.is_empty() {
+        eprintln!("skipping corrupt-slot admission test: no redis url");
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let prefix = format!("kiwi-adv-corrupt-{stamp:x}:");
+    let store: Arc<dyn RecordStore> =
+        Arc::new(kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("connect"));
+
+    // Mint one real record (ceiling off) for the template bytes.
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&store);
+        c.max_pending = 0;
+        c.max_live_records = 0;
+    });
+    let token = issue_and_solve(addr, "login");
+    let issued_nonce = kiwicaptcha::SolutionToken::decode(&token)
+        .expect("token decodes")
+        .nonce;
+    let template = match store.peek(&issued_nonce, unix_now()) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
+        other => panic!("pending after issue: {other:?}"),
+    };
+    let limits = CapacityLimits {
+        max_pending: 1,
+        max_live: 1,
+    };
+
+    let client = redis::Client::open(url.clone()).expect("url parses");
+    let mut conn = client.get_connection().expect("connection");
+    let pending_idx = format!("{prefix}admission:pending");
+    let live_idx = format!("{prefix}admission:live");
+
+    // 1. The capacity index is a plain string: the Lua prune cannot run.
+    //    The admission must FAIL (the issue path answers 500), never
+    //    admit around the bound and never half-reserve.
+    let _: () = redis::cmd("SET")
+        .arg(&pending_idx)
+        .arg("not-a-zset")
+        .query(&mut conn)
+        .expect("corrupt idx");
+    let mut probe1 = template.clone();
+    probe1.nonce = format!("corrupt-a-{stamp:x}");
+    let outcome = store.try_put_pending(&probe1, Default::default(), limits, unix_now());
+    assert!(
+        matches!(outcome, AdmissionOutcome::Failed(_)),
+        "a corrupt index fails closed, never bypasses: {outcome:?}"
+    );
+    assert!(matches!(
+        store.peek(&probe1.nonce, unix_now()),
+        kiwicaptcha_verifier::PeekOutcome::NotFound
+    ));
+    let _: () = redis::cmd("DEL")
+        .arg(&pending_idx)
+        .arg(&live_idx)
+        .query(&mut conn)
+        .expect("clean idx");
+
+    // 2. The record slot as a wrong-typed key: the reservation lands
+    //    first, then the record write. On servers where SET refuses a
+    //    non-string (pre-Redis-8) the write fails and the rollback must
+    //    leave NO phantom member. Redis 8 lets SET replace any type, so
+    //    the write succeeds there and that rollback window is
+    //    unreachable by corruption — detect the server's answer instead
+    //    of asserting one version's semantics as universal.
+    let mut probe2 = template.clone();
+    probe2.nonce = format!("corrupt-b-{stamp:x}");
+    let record_key = format!("{prefix}{}", probe2.nonce);
+    let scratch = format!("{prefix}scratch-type-{stamp:x}");
+    let _: () = redis::cmd("RPUSH")
+        .arg(&scratch)
+        .arg("x")
+        .query(&mut conn)
+        .expect("scratch list");
+    let set_replaces: bool = redis::cmd("SET")
+        .arg(&scratch)
+        .arg("y")
+        .query::<String>(&mut conn)
+        .is_ok();
+    let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&scratch).query(&mut conn);
+    if set_replaces {
+        eprintln!(
+            "server SET replaces any type — the record-slot WRONGTYPE rollback window is unreachable"
+        );
+        let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&record_key).query(&mut conn);
+    } else {
+        let _: () = redis::cmd("RPUSH")
+            .arg(&record_key)
+            .arg("slot")
+            .query(&mut conn)
+            .expect("corrupt record");
+        let outcome = store.try_put_pending(&probe2, Default::default(), limits, unix_now());
+        assert!(
+            matches!(outcome, AdmissionOutcome::Failed(_)),
+            "a wrong-typed record slot fails closed: {outcome:?}"
+        );
+        let (pending, live) = store.live_counts(unix_now());
+        assert_eq!(
+            (pending, live),
+            (0, 0),
+            "the failed write rolled its reservation back — no phantom counts"
+        );
+        let _: () = redis::cmd("DEL")
+            .arg(&record_key)
+            .query(&mut conn)
+            .expect("clean record");
+    }
+    // 3. Admission succeeds once the slot is a clean string key.
+    let outcome = store.try_put_pending(&probe2, Default::default(), limits, unix_now());
+    assert_eq!(
+        outcome,
+        AdmissionOutcome::Admitted,
+        "a clean slot admits after the corruption clears"
+    );
+
+    // Best-effort cleanup of this test's keyspace.
+    let cleanup = [
+        pending_idx.clone(),
+        live_idx.clone(),
+        record_key.clone(),
+        format!("{prefix}{}", probe1.nonce),
+        format!("{prefix}{}", probe2.nonce),
+    ];
+    let _: redis::RedisResult<i64> = redis::cmd("UNLINK").arg(&cleanup).query(&mut conn);
+}
