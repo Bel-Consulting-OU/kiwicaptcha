@@ -176,6 +176,22 @@
         "redRuns": 0,
         "campaignsInLedger": 17
       }
+    },
+    {
+      "run": 12,
+      "decidedAt": "2026-10-23T20:31:37Z",
+      "trigger": "no new finding this run: the synthesis escalates",
+      "combinedLabels": [
+        "forged-token",
+        "clock-skew"
+      ],
+      "priorSynthCount": 289,
+      "raisedSynthCount": 361,
+      "ledgerFacts": {
+        "greenRuns": 15,
+        "redRuns": 2,
+        "campaignsInLedger": 17
+      }
     }
   ]
 }
