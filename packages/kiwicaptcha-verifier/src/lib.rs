@@ -83,6 +83,22 @@
 //! capable backend: several sidecar nodes may then share one store and
 //! one secret, and a token minted on one node verifies on another.
 //!
+//! # Capacity ceilings
+//!
+//! `--max-pending-challenges` (`KIWI_MAX_PENDING_CHALLENGES`, default
+//! 100000; 0 disables) is the hard live-pending ceiling: issuance
+//! refuses `challenge_store_full` above it, and every backend enforces
+//! it inside the atomic admission (prune, count, compare and insert as
+//! one store transition — Redis runs that transaction server-side, so
+//! the bound holds across nodes). `--max-live-records`
+//! (`KIWI_MAX_LIVE_RECORDS`, default 400000; 0 disables) bounds total
+//! live record cardinality — pending plus consumed tombstones — so a
+//! burn-and-reissue churn cannot grow the store past a fixed multiple
+//! of the pending window until records expire. When both ceilings are
+//! on, a total bound below the pending bound is refused at startup:
+//! every pending record is also live, so such a configuration could
+//! never admit anything.
+//!
 //! # Risk involvement
 //!
 //! With `--risk` (`KIWI_RISK=1`) and a Redis URL (`KIWI_RISK_URL`),
