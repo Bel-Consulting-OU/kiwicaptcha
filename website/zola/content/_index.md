@@ -70,7 +70,7 @@ Current adaptive flows can request address ownership or route a principal to the
 {{ linkrow(href="/playground/", label="Inspect the widget states", arrow="↗") }}
 
 <div class="spec-stage">
-{{ widget(state="solving") }}
+{{ status(state="solving") }}
 </div>
 
 {{ notes(paths=["packages/kiwicaptcha-wasm/assets/widget-driver.js", "packages/kiwicaptcha/design/README.md"]) }}

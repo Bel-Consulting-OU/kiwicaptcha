@@ -52,7 +52,7 @@ The board recreates the identity with the supplied SVG masters, the exact palett
     <div>
       <p class="board-label">COMPONENT / ILLUSTRATIVE STATE</p>
       <div class="board-widget">
-        {{ widget(state="done", width=300) }}
+        {{ board_widget() }}
         <p class="board-widget-note">Host verification and policy still decide acceptance.</p>
       </div>
     </div>

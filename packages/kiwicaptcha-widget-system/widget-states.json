@@ -1,0 +1,91 @@
+{
+  "schema": "kiwicaptcha.widget-states/6",
+  "edition": "6 / 23 October 2026 / current widget system",
+  "source": "KiwiCaptcha_Visual_Identity.pdf sections 04-05 and 13 (copy & semantics)",
+  "note": "The ten source driver states remain unchanged. running/mismatch are presentation aliases only. Factor delivery and code views are an orthogonal task model, not additional proof-driver states. Production recovery must follow the driver's capabilities.",
+  "tone": {
+    "title": "Host family, Medium 500, 20/24",
+    "explanation": "Host family, 15/20, 5 px below title",
+    "action": "Deep teal #145C52 text action, 44 px target",
+    "boundary": "A completed browser response permits the host flow to continue to server verification. The text does not certify a person, authorize an operation or override the application's disposition."
+  },
+  "attribution": "KiwiCaptcha",
+  "states": {
+    "pending": {
+      "title": "Ready when needed",
+      "explanation": "Starts with your request.",
+      "action": null,
+      "icon": "none"
+    },
+    "idle": {
+      "title": "Ready to retry",
+      "explanation": "Start a fresh check.",
+      "action": "Try again",
+      "icon": "none"
+    },
+    "connecting": {
+      "title": "Connecting",
+      "explanation": "Getting the check ready.",
+      "action": null,
+      "icon": "none"
+    },
+    "solving": {
+      "title": "Checking your request",
+      "explanation": "Working in the background.",
+      "action": null,
+      "icon": "none"
+    },
+    "done": {
+      "title": "Check complete",
+      "explanation": "You can continue.",
+      "action": null,
+      "icon": "check"
+    },
+    "failed": {
+      "title": "Check interrupted",
+      "explanation": "Try again to continue.",
+      "action": "Try again",
+      "icon": "warning"
+    },
+    "expired": {
+      "title": "Check expired",
+      "explanation": "Your form has been kept.",
+      "action": "Try again",
+      "icon": "none"
+    },
+    "worker-unavailable": {
+      "title": "Couldn't start the check",
+      "explanation": "Try again, or contact the site.",
+      "action": "Try again",
+      "icon": "warning"
+    },
+    "execution-unavailable": {
+      "title": "Couldn't finish the check",
+      "explanation": "Try again, or contact the site.",
+      "action": "Try again",
+      "icon": "warning"
+    },
+    "solver-mismatch": {
+      "title": "Update needed",
+      "explanation": "Reload to update the check.",
+      "action": "Reload",
+      "icon": "warning"
+    }
+  },
+  "aliases": {
+    "running": "solving",
+    "mismatch": "solver-mismatch"
+  },
+  "recoveryContract": {
+    "pending": "No extra human control; application invokes execute.",
+    "idle": "Native retry when provided by the driver.",
+    "connecting": "Bounded flow recovery on failure.",
+    "solving": "Driver governs completion/failure.",
+    "done": "Host continues to authoritative server verification; later expiry remains possible.",
+    "failed": "Retry may reacquire or rerun the demanded flow.",
+    "expired": "Clear token and bindings; preserve the host form; retry reacquires.",
+    "worker-unavailable": "Retry can reacquire; no silent memory-hard downgrade.",
+    "execution-unavailable": "Retry reruns the flow; required evidence remains required.",
+    "solver-mismatch": "Reload a coherent asset set; never accept mismatched output."
+  }
+}

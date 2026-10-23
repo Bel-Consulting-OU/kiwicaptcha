@@ -70,6 +70,8 @@ website/zola/static/fonts/
 website/zola/static/brand/
 website/zola/static/pdf/
 website/zola/static/css/widget.css
+website/zola/static/css/widget-system.css
 website/zola/public/
 website/zola/.zones/
 website/zola/templates/partials/brand-art.html
+website/zola/templates/partials/generated/

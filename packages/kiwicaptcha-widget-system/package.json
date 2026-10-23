@@ -1,0 +1,18 @@
+{
+  "name": "@kiwicaptcha/widget-system",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Edition-6 widget system: shared skin, pure status and factor renderers, copy inventories and the proposed factor adapter outline.",
+  "exports": {
+    "./widget-system.css": "./widget-system.css",
+    "./widget-primitives.js": "./widget-primitives.js",
+    "./widget-view.js": "./widget-view.js",
+    "./factor-view.js": "./factor-view.js",
+    "./widget-states.json": "./widget-states.json",
+    "./widget-copy-v5.json": "./widget-copy-v5.json"
+  },
+  "scripts": {
+    "test": "node --test spec/"
+  }
+}
