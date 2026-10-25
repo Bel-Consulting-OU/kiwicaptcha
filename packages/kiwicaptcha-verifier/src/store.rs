@@ -950,12 +950,95 @@ impl RedisStore {
         let meta_client = redis::Client::open(url.to_string())
             .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
         let inner = kiwicaptcha::redis_verify::RedisChallengeStore::new(client, prefix);
-        Ok(RedisStore {
+        let store = RedisStore {
             inner,
             meta_client,
             meta_prefix: prefix.to_string(),
             meta: Mutex::new(MetaCache::new()),
-        })
+        };
+        // Mixed-version boot: records a pre-admission sidecar (or the
+        // unlimited ingest path) already wrote carry no index members.
+        // Without this seed the shared ceiling undercounts them for the
+        // whole rolling-upgrade overlap — the same N-1 hole the WebAuthn
+        // index had. Seeding fails the connect: a ceiling that silently
+        // starts blind is not a ceiling.
+        store.seed_admission_index()?;
+        Ok(store)
+    }
+
+    /// One-time backfill of the capacity indexes from the records
+    /// already on the server: every record key with a live TTL lands in
+    /// the live index (score: now + TTL), and a record still marked
+    /// `pending` also lands in the pending index. Records written by a
+    /// live OLD node after this seed are still missed until the next
+    /// connect — that window is bounded by the rolling upgrade and the
+    /// record TTL, and the failure direction is an undercount only of
+    /// foreign-writer records, never of this node's own admissions.
+    /// A consumed record seeded optimistically into the pending index
+    /// over-counts until its score prunes (the safe direction).
+    fn seed_admission_index(&self) -> Result<(), String> {
+        let mut conn = self
+            .meta_client
+            .get_connection()
+            .map_err(|e| format!("admission index seed: {e}"))?;
+        let pattern = format!("{}*", self.meta_prefix);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query(&mut conn)
+                .map_err(|e| format!("admission index seed scan: {e}"))?;
+            cursor = next;
+            for key in keys {
+                if key.ends_with(":smeta")
+                    || key.ends_with("admission:pending")
+                    || key.ends_with("admission:live")
+                {
+                    continue;
+                }
+                let ttl: i64 = redis::cmd("TTL")
+                    .arg(&key)
+                    .query(&mut conn)
+                    .map_err(|e| format!("admission index seed ttl: {e}"))?;
+                if ttl <= 0 {
+                    continue;
+                }
+                let score = (now + ttl as u64).max(1);
+                let raw: Option<String> = redis::cmd("GET")
+                    .arg(&key)
+                    .query(&mut conn)
+                    .map_err(|e| format!("admission index seed get: {e}"))?;
+                let pending = raw
+                    .as_deref()
+                    .is_some_and(|json| json.contains("\"state\":\"pending\""));
+                let nonce = key.trim_start_matches(&self.meta_prefix);
+                let mut live = redis::cmd("ZADD");
+                live.arg(self.live_idx_key()).arg(score).arg(nonce);
+                let _: i64 = live
+                    .query(&mut conn)
+                    .map_err(|e| format!("admission index seed live zadd: {e}"))?;
+                if pending {
+                    let _: i64 = redis::cmd("ZADD")
+                        .arg(self.pending_idx_key())
+                        .arg(score)
+                        .arg(nonce)
+                        .query(&mut conn)
+                        .map_err(|e| format!("admission index seed pending zadd: {e}"))?;
+                }
+            }
+            if cursor == 0 {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// The companion metadata key: one per challenge, TTL-bound like
@@ -1200,7 +1283,7 @@ impl RecordStore for RedisStore {
         // store cardinality until its expiry score is pruned. A
         // backend error leaves the member alone: over-counting until
         // the TTL prune is the safe direction, never a bypass.
-        if !consumed.is_err() {
+        if consumed.is_ok() {
             if let Ok(mut conn) = self.meta_client.get_connection() {
                 let _: redis::RedisResult<i64> = redis::cmd("ZREM")
                     .arg(self.pending_idx_key())
