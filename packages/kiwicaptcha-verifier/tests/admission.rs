@@ -1136,3 +1136,99 @@ fn redis_admission_fails_closed_on_corrupt_slots_then_recovers() {
     ];
     let _: redis::RedisResult<i64> = redis::cmd("UNLINK").arg(&cleanup).query(&mut conn);
 }
+
+/// Mixed-binary rolling upgrade of the Redis admission: records a
+/// pre-admission writer (the unlimited ingest path, or an old sidecar
+/// binary) left WITHOUT index members must be counted after the new
+/// node's boot seed — otherwise the shared ceiling is blind to the
+/// overlap's writes and the hard bound silently softens exactly when
+/// two versions share one keyspace.
+#[cfg(feature = "redis-store")]
+#[test]
+fn boot_seed_counts_records_that_never_touched_the_index() {
+    let url = ["TEST_REDIS_URL", "RISK_REDIS_URL"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default();
+    if url.is_empty() {
+        eprintln!("skipping boot-seed admission test: no redis url");
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let prefix = format!("kiwi-adv-seed-{stamp:x}:");
+
+    // Generation 1: the old writer — ceiling off, so its admissions
+    // take the unlimited path and never touch the capacity indexes.
+    let legacy: Arc<dyn RecordStore> = Arc::new(
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("legacy connects"),
+    );
+    let addr = spawn_with(|c| {
+        c.store = Arc::clone(&legacy);
+        c.max_pending = 0;
+        c.max_live_records = 0;
+    });
+    let nonce1 = issue_nonce(addr);
+    let nonce2 = issue_nonce(addr);
+    let (pending, live) = legacy.live_counts(unix_now());
+    assert_eq!(
+        (pending, live),
+        (0, 0),
+        "the legacy writer genuinely leaves the index blind"
+    );
+
+    // Generation 2: a fresh boot on the same keyspace seeds the indexes
+    // from the records already on the server.
+    let fresh =
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("fresh connects");
+    let (pending, live) = fresh.live_counts(unix_now());
+    assert_eq!(
+        (pending, live),
+        (2, 2),
+        "the boot seed counts the legacy records into both ceilings"
+    );
+
+    // The ceiling then holds against the seeded total: a third
+    // admission at limits (2, 2) is refused, not admitted around the
+    // records the seed just discovered.
+    let template = match fresh.peek(&nonce1, unix_now()) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
+        other => panic!("pending after issue: {other:?}"),
+    };
+    let mut probe = template;
+    probe.nonce = format!("seed-probe-{stamp:x}");
+    let outcome = fresh.try_put_pending(
+        &probe,
+        Default::default(),
+        CapacityLimits {
+            max_pending: 2,
+            max_live: 2,
+        },
+        unix_now(),
+    );
+    assert_eq!(
+        outcome,
+        AdmissionOutcome::PendingFull,
+        "seeded legacy records occupy the ceiling"
+    );
+
+    // Best-effort cleanup of this test's keyspace.
+    if let Ok(mut conn) = redis::Client::open(url)
+        .expect("redis url parses")
+        .get_connection()
+    {
+        let keys = [
+            format!("{prefix}admission:pending"),
+            format!("{prefix}admission:live"),
+            format!("{prefix}{nonce1}"),
+            format!("{prefix}{nonce1}:smeta"),
+            format!("{prefix}{nonce2}"),
+            format!("{prefix}{nonce2}:smeta"),
+            format!("{prefix}{}", probe.nonce),
+        ];
+        let _: redis::RedisResult<i64> = redis::cmd("UNLINK").arg(&keys).query(&mut conn);
+    }
+}
