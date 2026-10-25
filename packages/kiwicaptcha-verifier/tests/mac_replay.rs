@@ -36,6 +36,16 @@ enum Tamper {
     /// consume answer — the storage writer forging business metadata
     /// on an otherwise authentic success.
     MetaAction,
+    /// Swap EVERY companion field at once (action, cdata, decision id,
+    /// scope, remoteip) plus a garbage companion mac: the maximal
+    /// storage-writer forgery of the unauthenticated companion.
+    MetaAll,
+    /// Rewrite the ANSWER copy's record scope — the replay context
+    /// gate's authority — to a foreign scope.
+    RecordScope,
+    /// Rewrite the ANSWER copy's record binding tag — the IP gate's
+    /// authority — to an attacker-chosen tag.
+    RecordBinding,
 }
 
 /// A memory store whose `commit_with_mac` is dishonest — the stand-in
@@ -86,30 +96,79 @@ impl RecordStore for TamperStore {
                     meta.cdata = Some("amount=9000".to_string());
                     meta
                 }
+                Tamper::MetaAll => {
+                    meta.action = Some("wire_transfer".to_string());
+                    meta.cdata = Some("amount=9000".to_string());
+                    meta.decision_id = Some("decision-attacker".to_string());
+                    meta.scope = Some("attacker-scope".to_string());
+                    meta.remoteip = Some("203.0.113.9".to_string());
+                    meta.mac = Some("ab".repeat(32));
+                    meta
+                }
                 _ => meta,
             }
         };
-        if matches!(self.mode, Tamper::MetaRemoteip | Tamper::MetaAction) {
-            // The companion is NOT authenticated by itself: rewrite
-            // the fields a storage writer could overwrite in place.
-            return match outcome {
-                ConsumeOutcome::Won { record, meta } => ConsumeOutcome::Won {
-                    record,
-                    meta: swap(meta),
-                },
+        match self.mode {
+            Tamper::MetaRemoteip | Tamper::MetaAction | Tamper::MetaAll => {
+                // The companion is NOT authenticated by itself: rewrite
+                // the fields a storage writer could overwrite in place.
+                match outcome {
+                    ConsumeOutcome::Won { record, meta } => ConsumeOutcome::Won {
+                        record,
+                        meta: swap(meta),
+                    },
+                    ConsumeOutcome::AlreadyConsumed {
+                        meta,
+                        succeeded,
+                        stored,
+                    } => ConsumeOutcome::AlreadyConsumed {
+                        meta: swap(meta),
+                        succeeded,
+                        stored,
+                    },
+                    other => other,
+                }
+            }
+            Tamper::RecordScope => match outcome {
+                ConsumeOutcome::Won { mut record, meta } => {
+                    record.scope = "attacker-scope".to_string();
+                    ConsumeOutcome::Won { record, meta }
+                }
                 ConsumeOutcome::AlreadyConsumed {
                     meta,
                     succeeded,
                     stored,
                 } => ConsumeOutcome::AlreadyConsumed {
-                    meta: swap(meta),
+                    meta,
                     succeeded,
-                    stored,
+                    stored: stored.map(|mut s| {
+                        s.record.scope = "attacker-scope".to_string();
+                        s
+                    }),
                 },
                 other => other,
-            };
+            },
+            Tamper::RecordBinding => match outcome {
+                ConsumeOutcome::Won { mut record, meta } => {
+                    record.binding_tag = "ff".repeat(32);
+                    ConsumeOutcome::Won { record, meta }
+                }
+                ConsumeOutcome::AlreadyConsumed {
+                    meta,
+                    succeeded,
+                    stored,
+                } => ConsumeOutcome::AlreadyConsumed {
+                    meta,
+                    succeeded,
+                    stored: stored.map(|mut s| {
+                        s.record.binding_tag = "ff".repeat(32);
+                        s
+                    }),
+                },
+                other => other,
+            },
+            Tamper::Forged | Tamper::Dropped => outcome,
         }
-        outcome
     }
 
     fn peek(&self, nonce: &str, now_unix: u64) -> kiwicaptcha_verifier::store::PeekOutcome {
@@ -135,9 +194,13 @@ impl RecordStore for TamperStore {
                 self.inner
                     .commit_with_mac(nonce, record, valid, operation_identity, Some(&forged));
             }
-            // This mode tampers only the companion metadata: the MAC
-            // seam stays honest.
-            Tamper::MetaRemoteip | Tamper::MetaAction => {
+            // These modes tamper the companion or the ANSWER copy of
+            // the record: the MAC seam stays honest.
+            Tamper::MetaRemoteip
+            | Tamper::MetaAction
+            | Tamper::MetaAll
+            | Tamper::RecordScope
+            | Tamper::RecordBinding => {
                 self.inner
                     .commit_with_mac(nonce, record, valid, operation_identity, mac)
             }
@@ -491,5 +554,71 @@ fn an_authenticated_companion_still_echoes_its_fields() {
     assert!(
         first.contains(r#""cdata":"cart-9""#),
         "a valid companion MAC keeps the honest cdata on the success: {first}"
+    );
+}
+
+/// The auditor's "malicious store-writer alteration of every field
+/// individually": one mode per tamper surface, each judged against the
+/// outcome it could actually forge.
+///
+/// - Companion forgeries (MetaAll) never surface attacker values on the
+///   fresh success or the stored replay, and the success itself still
+///   rests on the authentic proof and the honest consumed-result MAC.
+/// - A record-scope rewrite never yields a success under the foreign
+///   scope (the context gate reads the record, not the companion).
+/// - A record-binding rewrite never yields a success under the client's
+///   IP (the IP gate re-derives from the signed tag).
+#[test]
+fn every_store_writer_field_tamper_fails_closed() {
+    // (a) Maximal companion forgery: every companion field plus a
+    // garbage mac, on an otherwise authentic solve.
+    let addr = spawn(Some(Tamper::MetaAll));
+    let token = issue_and_solve(addr);
+    let (status, first) = post_json(addr, "/verify", &verify_body(&token, "op-field-1"));
+    assert_eq!(status, 200, "{first}");
+    assert!(
+        first.contains(r#""success":true"#),
+        "the authentic proof stands: {first}"
+    );
+    assert!(
+        !first.contains("wire_transfer")
+            && !first.contains("amount=9000")
+            && !first.contains("decision-attacker")
+            && !first.contains("attacker-scope")
+            && !first.contains("203.0.113.9"),
+        "no companion-forged value may surface: {first}"
+    );
+    let (status, replay) = post_json(addr, "/verify", &verify_body(&token, "op-field-1"));
+    assert_eq!(status, 200, "{replay}");
+    assert!(replay.contains(r#""success":true"#), "{replay}");
+    assert!(
+        !replay.contains("wire_transfer")
+            && !replay.contains("amount=9000")
+            && !replay.contains("decision-attacker")
+            && !replay.contains("attacker-scope"),
+        "the replay must not assert attacker metadata either: {replay}"
+    );
+
+    // (b) The record's scope rewritten to a foreign value: the fresh
+    // verification's context gate must refuse — never a success under
+    // the attacker's scope.
+    let addr = spawn(Some(Tamper::RecordScope));
+    let token = issue_and_solve(addr);
+    let (status, body) = post_json(addr, "/verify", &verify_body(&token, "op-field-2"));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body.contains(r#""success":true"#),
+        "a foreign record scope never verifies: {body}"
+    );
+
+    // (c) The record's binding tag rewritten: the IP gate re-derives
+    // the expected tag and refuses — never a success for this client.
+    let addr = spawn(Some(Tamper::RecordBinding));
+    let token = issue_and_solve(addr);
+    let (status, body) = post_json(addr, "/verify", &verify_body(&token, "op-field-3"));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body.contains(r#""success":true"#),
+        "a foreign binding tag never verifies for this client: {body}"
     );
 }
