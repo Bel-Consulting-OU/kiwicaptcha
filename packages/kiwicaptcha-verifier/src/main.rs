@@ -8,7 +8,8 @@ use std::sync::Arc;
 use kiwicaptcha_verifier::{
     open_store, parse_binding, parse_listen, parse_rung, parse_scopes, parse_store,
     parse_timeout_ms, parse_workers, validate_rsw_trapdoor, validate_secret, BindingConfig,
-    ListenAddr, ServerOptions, SidecarConfig, SidecarState, DEFAULT_LISTEN, DEFAULT_PROFILE,
+    ListenAddr, ServerOptions, SidecarConfig, SidecarState, StoreConfig, DEFAULT_LISTEN,
+    DEFAULT_PROFILE,
 };
 
 const USAGE: &str = "kiwicaptcha-verifier: the language-neutral KiwiCaptcha verifier sidecar
@@ -87,6 +88,15 @@ Options:
                    challenge_store_full above it (env
                    KIWI_MAX_LIVE_RECORDS; default 400000,
                    0 = no ceiling)
+  --admission-index-authoritative
+                   assert that every writer on a Redis keyspace runs
+                   a current index-aware binary; required together
+                   with any Redis ceiling (env
+                   KIWI_ADMISSION_INDEX_AUTHORIZATIVE=1). Without it
+                   the binary refuses capped Redis admission so a
+                   rolling upgrade can never silently soften the
+                   bound (drain old issuers, or set both ceilings to
+                   0 for the degraded posture)
   --argon-budget-kib N
                    the in-flight memory-hard derivation budget in
                    KiB, metered per record m_kib (env
@@ -130,6 +140,7 @@ struct Args {
     execution_required_version: Option<String>,
     max_pending: Option<String>,
     max_live_records: Option<String>,
+    admission_index_authoritative: bool,
     argon_budget_kib: Option<String>,
 }
 
@@ -157,6 +168,7 @@ fn parse_args() -> Result<Args, String> {
         execution_required_version: None,
         max_pending: None,
         max_live_records: None,
+        admission_index_authoritative: false,
         argon_budget_kib: None,
     };
     let mut raw = std::env::args().skip(1);
@@ -234,6 +246,9 @@ fn parse_args() -> Result<Args, String> {
             }
             "--max-live-records" => {
                 args.max_live_records = Some(raw.next().ok_or("--max-live-records needs a value")?);
+            }
+            "--admission-index-authoritative" => {
+                args.admission_index_authoritative = true;
             }
             "--argon-budget-kib" => {
                 args.argon_budget_kib = Some(raw.next().ok_or("--argon-budget-kib needs a value")?);
@@ -366,6 +381,44 @@ fn main() -> ExitCode {
         None
     };
 
+    // The live-pending ceiling: 0 (or unset → the shipped default)
+    // disables/enables the bound explicitly.
+    let max_pending = match env_or(args.max_pending, "KIWI_MAX_PENDING_CHALLENGES") {
+        Some(raw) => {
+            match raw.parse::<u64>() {
+                Ok(v) => v,
+                _ => {
+                    eprintln!("kiwicaptcha-verifier: --max-pending-challenges must be a non-negative integer");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        None => kiwicaptcha_verifier::config::DEFAULT_MAX_PENDING_CHALLENGES,
+    };
+    // The total-live-record ceiling (pending + consumed tombstones):
+    // 0 (or unset → the shipped default) disables/enables it.
+    let max_live_records = match env_or(args.max_live_records, "KIWI_MAX_LIVE_RECORDS") {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(v) => v,
+            _ => {
+                eprintln!(
+                    "kiwicaptcha-verifier: --max-live-records must be a non-negative integer"
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+        None => kiwicaptcha_verifier::config::DEFAULT_MAX_LIVE_RECORDS,
+    };
+    // Both ceilings on, but the total bound below the pending bound:
+    // the pending ceiling could never admit anything (every pending
+    // record is also a live record), so the configuration is refused
+    // at startup instead of serving an issuer that always 503s.
+    if max_pending > 0 && max_live_records > 0 && max_live_records < max_pending {
+        eprintln!(
+            "kiwicaptcha-verifier: --max-live-records ({max_live_records}) must be 0 (off) or at least --max-pending-challenges ({max_pending})"
+        );
+        return ExitCode::FAILURE;
+    }
     // 4. The store backend.
     let store_config = match parse_store(env_or(args.store, "KIWI_STORE").as_deref()) {
         Ok(s) => s,
@@ -374,7 +427,39 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let store = match open_store(&store_config) {
+    let admission_authoritative = env_flag(
+        args.admission_index_authoritative,
+        "KIWI_ADMISSION_INDEX_AUTHORIZATIVE",
+    );
+    // The hard bound on Redis is only as global as the index it counts.
+    // A pre-admission (or older) binary writing the same keyspace does
+    // not maintain the indexes, so capped issuance stays honest ONLY
+    // when every writer is index-aware. During a rolling upgrade the
+    // operator either drains the old issuers and then asserts
+    // homogeneity here, or runs with both ceilings at 0 (degraded).
+    #[cfg(feature = "redis-store")]
+    {
+        if matches!(store_config, StoreConfig::Redis(_))
+            && (max_pending > 0 || max_live_records > 0)
+            && !admission_authoritative
+        {
+            eprintln!(
+                "kiwicaptcha-verifier: capped Redis admission needs --admission-index-authoritative (KIWI_ADMISSION_INDEX_AUTHORIZATIVE=1) once every writer on the keyspace runs a current index-aware binary; during a rolling upgrade drain old issuers or set both ceilings to 0 (degraded)"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+    #[cfg(not(feature = "redis-store"))]
+    {
+        let _ = admission_authoritative;
+    }
+    let store = match open_store(
+        &store_config,
+        kiwicaptcha_verifier::store::CapacityLimits {
+            max_pending,
+            max_live: max_live_records,
+        },
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("kiwicaptcha-verifier: {e}");
@@ -488,44 +573,6 @@ fn main() -> ExitCode {
         },
         None => 0,
     };
-    // The live-pending ceiling: 0 (or unset → the shipped default)
-    // disables/enables the bound explicitly.
-    let max_pending = match env_or(args.max_pending, "KIWI_MAX_PENDING_CHALLENGES") {
-        Some(raw) => {
-            match raw.parse::<u64>() {
-                Ok(v) => v,
-                _ => {
-                    eprintln!("kiwicaptcha-verifier: --max-pending-challenges must be a non-negative integer");
-                    return ExitCode::FAILURE;
-                }
-            }
-        }
-        None => kiwicaptcha_verifier::config::DEFAULT_MAX_PENDING_CHALLENGES,
-    };
-    // The total-live-record ceiling (pending + consumed tombstones):
-    // 0 (or unset → the shipped default) disables/enables it.
-    let max_live_records = match env_or(args.max_live_records, "KIWI_MAX_LIVE_RECORDS") {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(v) => v,
-            _ => {
-                eprintln!(
-                    "kiwicaptcha-verifier: --max-live-records must be a non-negative integer"
-                );
-                return ExitCode::FAILURE;
-            }
-        },
-        None => kiwicaptcha_verifier::config::DEFAULT_MAX_LIVE_RECORDS,
-    };
-    // Both ceilings on, but the total bound below the pending bound:
-    // the pending ceiling could never admit anything (every pending
-    // record is also a live record), so the configuration is refused
-    // at startup instead of serving an issuer that always 503s.
-    if max_pending > 0 && max_live_records > 0 && max_live_records < max_pending {
-        eprintln!(
-            "kiwicaptcha-verifier: --max-live-records ({max_live_records}) must be 0 (off) or at least --max-pending-challenges ({max_pending})"
-        );
-        return ExitCode::FAILURE;
-    }
     // The Argon admission budget (KiB): one default 4 x 64 MiB.
     let argon_budget_kib = match env_or(args.argon_budget_kib, "KIWI_ARGON_BUDGET_KIB") {
         Some(raw) => match raw.parse::<u64>() {

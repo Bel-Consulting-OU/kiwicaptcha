@@ -306,6 +306,14 @@ for campaign in $CAMPAIGNS; do
         RESULT=1
     fi
     sha_us=$(printf '%s\n' "$OUT" | grep -o 'sha16_solve_us=[0-9]*' | head -n 1 | cut -d= -f2)
+    # The product-method provenance the ledger requires for the
+    # method:product campaigns: the booted Kernel subclass and its
+    # container override count, taken from the campaign's own RUNTIME
+    # line. Absent RUNTIME passes empty (write-run records null) so a
+    # campaign that booted no kernel stays honestly RED.
+    runtime_line=$(printf '%s\n' "$OUT" | grep '^RUNTIME: ' | tail -n 1)
+    driver_val=$(printf '%s\n' "$runtime_line" | sed -n 's/^RUNTIME: driver=\([^ ]*\).*/\1/p')
+    overrides_val=$(printf '%s\n' "$runtime_line" | sed -n 's/.*container_overrides=\([0-9]*\).*/\1/p')
     run_doc=$(printf '%s\n' "$OUT" | grep '^RESULT' | head -n 1 | sed 's/ //g' | head -c 40)
     timestamp=$(date -u +%Y%m%dT%H%M%SZ)
     doc="$RUNS_DIR/${timestamp}-${campaign}-seed-${KIWI_RT_SEED}.json"
@@ -317,7 +325,7 @@ for campaign in $CAMPAIGNS; do
     # return code is checked and the file must exist afterwards: a
     # failed write is a failed campaign, never a silent NOT RUN.
     if ! node "$RT_DIR/engine/write-run.mjs" \
-        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$method_line"; then
+        "$doc" "$campaign" "$(class_of "$campaign")" "$KIWI_RT_SEED" "$started" "$duration" "$rc" "$verdict" "$detail" "$metric_line" "$economic_line" "$sha_us" "$method_line" "$driver_val" "$overrides_val"; then
         log "campaign $campaign failed to write its run document"
         RESULT=1
         continue

@@ -52,6 +52,13 @@ final class WebAuthnCredentialRegistry
     private const BACKFILL_MARKER_TTL_SECS = 604_800;
 
     /**
+     * The fleet-wide reconcile cadence inside the dual-read window:
+     * one bounded cursor walk per TTL at most, regardless of how many
+     * authentications run meanwhile.
+     */
+    private const RECONCILE_LOCK_TTL_SECS = 300;
+
+    /**
      * How long after a backfill (or marker restamp) lookups keep
      * reconciling against the keyspace: the rolling-upgrade window in
      * which a pre-index node may still write credentials without
@@ -85,6 +92,14 @@ if existing then
   end
 end
 redis.call('SETEX', KEYS[1], tonumber(ARGV[1]), ARGV[2])
+-- The principal index mutates inside the SAME transaction: a crash
+-- between credential write and index write can no longer strand an
+-- enrolled credential outside its allow-list. ARGV[5] == '1' carries
+-- a non-empty user handle (the index is keyed by principal).
+if ARGV[5] == '1' then
+  redis.call('SADD', KEYS[2], KEYS[1])
+  redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))
+end
 return 1
 LUA;
 
@@ -168,7 +183,12 @@ LUA;
         // this lookup (an enrolled key reading as credential-less until
         // the marker lapsed). One bounded cursor walk reconciles the
         // miss; past the horizon the walk never runs again.
-        if ($dualRead) {
+        if ($dualRead && $this->claimReconcileLock()) {
+            // At most ONE reconcile per lock TTL across the whole fleet:
+            // an authentication lookup must never become a
+            // per-request whole-keyspace walk during the migration
+            // window (the losers of the lock still serve from the
+            // index and the next lock holder reconciles).
             $this->reconcileIndexes();
         }
         $members = $this->redis->smembers($this->indexKey($principalPseudonym));
@@ -286,6 +306,27 @@ LUA;
         }
     }
 
+    /**
+     * Try to claim the fleet-wide reconcile slot (SET NX EX). True:
+     * this caller runs the bounded walk; false: another reader holds
+     * the cadence (or one ran within the TTL) — serve the index read
+     * immediately instead of scanning the keyspace.
+     */
+    private function claimReconcileLock(): bool
+    {
+        $lockKey = $this->prefix.'credential:reconcile-lock';
+        try {
+            $ok = $this->redis->set($lockKey, '1', ['NX', 'EX' => self::RECONCILE_LOCK_TTL_SECS]);
+        } catch (\Throwable) {
+            // A lock failure must not take authentication down: the
+            // index read below still answers (and the window's heal
+            // runs on the next successful claim or the marker lap).
+            return false;
+        }
+
+        return $ok !== null;
+    }
+
     /** The index set of one principal: members are the record keys. */
     private function indexKey(string $principalPseudonym): string
     {
@@ -300,28 +341,28 @@ LUA;
         // GET followed by a SETEX another writer can interleave. The
         // registry's redis seam is the Predis client interface, so the
         // script runs through its EVAL command shape directly.
+        $hasPrincipal = $record->userHandle !== '' ? '1' : '0';
+        $indexKey = $record->userHandle !== ''
+            ? $this->indexKey((string) $record->userHandle)
+            : $key; // unused placeholder key when no principal carries it
         $written = $this->redis->eval(
             self::SAVE_SCRIPT,
-            1,
+            2,
             $key,
+            $indexKey,
             (string) $this->ttlSecs,
             (string) $this->serializer->serialize($record, 'json'),
             (string) $record->counter,
+            (string) $this->ttlSecs,
+            $hasPrincipal,
         );
         if ((int) $written !== 1) {
             return;
         }
-        // Keep the principal's index in step with the record: the
-        // allow-list lookup reads this set instead of scanning the
-        // keyspace, so every write (not just the backfill) maintains
-        // it. The set add is idempotent; the index TTL refreshes with the
-        // record's own lifetime and can only outlive a member, never
-        // precede it.
-        if ($record->userHandle !== '') {
-            $indexKey = $this->indexKey((string) $record->userHandle);
-            $this->redis->sadd($indexKey, $key);
-            $this->redis->expire($indexKey, $this->ttlSecs);
-        }
+        // The principal index add + TTL refresh live inside the script:
+        // credential write and allow-list membership are one atomic
+        // transition, so an interrupted save can never strand an
+        // enrolled credential outside its own principal's index.
     }
 
     private function key(string $credentialId): string

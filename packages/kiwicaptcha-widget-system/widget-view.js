@@ -55,8 +55,13 @@ const DEFAULTS = {
 };
 
 function classes(view) {
-  const theme = view.theme ?? DEFAULTS.theme;
-  const width = view.width ?? DEFAULTS.width;
+  // Allowlist the class vocabulary: caller-supplied theme/width never
+  // reach the class attribute raw (an unknown value falls back to the
+  // documented default instead of extending the selector space).
+  const THEMES = new Set(["light", "dark"]);
+  const WIDTHS = new Set([240, 280, 320, 352]);
+  const theme = THEMES.has(view.theme) ? view.theme : DEFAULTS.theme;
+  const width = WIDTHS.has(view.width) ? view.width : DEFAULTS.width;
   const scale = view.scale ?? DEFAULTS.scale;
   const parts = ["kc-status", `kc-theme-${theme}`, `kc-w${width}`];
   if (scale !== 1) parts.push("kc-text-2x");

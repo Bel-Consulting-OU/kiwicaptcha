@@ -97,10 +97,17 @@
 //! of the pending window until records expire. On the Redis backend,
 //! boot seeds the capacity indexes from the records already on the
 //! server, so records written by an older binary or the unlimited
-//! ingest path count from the first admission of the new node. When
-//! both ceilings are on, a total bound below the pending bound is
-//! refused at startup: every pending record is also live, so such a
-//! configuration could never admit anything.
+//! ingest path count from the first admission of the new node. The
+//! Redis bound is only as global as that index, so capped Redis
+//! admission additionally requires the operator assertion
+//! `--admission-index-authoritative`
+//! (`KIWI_ADMISSION_INDEX_AUTHORIZATIVE=1`) that every writer on the
+//! keyspace is index-aware: during a rolling upgrade the binary
+//! refuses capped issuance until old writers are drained, or the
+//! ceilings are set to 0 for the degraded posture. When both ceilings
+//! are on, a total bound below the pending bound is refused at
+//! startup: every pending record is also live, so such a configuration
+//! could never admit anything.
 //!
 //! # Risk involvement
 //!

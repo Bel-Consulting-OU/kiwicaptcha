@@ -159,11 +159,14 @@ fn solve_verify_replay_and_scope_end_to_end() {
     // A real challenge from the workspace issuer lands in the store.
     let issued = mint("login");
     let wire = kiwicaptcha_verifier::issue_wire_of(&issued);
-    server.state.inject_record(
-        issued.record,
-        Some("checkout".to_string()),
-        Some("c-91".to_string()),
-    );
+    server
+        .state
+        .inject_record(
+            issued.record,
+            Some("checkout".to_string()),
+            Some("c-91".to_string()),
+        )
+        .expect("the ingest lands");
     let token = solve_token(&wire);
 
     // The happy path: the provider shape with the issuance-bound
@@ -202,7 +205,10 @@ fn solve_verify_replay_and_scope_end_to_end() {
     // consumed tombstone.
     let other = mint("login");
     let other_wire = kiwicaptcha_verifier::issue_wire_of(&other);
-    server.state.inject_record(other.record, None, None);
+    server
+        .state
+        .inject_record(other.record, None, None)
+        .expect("the ingest lands");
     let other_token = solve_token(&other_wire);
     let (_, wrong) = post_json(
         server.addr,
@@ -650,7 +656,10 @@ fn expected_request_binding_is_enforced_when_the_caller_states_it() {
     // Equal binding redeems.
     let ok = mint_bound(Some("txn-A"));
     let ok_wire = kiwicaptcha_verifier::issue_wire_of(&ok);
-    server.state.inject_record(ok.record.clone(), None, None);
+    server
+        .state
+        .inject_record(ok.record.clone(), None, None)
+        .expect("the ingest lands");
     let ok_token = solve_token(&ok_wire);
     let (status, body) = post_json(
         server.addr,
@@ -666,7 +675,10 @@ fn expected_request_binding_is_enforced_when_the_caller_states_it() {
     // A different expected binding refuses the same-shaped record.
     let other = mint_bound(Some("txn-A"));
     let other_wire = kiwicaptcha_verifier::issue_wire_of(&other);
-    server.state.inject_record(other.record, None, None);
+    server
+        .state
+        .inject_record(other.record, None, None)
+        .expect("the ingest lands");
     let other_token = solve_token(&other_wire);
     let (status, body) = post_json(
         server.addr,
@@ -683,7 +695,10 @@ fn expected_request_binding_is_enforced_when_the_caller_states_it() {
     // An empty expectation asserts the record carries no binding.
     let bare = mint_bound(None);
     let bare_wire = kiwicaptcha_verifier::issue_wire_of(&bare);
-    server.state.inject_record(bare.record, None, None);
+    server
+        .state
+        .inject_record(bare.record, None, None)
+        .expect("the ingest lands");
     let bare_token = solve_token(&bare_wire);
     let (status, body) = post_json(
         server.addr,
@@ -699,7 +714,10 @@ fn expected_request_binding_is_enforced_when_the_caller_states_it() {
     // A bound record cannot satisfy the empty expectation.
     let bound = mint_bound(Some("txn-A"));
     let bound_wire = kiwicaptcha_verifier::issue_wire_of(&bound);
-    server.state.inject_record(bound.record, None, None);
+    server
+        .state
+        .inject_record(bound.record, None, None)
+        .expect("the ingest lands");
     let bound_token = solve_token(&bound_wire);
     let (_, body) = post_json(
         server.addr,

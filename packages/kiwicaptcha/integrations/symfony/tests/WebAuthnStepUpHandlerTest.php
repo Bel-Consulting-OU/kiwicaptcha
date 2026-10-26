@@ -600,13 +600,20 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $registry = $this->registry();
         $redis = $this->fakeRedis();
 
-        // A fresh credential lands through exactly one CAS plus the
-        // index maintenance — never a bare GET/SETEX pair.
+        // A fresh credential lands through exactly one script: the
+        // counter CAS plus the index membership — never a bare
+        // GET/SETEX pair and never a follow-up index write.
         $registry->saveCredentialSource($this->record('cred-CAS', self::PRINCIPAL, 7));
         self::assertSame(
-            ['EVAL', 'SADD', 'EXPIRE'],
+            ['EVAL'],
             $redis->commands,
             'the save path is one atomic script, no client-side read-compare race'
+        );
+        $indexKey = 'tests:webauthn:principal:'.hash('sha256', self::PRINCIPAL);
+        self::assertContains(
+            $this->credentialKey('cred-CAS'),
+            $redis->sets[$indexKey] ?? [],
+            'the index membership landed inside the same transaction'
         );
         $key = $this->credentialKey('cred-CAS');
         $stored = json_decode((string) $redis->values[$key], true);
@@ -647,7 +654,41 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $registry->saveCredentialSource($this->record('cred-CORRUPT', self::PRINCIPAL, 5));
         $stored = json_decode((string) $redis->values[$key], true);
         self::assertSame(5, $stored['counter'], 'an unreadable prior is overwritten by the validated write');
-        self::assertSame(['EVAL', 'SADD', 'EXPIRE'], $redis->commands, 'still one atomic script');
+        self::assertSame(['EVAL'], $redis->commands, 'still one atomic script');
+    }
+
+    /**
+     * The dual-read window must never scan the whole keyspace per
+     * authentication: one bounded reconcile runs per fleet-wide lock
+     * TTL, later lookups serve the index immediately.
+     */
+    public function testDualReadReconcilesAtMostOncePerLockTtl(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        // A fresh (in-window) marker with a legacy un-indexed record.
+        $redis->setex('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER, 604800, (string) time());
+        $redis->setex($this->credentialKey('cred-THROTTLE'), 31536000, (string) json_encode([
+            'publicKeyCredentialId' => base64_encode('cred-THROTTLE'),
+            'type' => 'public-key',
+            'transports' => [],
+            'attestationType' => 'none',
+            'trustPath' => [],
+            'aaguid' => '00000000-0000-0000-0000-000000000000',
+            'credentialPublicKey' => base64_encode('key-material'),
+            'userHandle' => base64_encode('throttle-principal'),
+            'counter' => 2,
+        ]));
+
+        $redis->commands = [];
+        $first = $registry->registeredCredentialsOf('throttle-principal');
+        self::assertCount(1, $first, 'the first in-window lookup reconciles and finds the legacy write');
+        self::assertContains('SCAN', $redis->commands, 'the claimed lock runs exactly one walk');
+
+        $redis->commands = [];
+        $second = $registry->registeredCredentialsOf('throttle-principal');
+        self::assertCount(1, $second, 'the index still answers');
+        self::assertNotContains('SCAN', $redis->commands, 'the held lock suppresses a second walk (no per-request keyspace scan)');
     }
 
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void
@@ -986,6 +1027,10 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
     /** The calls no arm answered. */
     public int $unservedCommands = 0;
 
+    /** SET NX lock keys (the reconcile cadence), kept out of $values
+     * so the record SCAN never sees a lock as a credential. */
+    public array $locks = [];
+
     public function setex($key, $ttl, $value)
     {
         $this->values[(string) $key] = (string) $value;
@@ -1142,8 +1187,35 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
             'EXPIRE' => $this->expire((string) ($arguments[0] ?? ''), (int) ($arguments[1] ?? 0)),
             'SCAN' => $this->scan($arguments[0] ?? '0', \is_array($arguments[1] ?? null) ? $arguments[1] : []),
             'EVAL' => $this->evalCounterCas($arguments),
+            'SET' => $this->setNxOrSet($arguments),
             default => $this->unserved($method),
         };
+    }
+
+    /**
+     * The SET command as the registry uses it: `SET key value NX EX t`
+     * for the reconcile lock (null on a held lock, 'OK' on the claim)
+     * plus a plain two-argument set fallback.
+     *
+     * @param list<mixed> $arguments
+     */
+    private function setNxOrSet(array $arguments)
+    {
+        $key = (string) ($arguments[0] ?? '');
+        $value = (string) ($arguments[1] ?? '');
+        $options = $arguments[2] ?? null;
+        $isNx = \is_array($options) && \in_array('NX', $options, true);
+        if ($isNx && (isset($this->locks[$key]) || isset($this->values[$key]))) {
+            return null;
+        }
+        if ($isNx) {
+            $this->locks[$key] = $value;
+
+            return 'OK';
+        }
+        $this->values[$key] = $value;
+
+        return 'OK';
     }
 
     /**
@@ -1157,11 +1229,15 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
      */
     private function evalCounterCas(array $arguments): int
     {
+        // eval($script, $numKeys, recordKey, indexKey, ttl, json,
+        // counter, indexTtl, hasPrincipal) — the counter CAS and the
+        // index membership in ONE transaction, mirroring the registry.
         $key = (string) ($arguments[2] ?? '');
-        $argv = \array_slice($arguments, 3);
-        $ttl = (int) ($argv[0] ?? 0);
-        $json = (string) ($argv[1] ?? '');
-        $incoming = (int) ($argv[2] ?? 0);
+        $indexKey = (string) ($arguments[3] ?? '');
+        $ttl = (int) ($arguments[4] ?? 0);
+        $json = (string) ($arguments[5] ?? '');
+        $incoming = (int) ($arguments[6] ?? 0);
+        $hasPrincipal = (string) ($arguments[8] ?? '0') === '1';
         $existing = $this->get($key);
         if (\is_string($existing) && $existing !== '') {
             $decoded = json_decode($existing, true);
@@ -1171,6 +1247,12 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
             }
         }
         $this->setex($key, $ttl, $json);
+        if ($hasPrincipal) {
+            $this->sets[$indexKey] ??= [];
+            if (!\in_array($key, $this->sets[$indexKey], true)) {
+                $this->sets[$indexKey][] = $key;
+            }
+        }
 
         return 1;
     }
