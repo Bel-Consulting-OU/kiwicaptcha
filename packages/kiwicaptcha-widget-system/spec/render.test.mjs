@@ -224,3 +224,49 @@ test("every locale renders every view without throwing", () => {
     }
   }
 });
+
+test("hostile theme and width never reach the class attribute", () => {
+  const pack = copyDoc.packs.en;
+  const widget = renderWidget({
+    state: "solving",
+    copy: pack.states.solving,
+    icon: "check",
+    theme: 'light" onload="alert(1)',
+    width: '352"><script>alert(2)</script>',
+  });
+  assert.ok(!widget.includes("onload="), "no attribute breakout from theme");
+  assert.ok(!widget.includes("<script>"), "no element breakout from width");
+  assert.ok(widget.includes("kc-theme-light"), "unknown theme falls back to light");
+  assert.ok(widget.includes("kc-w352"), "unknown width falls back to the default");
+
+  const factor = renderFactor({
+    view: "code",
+    copy: pack,
+    email: "you@example.com",
+    code: "123456",
+    theme: 'dark"/><img src=x onerror=alert(1)>',
+    width: 99999,
+  });
+  assert.ok(!factor.includes("onerror="), "no attribute breakout from the factor theme");
+  assert.ok(!factor.includes("<img"), "no element breakout from the factor theme");
+  assert.ok(factor.includes("kc-theme-light"), "the factor view falls back to the default theme");
+  assert.ok(factor.includes("kc-fw384"), "the factor view falls back to its default width");
+});
+
+test("hostile copy and email are escaped at the splice", () => {
+  const pack = JSON.parse(JSON.stringify(copyDoc.packs.en));
+  pack.factor.code.copy = 'Enter the code sent to {email}. <script>alert(1)</script>';
+  const html = renderFactor({
+    view: "code",
+    copy: pack,
+    email: 'eve" onmouseover="alert(2)',
+    code: "000000",
+  });
+  assert.ok(!html.includes("<script>"), "the translation string is escaped, not trusted markup");
+  assert.ok(html.includes("&lt;script&gt;"), "the hostile copy arrives escaped");
+  assert.ok(
+    !html.includes('onmouseover="alert(2)"'),
+    "the interpolated email cannot break out of its bdi wrapper",
+  );
+  assert.ok(html.includes("<bdi>"), "the email still rides the bdi isolation wrapper");
+});

@@ -101,8 +101,12 @@ function utilities(copy, { resend, resendDisabled }) {
 }
 
 function shell(view, copy, inner) {
-  const theme = view.theme ?? DEFAULTS.theme;
-  const width = view.width ?? DEFAULTS.width;
+  // Allowlist the class vocabulary (same rule as the status view):
+  // unknown theme/width values fall back to the documented defaults.
+  const THEMES = new Set(["light", "dark"]);
+  const WIDTHS = new Set([240, 320, 384]);
+  const theme = THEMES.has(view.theme) ? view.theme : DEFAULTS.theme;
+  const width = WIDTHS.has(view.width) ? view.width : DEFAULTS.width;
   const scale = view.scale ?? DEFAULTS.scale;
   const parts = ["kc-factor", `kc-theme-${theme}`, `kc-fw${width}`];
   if (scale !== 1) parts.push("kc-text-2x");
@@ -182,7 +186,7 @@ export function renderFactor(view) {
       return shell(view, copy,
         header(copy, { withClose: true }) +
         `<h2 class="kc-heading">${esc(f.code.title)}</h2>` +
-        `<p class="kc-explanation">${f.code.copy.replace("{email}", bdi(email))}</p>` +
+        `<p class="kc-explanation">${esc(f.code.copy).replace("{email}", bdi(email))}</p>` +
         input({
           id: "kc-code",
           label: f.code.label,

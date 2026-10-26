@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -648,10 +648,22 @@ impl FileStore {
                     ));
                 }
                 let expires_at = entry.record.expires_at;
-                if envelope.state == STATE_CONSUMED {
-                    state.consumed.insert(nonce, entry);
-                } else {
-                    state.pending.insert(nonce, entry);
+                // Fail closed on an unknown persisted state: mapping
+                // "corrupt"/"cancelled"/"" onto pending would resurrect
+                // a terminal (or foreign) record as redeemable work —
+                // the opposite of every other parser in this crate.
+                match envelope.state.as_str() {
+                    STATE_PENDING => {
+                        state.pending.insert(nonce, entry);
+                    }
+                    STATE_CONSUMED => {
+                        state.consumed.insert(nonce, entry);
+                    }
+                    other => {
+                        return Err(format!(
+                            "file store: unknown persisted state {other:?} for record {nonce} (a final-name envelope is always whole under the rename discipline, so an unknown state means a foreign writer)"
+                        ));
+                    }
                 }
                 // A loaded expired envelope must pull the sweep horizon
                 // into the past so the first prune reaps it.
@@ -668,9 +680,13 @@ impl FileStore {
             .join(format!("{hash}.json"))
     }
 
-    /// Write one envelope durably: unique temp file, `sync_all`, atomic
-    /// rename, best-effort directory sync. The peer of the PHP
-    /// filesystem storage's write path, built from std only.
+    /// Write one envelope with the exact durability contract this
+    /// implementation meets: unique temp file, `sync_all`, atomic
+    /// rename, and a BEST-EFFORT directory sync whose errors are
+    /// discarded (many filesystems refuse directory fsync). The rename
+    /// orders visibility; full power-loss durability of the directory
+    /// entry is not claimed. The peer of the PHP filesystem storage's
+    /// write path, built from std only.
     fn write_envelope(&self, nonce: &str, envelope: &Envelope) -> Result<(), String> {
         let path = self.record_path(nonce);
         if let Some(parent) = path.parent() {
@@ -691,9 +707,11 @@ impl FileStore {
                 .map_err(|e| format!("temp sync failed: {e}"))?;
         }
         fs::rename(&tmp, &path).map_err(|e| format!("atomic rename failed: {e}"))?;
-        // The directory entry itself: sync the shard dir so the rename
-        // survives a power cut. Best effort: some filesystems refuse a
-        // directory fsync, and the rename already orders the visibility.
+        // The directory entry itself: best-effort shard-dir sync to
+        // reinforce the rename across a power cut. Errors are discarded
+        // (some filesystems refuse a directory fsync) and the rename
+        // already orders visibility — this is not an unconditional
+        // power-loss barrier.
         if let Some(parent) = path.parent() {
             if let Ok(dirf) = fs::File::open(parent) {
                 let _ = dirf.sync_all();
@@ -915,6 +933,9 @@ pub struct RedisStore {
     /// node-local map is kept only as a read-through cache.
     meta_client: redis::Client,
     meta_prefix: String,
+    /// The operator's original Redis URL (pre-RESP2 rewrite), kept for
+    /// the bounded pre-flight probe's host/port resolution.
+    meta_url_hint: String,
     meta: Mutex<MetaCache>,
 }
 
@@ -944,26 +965,144 @@ impl RedisStore {
     /// Connect to `url` under the key prefix `prefix`. The connection
     /// opens lazily per command inside the core store's pool, so this
     /// only validates the URL shape.
-    pub fn connect(url: &str, prefix: &str) -> Result<Self, String> {
+    pub fn connect(url: &str, prefix: &str, limits: CapacityLimits) -> Result<Self, String> {
         let client = redis::Client::open(url.to_string())
             .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
-        let meta_client = redis::Client::open(url.to_string())
+        let meta_client = redis::Client::open(Self::meta_url(url))
             .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
         let inner = kiwicaptcha::redis_verify::RedisChallengeStore::new(client, prefix);
         let store = RedisStore {
             inner,
             meta_client,
             meta_prefix: prefix.to_string(),
+            meta_url_hint: url.to_string(),
             meta: Mutex::new(MetaCache::new()),
         };
-        // Mixed-version boot: records a pre-admission sidecar (or the
-        // unlimited ingest path) already wrote carry no index members.
-        // Without this seed the shared ceiling undercounts them for the
-        // whole rolling-upgrade overlap — the same N-1 hole the WebAuthn
-        // index had. Seeding fails the connect: a ceiling that silently
-        // starts blind is not a ceiling.
-        store.seed_admission_index()?;
+        // Mixed-version boot with a ceiling ON: records a pre-admission
+        // sidecar (or the unlimited ingest path) already wrote carry no
+        // index members. The seed reconciles them — but ONLY when a
+        // ceiling is configured: a deployment with both ceilings off
+        // pays nothing, and the operator-facing hard bound is the
+        // `--admission-index-authoritative` assertion (main) that every
+        // writer on this keyspace is index-aware. Seeding fails the
+        // connect: a ceiling that silently starts blind is not a
+        // ceiling.
+        if limits != CapacityLimits::UNLIMITED {
+            store.seed_admission_index()?;
+        }
         Ok(store)
+    }
+
+    /// The meta-plane URL: RESP2 by default (an explicit `protocol=`
+    /// in the operator's URL wins). redis-rs's default RESP3 handshake
+    /// sends HELLO and waits for the reply INSIDE connect(), where no
+    /// timeout applies — a server that accepts TCP and never answers
+    /// would park setup forever. RESP2 has no setup round trip, so the
+    /// connect bound below and the 1 s read/write timeouts cover every
+    /// byte the meta plane ever waits on. Every command the meta plane
+    /// issues (GET/SET/ZADD/ZREM/EVAL/SCAN/PTTL/SADD/…) is RESP2-safe.
+    fn meta_url(url: &str) -> String {
+        if url.contains("protocol=") {
+            return url.to_string();
+        }
+        if url.contains('?') {
+            format!("{url}&protocol=resp2")
+        } else {
+            format!("{url}?protocol=resp2")
+        }
+    }
+
+    /// A bounded raw-RESP liveness probe BEFORE the redis-rs
+    /// connection: upstream's connect() runs its setup pipeline
+    /// (CLIENT SETINFO, and HELLO unless RESP2) with NO socket timeout
+    /// — a server that accepts TCP and never answers would park
+    /// `get_connection_with_timeout` forever, the connect-time budget
+    /// notwithstanding. This probe owns a raw socket with the explicit
+    /// 500 ms connect / 1 s read-write bounds and requires any answer
+    /// to a PING; only then does the real (fast, answering) server
+    /// path open, where setup replies within microseconds and every
+    /// later command is bounded by the timeouts set in [`Self::meta_conn`].
+    fn ping_probe(url: &str) -> Result<(), String> {
+        let rest = url
+            .split_once("://")
+            .map(|(_, r)| r)
+            .ok_or_else(|| format!("meta redis url has no scheme: {url}"))?;
+        if rest.starts_with('/') {
+            // unix:// sockets: no TCP probe; the post-setup command
+            // timeouts still bound the connection.
+            return Ok(());
+        }
+        let hostport = rest.split('/').next().unwrap_or(rest);
+        let hostport = hostport.split('?').next().unwrap_or(hostport);
+        let (host, port) = if let Some(hp) = hostport.strip_prefix('[') {
+            let (h, p) = hp
+                .split_once(']')
+                .ok_or_else(|| format!("meta redis ipv6 addr malformed: {url}"))?;
+            let port = p
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(6379);
+            (h.to_string(), port)
+        } else if let Some((h, p)) = hostport.rsplit_once(':') {
+            let port = p.parse::<u16>().unwrap_or(6379);
+            (h.to_string(), port)
+        } else {
+            (hostport.to_string(), 6379u16)
+        };
+        let mut last_err = String::new();
+        for addr in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
+            .map_err(|e| format!("meta redis resolve: {e}"))?
+        {
+            match std::net::TcpStream::connect_timeout(
+                &addr,
+                kiwicaptcha::redis_verify::CONNECT_TIMEOUT,
+            ) {
+                Ok(mut stream) => {
+                    stream
+                        .set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
+                        .map_err(|e| format!("meta redis probe read timeout: {e}"))?;
+                    stream
+                        .set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
+                        .map_err(|e| format!("meta redis probe write timeout: {e}"))?;
+                    // RESP PING — any reply (PONG, an error, anything
+                    // parseable) proves the server answers bytes.
+                    stream
+                        .write_all(b"*1\r\n$4\r\nPING\r\n")
+                        .map_err(|e| format!("meta redis probe write: {e}"))?;
+                    let mut buf = [0u8; 64];
+                    let n = stream
+                        .read(&mut buf)
+                        .map_err(|e| format!("meta redis probe: {e}"))?;
+                    if n == 0 {
+                        return Err("meta redis probe: server closed without a reply".to_string());
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                }
+            }
+        }
+        Err(format!("meta redis probe connect: {last_err}"))
+    }
+
+    /// A meta-plane connection under the SAME bounded-time failure
+    /// contract as the core store's pool: a raw-RESP liveness probe
+    /// first (500 ms connect / 1 s read-write), then the redis-rs
+    /// connection with the same explicit read/write timeouts. A stalled
+    /// Redis therefore cannot park an /issue, a /metrics scrape or a
+    /// startup past the advertised bound.
+    fn meta_conn(&self) -> Result<redis::Connection, String> {
+        Self::ping_probe(&self.meta_url_hint)?;
+        let conn = self
+            .meta_client
+            .get_connection_with_timeout(kiwicaptcha::redis_verify::CONNECT_TIMEOUT)
+            .map_err(|e| format!("meta redis connect: {e}"))?;
+        conn.set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
+            .map_err(|e| format!("meta redis read timeout: {e}"))?;
+        conn.set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
+            .map_err(|e| format!("meta redis write timeout: {e}"))?;
+        Ok(conn)
     }
 
     /// One-time backfill of the capacity indexes from the records
@@ -977,10 +1116,7 @@ impl RedisStore {
     /// A consumed record seeded optimistically into the pending index
     /// over-counts until its score prunes (the safe direction).
     fn seed_admission_index(&self) -> Result<(), String> {
-        let mut conn = self
-            .meta_client
-            .get_connection()
-            .map_err(|e| format!("admission index seed: {e}"))?;
+        let mut conn = self.meta_conn()?;
         let pattern = format!("{}*", self.meta_prefix);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -997,42 +1133,73 @@ impl RedisStore {
                 .query(&mut conn)
                 .map_err(|e| format!("admission index seed scan: {e}"))?;
             cursor = next;
-            for key in keys {
-                if key.ends_with(":smeta")
-                    || key.ends_with("admission:pending")
-                    || key.ends_with("admission:live")
-                {
+            let records: Vec<String> = keys
+                .into_iter()
+                .filter(|key| {
+                    !key.ends_with(":smeta")
+                        && !key.ends_with("admission:pending")
+                        && !key.ends_with("admission:live")
+                })
+                .collect();
+            if records.is_empty() {
+                if cursor == 0 {
+                    break;
+                }
+                continue;
+            }
+            // One pipelined round trip for the per-record reads of this
+            // chunk (PTTL for a millisecond-accurate expiry, GET for the
+            // structural state classification) — never one command per
+            // record on the network. Scores stay in SECONDS (ceiling of
+            // the remaining milliseconds) because the admission Lua
+            // prunes with a seconds `now`.
+            let mut reads = redis::Pipeline::new();
+            for key in &records {
+                reads.cmd("PTTL").arg(key);
+                reads.cmd("GET").arg(key);
+            }
+            let rows: Vec<(i64, Option<String>)> = reads
+                .query(&mut conn)
+                .map_err(|e| format!("admission index seed read: {e}"))?;
+            let mut live = redis::Pipeline::new();
+            let mut pending = redis::Pipeline::new();
+            let mut planned = 0usize;
+            let mut planned_pending = 0usize;
+            for (idx, key) in records.iter().enumerate() {
+                let (pttl_ms, raw) = &rows[idx];
+                if *pttl_ms <= 0 {
                     continue;
                 }
-                let ttl: i64 = redis::cmd("TTL")
-                    .arg(&key)
-                    .query(&mut conn)
-                    .map_err(|e| format!("admission index seed ttl: {e}"))?;
-                if ttl <= 0 {
+                let Some(raw) = raw.as_ref() else { continue };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
                     continue;
-                }
-                let score = (now + ttl as u64).max(1);
-                let raw: Option<String> = redis::cmd("GET")
-                    .arg(&key)
-                    .query(&mut conn)
-                    .map_err(|e| format!("admission index seed get: {e}"))?;
-                let pending = raw
-                    .as_deref()
-                    .is_some_and(|json| json.contains("\"state\":\"pending\""));
+                };
+                let is_pending = value.get("state").and_then(|s| s.as_str()) == Some("pending");
+                let score = now + ((*pttl_ms as u64).div_ceil(1000)).max(1);
                 let nonce = key.trim_start_matches(&self.meta_prefix);
-                let mut live = redis::cmd("ZADD");
-                live.arg(self.live_idx_key()).arg(score).arg(nonce);
-                let _: i64 = live
-                    .query(&mut conn)
-                    .map_err(|e| format!("admission index seed live zadd: {e}"))?;
-                if pending {
-                    let _: i64 = redis::cmd("ZADD")
+                live.cmd("ZADD")
+                    .arg(self.live_idx_key())
+                    .arg(score)
+                    .arg(nonce);
+                if is_pending {
+                    pending
+                        .cmd("ZADD")
                         .arg(self.pending_idx_key())
                         .arg(score)
-                        .arg(nonce)
-                        .query(&mut conn)
-                        .map_err(|e| format!("admission index seed pending zadd: {e}"))?;
+                        .arg(nonce);
+                    planned_pending += 1;
                 }
+                planned += 1;
+            }
+            if planned > 0 {
+                let _: Vec<i64> = live
+                    .query(&mut conn)
+                    .map_err(|e| format!("admission index seed live zadd: {e}"))?;
+            }
+            if planned_pending > 0 {
+                let _: Vec<i64> = pending
+                    .query(&mut conn)
+                    .map_err(|e| format!("admission index seed pending zadd: {e}"))?;
             }
             if cursor == 0 {
                 break;
@@ -1056,7 +1223,7 @@ impl RedisStore {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         );
-        let Ok(mut conn) = self.meta_client.get_connection() else {
+        let Ok(mut conn) = self.meta_conn() else {
             return;
         };
         let ttl_ms = (ttl.max(1) * 1000).min(2147483647) as i64;
@@ -1072,7 +1239,7 @@ impl RedisStore {
     /// Read the provider metadata: Redis first (multi-node), then the
     /// local map (single-node fast path).
     fn read_meta(&self, nonce: &str) -> RecordMeta {
-        if let Ok(mut conn) = self.meta_client.get_connection() {
+        if let Ok(mut conn) = self.meta_conn() {
             let payload: redis::RedisResult<Option<String>> =
                 redis::cmd("GET").arg(self.meta_key(nonce)).query(&mut conn);
             if let Ok(Some(json)) = payload {
@@ -1147,7 +1314,7 @@ impl RedisStore {
     /// expires with the record, which only over-counts until the
     /// admission prune — never under-counts.
     fn drop_reservation(&self, nonce: &str) {
-        if let Ok(mut conn) = self.meta_client.get_connection() {
+        if let Ok(mut conn) = self.meta_conn() {
             let _: redis::RedisResult<i64> = redis::cmd("ZREM")
                 .arg(self.pending_idx_key())
                 .arg(nonce)
@@ -1215,7 +1382,7 @@ impl RecordStore for RedisStore {
             };
         }
         let reserved: redis::RedisResult<i64> = {
-            let mut conn = match self.meta_client.get_connection() {
+            let mut conn = match self.meta_conn() {
                 Ok(conn) => conn,
                 Err(e) => return AdmissionOutcome::Failed(format!("redis admission: {e}")),
             };
@@ -1246,7 +1413,9 @@ impl RecordStore for RedisStore {
 
     fn live_counts(&self, now_unix: u64) -> (u64, u64) {
         let reply: redis::RedisResult<Vec<i64>> = (|| {
-            let mut conn = self.meta_client.get_connection()?;
+            let mut conn = self
+                .meta_conn()
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::IoError, "meta", e)))?;
             redis::Script::new(LIVE_COUNTS_LUA)
                 .key(self.pending_idx_key())
                 .key(self.live_idx_key())
@@ -1284,7 +1453,7 @@ impl RecordStore for RedisStore {
         // backend error leaves the member alone: over-counting until
         // the TTL prune is the safe direction, never a bypass.
         if consumed.is_ok() {
-            if let Ok(mut conn) = self.meta_client.get_connection() {
+            if let Ok(mut conn) = self.meta_conn() {
                 let _: redis::RedisResult<i64> = redis::cmd("ZREM")
                     .arg(self.pending_idx_key())
                     .arg(nonce)
@@ -1376,7 +1545,15 @@ impl RecordStore for RedisStore {
     }
 
     fn counts(&self) -> (usize, usize) {
-        (0, 0)
+        // The published gauges must describe the shared keyspace, not a
+        // placeholder: derive from the pruned capacity counts (pending
+        // and total live; consumed = live − pending).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let (pending, live) = self.live_counts(now);
+        (pending as usize, live.saturating_sub(pending) as usize)
     }
 
     fn describe(&self) -> String {
@@ -1903,7 +2080,8 @@ mod redis_store_tests {
         };
 
         // Store (pending) through the sidecar's Redis backend.
-        let store = RedisStore::connect(&url, &prefix).expect("the store connects");
+        let store = RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("the store connects");
         store.put_pending(&record, meta).expect("the record stores");
 
         // Load + the one-shot consume transition.
@@ -1932,7 +2110,8 @@ mod redis_store_tests {
             prefix.clone(),
         );
         core.best_effort_delete(&nonce);
-        let reread = RedisStore::connect(&url, &prefix).expect("the store reconnects");
+        let reread = RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("the store reconnects");
         assert!(matches!(
             reread.consume(&nonce, now, None),
             ConsumeOutcome::NotFound
@@ -1943,10 +2122,11 @@ mod redis_store_tests {
     fn redis_store_reports_url_shape_and_backend_errors() {
         // A URL the client cannot parse is refused at construction, not
         // at the first request.
-        assert!(RedisStore::connect("not-a-redis-url", "p:").is_err());
+        assert!(RedisStore::connect("not-a-redis-url", "p:", CapacityLimits::UNLIMITED).is_err());
         // The describe label is the backend surface /doctor reports.
         let Some(url) = redis_url() else { return };
-        let store = RedisStore::connect(&url, &prefix("describe")).expect("the store connects");
+        let store = RedisStore::connect(&url, &prefix("describe"), CapacityLimits::UNLIMITED)
+            .expect("the store connects");
         assert!(store.describe().contains("redis"));
     }
 
@@ -2003,7 +2183,8 @@ mod redis_store_tests {
         let mac = "ef".repeat(32);
         let binding = record.request_binding.clone();
         assert!(binding.is_some(), "the probe record carries a binding");
-        let store = RedisStore::connect(&url, &prefix).expect("the store connects");
+        let store = RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("the store connects");
         store
             .put_pending(&record, RecordMeta::default())
             .expect("the record stores");
@@ -2027,7 +2208,8 @@ mod redis_store_tests {
         // A retry reaching this store — the "other node" shape: same
         // Redis, fresh store handle, no node-local map state — carries
         // the identity, the verdict and the verification material.
-        let other_node = RedisStore::connect(&url, &prefix).expect("the store reconnects");
+        let other_node = RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("the store reconnects");
         match other_node.consume(&nonce, now, Some("op-node-2")) {
             ConsumeOutcome::AlreadyConsumed {
                 meta,

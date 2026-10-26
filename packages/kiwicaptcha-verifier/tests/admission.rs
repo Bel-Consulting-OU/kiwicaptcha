@@ -553,10 +553,12 @@ fn redis_admission_ceiling_is_one_transaction_across_handles() {
         .as_nanos();
     let prefix = format!("kiwi-adv-adm-{stamp:x}:");
     let store_a: Arc<dyn RecordStore> = Arc::new(
-        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("handle A"),
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("handle A"),
     );
     let store_b: Arc<dyn RecordStore> = Arc::new(
-        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("handle B"),
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("handle B"),
     );
 
     let addr_a = spawn_with(|c| {
@@ -873,8 +875,10 @@ fn inject_record_honors_the_ceiling_and_the_off_switch() {
     a.nonce = "inject-off-a".to_string();
     let mut b = template.clone();
     b.nonce = "inject-off-b".to_string();
-    off.inject_record(a.clone(), Some("checkout".to_string()), None);
-    off.inject_record(b.clone(), None, Some("cart".to_string()));
+    off.inject_record(a.clone(), Some("checkout".to_string()), None)
+        .expect("unlimited ingest A lands");
+    off.inject_record(b.clone(), None, Some("cart".to_string()))
+        .expect("unlimited ingest B lands");
     assert_eq!(
         store.live_counts(unix_now()),
         (3, 3),
@@ -896,7 +900,13 @@ fn inject_record_honors_the_ceiling_and_the_off_switch() {
     });
     let mut c = template.clone();
     c.nonce = "inject-capped-c".to_string();
-    capped.inject_record(c.clone(), None, None);
+    let refused = capped.inject_record(c.clone(), None, None);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("challenge_store_full")),
+        "a saturated ingest reports the typed refusal, never silence: {refused:?}"
+    );
     assert_eq!(
         store.live_counts(unix_now()),
         (3, 3),
@@ -1017,8 +1027,10 @@ fn redis_admission_fails_closed_on_corrupt_slots_then_recovers() {
         .expect("clock")
         .as_nanos();
     let prefix = format!("kiwi-adv-corrupt-{stamp:x}:");
-    let store: Arc<dyn RecordStore> =
-        Arc::new(kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("connect"));
+    let store: Arc<dyn RecordStore> = Arc::new(
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("connect"),
+    );
 
     // Mint one real record (ceiling off) for the template bytes.
     let addr = spawn_with(|c| {
@@ -1164,7 +1176,8 @@ fn boot_seed_counts_records_that_never_touched_the_index() {
     // Generation 1: the old writer — ceiling off, so its admissions
     // take the unlimited path and never touch the capacity indexes.
     let legacy: Arc<dyn RecordStore> = Arc::new(
-        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("legacy connects"),
+        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix, CapacityLimits::UNLIMITED)
+            .expect("legacy connects"),
     );
     let addr = spawn_with(|c| {
         c.store = Arc::clone(&legacy);
@@ -1182,8 +1195,15 @@ fn boot_seed_counts_records_that_never_touched_the_index() {
 
     // Generation 2: a fresh boot on the same keyspace seeds the indexes
     // from the records already on the server.
-    let fresh =
-        kiwicaptcha_verifier::store::RedisStore::connect(&url, &prefix).expect("fresh connects");
+    let fresh = kiwicaptcha_verifier::store::RedisStore::connect(
+        &url,
+        &prefix,
+        CapacityLimits {
+            max_pending: 2,
+            max_live: 2,
+        },
+    )
+    .expect("fresh connects");
     let (pending, live) = fresh.live_counts(unix_now());
     assert_eq!(
         (pending, live),
@@ -1231,4 +1251,170 @@ fn boot_seed_counts_records_that_never_touched_the_index() {
         ];
         let _: redis::RedisResult<i64> = redis::cmd("UNLINK").arg(&keys).query(&mut conn);
     }
+}
+
+/// The mixed-version fence at the shipped binary: a Redis store with
+/// any ceiling enabled must REFUSE to start unless the operator
+/// asserts that every writer on the keyspace is index-aware. A
+/// rolling upgrade therefore cannot silently soften the bound — the
+/// choices are drain-then-assert, or both ceilings at 0 (degraded).
+#[cfg(feature = "redis-store")]
+#[test]
+fn capped_redis_admission_requires_the_authoritative_fleet_assertion() {
+    let url = ["TEST_REDIS_URL", "RISK_REDIS_URL"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default();
+    if url.is_empty() {
+        eprintln!("skipping admission fence test: no redis url");
+        return;
+    }
+    let store_url = if url.contains("://") {
+        url
+    } else {
+        format!("redis://{url}")
+    };
+
+    // Without the assertion: startup refusal naming the flag.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_kiwicaptcha-verifier"))
+        .args([
+            "--secret",
+            E2E_SECRET,
+            "--listen",
+            "http://127.0.0.1:0",
+            "--store",
+            &store_url,
+            "--max-pending-challenges",
+            "10",
+            "--max-live-records",
+            "20",
+        ])
+        .output()
+        .expect("the verifier binary spawns");
+    assert!(
+        !output.status.success(),
+        "uncapped-assertion Redis start must fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--admission-index-authoritative"),
+        "the refusal names the flag: {stderr}"
+    );
+
+    // With the assertion: the fence passes (child is killed immediately
+    // after its socket answers).
+    let probe = TcpListener::bind("127.0.0.1:0").expect("port probe");
+    let port = probe.local_addr().expect("addr").port();
+    drop(probe);
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_kiwicaptcha-verifier"))
+        .args([
+            "--secret",
+            E2E_SECRET,
+            "--listen",
+            &format!("http://127.0.0.1:{port}"),
+            "--store",
+            &store_url,
+            "--max-pending-challenges",
+            "10",
+            "--max-live-records",
+            "20",
+            "--admission-index-authoritative",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the asserted binary spawns");
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the asserted Redis start never served"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Cleanup any keys this probe minted.
+    if let Ok(mut conn) = redis::Client::open(store_url)
+        .expect("url parses")
+        .get_connection()
+    {
+        let keys: Vec<String> = redis::cmd("KEYS")
+            .arg("kiwi:verifier:*")
+            .query(&mut conn)
+            .unwrap_or_default();
+        if !keys.is_empty() {
+            let _: redis::RedisResult<i64> = redis::cmd("UNLINK").arg(&keys).query(&mut conn);
+        }
+    }
+}
+
+/// The meta-plane bound: a Redis endpoint that accepts TCP but never
+/// replies must not park the admission path — the core's 500 ms
+/// connect / 1 s read-write discipline turns the stall into a fast
+/// Failed admission, not a hung worker.
+#[cfg(feature = "redis-store")]
+#[test]
+fn a_hung_meta_redis_fails_admission_within_the_bounded_time() {
+    // A sink that accepts and then says nothing at all.
+    let sink = TcpListener::bind("127.0.0.1:0").expect("sink binds");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = sink.accept() {
+            held.push(stream); // hold the sockets open, never read, never write
+            if held.len() > 64 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(60));
+    });
+    let url = format!("redis://{sink_addr}");
+
+    let store = kiwicaptcha_verifier::store::RedisStore::connect(
+        &url,
+        "kiwi:hung-meta:",
+        CapacityLimits::UNLIMITED,
+    )
+    .expect("the URL-shape connect succeeds (it must not hang)");
+    let hung: Arc<dyn RecordStore> = Arc::new(store);
+
+    // Real record bytes, minted through an in-process memory server.
+    let mint_store: Arc<dyn RecordStore> = Arc::new(kiwicaptcha_verifier::MemoryStore::new());
+    let mint_addr = spawn_with(|c| {
+        c.store = Arc::clone(&mint_store);
+    });
+    let token = issue_and_solve(mint_addr, "login");
+    let minted_nonce = kiwicaptcha::SolutionToken::decode(&token)
+        .expect("token decodes")
+        .nonce;
+    let probe_record = match mint_store.peek(&minted_nonce, unix_now()) {
+        kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
+        other => panic!("pending after issue: {other:?}"),
+    };
+    let started = Instant::now();
+    let outcome = hung.try_put_pending(
+        &probe_record,
+        Default::default(),
+        CapacityLimits {
+            max_pending: 1,
+            max_live: 1,
+        },
+        unix_now(),
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(outcome, AdmissionOutcome::Failed(_)),
+        "a stalled meta path fails closed: {outcome:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the bounded connect/read/write contract answered within 5s, took {elapsed:?}"
+    );
 }

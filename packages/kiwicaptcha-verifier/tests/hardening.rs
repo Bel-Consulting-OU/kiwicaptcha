@@ -769,7 +769,11 @@ fn the_file_store_survives_a_server_restart() {
     let _ = std::fs::remove_dir_all(&dir);
     // First process: issue and solve, never verify.
     let token = {
-        let store = open_store(&StoreConfig::File(dir.clone())).expect("the store opens");
+        let store = open_store(
+            &StoreConfig::File(dir.clone()),
+            kiwicaptcha_verifier::store::CapacityLimits::UNLIMITED,
+        )
+        .expect("the store opens");
         let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
         config.store = store;
         let server = spawn(SidecarState::build(config), ServerOptions::default());
@@ -777,7 +781,11 @@ fn the_file_store_survives_a_server_restart() {
     };
     // The restart: a fresh server over the same directory reopens the
     // persisted envelopes; the token still verifies, exactly once.
-    let store = open_store(&StoreConfig::File(dir.clone())).expect("the store reopens");
+    let store = open_store(
+        &StoreConfig::File(dir.clone()),
+        kiwicaptcha_verifier::store::CapacityLimits::UNLIMITED,
+    )
+    .expect("the store reopens");
     let mut config = SidecarConfig::minimal(SECRET.to_string(), vec![], "http://127.0.0.1:0");
     config.store = store;
     let server = spawn(SidecarState::build(config), ServerOptions::default());

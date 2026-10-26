@@ -496,8 +496,10 @@ impl SidecarState {
         record: ChallengeRecord,
         action: Option<String>,
         cdata: Option<String>,
-    ) {
-        let _ = self.store.try_put_pending(
+    ) -> Result<(), String> {
+        match self
+            .store
+            .try_put_pending(
             &record,
             {
                 let mut meta = RecordMeta {
@@ -523,7 +525,13 @@ impl SidecarState {
             },
             self.capacity,
             record.issued_at,
-        );
+        ) {
+            AdmissionOutcome::Admitted => Ok(()),
+            AdmissionOutcome::PendingFull | AdmissionOutcome::LiveFull => Err(
+                "challenge_store_full: the store ceiling refused the ingest; the record is not stored and must never be served".to_string(),
+            ),
+            AdmissionOutcome::Failed(e) => Err(e),
+        }
     }
 
     /// Resolve the remoteip the request presents, under the binding
@@ -1498,7 +1506,10 @@ pub fn issue_wire_of(issued: &kiwicaptcha::challenge::Issued) -> String {
 
 /// The store backends the binary can select (re-exported so the tests
 /// and the binary share one construction path).
-pub fn open_store(config: &StoreConfig) -> Result<Arc<dyn RecordStore>, String> {
+pub fn open_store(
+    config: &StoreConfig,
+    limits: crate::store::CapacityLimits,
+) -> Result<Arc<dyn RecordStore>, String> {
     match config {
         StoreConfig::Memory => Ok(Arc::new(MemoryStore::new())),
         StoreConfig::File(path) => Ok(Arc::new(FileStore::open(path)?)),
@@ -1506,6 +1517,7 @@ pub fn open_store(config: &StoreConfig) -> Result<Arc<dyn RecordStore>, String> 
         StoreConfig::Redis(url) => Ok(Arc::new(crate::store::RedisStore::connect(
             url,
             "kiwi:verifier:",
+            limits,
         )?)),
         #[cfg(not(feature = "redis-store"))]
         StoreConfig::Redis(url) => Err(format!(
