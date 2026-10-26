@@ -97,7 +97,13 @@ PYSOLVE
     redis-cli -p "$MASTER_PORT" shutdown nosave >/dev/null 2>&1
     NEW_MASTER_PORT=''
     i=0
-    while [ "$i" -lt 50 ]; do
+    # The promotion window absorbs scheduling jitter on a loaded box:
+    # sentinel's failover detection plus the replica's takeover can
+    # exceed the old 15 s under contention, which reported a healthy
+    # topology as "never promoted" (a false RED, the same class as the
+    # sw-mitm probe race). 50 s stays fail-closed — no promotion after
+    # the window is still a FAIL.
+    while [ "$i" -lt 166 ]; do
         CANDIDATE=$(redis-cli -p "$SENTINEL_PORT" --no-auth-warning sentinel get-master-addr-by-name kiwi-master 2>/dev/null | tail -n 1)
         if [ -n "$CANDIDATE" ] && [ "$CANDIDATE" != "$MASTER_PORT" ]; then
             NEW_MASTER_PORT=$CANDIDATE
