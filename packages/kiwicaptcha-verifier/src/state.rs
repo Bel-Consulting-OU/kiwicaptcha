@@ -1511,7 +1511,7 @@ pub fn open_store(
     limits: crate::store::CapacityLimits,
 ) -> Result<Arc<dyn RecordStore>, String> {
     // The in-process backends are single-process by contract: only the
-    // Redis arm consumes the admission limits (the boot-seed check).
+    // Redis arm consumes the admission limits (the readiness-marker check).
     let _ = limits;
     match config {
         StoreConfig::Memory => Ok(Arc::new(MemoryStore::new())),
@@ -1524,7 +1524,8 @@ pub fn open_store(
         )?)),
         #[cfg(not(feature = "redis-store"))]
         StoreConfig::Redis(url) => Err(format!(
-            "KIWI_STORE={url} needs the redis-store build feature (rebuild with: cargo build --features redis-store); this build serves memory and file stores only"
+            "KIWI_STORE={} needs the redis-store build feature (rebuild with: cargo build --features redis-store); this build serves memory and file stores only",
+            crate::config::redact_store_url(url)
         )),
     }
 }

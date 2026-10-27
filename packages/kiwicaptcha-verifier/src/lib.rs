@@ -95,19 +95,25 @@
 //! live record cardinality — pending plus consumed tombstones — so a
 //! burn-and-reissue churn cannot grow the store past a fixed multiple
 //! of the pending window until records expire. On the Redis backend,
-//! boot seeds the capacity indexes from the records already on the
-//! server, so records written by an older binary or the unlimited
-//! ingest path count from the first admission of the new node. The
-//! Redis bound is only as global as that index, so capped Redis
-//! admission additionally requires the operator assertion
+//! the capacity indexes are bootstrapped by the explicit
+//! `migrate-admission-index` one-shot (a bounded keyspace pass that
+//! stamps the readiness marker); capped startup refuses a namespace
+//! whose marker is missing rather than hiding the migration inside
+//! process init. Records written by an older binary or the unlimited
+//! ingest path therefore count once the operator has run the
+//! migration. The Redis bound is only as global as that index, so
+//! capped Redis admission additionally requires the operator assertion
 //! `--admission-index-authoritative`
 //! (`KIWI_ADMISSION_INDEX_AUTHORIZATIVE=1`) that every writer on the
 //! keyspace is index-aware: during a rolling upgrade the binary
 //! refuses capped issuance until old writers are drained, or the
-//! ceilings are set to 0 for the degraded posture. When both ceilings
-//! are on, a total bound below the pending bound is refused at
-//! startup: every pending record is also live, so such a configuration
-//! could never admit anything.
+//! ceilings are set to 0 for the degraded posture. The default store
+//! prefix is epoch-isolated (`kiwi:verifier:i1:`), so an older binary
+//! that only knows `kiwi:verifier:` cannot silently join the
+//! authority domain of the hard cap. When both ceilings are on, a
+//! total bound below the pending bound is refused at startup: every
+//! pending record is also live, so such a configuration could never
+//! admit anything.
 //!
 //! # Risk involvement
 //!
@@ -130,9 +136,10 @@ pub mod store;
 
 pub use config::{
     parse_binding, parse_rung, parse_scopes, parse_store, parse_timeout_ms, parse_workers,
-    validate_rsw_trapdoor, validate_secret, BindingConfig, Rung, ScopePlan, StoreConfig,
-    CHALLENGE_TTL_SECS, DEFAULT_LISTEN, DEFAULT_PROFILE, DEFAULT_TIMEOUT_MS, DEFAULT_WORKERS,
-    EXAMPLE_SECRET, EXAMPLE_SECRETS, MAX_BODY_BYTES, MAX_HEAD_BYTES, MIN_SECRET_BYTES,
+    redact_store_url, validate_rsw_trapdoor, validate_secret, BindingConfig, Rung, ScopePlan,
+    StoreConfig, CHALLENGE_TTL_SECS, DEFAULT_LISTEN, DEFAULT_PROFILE, DEFAULT_TIMEOUT_MS,
+    DEFAULT_WORKERS, EXAMPLE_SECRET, EXAMPLE_SECRETS, MAX_BODY_BYTES, MAX_HEAD_BYTES,
+    MIN_SECRET_BYTES,
 };
 pub use riskplane::{compose_rung, scope_id, RiskPlane};
 pub use server::{

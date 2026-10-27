@@ -1151,20 +1151,22 @@ fn redis_admission_fails_closed_on_corrupt_slots_then_recovers() {
 
 /// Mixed-binary rolling upgrade of the Redis admission: records a
 /// pre-admission writer (the unlimited ingest path, or an old sidecar
-/// binary) left WITHOUT index members must be counted after the new
-/// node's boot seed — otherwise the shared ceiling is blind to the
-/// overlap's writes and the hard bound silently softens exactly when
-/// two versions share one keyspace.
+/// binary) left WITHOUT index members must be counted after the
+/// operator's explicit `migrate-admission-index` pass — otherwise the
+/// shared ceiling is blind to the overlap's writes and the hard bound
+/// silently softens exactly when two versions share one keyspace.
+/// Startup itself never scans: a capped boot without the readiness
+/// marker refuses with the migration command.
 #[cfg(feature = "redis-store")]
 #[test]
-fn boot_seed_counts_records_that_never_touched_the_index() {
+fn migrate_admission_index_counts_records_that_never_touched_the_index() {
     let url = ["TEST_REDIS_URL", "RISK_REDIS_URL"]
         .iter()
         .find_map(|name| std::env::var(name).ok())
         .filter(|v| !v.is_empty())
         .unwrap_or_default();
     if url.is_empty() {
-        eprintln!("skipping boot-seed admission test: no redis url");
+        eprintln!("skipping admission-index migration test: no redis url");
         return;
     }
     let stamp = std::time::SystemTime::now()

@@ -727,32 +727,48 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     }
 
     /**
-     * Inside the dual-read window a NON-empty index is always
-     * trustworthy: found keys exist. The lookup must answer from the
-     * index alone — never a keyspace walk, never the reconcile lock —
-     * even while another reader holds the cadence.
+     * Inside the dual-read window a NON-empty index is trustworthy for
+     * the strongest-factor floor, and this caller also takes the fleet
+     * cadence when it wins it so a PARTIAL index (a second key written
+     * by a pre-index node) heals. A loser of the lock still serves the
+     * index — never a keyspace walk per request.
      */
-    public function testDualReadServesANonEmptyIndexWithoutWalkingOrClaimingTheLock(): void
+    public function testDualReadHealsAPartialIndexUnderTheFleetLockWithoutPerRequestWalks(): void
     {
         $registry = $this->registry();
         $redis = $this->fakeRedis();
         $registry->saveCredentialSource($this->record('cred-SHORT', self::PRINCIPAL, 1));
-        // Fresh marker (in-window) and the fleet lock held elsewhere:
-        // a stale-empty hypothesis is wrong, but a non-empty answer is
-        // still authoritative for the strongest-factor floor.
+        // A second credential the pre-index node wrote WITHOUT SADDing.
+        $redis->setex($this->credentialKey('cred-LEGACY-2'), 31536000, (string) json_encode([
+            'publicKeyCredentialId' => base64_encode('cred-LEGACY-2'),
+            'type' => 'public-key',
+            'transports' => [],
+            'attestationType' => 'none',
+            'trustPath' => [],
+            'aaguid' => '00000000-0000-0000-0000-000000000000',
+            'credentialPublicKey' => base64_encode('key-material'),
+            'userHandle' => base64_encode(self::PRINCIPAL),
+            'counter' => 0,
+        ]));
         $redis->setex(
             'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
             604800,
             (string) \time(),
         );
-        $redis->locks['tests:webauthn:credential:reconcile-lock'] = '1';
 
+        // Lock free: the in-window lookup claims it, walks once, and
+        // the partial index becomes complete.
         $redis->commands = [];
         $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
-        self::assertCount(1, $found, 'the index members answer without a walk');
-        self::assertSame('cred-SHORT', $found[0]->publicKeyCredentialId);
-        self::assertNotContains('SCAN', $redis->commands, 'a non-empty index never triggers a keyspace walk');
-        self::assertNotContains('SET', $redis->commands, 'the non-empty path never claims the reconcile lock');
+        self::assertCount(2, $found, 'the winning claim heals the second key into the allow-list');
+        self::assertContains('SCAN', $redis->commands, 'the winner runs exactly one walk');
+
+        // Lock held elsewhere: serve the (now complete) index, never walk.
+        $redis->locks['tests:webauthn:credential:reconcile-lock'] = 'other-node';
+        $redis->commands = [];
+        $again = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertCount(2, $again, 'the index still answers');
+        self::assertNotContains('SCAN', $redis->commands, 'a lock loser never runs a keyspace walk');
     }
 
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void

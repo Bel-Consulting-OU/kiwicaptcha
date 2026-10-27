@@ -222,6 +222,121 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// returns this long after the first failed connect.
 pub const POOL_CHECKOUT_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// A bounded, protocol-aware liveness probe BEFORE redis-rs's own
+/// `connect()`. Upstream's setup pipeline (`CLIENT SETINFO`, and `HELLO`
+/// unless RESP2) runs with NO reply bound after the TCP connect — a
+/// server that accepts and then stays silent parks `get_connection_with_timeout`
+/// forever. The URL is parsed by the SAME structured `IntoConnectionInfo`
+/// the client uses (host, port, ACL username/password, database — never
+/// an ad-hoc string split, so `redis://user:pass@host/0` cannot be
+/// mistaken for a hostname), and the probe speaks real RESP over the
+/// matching transport: AUTH (when credentials are present), SELECT
+/// (non-zero db) and PING, each answered within the 1 s read/write bounds.
+/// An error reply (`-ERR …`) fails the probe — a live-but-refusing
+/// handshake is not a usable backend.
+pub fn bounded_redis_probe(url: &str) -> Result<(), String> {
+    let info = redis::IntoConnectionInfo::into_connection_info(url)
+        .map_err(|e| format!("redis url rejected by the client parser: {e}"))?;
+    probe_connection_info(&info)
+}
+
+/// The probe over an already-parsed connection description (the pool
+/// and the meta plane share this entry).
+pub fn probe_connection_info(info: &redis::ConnectionInfo) -> Result<(), String> {
+    match &info.addr {
+        redis::ConnectionAddr::Tcp(host, port) => {
+            let mut last_err = String::new();
+            for addr in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), *port))
+                .map_err(|e| format!("redis probe resolve: {e}"))?
+            {
+                match std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+                    Ok(stream) => {
+                        stream
+                            .set_read_timeout(Some(READ_TIMEOUT))
+                            .map_err(|e| format!("redis probe read timeout: {e}"))?;
+                        stream
+                            .set_write_timeout(Some(WRITE_TIMEOUT))
+                            .map_err(|e| format!("redis probe write timeout: {e}"))?;
+                        return resp_liveness(stream, info);
+                    }
+                    Err(e) => last_err = e.to_string(),
+                }
+            }
+            Err(format!("redis probe connect: {last_err}"))
+        }
+        redis::ConnectionAddr::Unix(path) => {
+            let stream = std::os::unix::net::UnixStream::connect(path)
+                .map_err(|e| format!("redis unix connect: {e}"))?;
+            stream
+                .set_read_timeout(Some(READ_TIMEOUT))
+                .map_err(|e| format!("redis probe read timeout: {e}"))?;
+            stream
+                .set_write_timeout(Some(WRITE_TIMEOUT))
+                .map_err(|e| format!("redis probe write timeout: {e}"))?;
+            resp_liveness(stream, info)
+        }
+        redis::ConnectionAddr::TcpTls { .. } => Err(
+            "TLS (rediss://) is refused — this build carries no Redis TLS backend (terminate TLS in front of Redis)".to_string(),
+        ),
+    }
+}
+
+/// RESP handshake over any stream: optional AUTH (ACL username +
+/// password, or password alone), optional SELECT for a non-zero
+/// database, then PING. Every reply is a simple-string status: an
+/// error (`-ERR …`) or a close fails the probe within the socket bounds.
+fn resp_liveness<S: std::io::Read + std::io::Write>(
+    mut stream: S,
+    info: &redis::ConnectionInfo,
+) -> Result<(), String> {
+    if let Some(password) = info.redis.password.as_deref() {
+        match info.redis.username.as_deref() {
+            Some(user) if !user.is_empty() => resp_send(&mut stream, &["AUTH", user, password])?,
+            _ => resp_send(&mut stream, &["AUTH", password])?,
+        }
+        resp_expect(&mut stream, "auth")?;
+    }
+    if info.redis.db != 0 {
+        let db = info.redis.db.to_string();
+        resp_send(&mut stream, &["SELECT", db.as_str()])?;
+        resp_expect(&mut stream, "select")?;
+    }
+    resp_send(&mut stream, &["PING"])?;
+    resp_expect(&mut stream, "ping")
+}
+
+/// Encode and write one RESP array command.
+fn resp_send<S: std::io::Write>(stream: &mut S, args: &[&str]) -> Result<(), String> {
+    let mut out = format!("*{}\r\n", args.len());
+    for a in args {
+        out.push('$');
+        out.push_str(&a.len().to_string());
+        out.push_str("\r\n");
+        out.push_str(a);
+        out.push_str("\r\n");
+    }
+    stream
+        .write_all(out.as_bytes())
+        .map_err(|e| format!("redis probe write: {e}"))
+}
+
+/// Read one reply; `+…` proves the server answered the handshake step,
+/// `-…` is a protocol-level refusal (bad credentials, NOAUTH, wrong db).
+fn resp_expect<S: std::io::Read>(stream: &mut S, what: &str) -> Result<(), String> {
+    let mut buf = [0u8; 256];
+    let n = stream
+        .read(&mut buf)
+        .map_err(|e| format!("redis probe {what}: {e}"))?;
+    if n == 0 {
+        return Err(format!("redis probe {what}: server closed without a reply"));
+    }
+    if buf[0] == b'-' {
+        let detail = String::from_utf8_lossy(&buf[..n.min(160)]).to_string();
+        return Err(format!("redis probe {what} refused: {detail}"));
+    }
+    Ok(())
+}
+
 /// The r2d2 connection manager: opens a real `redis::Connection` per pooled
 /// slot with the crate's timeouts applied at connect time, and reports
 /// poisoned connections as broken so r2d2 evicts them instead of reusing
@@ -279,6 +394,14 @@ impl r2d2::ManageConnection for StoreConnectionManager {
     type Error = redis::RedisError;
 
     fn connect(&self) -> Result<ManagedConnection, redis::RedisError> {
+        // Bounded liveness first: upstream's setup pipeline (SETINFO /
+        // HELLO) has no reply bound after the TCP connect, so a silent
+        // acceptor would park this slot's connect forever. The probe
+        // owns the 500 ms / 1 s bounds; only an answering server is
+        // handed to redis-rs.
+        probe_connection_info(self.client.get_connection_info()).map_err(|e| {
+            redis::RedisError::from((redis::ErrorKind::IoError, "redis probe before connect", e))
+        })?;
         let inner = self.client.get_connection_with_timeout(CONNECT_TIMEOUT)?;
         inner.set_read_timeout(Some(READ_TIMEOUT))?;
         inner.set_write_timeout(Some(WRITE_TIMEOUT))?;
@@ -4797,12 +4920,126 @@ mod tests {
 
     fn redis_url() -> Option<String> {
         match std::env::var("RISK_REDIS_URL") {
-            Ok(url) => Some(url),
-            Err(_) => {
+            Ok(url) if !url.is_empty() => {
+                // The shared harness convention may carry a predis-style
+                // `tcp://host:port`; redis-rs only parses `redis://`.
+                Some(if let Some(rest) = url.strip_prefix("tcp://") {
+                    format!("redis://{rest}")
+                } else {
+                    url
+                })
+            }
+            _ => {
                 eprintln!("RISK_REDIS_URL unset — Redis integration test skipped");
                 None
             }
         }
+    }
+
+    /// A bare `-ERR …` (wrong password, NOAUTH) is a live server that
+    /// refused the handshake: the probe must fail, not report liveness
+    /// for a backend the real connect could never authenticate against.
+    #[test]
+    fn probe_fails_on_an_error_reply_not_just_any_bytes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(&mut stream, b"-ERR invalid password\r\n");
+        });
+        let url = format!("redis://appuser:wrong@{addr}/0");
+        let err = bounded_redis_probe(&url).expect_err("an -ERR handshake must fail the probe");
+        assert!(
+            err.contains("refused") && err.contains("invalid password"),
+            "the refusal carries the server's error: {err}"
+        );
+        let _ = server.join();
+    }
+
+    /// A closed connection (zero bytes) still fails within the bound.
+    #[test]
+    fn probe_fails_when_the_server_closes_without_replying() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                // drop = FIN without a reply
+                drop(stream);
+            }
+        });
+        let err = bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect_err("a close-without-reply must fail");
+        assert!(
+            err.contains("closed") || err.contains("probe ping"),
+            "the close is reported: {err}"
+        );
+        let _ = server.join();
+    }
+
+    /// ACL credentials survive the structured parse: AUTH user pass
+    /// rides the wire before PING (an ad-hoc host splitter would have
+    /// resolved `user:pass@host` as a hostname and never reached us).
+    #[test]
+    fn probe_authenticates_acl_urls_before_pinging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = std::sync::Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 1024];
+            for _ in 0..4 {
+                let Ok(n) = std::io::Read::read(&mut stream, &mut buf) else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                let cmd = String::from_utf8_lossy(&buf[..n]).to_string();
+                let word = cmd.split("\r\n").nth(2).unwrap_or("").to_string();
+                seen2.lock().expect("seen").push(word.clone());
+                let reply: &[u8] = if word == "AUTH" || word == "SELECT" {
+                    b"+OK\r\n"
+                } else if word == "PING" {
+                    b"+PONG\r\n"
+                } else {
+                    b"-ERR unknown\r\n"
+                };
+                let _ = std::io::Write::write_all(&mut stream, reply);
+                if word == "PING" {
+                    return;
+                }
+            }
+        });
+        bounded_redis_probe(&format!("redis://appuser:secret@{addr}/0"))
+            .expect("the credentialed probe completes the handshake");
+        let words = seen.lock().expect("seen").clone();
+        let _ = server.join();
+        assert_eq!(
+            words,
+            vec!["AUTH".to_string(), "PING".to_string()],
+            "the probe authenticates with the parsed ACL credentials before PING: {words:?}"
+        );
+    }
+
+    /// TLS is refused at the probe boundary: a `rediss://` URL never
+    /// pretends a plaintext PING proves a TLS endpoint alive.
+    #[test]
+    fn probe_refuses_tls_urls_instead_of_pinging_plaintext() {
+        let err = bounded_redis_probe("rediss://user:secret@redis.internal:6380/0")
+            .expect_err("TLS must be refused");
+        assert!(
+            err.contains("TLS") || err.contains("rediss"),
+            "the refusal names TLS: {err}"
+        );
     }
 
     fn now_unix() -> u64 {

@@ -236,6 +236,18 @@ impl ConnectionPool {
             *guard = None;
         }
         if guard.is_none() {
+            // Bounded liveness first: redis-rs's setup pipeline (SETINFO /
+            // HELLO) has no reply bound after the TCP connect, so a silent
+            // acceptor would park this slot forever. The shared probe owns
+            // the connect/read/write bounds; only an answering server is
+            // handed to redis-rs.
+            if let Err(e) =
+                kiwicaptcha::redis_verify::probe_connection_info(client.get_connection_info())
+            {
+                return Err(RiskStoreError::BackendUnavailable(format!(
+                    "redis probe before risk connect: {e}"
+                )));
+            }
             let conn = client
                 .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
                 .map_err(map_redis_error)?;

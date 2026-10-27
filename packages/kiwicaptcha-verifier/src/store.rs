@@ -966,10 +966,18 @@ impl RedisStore {
     /// opens lazily per command inside the core store's pool, so this
     /// only validates the URL shape.
     pub fn connect(url: &str, prefix: &str, limits: CapacityLimits) -> Result<Self, String> {
-        let client = redis::Client::open(url.to_string())
-            .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
-        let meta_client = redis::Client::open(Self::meta_url(url))
-            .map_err(|e| format!("cannot parse redis url {url}: {e}"))?;
+        let client = redis::Client::open(url.to_string()).map_err(|e| {
+            format!(
+                "cannot parse redis url {}: {e}",
+                crate::config::redact_store_url(url)
+            )
+        })?;
+        let meta_client = redis::Client::open(Self::meta_url(url)).map_err(|e| {
+            format!(
+                "cannot parse redis url {}: {e}",
+                crate::config::redact_store_url(url)
+            )
+        })?;
         let inner = kiwicaptcha::redis_verify::RedisChallengeStore::new(client, prefix);
         let store = RedisStore {
             inner,
@@ -993,7 +1001,8 @@ impl RedisStore {
                 .map_err(|e| format!("admission index readiness check: {e}"))?;
             if ready != 1 {
                 return Err(format!(
-                    "capped Redis admission at prefix {prefix} has no bootstrapped index: run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={url}) once before starting capped nodes — startup refuses to hide the keyspace migration"
+                    "capped Redis admission at prefix {prefix} has no bootstrapped index: run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={}) once before starting capped nodes — startup refuses to hide the keyspace migration",
+                    crate::config::redact_store_url(url)
                 ));
             }
         }
@@ -1045,119 +1054,12 @@ impl RedisStore {
     }
 
     /// A bounded, protocol-aware liveness probe BEFORE the redis-rs
-    /// connection. The URL is parsed by the SAME structured
-    /// `IntoConnectionInfo` the client uses (host, port, ACL
-    /// username/password, database — never an ad-hoc string split, so
-    /// `redis://user:pass@host/0` cannot be mistaken for a hostname),
-    /// and the probe speaks real RESP over the matching transport:
-    /// AUTH (when credentials are present), SELECT (non-zero db) and
-    /// PING, each answered within the 1 s read/write bounds. Only a
-    /// server that completes the handshake counts as alive — upstream's
-    /// own connect() runs its setup with NO reply bound, which is how a
-    /// silent TCP acceptor used to park connect() forever.
+    /// connection. Delegates to the core crate's shared probe (the same
+    /// one the challenge-store pool runs), so there is one URL parser
+    /// and one handshake for every connect path.
     fn ping_probe(url: &str) -> Result<(), String> {
-        let info = redis::IntoConnectionInfo::into_connection_info(url)
-            .map_err(|e| format!("meta redis url rejected by the client parser: {e}"))?;
-        match &info.addr {
-            redis::ConnectionAddr::Tcp(host, port) => {
-                let mut last_err = String::new();
-                for addr in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), *port))
-                    .map_err(|e| format!("meta redis resolve: {e}"))?
-                {
-                    match std::net::TcpStream::connect_timeout(
-                        &addr,
-                        kiwicaptcha::redis_verify::CONNECT_TIMEOUT,
-                    ) {
-                        Ok(stream) => {
-                            stream
-                                .set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
-                                .map_err(|e| format!("meta redis probe read timeout: {e}"))?;
-                            stream
-                                .set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
-                                .map_err(|e| format!("meta redis probe write timeout: {e}"))?;
-                            return Self::resp_liveness(stream, &info);
-                        }
-                        Err(e) => last_err = e.to_string(),
-                    }
-                }
-                Err(format!("meta redis probe connect: {last_err}"))
-            }
-            redis::ConnectionAddr::Unix(path) => {
-                let stream = std::os::unix::net::UnixStream::connect(path)
-                    .map_err(|e| format!("meta redis unix connect: {e}"))?;
-                stream
-                    .set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
-                    .map_err(|e| format!("meta redis probe read timeout: {e}"))?;
-                stream
-                    .set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
-                    .map_err(|e| format!("meta redis probe write timeout: {e}"))?;
-                Self::resp_liveness(stream, &info)
-            }
-            redis::ConnectionAddr::TcpTls { .. } => Err(
-                "meta redis: TLS (rediss://) is refused — this build carries no Redis TLS backend (terminate TLS in front of Redis)".to_string(),
-            ),
-        }
-    }
-
-    /// RESP handshake over any stream: optional AUTH (ACL username +
-    /// password, or password alone), optional SELECT for a non-zero
-    /// database, then PING. Any complete reply proves liveness; a
-    /// stall or close fails within the socket bounds.
-    fn resp_liveness<S: std::io::Read + std::io::Write>(
-        mut stream: S,
-        info: &redis::ConnectionInfo,
-    ) -> Result<(), String> {
-        if let Some(password) = info.redis.password.as_deref() {
-            match info.redis.username.as_deref() {
-                Some(user) if !user.is_empty() => {
-                    Self::resp_send(&mut stream, &["AUTH", user, password])?
-                }
-                _ => Self::resp_send(&mut stream, &["AUTH", password])?,
-            }
-            Self::resp_expect(&mut stream, "auth")?;
-        }
-        if info.redis.db != 0 {
-            let db = info.redis.db.to_string();
-            Self::resp_send(&mut stream, &["SELECT", db.as_str()])?;
-            Self::resp_expect(&mut stream, "select")?;
-        }
-        Self::resp_send(&mut stream, &["PING"])?;
-        Self::resp_expect(&mut stream, "ping")
-    }
-
-    /// Encode and write one RESP array command.
-    fn resp_send<S: std::io::Read + std::io::Write>(
-        stream: &mut S,
-        args: &[&str],
-    ) -> Result<(), String> {
-        let mut out = format!("*{}\r\n", args.len());
-        for a in args {
-            out.push('$');
-            out.push_str(&a.len().to_string());
-            out.push_str("\r\n");
-            out.push_str(a);
-            out.push_str("\r\n");
-        }
-        stream
-            .write_all(out.as_bytes())
-            .map_err(|e| format!("meta redis probe write: {e}"))
-    }
-
-    /// Read one reply; any non-empty response proves the server answered.
-    fn resp_expect<S: std::io::Read + std::io::Write>(
-        stream: &mut S,
-        what: &str,
-    ) -> Result<(), String> {
-        let mut buf = [0u8; 256];
-        let n = stream
-            .read(&mut buf)
-            .map_err(|e| format!("meta redis probe {what}: {e}"))?;
-        if n == 0 {
-            return Err(format!(
-                "meta redis probe {what}: server closed without a reply"
-            ));
-        }
-        Ok(())
+        kiwicaptcha::redis_verify::bounded_redis_probe(url)
+            .map_err(|e| format!("meta redis probe: {e}"))
     }
 
     /// A meta-plane connection under the SAME bounded-time failure
@@ -1183,12 +1085,13 @@ impl RedisStore {
     /// already on the server: every record key with a live TTL lands in
     /// the live index (score: now + TTL), and a record still marked
     /// `pending` also lands in the pending index. Records written by a
-    /// live OLD node after this seed are still missed until the next
-    /// connect — that window is bounded by the rolling upgrade and the
-    /// record TTL, and the failure direction is an undercount only of
-    /// foreign-writer records, never of this node's own admissions.
-    /// A consumed record seeded optimistically into the pending index
-    /// over-counts until its score prunes (the safe direction).
+    /// live OLD node after this pass are still missed until the next
+    /// `migrate-admission-index` run — that window is bounded by the
+    /// rolling upgrade and the record TTL, and the failure direction is
+    /// an undercount only of foreign-writer records, never of this
+    /// node's own admissions. A consumed record seeded optimistically
+    /// into the pending index over-counts until its score prunes (the
+    /// safe direction).
     fn seed_admission_index(&self) -> Result<(usize, usize), String> {
         let mut conn = self.meta_conn()?;
         let pattern = format!("{}*", self.meta_prefix);
