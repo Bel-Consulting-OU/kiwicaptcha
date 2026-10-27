@@ -246,18 +246,32 @@ pub fn probe_connection_info(info: &redis::ConnectionInfo) -> Result<(), String>
     match &info.addr {
         redis::ConnectionAddr::Tcp(host, port) => {
             let mut last_err = String::new();
-            for addr in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), *port))
-                .map_err(|e| format!("redis probe resolve: {e}"))?
-            {
+            let addrs: Vec<std::net::SocketAddr> =
+                std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), *port))
+                    .map_err(|e| format!("redis probe resolve: {e}"))?
+                    .collect();
+            if addrs.is_empty() {
+                return Err("redis probe resolve: no addresses".to_string());
+            }
+            for addr in addrs {
                 match std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
                     Ok(stream) => {
-                        stream
-                            .set_read_timeout(Some(READ_TIMEOUT))
-                            .map_err(|e| format!("redis probe read timeout: {e}"))?;
-                        stream
-                            .set_write_timeout(Some(WRITE_TIMEOUT))
-                            .map_err(|e| format!("redis probe write timeout: {e}"))?;
-                        return resp_liveness(stream, info);
+                        let probed = (|| {
+                            stream
+                                .set_read_timeout(Some(READ_TIMEOUT))
+                                .map_err(|e| format!("redis probe read timeout: {e}"))?;
+                            stream
+                                .set_write_timeout(Some(WRITE_TIMEOUT))
+                                .map_err(|e| format!("redis probe write timeout: {e}"))?;
+                            resp_liveness(stream, info)
+                        })();
+                        match probed {
+                            Ok(()) => return Ok(()),
+                            // A live-but-refusing first address must not
+                            // hide a healthy one behind it (multi-homed
+                            // hosts, anycast, a broken DNS record).
+                            Err(e) => last_err = e,
+                        }
                     }
                     Err(e) => last_err = e.to_string(),
                 }
@@ -283,8 +297,9 @@ pub fn probe_connection_info(info: &redis::ConnectionInfo) -> Result<(), String>
 
 /// RESP handshake over any stream: optional AUTH (ACL username +
 /// password, or password alone), optional SELECT for a non-zero
-/// database, then PING. Every reply is a simple-string status: an
-/// error (`-ERR …`) or a close fails the probe within the socket bounds.
+/// database, then PING. Each reply is a framed CRLF-terminated line
+/// (a fragmented `+OK` can never desync the next handshake command);
+/// only `+`/`$` count as success, `-ERR …` is a refusal.
 fn resp_liveness<S: std::io::Read + std::io::Write>(
     mut stream: S,
     info: &redis::ConnectionInfo,
@@ -320,21 +335,70 @@ fn resp_send<S: std::io::Write>(stream: &mut S, args: &[&str]) -> Result<(), Str
         .map_err(|e| format!("redis probe write: {e}"))
 }
 
-/// Read one reply; `+…` proves the server answered the handshake step,
-/// `-…` is a protocol-level refusal (bad credentials, NOAUTH, wrong db).
+/// Read one complete CRLF-terminated RESP reply. Bytes are
+/// accumulated until `\r\n`, so a reply split across TCP segments
+/// (`+O` then `K\r\n`) still parses as one step and never leaves a
+/// tail that desyncs the next command. AUTH/SELECT/PING answer with
+/// a simple string (`+…`); `-…` is a refusal; a bulk `$N` body is
+/// consumed in full (some forks) so the stream stays framed; any
+/// other type is a protocol violation.
 fn resp_expect<S: std::io::Read>(stream: &mut S, what: &str) -> Result<(), String> {
-    let mut buf = [0u8; 256];
-    let n = stream
-        .read(&mut buf)
-        .map_err(|e| format!("redis probe {what}: {e}"))?;
-    if n == 0 {
-        return Err(format!("redis probe {what}: server closed without a reply"));
+    let mut line: Vec<u8> = Vec::with_capacity(32);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = stream
+            .read(&mut byte)
+            .map_err(|e| format!("redis probe {what}: {e}"))?;
+        if n == 0 {
+            return Err(if line.is_empty() {
+                format!("redis probe {what}: server closed without a reply")
+            } else {
+                format!(
+                    "redis probe {what}: truncated reply {:?}",
+                    String::from_utf8_lossy(&line)
+                )
+            });
+        }
+        line.push(byte[0]);
+        if line.len() >= 2 && line[line.len() - 2] == b'\r' && line[line.len() - 1] == b'\n' {
+            break;
+        }
+        if line.len() > 4096 {
+            return Err(format!("redis probe {what}: reply line exceeds 4 KiB"));
+        }
     }
-    if buf[0] == b'-' {
-        let detail = String::from_utf8_lossy(&buf[..n.min(160)]).to_string();
-        return Err(format!("redis probe {what} refused: {detail}"));
+    match line.first() {
+        Some(b'-') => {
+            let detail = String::from_utf8_lossy(&line[..line.len().min(160)]).to_string();
+            Err(format!("redis probe {what} refused: {detail}"))
+        }
+        // Any well-formed RESP type proves the peer speaks Redis
+        // protocol (simple string, integer, bulk, array, map, set,
+        // bool, double, big number, verbatim, push). Test doubles and
+        // some proxies answer PING with a non-simple-string type;
+        // that is still liveness. A first byte outside RESP is not.
+        Some(b'+') | Some(b':') | Some(b'$') | Some(b'*') | Some(b'%') | Some(b'#')
+        | Some(b',') | Some(b'(') | Some(b'~') | Some(b'|') => {
+            if line.first() == Some(&b'$') {
+                // Bulk header `$N\r\n` is the line just read; consume the
+                // payload (N bytes + CRLF) so the next handshake step
+                // starts on a clean boundary.
+                let n: usize = String::from_utf8_lossy(&line[1..line.len() - 2])
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("redis probe {what}: malformed bulk length"))?;
+                let mut body = vec![0u8; n + 2];
+                stream
+                    .read_exact(&mut body)
+                    .map_err(|e| format!("redis probe {what}: bulk body incomplete: {e}"))?;
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "redis probe {what}: unexpected reply type {:?}",
+            other.copied()
+        )),
     }
-    Ok(())
 }
 
 /// The r2d2 connection manager: opens a real `redis::Connection` per pooled
@@ -5040,6 +5104,73 @@ mod tests {
             err.contains("TLS") || err.contains("rediss"),
             "the refusal names TLS: {err}"
         );
+    }
+
+    /// A reply drip-fed one byte at a time must still frame: the probe
+    /// reassembles CRLF across TCP segments instead of treating the
+    /// first fragment as a complete answer (and desyncing the next
+    /// handshake command).
+    #[test]
+    fn probe_frames_a_reply_drip_fed_one_byte_at_a_time() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            for b in b"+PONG\r\n" {
+                let _ = std::io::Write::write_all(&mut stream, &[*b]);
+                let _ = std::io::Write::flush(&mut stream);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect("a drip-fed +PONG still completes the handshake");
+        let _ = server.join();
+    }
+
+    /// A bulk PING body is consumed in full so the stream stays framed.
+    #[test]
+    fn probe_consumes_a_bulk_ping_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(&mut stream, b"$4\r\nPONG\r\n");
+        });
+        bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect("a bulk PONG completes the handshake");
+        let _ = server.join();
+    }
+
+    /// A non-RESP first byte (`X…`) is a protocol violation, not
+    /// liveness — the probe must refuse garbage that happens to be
+    /// non-empty.
+    #[test]
+    fn probe_refuses_a_non_resp_first_byte() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 256];
+            let _ = std::io::Read::read(&mut stream, &mut buf);
+            let _ = std::io::Write::write_all(&mut stream, b"Xnot-resp\r\n");
+        });
+        let err = bounded_redis_probe(&format!("redis://{addr}/"))
+            .expect_err("garbage must not count as a live server");
+        assert!(
+            err.contains("unexpected reply type"),
+            "the refusal names the protocol violation: {err}"
+        );
+        let _ = server.join();
     }
 
     fn now_unix() -> u64 {

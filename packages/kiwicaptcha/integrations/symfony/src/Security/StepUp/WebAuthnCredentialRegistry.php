@@ -157,10 +157,31 @@ LUA;
      */
     public function registeredCredentialsOf(string $principalPseudonym): ?array
     {
+        try {
+            return $this->registeredCredentialsOfInner($principalPseudonym);
+        } catch (\Throwable) {
+            // Any backend failure mid-lookup (SMEMBERS, batch GET, SCAN)
+            // leaves the answer unproven: UNKNOWN, never [] — the caller
+            // answers a retryable refusal instead of treating a Redis
+            // blip as "this account has no security key".
+            return null;
+        }
+    }
+
+    /**
+     * The lookup body; see {@see self::registeredCredentialsOf()} for the
+     * three-state contract. Exceptions propagate to that wrapper.
+     *
+     * @return list<CredentialRecord>|null
+     */
+    private function registeredCredentialsOfInner(string $principalPseudonym): ?array
+    {
         $marker = $this->redis->get($this->prefix.self::BACKFILL_MARKER);
         if ($marker === null) {
             // Fresh install (or lapsed marker): this call runs the one
-            // full walk, so its answer is fresh by construction.
+            // full walk, so its answer is fresh by construction. If the
+            // walk cannot complete, the exception becomes UNKNOWN above
+            // and the marker is never stamped.
             $this->backfillIndexes();
 
             return $this->readIndexFor($principalPseudonym);
@@ -191,7 +212,21 @@ LUA;
             // for the strongest-factor floor, and the gap closes on the
             // next winning claim.
             if ($this->claimReconcileLock()) {
-                $this->reconcileIndexes();
+                try {
+                    $this->reconcileIndexes();
+                } catch (\Throwable $walkFailure) {
+                    // A failed walk must not pin the fleet cadence for
+                    // the full lock TTL: release so the next lookup can
+                    // retry immediately. The answer is still UNKNOWN
+                    // (wrapper), never [].
+                    try {
+                        $this->redis->del($this->prefix.'credential:reconcile-lock');
+                    } catch (\Throwable) {
+                        // Lock expiry is the fallback; never mask the
+                        // original walk failure.
+                    }
+                    throw $walkFailure;
+                }
 
                 return $this->readIndexFor($principalPseudonym);
             }
@@ -273,6 +308,11 @@ LUA;
      * reconcile leg of a dual-read lookup (and the walk half of a
      * fresh backfill). Idempotent index adds only — a record an old
      * node wrote without SADDing it lands in its principal's set here.
+     *
+     * A SCAN reply that is not a well-formed cursor pair is a failed
+     * walk, not an empty keyspace: the exception stops the backfill
+     * marker (never stamped on a partial pass) and the dual-read
+     * caller's wrapper turns it into UNKNOWN.
      */
     private function reconcileIndexes(): void
     {
@@ -303,22 +343,33 @@ LUA;
                 $membersByIndex[$this->indexKey((string) $record->userHandle)][] = $key;
             }
         };
+        $steps = 0;
         do {
             $reply = $this->redis->scan($cursor, ['MATCH' => $pattern, 'COUNT' => 200]);
-            if (!\is_array($reply)) {
-                break;
+            if (!\is_array($reply) || (!isset($reply[0]) && !isset($reply['cursor']))) {
+                throw new \RuntimeException('the credential index SCAN returned a malformed cursor reply; refusing to treat a failed walk as a complete one');
             }
-            $cursor = isset($reply[0]) ? (string) $reply[0] : (string) ($reply['cursor'] ?? '0');
+            $next = isset($reply[0]) ? (string) $reply[0] : (string) ($reply['cursor'] ?? '0');
             $keys = $reply[1] ?? ($reply['keys'] ?? []);
-            if (\is_array($keys)) {
-                foreach ($keys as $key) {
-                    if (\is_string($key) && $key !== '') {
-                        $collect[] = $key;
-                    }
+            if (!\is_array($keys)) {
+                throw new \RuntimeException('the credential index SCAN returned a malformed key list; refusing to treat a failed walk as a complete one');
+            }
+            foreach ($keys as $key) {
+                if (\is_string($key) && $key !== '') {
+                    $collect[] = $key;
                 }
             }
             if (\count($collect) >= 500) {
                 $flush();
+            }
+            // A cursor that never advances would spin forever: a stuck
+            // server reply is a failed walk, not a hang.
+            if ($next === $cursor && $next !== '0' && $next !== '') {
+                throw new \RuntimeException('the credential index SCAN cursor stopped advancing; refusing to treat a failed walk as a complete one');
+            }
+            $cursor = $next;
+            if (++$steps > 1_000_000) {
+                throw new \RuntimeException('the credential index SCAN exceeded the step bound; refusing to treat a failed walk as a complete one');
             }
         } while ($cursor !== '0' && $cursor !== '');
         $flush();
