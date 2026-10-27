@@ -913,6 +913,15 @@ impl RedisCalibrationStore {
     fn connection(&self) -> Result<MutexGuard<'_, Option<redis::Connection>>, CalibrationError> {
         let mut guard = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_none() {
+            // Bounded liveness first: this path runs on the assessment
+            // hot path — a silent acceptor must fail fast, never park
+            // every assessment thread inside redis-rs's unbounded setup.
+            kiwicaptcha::redis_verify::probe_connection_info(self.client.get_connection_info())
+                .map_err(|e| {
+                    CalibrationError::Backend(format!(
+                        "redis probe before calibration connect: {e}"
+                    ))
+                })?;
             let conn = self
                 .client
                 .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
