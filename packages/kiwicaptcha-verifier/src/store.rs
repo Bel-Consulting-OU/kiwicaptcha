@@ -966,7 +966,12 @@ impl RedisStore {
     /// opens lazily per command inside the core store's pool, so this
     /// only validates the URL shape.
     pub fn connect(url: &str, prefix: &str, limits: CapacityLimits) -> Result<Self, String> {
-        let client = redis::Client::open(url.to_string()).map_err(|e| {
+        // Both clients ride the RESP2 meta URL: redis-rs's default RESP3
+        // handshake sends HELLO inside connect() with no reply bound.
+        // The shared probe covers silent acceptors; RESP2 removes the
+        // HELLO round trip from the setup pipeline itself (the challenge
+        // store's commands are RESP2-safe).
+        let client = redis::Client::open(Self::meta_url(url)).map_err(|e| {
             format!(
                 "cannot parse redis url {}: {e}",
                 crate::config::redact_store_url(url)
@@ -1560,10 +1565,11 @@ impl RecordStore for RedisStore {
     }
 
     fn probe(&self) -> Result<String, String> {
-        let mut conn = self
-            .meta_client
-            .get_connection()
-            .map_err(|e| format!("connect failed: {e}"))?;
+        // The same bounded path every other meta-plane op takes: a
+        // raw-RESP liveness probe first, then a timed connect. A
+        // silent acceptor must fail /doctor within the advertised
+        // bound, never park the request on redis-rs's unbounded setup.
+        let mut conn = self.meta_conn()?;
         let pong: redis::RedisResult<String> = redis::cmd("PING").query(&mut conn);
         match pong {
             Ok(reply) => Ok(format!("redis answered PING ({reply})")),
@@ -1997,6 +2003,7 @@ mod tests {
 mod redis_store_tests {
     use super::*;
     use kiwicaptcha::challenge::{issue_challenge, now_epoch_micros, BindingMode, ChallengeConfig};
+    use std::time::Duration;
 
     const SECRET: &str = "kiwi-verifier-redis-store-test-secret-0123456789";
 
@@ -2131,6 +2138,41 @@ mod redis_store_tests {
             err.contains("TLS") || err.contains("rediss"),
             "the refusal names TLS: {err}"
         );
+    }
+
+    /// `/doctor` rides the same bounded meta path as every other meta
+    /// op: a silent acceptor must fail the store check within the
+    /// connect/read/write bounds, never park the HTTP worker inside
+    /// redis-rs's unbounded setup pipeline.
+    #[test]
+    fn doctor_probe_fails_bounded_against_a_silent_acceptor() {
+        let sink = std::net::TcpListener::bind("127.0.0.1:0").expect("sink binds");
+        let sink_addr = sink.local_addr().expect("sink addr");
+        let holder = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = sink.accept() {
+                held.push(stream);
+                if held.len() >= 8 {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        let url = format!("redis://{sink_addr}/");
+        let store = RedisStore::connect(&url, "kiwi:hung-doctor:", CapacityLimits::UNLIMITED)
+            .expect("URL-shape connect is lazy");
+        let started = std::time::Instant::now();
+        let outcome = RecordStore::probe(&store);
+        let elapsed = started.elapsed();
+        assert!(
+            outcome.is_err(),
+            "a silent acceptor is not a healthy store: {outcome:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the doctor probe answered within the bound, took {elapsed:?}"
+        );
+        drop(holder);
     }
 
     /// The unix-socket form probes over the socket with the same RESP

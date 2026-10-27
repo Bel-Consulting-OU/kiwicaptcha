@@ -1441,3 +1441,84 @@ fn a_hung_meta_redis_fails_admission_within_the_bounded_time() {
         "the bounded connect/read/write contract answered within 5s, took {elapsed:?}"
     );
 }
+
+/// The `/doctor` HTTP path against a silent acceptor: the store check
+/// must answer (ok=false with the probe reason) within the advertised
+/// bound — never park the worker inside redis-rs's unbounded setup.
+#[cfg(feature = "redis-store")]
+#[test]
+fn doctor_over_http_fails_bounded_against_a_silent_acceptor() {
+    let sink = TcpListener::bind("127.0.0.1:0").expect("sink binds");
+    let sink_addr = sink.local_addr().expect("sink addr");
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = sink.accept() {
+            held.push(stream);
+            if held.len() >= 8 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(30));
+    });
+
+    // Ceilings off: startup is lazy (URL shape only) and does not need
+    // Redis alive to bind; /doctor is the first live check.
+    let probe = TcpListener::bind("127.0.0.1:0").expect("port probe");
+    let port = probe.local_addr().expect("probe addr").port();
+    drop(probe);
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_kiwicaptcha-verifier"))
+        .args([
+            "--secret",
+            E2E_SECRET,
+            "--listen",
+            &format!("http://127.0.0.1:{port}"),
+            "--store",
+            &format!("redis://{sink_addr}/"),
+            "--max-pending-challenges",
+            "0",
+            "--max-live-records",
+            "0",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the verifier binary spawns");
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the spawned binary never started serving"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let started = Instant::now();
+    let mut stream = TcpStream::connect(addr).expect("doctor connect");
+    stream
+        .write_all(b"GET /doctor HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n")
+        .expect("doctor request");
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .expect("doctor response drained");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "/doctor must answer within the bound against a silent Redis, took {elapsed:?}"
+    );
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains("200"),
+        "/doctor still answers HTTP 200 with a failed store check: {text}"
+    );
+    assert!(
+        text.contains("\"ok\": false") || text.contains("\"ok\":false"),
+        "the doctor payload reports the failed store probe: {text}"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+}

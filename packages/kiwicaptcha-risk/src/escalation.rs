@@ -120,6 +120,14 @@ impl RedisDecoyEscalationStore {
     }
 
     fn connection(&self) -> Result<::redis::Connection, RiskStoreError> {
+        // Bounded liveness first: the setup pipeline has no reply bound
+        // after TCP connect, so a silent acceptor would park this path.
+        kiwicaptcha::redis_verify::probe_connection_info(self.client.get_connection_info())
+            .map_err(|e| {
+                RiskStoreError::BackendUnavailable(format!(
+                    "redis probe before escalation connect: {e}"
+                ))
+            })?;
         let conn = self
             .client
             .get_connection_with_timeout(std::time::Duration::from_millis(
