@@ -124,6 +124,86 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         self::assertStringContainsString('step_up_credential_lookup_retry', (string) $enroll->getContent());
     }
 
+    /**
+     * A SCAN backend failure mid-walk must never be treated as a
+     * complete empty keyspace: the backfill marker is not stamped, the
+     * lookup answers UNKNOWN (retryable), and no first-key bootstrap
+     * becomes eligible from a failed pass.
+     */
+    public function testAFailedScanWalkNeverStampsTheMarkerOrAnswersKnownEmpty(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        $redis->scanMalformed = true;
+
+        $lookup = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertNull($lookup, 'a failed walk is UNKNOWN, never []');
+        self::assertNull(
+            $redis->get('tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER),
+            'a failed walk never stamps the backfill marker'
+        );
+
+        // Dual-read with the lock free: the winning claim's walk also
+        // fails → UNKNOWN, not a fresh [] that would authorize bootstrap.
+        $redis->scanMalformed = false;
+        $redis->setex(
+            'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
+            604800,
+            (string) \time(),
+        );
+        $redis->scanMalformed = true;
+        $again = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertNull($again, 'a failed reconcile under the lock is UNKNOWN');
+        // The failed walk released the cadence so the next lookup can
+        // retry immediately instead of waiting out the 300 s TTL.
+        self::assertArrayNotHasKey(
+            'tests:webauthn:credential:reconcile-lock',
+            $redis->locks,
+            'a failed walk must not pin the fleet reconcile lock'
+        );
+    }
+
+    /**
+     * A retryable lookup miss on completion must leave the challenge
+     * alive: the client is told to retry, so spending single-use would
+     * make the next attempt unknown_challenge instead.
+     */
+    public function testCompletionLookupRetryDoesNotConsumeTheChallenge(): void
+    {
+        $handler = $this->handler();
+        $redis = $this->fakeRedis();
+        // Mint a real enrollment challenge while the index is known.
+        $this->store->markSessionStepUpSuccess(self::SESSION, self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+        $challengeId = (string) $document['challenge'];
+
+        // Index goes UNKNOWN (in-window, lock held elsewhere) before complete.
+        $redis->setex(
+            'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
+            604800,
+            (string) \time(),
+        );
+        $redis->locks['tests:webauthn:credential:reconcile-lock'] = '1';
+
+        $result = $handler->enrollComplete($this->completeRequest($challengeId, ''));
+        self::assertSame('step_up_credential_lookup_retry', $result->failureCode, 'retryable, fail-closed');
+        self::assertNotNull($result->challengeId, 'the refusal carries the challenge id');
+        self::assertNotNull(
+            $this->store->read($result->challengeId),
+            'the challenge must survive a retryable lookup miss so the client can complete once the index settles'
+        );
+        // And the same ticket still resolves (not consumed → not unknown).
+        $unlocked = $this->fakeRedis();
+        unset($unlocked->locks['tests:webauthn:credential:reconcile-lock']);
+        $retry = $handler->enrollComplete($this->completeRequest($challengeId, ''));
+        self::assertNotSame(
+            StepUpResult::FAIL_UNKNOWN_CHALLENGE,
+            $retry->failureCode,
+            'a second attempt on the same ticket must not answer unknown_challenge'
+        );
+    }
+
     public function testTheEnrollmentEntryPointCompletesAndEnrolls(): void
     {
         $handler = $this->handler();
@@ -1111,6 +1191,10 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
      * so the record SCAN never sees a lock as a credential. */
     public array $locks = [];
 
+    /** When true, SCAN answers a non-array garbage reply (a failed
+     * walk must never be treated as a complete empty keyspace). */
+    public bool $scanMalformed = false;
+
     public function setex($key, $ttl, $value)
     {
         $this->values[(string) $key] = (string) $value;
@@ -1178,6 +1262,9 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
     public function scan($cursor, $options = []): array
     {
         $this->commands[] = 'SCAN';
+        if ($this->scanMalformed) {
+            throw new \RuntimeException('fixture: SCAN backend failure');
+        }
         $pattern = (string) ($options['MATCH'] ?? '*');
         $regex = '/^'.strtr(preg_quote($pattern, '/'), ['\\*' => '.*', '\\?' => '.']).'$/';
         $matched = array_values(array_filter(array_keys($this->values), static fn ($key) => preg_match($regex, (string) $key) === 1));
@@ -1268,8 +1355,31 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
             'SCAN' => $this->scan($arguments[0] ?? '0', \is_array($arguments[1] ?? null) ? $arguments[1] : []),
             'EVAL' => $this->evalCounterCas($arguments),
             'SET' => $this->setNxOrSet($arguments),
+            'DEL' => $this->fakeDel(\array_map(strval(...), $arguments)),
             default => $this->unserved($method),
         };
+    }
+
+    /** DEL: drop string values and lock keys; returns how many went away. */
+    private function fakeDel(array $keys): int
+    {
+        $gone = 0;
+        foreach ($keys as $key) {
+            if (isset($this->values[$key])) {
+                unset($this->values[$key]);
+                ++$gone;
+            }
+            if (isset($this->locks[$key])) {
+                unset($this->locks[$key]);
+                ++$gone;
+            }
+            if (isset($this->sets[$key])) {
+                unset($this->sets[$key]);
+                ++$gone;
+            }
+        }
+
+        return $gone;
     }
 
     /**

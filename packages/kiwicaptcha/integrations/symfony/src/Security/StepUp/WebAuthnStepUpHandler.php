@@ -729,8 +729,10 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             // The completion re-derives the strongest-factor floor: an
             // UNKNOWN index must fail the check closed (retry), never
             // relax it to a weaker factor on migration-stale data.
-            $this->store->consume($challenge->id);
-
+            // The challenge is NOT consumed — a retryable lookup miss
+            // must leave the ticket alive so the client can complete
+            // once the index settles; only verified/terminal outcomes
+            // spend single-use.
             return StepUpResult::failed('step_up_credential_lookup_retry', $challenge->id);
         }
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;

@@ -1000,15 +1000,28 @@ impl RedisStore {
         if limits != CapacityLimits::UNLIMITED {
             let marker = format!("{}{}", prefix, ADMISSION_READY_MARKER);
             let mut conn = store.meta_conn()?;
-            let ready: i64 = redis::cmd("EXISTS")
+            let stamped: Option<String> = redis::cmd("GET")
                 .arg(&marker)
                 .query(&mut conn)
                 .map_err(|e| format!("admission index readiness check: {e}"))?;
-            if ready != 1 {
-                return Err(format!(
-                    "capped Redis admission at prefix {prefix} has no bootstrapped index: run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={}) once before starting capped nodes — startup refuses to hide the keyspace migration",
-                    crate::config::redact_store_url(url)
-                ));
+            let expected = format!("epoch={}", ADMISSION_INDEX_EPOCH);
+            match stamped {
+                None => {
+                    return Err(format!(
+                        "capped Redis admission at prefix {prefix} has no bootstrapped index: run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={}) once before starting capped nodes — startup refuses to hide the keyspace migration",
+                        crate::config::redact_store_url(url)
+                    ));
+                }
+                // A marker from another epoch (manual SET, restored
+                // snapshot, future bump) is not this authority domain's
+                // readiness proof.
+                Some(value) if !value.contains(&expected) => {
+                    return Err(format!(
+                        "capped Redis admission at prefix {prefix} carries a readiness marker for a different epoch ({value}, want {expected}): re-run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={})",
+                        crate::config::redact_store_url(url)
+                    ));
+                }
+                Some(_) => {}
             }
         }
         Ok(store)
@@ -1036,25 +1049,47 @@ impl RedisStore {
         Ok((live, pending))
     }
 
-    /// The meta-plane URL: RESP2 by default (an explicit `protocol=`
-    /// in the operator's URL wins). redis-rs's default RESP3 handshake
-    /// sends HELLO and waits for the reply INSIDE connect(), where no
-    /// timeout applies — a server that accepts TCP and never answers
-    /// would park setup forever. RESP2 has no setup round trip, so the
-    /// connect bound below and the 1 s read/write timeouts cover every
-    /// byte the meta plane ever waits on. Every command the meta plane
-    /// issues (GET/SET/ZADD/ZREM/EVAL/SCAN/PTTL/SADD/…) is RESP2-safe.
+    /// The meta-plane URL: always `protocol=resp2`. redis-rs's RESP3
+    /// handshake sends HELLO and waits for the reply INSIDE connect(),
+    /// where no timeout applies — a server that accepts TCP and never
+    /// answers would park setup forever. RESP2 has no setup round trip
+    /// (beyond SETINFO, which the bounded probe already proved
+    /// answers). An operator-supplied `protocol=` is overridden: an
+    /// explicit RESP3 would silently reintroduce the unbounded HELLO.
+    /// Every command the meta plane issues (GET/SET/ZADD/ZREM/EVAL/
+    /// SCAN/PTTL/SADD/…) is RESP2-safe.
     fn meta_url(url: &str) -> String {
         // unix:// sockets carry a path, not a query — leave them alone
-        // (the liveness probe bounds them before any client connect),
-        // and an explicit protocol= always wins.
-        if url.starts_with("unix://") || url.contains("protocol=") {
+        // (the liveness probe bounds them before any client connect).
+        if url.starts_with("unix://") {
             return url.to_string();
         }
-        if url.contains('?') {
-            format!("{url}&protocol=resp2")
+        // Drop any operator `protocol=` so resp3 cannot slip through,
+        // then append the forced resp2.
+        let stripped = match url.find('?') {
+            Some(q) => {
+                let (head, query) = url.split_at(q);
+                let rest = &query[1..];
+                let kept: Vec<&str> = rest
+                    .split('&')
+                    .filter(|p| {
+                        !p.split('=')
+                            .next()
+                            .is_some_and(|k| k.eq_ignore_ascii_case("protocol"))
+                    })
+                    .collect();
+                if kept.is_empty() {
+                    head.to_string()
+                } else {
+                    format!("{head}?{}", kept.join("&"))
+                }
+            }
+            None => url.to_string(),
+        };
+        if stripped.contains('?') {
+            format!("{stripped}&protocol=resp2")
         } else {
-            format!("{url}?protocol=resp2")
+            format!("{stripped}?protocol=resp2")
         }
     }
 
@@ -2173,6 +2208,76 @@ mod redis_store_tests {
             "the doctor probe answered within the bound, took {elapsed:?}"
         );
         drop(holder);
+    }
+
+    /// The meta URL always forces RESP2, even when the operator passes
+    /// `protocol=resp3` — an explicit HELLO would reintroduce the
+    /// unbounded setup round trip the probe exists to eliminate.
+    #[test]
+    fn meta_url_forces_resp2_and_strips_operator_protocol() {
+        assert_eq!(
+            RedisStore::meta_url("redis://127.0.0.1:6379/0"),
+            "redis://127.0.0.1:6379/0?protocol=resp2"
+        );
+        let forced = RedisStore::meta_url("redis://127.0.0.1:6379/0?protocol=resp3");
+        assert!(
+            forced.contains("protocol=resp2") && !forced.contains("resp3"),
+            "resp3 is overridden: {forced}"
+        );
+        let kept = RedisStore::meta_url("redis://127.0.0.1:6379/0?db=2&protocol=resp3");
+        assert!(
+            kept.contains("db=2") && kept.ends_with("protocol=resp2") && !kept.contains("resp3"),
+            "other query params survive, protocol is forced: {kept}"
+        );
+        // unix sockets are left alone (path, not query).
+        assert_eq!(
+            RedisStore::meta_url("unix:///var/run/kiwi.sock"),
+            "unix:///var/run/kiwi.sock"
+        );
+    }
+
+    /// A readiness marker stamped for a DIFFERENT epoch (manual SET, a
+    /// restored snapshot, a future bump) is not this authority domain's
+    /// proof: a capped connect refuses and names the migration command.
+    #[test]
+    fn a_readiness_marker_for_the_wrong_epoch_refuses_capped_connect() {
+        let Some(url) = redis_url() else {
+            return;
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let prefix = format!("kiwi:epoch-probe-{stamp:x}:");
+        let marker = format!("{prefix}{ADMISSION_READY_MARKER}");
+        {
+            let client = redis::Client::open(url.as_str()).expect("url parses");
+            let mut conn = client.get_connection().expect("connection");
+            let _: () = redis::cmd("SET")
+                .arg(&marker)
+                .arg("epoch=i0 at not-this-domain")
+                .query(&mut conn)
+                .expect("plant marker");
+        }
+        let err = match RedisStore::connect(
+            &url,
+            &prefix,
+            CapacityLimits {
+                max_pending: 1,
+                max_live: 1,
+            },
+        ) {
+            Ok(_) => panic!("a foreign-epoch marker must refuse capped connect"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("different epoch") && err.contains("migrate-admission-index"),
+            "the refusal names the epoch mismatch and the fix: {err}"
+        );
+        // Cleanup.
+        let client = redis::Client::open(url.as_str()).expect("url parses");
+        let mut conn = client.get_connection().expect("connection");
+        let _: i64 = redis::cmd("DEL").arg(&marker).query(&mut conn).unwrap_or(0);
     }
 
     /// The unix-socket form probes over the socket with the same RESP

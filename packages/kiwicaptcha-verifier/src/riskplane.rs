@@ -270,12 +270,37 @@ pub fn connect_redis_plane(
                 .to_string(),
         );
     }
-    let effective = if url.starts_with("unix://") || url.contains("protocol=") {
+    let effective = if url.starts_with("unix://") {
         url.to_string()
-    } else if url.contains('?') {
-        format!("{url}&protocol=resp2")
     } else {
-        format!("{url}?protocol=resp2")
+        // Always force RESP2: an operator `protocol=resp3` would put an
+        // unbounded HELLO inside the risk pool's connect(). Strip any
+        // existing protocol= first so resp3 cannot slip through.
+        let stripped = match url.find('?') {
+            Some(q) => {
+                let (head, query) = url.split_at(q);
+                let rest = &query[1..];
+                let kept: Vec<&str> = rest
+                    .split('&')
+                    .filter(|p| {
+                        !p.split('=')
+                            .next()
+                            .is_some_and(|k| k.eq_ignore_ascii_case("protocol"))
+                    })
+                    .collect();
+                if kept.is_empty() {
+                    head.to_string()
+                } else {
+                    format!("{head}?{}", kept.join("&"))
+                }
+            }
+            None => url.to_string(),
+        };
+        if stripped.contains('?') {
+            format!("{stripped}&protocol=resp2")
+        } else {
+            format!("{stripped}?protocol=resp2")
+        }
     };
     kiwicaptcha::redis_verify::bounded_redis_probe(&effective)
         .map_err(|e| format!("risk redis probe: {e}"))?;

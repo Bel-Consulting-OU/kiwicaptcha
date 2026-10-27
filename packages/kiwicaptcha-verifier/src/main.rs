@@ -42,9 +42,11 @@ Options:
   --profile RUNG   the default rung for scopes without an explicit
                    entry (env KIWI_PROFILE; default sha18)
   --store BACKEND  memory (volatile, the default), file=DIR (durable,
-                   atomic rename plus fsync, single node) or a redis://
-                   URL (the core crate's fused verifier store; needs the
-                   redis-store build feature) (env KIWI_STORE)
+                   atomic rename plus fsync, single node), a redis://
+                   URL with optional ACL credentials, or unix:///
+                   PATH (the core crate's fused verifier store; needs
+                   the redis-store build feature; rediss:// is refused
+                   — terminate TLS in front of Redis) (env KIWI_STORE)
   --workers N      the bounded worker pool size, 1..=1024
                    (env KIWI_WORKERS; default 16)
   --timeout-ms MS  the per-connection read and write timeout, 1..=60000
@@ -363,6 +365,16 @@ fn main() -> ExitCode {
         let raw: Vec<String> = std::env::args().skip(1).collect();
         if raw.first().map(String::as_str) == Some("migrate-admission-index") {
             return run_migrate_admission_index(&raw[1..]);
+        }
+    }
+    #[cfg(not(feature = "redis-store"))]
+    {
+        let raw: Vec<String> = std::env::args().skip(1).collect();
+        if raw.first().map(String::as_str) == Some("migrate-admission-index") {
+            eprintln!(
+                "kiwicaptcha-verifier: migrate-admission-index needs the redis-store build feature (rebuild with: cargo build --features redis-store); this build serves memory and file stores only"
+            );
+            return ExitCode::FAILURE;
         }
     }
     let args = match parse_args() {
