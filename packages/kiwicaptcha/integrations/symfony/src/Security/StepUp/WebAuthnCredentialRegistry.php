@@ -133,64 +133,84 @@ LUA;
     }
 
     /**
-     * The enrolled credentials of a principal (the handler's allow-list
-     * source and its creation/assertion branch decision). The stored
-     * user handle is the raw principal pseudonym, the same value the
-     * assertion ceremony compares the authenticator's user handle
-     * against.
+     * The enrolled credentials of a principal, or NULL when the answer
+     * cannot be trusted yet. The handler's strongest-factor decisions
+     * need three states, not two:
+     *
+     *  - a non-empty list: the principal has keys (normal flows);
+     *  - an empty list: KNOWN credential-less (index authoritative, or
+     *    this caller just completed the reconcile walk itself);
+     *  - null: UNKNOWN during the migration window — the index may be
+     *    stale because a pre-index node can still write, and another
+     *    reader holds the reconcile cadence. Unknown never authorizes
+     *    a first-key bootstrap and never claims the account is
+     *    key-less; the caller answers a retryable refusal instead.
      *
      * The discovery is the principal's own index set — one bounded
      * read of the members of this principal, never a keyspace-wide
-     * scan. The pre-index lookup walked every credential key on the
-     * server and deserialized every record on each ceremony; that
-     * blocking round trip grew with the whole deployment. The members
-     * arrive in one pipelined batch, so the steady state is two round
-     * trips (index plus batch) whatever the deployment's total
-     * credential count, and the batch holds only this principal's
-     * records.
+     * scan, except the single cadence-locked reconcile below. The
+     * batch holds only this principal's records, so the steady state
+     * is two round trips whatever the deployment's total credential
+     * count.
      *
-     * On the first lookup after a fresh install (or once the backfill
-     * marker lapses after a rolling upgrade), the index is built once
-     * from a cursor walk, so pre-index records
-     * stay visible without a migration step.
+     * @return list<CredentialRecord>|null
+     */
+    public function registeredCredentialsOf(string $principalPseudonym): ?array
+    {
+        $marker = $this->redis->get($this->prefix.self::BACKFILL_MARKER);
+        if ($marker === null) {
+            // Fresh install (or lapsed marker): this call runs the one
+            // full walk, so its answer is fresh by construction.
+            $this->backfillIndexes();
+
+            return $this->readIndexFor($principalPseudonym);
+        }
+        $dualRead = false;
+        $raw = (string) $marker;
+        if ($raw === '1' || !ctype_digit($raw)) {
+            // Age-less marker from an earlier build: restamp it so the
+            // upgrade horizon closes a full dual-read window after
+            // this node first sees it, then treat the window as open.
+            $this->redis->setex(
+                $this->prefix.self::BACKFILL_MARKER,
+                self::BACKFILL_MARKER_TTL_SECS,
+                (string) \time(),
+            );
+            $dualRead = true;
+        } elseif (\time() < (int) $raw + $this->indexDualReadSecs) {
+            $dualRead = true;
+        }
+        if ($dualRead) {
+            $list = $this->readIndexFor($principalPseudonym);
+            if ($list !== []) {
+                // Found keys are always trustworthy (they exist); no
+                // walk is needed to prove a non-empty set.
+                return $list;
+            }
+            if ($this->claimReconcileLock()) {
+                // This caller owns the cadence: one bounded walk, then
+                // the answer is as fresh as a backfill's.
+                $this->reconcileIndexes();
+
+                return $this->readIndexFor($principalPseudonym);
+            }
+            // The index says empty but another reader is reconciling:
+            // a pre-index write may exist. UNKNOWN, never [].
+            return null;
+        }
+        // Past the window: the index is authoritative.
+        return $this->readIndexFor($principalPseudonym);
+    }
+
+    /**
+     * The principal's records from the index (one SMEMBERS plus the
+     * batched record reads): empty array means the index has no
+     * members for this principal.
      *
      * @return list<CredentialRecord>
      */
-    public function registeredCredentialsOf(string $principalPseudonym): array
+    private function readIndexFor(string $principalPseudonym): array
     {
-        $marker = $this->redis->get($this->prefix.self::BACKFILL_MARKER);
-        $dualRead = false;
-        if ($marker === null) {
-            $this->backfillIndexes();
-        } else {
-            $raw = (string) $marker;
-            if ($raw === '1' || !ctype_digit($raw)) {
-                // Age-less marker from an earlier build: restamp it so
-                // the upgrade horizon closes a full dual-read window
-                // after this node first sees it, then reconcile now.
-                $this->redis->setex(
-                    $this->prefix.self::BACKFILL_MARKER,
-                    self::BACKFILL_MARKER_TTL_SECS,
-                    (string) \time(),
-                );
-                $dualRead = true;
-            } elseif (\time() < (int) $raw + $this->indexDualReadSecs) {
-                $dualRead = true;
-            }
-        }
-        // The rolling-upgrade window: a pre-index node writes records
-        // without SADDing them, so the index alone would hide them from
-        // this lookup (an enrolled key reading as credential-less until
-        // the marker lapsed). One bounded cursor walk reconciles the
-        // miss; past the horizon the walk never runs again.
-        if ($dualRead && $this->claimReconcileLock()) {
-            // At most ONE reconcile per lock TTL across the whole fleet:
-            // an authentication lookup must never become a
-            // per-request whole-keyspace walk during the migration
-            // window (the losers of the lock still serve from the
-            // index and the next lock holder reconciles).
-            $this->reconcileIndexes();
-        }
         $members = $this->redis->smembers($this->indexKey($principalPseudonym));
         if (!\is_array($members) || $members === []) {
             return [];

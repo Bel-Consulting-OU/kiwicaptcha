@@ -1510,13 +1510,16 @@ pub fn open_store(
     config: &StoreConfig,
     limits: crate::store::CapacityLimits,
 ) -> Result<Arc<dyn RecordStore>, String> {
+    // The in-process backends are single-process by contract: only the
+    // Redis arm consumes the admission limits (the boot-seed check).
+    let _ = limits;
     match config {
         StoreConfig::Memory => Ok(Arc::new(MemoryStore::new())),
         StoreConfig::File(path) => Ok(Arc::new(FileStore::open(path)?)),
         #[cfg(feature = "redis-store")]
         StoreConfig::Redis(url) => Ok(Arc::new(crate::store::RedisStore::connect(
             url,
-            "kiwi:verifier:",
+            crate::store::ADMISSION_INDEX_EPOCH_PREFIX,
             limits,
         )?)),
         #[cfg(not(feature = "redis-store"))]

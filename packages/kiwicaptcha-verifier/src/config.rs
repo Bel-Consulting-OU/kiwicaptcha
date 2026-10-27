@@ -319,11 +319,19 @@ pub fn parse_store(raw: Option<&str>) -> Result<StoreConfig, String> {
         }
         return Ok(StoreConfig::File(PathBuf::from(path)));
     }
-    if raw.starts_with("redis://") || raw.starts_with("rediss://") || raw.starts_with("unix://") {
+    if raw.starts_with("rediss://") {
+        // Honest rejection instead of pretended support: this build's
+        // redis crate carries no TLS feature, and the bounded liveness
+        // probe cannot speak TLS. Managed-Redis deployments terminate
+        // TLS in front (stunnel / mesh / platform sidecar) and hand the
+        // sidecar a redis:// URL, including ACL credentials.
+        return Err("store rediss:// (TLS Redis) is not supported by this build: terminate TLS in front of Redis (stunnel, service mesh, or the platform's local proxy) and pass redis:// — optionally with ACL credentials — or rebuild with a Redis TLS backend before advertising rediss://".to_string());
+    }
+    if raw.starts_with("redis://") || raw.starts_with("unix://") {
         return Ok(StoreConfig::Redis(raw.to_string()));
     }
     Err(format!(
-        "unknown store \"{raw}\" (want memory, file=DIR, or a redis:// URL)"
+        "unknown store \"{raw}\" (want memory, file=DIR, redis:// with optional ACL credentials, or unix://)"
     ))
 }
 
@@ -537,6 +545,18 @@ mod tests {
         );
         assert!(parse_store(Some("sqlite=/tmp/x")).is_err());
         assert!(parse_store(Some("file=")).is_err());
+        // TLS is refused honestly instead of pretended: this build
+        // carries no Redis TLS backend and the liveness probe speaks
+        // plain RESP only.
+        let tls = parse_store(Some("rediss://user:secret@redis.internal:6380/0"))
+            .expect_err("rediss:// must be refused at configuration");
+        assert!(
+            tls.to_string().contains("not supported"),
+            "the refusal names the unsupported scheme: {tls}"
+        );
+        // ACL-credentialed and unix forms stay first-class.
+        assert!(parse_store(Some("redis://appuser:secret@redis.internal:6379/0")).is_ok());
+        assert!(parse_store(Some("unix:///var/run/kiwi-redis.sock")).is_ok());
     }
 
     #[test]
