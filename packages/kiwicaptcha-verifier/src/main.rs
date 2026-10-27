@@ -5,11 +5,12 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
+#[cfg(feature = "redis-store")]
+use kiwicaptcha_verifier::StoreConfig;
 use kiwicaptcha_verifier::{
     open_store, parse_binding, parse_listen, parse_rung, parse_scopes, parse_store,
     parse_timeout_ms, parse_workers, validate_rsw_trapdoor, validate_secret, BindingConfig,
-    ListenAddr, ServerOptions, SidecarConfig, SidecarState, StoreConfig, DEFAULT_LISTEN,
-    DEFAULT_PROFILE,
+    ListenAddr, ServerOptions, SidecarConfig, SidecarState, DEFAULT_LISTEN, DEFAULT_PROFILE,
 };
 
 const USAGE: &str = "kiwicaptcha-verifier: the language-neutral KiwiCaptcha verifier sidecar
@@ -97,6 +98,12 @@ Options:
                    rolling upgrade can never silently soften the
                    bound (drain old issuers, or set both ceilings to
                    0 for the degraded posture)
+  migrate-admission-index
+                   one-shot keyspace migration for capped Redis
+                   admission: reconcile the capacity indexes and
+                   stamp the readiness marker, then exit (run once
+                   per authority domain before starting capped
+                   nodes; takes --store redis://URL or KIWI_STORE)
   --argon-budget-kib N
                    the in-flight memory-hard derivation budget in
                    KiB, metered per record m_kib (env
@@ -271,6 +278,68 @@ fn env_flag(flag: bool, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `migrate-admission-index [--store URL]` (or KIWI_STORE): one
+/// bounded pass over the store's keyspace that reconciles the
+/// admission capacity indexes and stamps the readiness marker capped
+/// startup requires. The epoch-prefixed default authority domain is
+/// the sidecar's own — an older binary cannot write into it.
+#[cfg(feature = "redis-store")]
+fn run_migrate_admission_index(rest: &[String]) -> ExitCode {
+    let mut flag_store: Option<String> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--store" => {
+                i += 1;
+                flag_store = match rest.get(i) {
+                    Some(v) => Some(v.clone()),
+                    None => {
+                        eprintln!(
+                            "kiwicaptcha-verifier: migrate-admission-index --store needs a value"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                };
+            }
+            other => {
+                eprintln!(
+                    "kiwicaptcha-verifier: unknown migrate-admission-index argument: {other} (want --store redis://URL)"
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+    let raw = env_or(flag_store, "KIWI_STORE");
+    let config = match parse_store(raw.as_deref()) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("kiwicaptcha-verifier: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let StoreConfig::Redis(url) = config else {
+        eprintln!(
+            "kiwicaptcha-verifier: migrate-admission-index needs a redis:// or unix:// store (memory and file stores need no migration)"
+        );
+        return ExitCode::FAILURE;
+    };
+    let prefix = kiwicaptcha_verifier::store::ADMISSION_INDEX_EPOCH_PREFIX;
+    match kiwicaptcha_verifier::store::RedisStore::migrate_admission_index(&url, prefix) {
+        Ok((live, pending)) => {
+            println!(
+                "admission index migrated: prefix={prefix} live_indexed={live} pending_indexed={pending} readiness marker stamped (epoch {})",
+                kiwicaptcha_verifier::store::ADMISSION_INDEX_EPOCH
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("kiwicaptcha-verifier migrate-admission-index: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
     // The feature-gated cross-language test surface, dispatched before
     // any server state exists.
@@ -285,6 +354,15 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             };
+        }
+    }
+    // The explicit admission-index migration: keyspace work lives in
+    // an operator-visible command, never hidden inside startup.
+    #[cfg(feature = "redis-store")]
+    {
+        let raw: Vec<String> = std::env::args().skip(1).collect();
+        if raw.first().map(String::as_str) == Some("migrate-admission-index") {
+            return run_migrate_admission_index(&raw[1..]);
         }
     }
     let args = match parse_args() {

@@ -89,6 +89,41 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         self::assertSame(1, $this->store->countBegin(self::PRINCIPAL, 3600), 'the probe is the only admission: a refused begin consumes no rate budget');
     }
 
+    /**
+     * The strongest-factor floor under migration: a fresh marker plus
+     * a reconcile lock held by another reader makes an empty index
+     * UNKNOWN, never evidence that the account is key-less. Begin
+     * answers a retryable 503 (never the 403 credential-less refusal,
+     * never a creation ceremony), and enrollment refuses rather than
+     * bootstrapping first-key from migration-stale data.
+     */
+    public function testAnInMigrationEmptyIndexIsRetryableNeverCredentialLessOrBootstrap(): void
+    {
+        $handler = $this->handler();
+        $redis = $this->fakeRedis();
+        // Inside the dual-read window, with the fleet reconcile cadence
+        // held by another reader: this node may not trust the empty set.
+        $redis->setex(
+            'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
+            604800,
+            (string) \time(),
+        );
+        $redis->locks['tests:webauthn:credential:reconcile-lock'] = '1';
+
+        $lookup = $this->registry()->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertNull($lookup, 'an in-migration empty answer is UNKNOWN, never []');
+
+        $begin = $handler->begin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        self::assertSame(Response::HTTP_SERVICE_UNAVAILABLE, $begin->getStatusCode(), 'retryable, never 403-credential-less');
+        self::assertStringContainsString('step_up_credential_lookup_retry', (string) $begin->getContent());
+        self::assertStringNotContainsString('creation', (string) $begin->getContent(), 'no ceremony is minted from stale data');
+        self::assertSame(1, $this->store->countBegin(self::PRINCIPAL, 3600), 'the retry refusal consumes no rate budget: this call is the only increment');
+
+        $enroll = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        self::assertSame(Response::HTTP_SERVICE_UNAVAILABLE, $enroll->getStatusCode(), 'enrollment never bootstraps from UNKNOWN');
+        self::assertStringContainsString('step_up_credential_lookup_retry', (string) $enroll->getContent());
+    }
+
     public function testTheEnrollmentEntryPointCompletesAndEnrolls(): void
     {
         $handler = $this->handler();
@@ -689,6 +724,35 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         $second = $registry->registeredCredentialsOf('throttle-principal');
         self::assertCount(1, $second, 'the index still answers');
         self::assertNotContains('SCAN', $redis->commands, 'the held lock suppresses a second walk (no per-request keyspace scan)');
+    }
+
+    /**
+     * Inside the dual-read window a NON-empty index is always
+     * trustworthy: found keys exist. The lookup must answer from the
+     * index alone — never a keyspace walk, never the reconcile lock —
+     * even while another reader holds the cadence.
+     */
+    public function testDualReadServesANonEmptyIndexWithoutWalkingOrClaimingTheLock(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        $registry->saveCredentialSource($this->record('cred-SHORT', self::PRINCIPAL, 1));
+        // Fresh marker (in-window) and the fleet lock held elsewhere:
+        // a stale-empty hypothesis is wrong, but a non-empty answer is
+        // still authoritative for the strongest-factor floor.
+        $redis->setex(
+            'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
+            604800,
+            (string) \time(),
+        );
+        $redis->locks['tests:webauthn:credential:reconcile-lock'] = '1';
+
+        $redis->commands = [];
+        $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertCount(1, $found, 'the index members answer without a walk');
+        self::assertSame('cred-SHORT', $found[0]->publicKeyCredentialId);
+        self::assertNotContains('SCAN', $redis->commands, 'a non-empty index never triggers a keyspace walk');
+        self::assertNotContains('SET', $redis->commands, 'the non-empty path never claims the reconcile lock');
     }
 
     private function enroll(WebAuthnStepUpHandler $handler, string $credentialId, int $counter): void

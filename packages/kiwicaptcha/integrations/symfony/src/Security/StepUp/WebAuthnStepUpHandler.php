@@ -345,6 +345,18 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
 
         // The refusals answer before the admission counter: a begin
         // that mints nothing must also consume no rate budget.
+        if ($enrolled === null) {
+            // The index is reconciling after an upgrade: an in-migration
+            // empty answer must never pretend the account is key-less
+            // (nor authorize anything from that fiction). Retryable,
+            // never 403-credential-less.
+            return $this->refusal(
+                $context,
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                'step_up_credential_lookup_retry',
+                'The credential index is reconciling after an upgrade. Retry shortly; the server never treats an in-migration empty index as a missing security key.',
+            );
+        }
         if ($enrolled === []) {
             return $this->refusal(
                 $context,
@@ -622,6 +634,17 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         $boundSessionId = StepUpSessionBinding::sessionId($request);
         $sessionId = $boundSessionId;
         $enrolledNow = $this->registry->registeredCredentialsOf($context->principalPseudonym);
+        if ($enrolledNow === null) {
+            // UNKNOWN during migration must never authorize a
+            // first-key bootstrap: a stale empty index is not evidence
+            // that the account holds no key yet. Retryable refusal.
+            return $this->refusal(
+                $context,
+                Response::HTTP_SERVICE_UNAVAILABLE,
+                'step_up_credential_lookup_retry',
+                'The credential index is reconciling after an upgrade. Retry shortly; enrollment never bootstraps from an in-migration empty index.',
+            );
+        }
         // Strongest-factor floor: a principal that already holds a
         // security key must prove with that key to add another.
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
@@ -702,6 +725,14 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         }
         $sessionId = $boundSessionId !== '' ? $boundSessionId : StepUpSessionBinding::sessionId($request);
         $enrolledNow = $this->registry->registeredCredentialsOf($challenge->principalPseudonym);
+        if ($enrolledNow === null) {
+            // The completion re-derives the strongest-factor floor: an
+            // UNKNOWN index must fail the check closed (retry), never
+            // relax it to a weaker factor on migration-stale data.
+            $this->store->consume($challenge->id);
+
+            return StepUpResult::failed('step_up_credential_lookup_retry', $challenge->id);
+        }
         $minFactor = $enrolledNow !== [] ? 'webauthn' : null;
         // The grant is single-use and was consumed at enrollBegin: the
         // completion reads the flag the begin recorded on the challenge

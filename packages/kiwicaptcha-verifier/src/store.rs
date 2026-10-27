@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -978,19 +978,48 @@ impl RedisStore {
             meta_url_hint: url.to_string(),
             meta: Mutex::new(MetaCache::new()),
         };
-        // Mixed-version boot with a ceiling ON: records a pre-admission
-        // sidecar (or the unlimited ingest path) already wrote carry no
-        // index members. The seed reconciles them — but ONLY when a
-        // ceiling is configured: a deployment with both ceilings off
-        // pays nothing, and the operator-facing hard bound is the
-        // `--admission-index-authoritative` assertion (main) that every
-        // writer on this keyspace is index-aware. Seeding fails the
-        // connect: a ceiling that silently starts blind is not a
-        // ceiling.
+        // Capped operation needs a BOOTSTRAPPED index, verified fast:
+        // the explicit migration command wrote this marker after its
+        // one keyspace pass. Startup never hides migration work in
+        // initialization — a large namespace migrates out-of-band and
+        // a missing marker fails the boot with the exact command to
+        // run. Both ceilings off: no marker required (nothing counts).
         if limits != CapacityLimits::UNLIMITED {
-            store.seed_admission_index()?;
+            let marker = format!("{}{}", prefix, ADMISSION_READY_MARKER);
+            let mut conn = store.meta_conn()?;
+            let ready: i64 = redis::cmd("EXISTS")
+                .arg(&marker)
+                .query(&mut conn)
+                .map_err(|e| format!("admission index readiness check: {e}"))?;
+            if ready != 1 {
+                return Err(format!(
+                    "capped Redis admission at prefix {prefix} has no bootstrapped index: run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={url}) once before starting capped nodes — startup refuses to hide the keyspace migration"
+                ));
+            }
         }
         Ok(store)
+    }
+
+    /// One explicit migration: reconcile the capacity indexes from the
+    /// records already on the server and stamp the readiness marker.
+    /// Returns `(live_indexed, pending_indexed)` for the CLI summary.
+    pub fn migrate_admission_index(url: &str, prefix: &str) -> Result<(usize, usize), String> {
+        let store = Self::connect(url, prefix, CapacityLimits::UNLIMITED)?;
+        let (live, pending) = store.seed_admission_index()?;
+        let mut conn = store.meta_conn()?;
+        let _: () = redis::cmd("SET")
+            .arg(format!("{}{}", prefix, ADMISSION_READY_MARKER))
+            .arg(format!(
+                "epoch={} at {}",
+                ADMISSION_INDEX_EPOCH,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            ))
+            .query(&mut conn)
+            .map_err(|e| format!("admission index marker write: {e}"))?;
+        Ok((live, pending))
     }
 
     /// The meta-plane URL: RESP2 by default (an explicit `protocol=`
@@ -1002,7 +1031,10 @@ impl RedisStore {
     /// byte the meta plane ever waits on. Every command the meta plane
     /// issues (GET/SET/ZADD/ZREM/EVAL/SCAN/PTTL/SADD/…) is RESP2-safe.
     fn meta_url(url: &str) -> String {
-        if url.contains("protocol=") {
+        // unix:// sockets carry a path, not a query — leave them alone
+        // (the liveness probe bounds them before any client connect),
+        // and an explicit protocol= always wins.
+        if url.starts_with("unix://") || url.contains("protocol=") {
             return url.to_string();
         }
         if url.contains('?') {
@@ -1012,78 +1044,120 @@ impl RedisStore {
         }
     }
 
-    /// A bounded raw-RESP liveness probe BEFORE the redis-rs
-    /// connection: upstream's connect() runs its setup pipeline
-    /// (CLIENT SETINFO, and HELLO unless RESP2) with NO socket timeout
-    /// — a server that accepts TCP and never answers would park
-    /// `get_connection_with_timeout` forever, the connect-time budget
-    /// notwithstanding. This probe owns a raw socket with the explicit
-    /// 500 ms connect / 1 s read-write bounds and requires any answer
-    /// to a PING; only then does the real (fast, answering) server
-    /// path open, where setup replies within microseconds and every
-    /// later command is bounded by the timeouts set in [`Self::meta_conn`].
+    /// A bounded, protocol-aware liveness probe BEFORE the redis-rs
+    /// connection. The URL is parsed by the SAME structured
+    /// `IntoConnectionInfo` the client uses (host, port, ACL
+    /// username/password, database — never an ad-hoc string split, so
+    /// `redis://user:pass@host/0` cannot be mistaken for a hostname),
+    /// and the probe speaks real RESP over the matching transport:
+    /// AUTH (when credentials are present), SELECT (non-zero db) and
+    /// PING, each answered within the 1 s read/write bounds. Only a
+    /// server that completes the handshake counts as alive — upstream's
+    /// own connect() runs its setup with NO reply bound, which is how a
+    /// silent TCP acceptor used to park connect() forever.
     fn ping_probe(url: &str) -> Result<(), String> {
-        let rest = url
-            .split_once("://")
-            .map(|(_, r)| r)
-            .ok_or_else(|| format!("meta redis url has no scheme: {url}"))?;
-        if rest.starts_with('/') {
-            // unix:// sockets: no TCP probe; the post-setup command
-            // timeouts still bound the connection.
-            return Ok(());
-        }
-        let hostport = rest.split('/').next().unwrap_or(rest);
-        let hostport = hostport.split('?').next().unwrap_or(hostport);
-        let (host, port) = if let Some(hp) = hostport.strip_prefix('[') {
-            let (h, p) = hp
-                .split_once(']')
-                .ok_or_else(|| format!("meta redis ipv6 addr malformed: {url}"))?;
-            let port = p
-                .strip_prefix(':')
-                .and_then(|p| p.parse::<u16>().ok())
-                .unwrap_or(6379);
-            (h.to_string(), port)
-        } else if let Some((h, p)) = hostport.rsplit_once(':') {
-            let port = p.parse::<u16>().unwrap_or(6379);
-            (h.to_string(), port)
-        } else {
-            (hostport.to_string(), 6379u16)
-        };
-        let mut last_err = String::new();
-        for addr in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port))
-            .map_err(|e| format!("meta redis resolve: {e}"))?
-        {
-            match std::net::TcpStream::connect_timeout(
-                &addr,
-                kiwicaptcha::redis_verify::CONNECT_TIMEOUT,
-            ) {
-                Ok(mut stream) => {
-                    stream
-                        .set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
-                        .map_err(|e| format!("meta redis probe read timeout: {e}"))?;
-                    stream
-                        .set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
-                        .map_err(|e| format!("meta redis probe write timeout: {e}"))?;
-                    // RESP PING — any reply (PONG, an error, anything
-                    // parseable) proves the server answers bytes.
-                    stream
-                        .write_all(b"*1\r\n$4\r\nPING\r\n")
-                        .map_err(|e| format!("meta redis probe write: {e}"))?;
-                    let mut buf = [0u8; 64];
-                    let n = stream
-                        .read(&mut buf)
-                        .map_err(|e| format!("meta redis probe: {e}"))?;
-                    if n == 0 {
-                        return Err("meta redis probe: server closed without a reply".to_string());
+        let info = redis::IntoConnectionInfo::into_connection_info(url)
+            .map_err(|e| format!("meta redis url rejected by the client parser: {e}"))?;
+        match &info.addr {
+            redis::ConnectionAddr::Tcp(host, port) => {
+                let mut last_err = String::new();
+                for addr in std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), *port))
+                    .map_err(|e| format!("meta redis resolve: {e}"))?
+                {
+                    match std::net::TcpStream::connect_timeout(
+                        &addr,
+                        kiwicaptcha::redis_verify::CONNECT_TIMEOUT,
+                    ) {
+                        Ok(stream) => {
+                            stream
+                                .set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
+                                .map_err(|e| format!("meta redis probe read timeout: {e}"))?;
+                            stream
+                                .set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
+                                .map_err(|e| format!("meta redis probe write timeout: {e}"))?;
+                            return Self::resp_liveness(stream, &info);
+                        }
+                        Err(e) => last_err = e.to_string(),
                     }
-                    return Ok(());
                 }
-                Err(e) => {
-                    last_err = e.to_string();
-                }
+                Err(format!("meta redis probe connect: {last_err}"))
             }
+            redis::ConnectionAddr::Unix(path) => {
+                let stream = std::os::unix::net::UnixStream::connect(path)
+                    .map_err(|e| format!("meta redis unix connect: {e}"))?;
+                stream
+                    .set_read_timeout(Some(kiwicaptcha::redis_verify::READ_TIMEOUT))
+                    .map_err(|e| format!("meta redis probe read timeout: {e}"))?;
+                stream
+                    .set_write_timeout(Some(kiwicaptcha::redis_verify::WRITE_TIMEOUT))
+                    .map_err(|e| format!("meta redis probe write timeout: {e}"))?;
+                Self::resp_liveness(stream, &info)
+            }
+            redis::ConnectionAddr::TcpTls { .. } => Err(
+                "meta redis: TLS (rediss://) is refused — this build carries no Redis TLS backend (terminate TLS in front of Redis)".to_string(),
+            ),
         }
-        Err(format!("meta redis probe connect: {last_err}"))
+    }
+
+    /// RESP handshake over any stream: optional AUTH (ACL username +
+    /// password, or password alone), optional SELECT for a non-zero
+    /// database, then PING. Any complete reply proves liveness; a
+    /// stall or close fails within the socket bounds.
+    fn resp_liveness<S: std::io::Read + std::io::Write>(
+        mut stream: S,
+        info: &redis::ConnectionInfo,
+    ) -> Result<(), String> {
+        if let Some(password) = info.redis.password.as_deref() {
+            match info.redis.username.as_deref() {
+                Some(user) if !user.is_empty() => {
+                    Self::resp_send(&mut stream, &["AUTH", user, password])?
+                }
+                _ => Self::resp_send(&mut stream, &["AUTH", password])?,
+            }
+            Self::resp_expect(&mut stream, "auth")?;
+        }
+        if info.redis.db != 0 {
+            let db = info.redis.db.to_string();
+            Self::resp_send(&mut stream, &["SELECT", db.as_str()])?;
+            Self::resp_expect(&mut stream, "select")?;
+        }
+        Self::resp_send(&mut stream, &["PING"])?;
+        Self::resp_expect(&mut stream, "ping")
+    }
+
+    /// Encode and write one RESP array command.
+    fn resp_send<S: std::io::Read + std::io::Write>(
+        stream: &mut S,
+        args: &[&str],
+    ) -> Result<(), String> {
+        let mut out = format!("*{}\r\n", args.len());
+        for a in args {
+            out.push('$');
+            out.push_str(&a.len().to_string());
+            out.push_str("\r\n");
+            out.push_str(a);
+            out.push_str("\r\n");
+        }
+        stream
+            .write_all(out.as_bytes())
+            .map_err(|e| format!("meta redis probe write: {e}"))
+    }
+
+    /// Read one reply; any non-empty response proves the server answered.
+    fn resp_expect<S: std::io::Read + std::io::Write>(
+        stream: &mut S,
+        what: &str,
+    ) -> Result<(), String> {
+        let mut buf = [0u8; 256];
+        let n = stream
+            .read(&mut buf)
+            .map_err(|e| format!("meta redis probe {what}: {e}"))?;
+        if n == 0 {
+            return Err(format!(
+                "meta redis probe {what}: server closed without a reply"
+            ));
+        }
+        Ok(())
     }
 
     /// A meta-plane connection under the SAME bounded-time failure
@@ -1115,7 +1189,7 @@ impl RedisStore {
     /// foreign-writer records, never of this node's own admissions.
     /// A consumed record seeded optimistically into the pending index
     /// over-counts until its score prunes (the safe direction).
-    fn seed_admission_index(&self) -> Result<(), String> {
+    fn seed_admission_index(&self) -> Result<(usize, usize), String> {
         let mut conn = self.meta_conn()?;
         let pattern = format!("{}*", self.meta_prefix);
         let now = std::time::SystemTime::now()
@@ -1123,6 +1197,8 @@ impl RedisStore {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let mut cursor: u64 = 0;
+        let mut total_live = 0usize;
+        let mut total_pending = 0usize;
         loop {
             let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
@@ -1139,6 +1215,7 @@ impl RedisStore {
                     !key.ends_with(":smeta")
                         && !key.ends_with("admission:pending")
                         && !key.ends_with("admission:live")
+                        && !key.ends_with("admission:ready")
                 })
                 .collect();
             if records.is_empty() {
@@ -1201,11 +1278,13 @@ impl RedisStore {
                     .query(&mut conn)
                     .map_err(|e| format!("admission index seed pending zadd: {e}"))?;
             }
+            total_live += planned;
+            total_pending += planned_pending;
             if cursor == 0 {
                 break;
             }
         }
-        Ok(())
+        Ok((total_live, total_pending))
     }
 
     /// The companion metadata key: one per challenge, TTL-bound like
@@ -1326,6 +1405,23 @@ impl RedisStore {
         }
     }
 }
+
+/// The writer/index epoch the sidecar's admission domain runs under:
+/// an older binary that knows only `kiwi:verifier:` physically cannot
+/// write into this namespace, so the hard-cap guarantee does not rest
+/// on an operator's promise that no old writer exists.
+#[cfg(feature = "redis-store")]
+pub const ADMISSION_INDEX_EPOCH: &str = "i1";
+
+/// The epoch-prefixed default store prefix. Literally the epoch in
+/// [`ADMISSION_INDEX_EPOCH`] (`kiwi:verifier:` + `i1` + `:`): older
+/// binaries write `kiwi:verifier:` and can never join this domain.
+#[cfg(feature = "redis-store")]
+pub const ADMISSION_INDEX_EPOCH_PREFIX: &str = "kiwi:verifier:i1:";
+
+/// Marker written by `migrate-admission-index` after a complete seed.
+#[cfg(feature = "redis-store")]
+pub const ADMISSION_READY_MARKER: &str = "admission:ready";
 
 /// One server-side admission transaction, shared by every node on the
 /// keyspace: prune both capacity indexes by expiry score, compare the
@@ -2004,6 +2100,167 @@ mod redis_store_tests {
     /// The env-gated Redis URL: `TEST_REDIS_URL` first (the shared test
     /// harness convention), then `RISK_REDIS_URL`. Without either the
     /// test skips, exactly like the core's Redis suites.
+    /// A tiny in-process RESP server that records every command it
+    /// sees and answers AUTH/SELECT/PING. The ACL fixture: the probe
+    /// must authenticate with the parsed credentials before PING —
+    /// the old string-split parser would have resolved
+    /// `user:pass@host` as a hostname and never reached a server.
+    fn spawn_fake_resp(
+        listener: std::net::TcpListener,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_clone = std::sync::Arc::clone(&seen);
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                for _ in 0..4 {
+                    let Ok(n) = std::io::Read::read(&mut stream, &mut buf) else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    let cmd = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let word = cmd.split("\r\n").nth(2).unwrap_or("").to_string();
+                    seen_clone.lock().expect("seen lock").push(word.clone());
+                    let reply: &[u8] = if word == "AUTH" || word == "SELECT" {
+                        b"+OK\r\n"
+                    } else if word == "PING" {
+                        b"+PONG\r\n"
+                    } else {
+                        b"-ERR unknown\r\n"
+                    };
+                    let _ = std::io::Write::write_all(&mut stream, reply);
+                    if word == "PING" {
+                        return;
+                    }
+                }
+            }
+        });
+        (handle, seen)
+    }
+
+    /// ACL credentials survive the probe: the RESP handshake carries
+    /// AUTH user pass before PING (a hostname-splitting parser fails
+    /// resolution instead).
+    #[test]
+    fn probe_authenticates_acl_urls_before_pinging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake binds");
+        let addr = listener.local_addr().expect("addr");
+        let (server, seen) = spawn_fake_resp(listener);
+        let url = format!("redis://appuser:secret@{addr}/0");
+        RedisStore::ping_probe(&url).expect("the credentialed probe completes the handshake");
+        let words = seen.lock().expect("seen lock").clone();
+        let _ = server.join();
+        assert_eq!(
+            words,
+            vec!["AUTH".to_string(), "PING".to_string()],
+            "the probe authenticates with the parsed ACL credentials before PING: {words:?}"
+        );
+    }
+
+    /// Password-only AUTH (no ACL username): `redis://:secret@host`
+    /// still authenticates before PING — the same structured parse.
+    #[test]
+    fn probe_authenticates_password_only_urls_before_pinging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake binds");
+        let addr = listener.local_addr().expect("addr");
+        let (server, seen) = spawn_fake_resp(listener);
+        let url = format!("redis://:s3cret@{addr}");
+        RedisStore::ping_probe(&url).expect("the password-only probe completes the handshake");
+        let words = seen.lock().expect("seen lock").clone();
+        let _ = server.join();
+        assert_eq!(
+            words,
+            vec!["AUTH".to_string(), "PING".to_string()],
+            "the probe authenticates with the parsed password before PING: {words:?}"
+        );
+    }
+
+    /// A non-zero database is SELECTed after AUTH and before PING, so
+    /// the probe cannot report a live server on the wrong logical db.
+    #[test]
+    fn probe_selects_nonzero_database_before_pinging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("fake binds");
+        let addr = listener.local_addr().expect("addr");
+        let (server, seen) = spawn_fake_resp(listener);
+        let url = format!("redis://appuser:secret@{addr}/3");
+        RedisStore::ping_probe(&url).expect("the db-3 probe completes the handshake");
+        let words = seen.lock().expect("seen lock").clone();
+        let _ = server.join();
+        assert_eq!(
+            words,
+            vec!["AUTH".to_string(), "SELECT".to_string(), "PING".to_string()],
+            "the probe AUTHs, SELECTs the parsed db, then PINGs: {words:?}"
+        );
+    }
+
+    /// IPv6 loopback is a first-class address for the structured probe
+    /// (the old string-split parser mishandled bracketed hosts).
+    #[test]
+    fn probe_resolves_ipv6_loopback_urls() {
+        let listener = std::net::TcpListener::bind("[::1]:0").expect("fake binds");
+        let addr = listener.local_addr().expect("addr");
+        let (server, seen) = spawn_fake_resp(listener);
+        let ip = addr.ip();
+        let url = format!("redis://[{ip}]:{}/", addr.port());
+        RedisStore::ping_probe(&url).expect("the IPv6 probe completes the handshake");
+        let words = seen.lock().expect("seen lock").clone();
+        let _ = server.join();
+        assert_eq!(
+            words,
+            vec!["PING".to_string()],
+            "the IPv6 URL reaches a real PING: {words:?}"
+        );
+    }
+
+    /// TLS is refused at the probe boundary too: a URL that somehow
+    /// reaches the liveness check as `rediss://` never pretends a
+    /// plaintext PING proves a TLS endpoint alive.
+    #[test]
+    fn probe_refuses_tls_urls_instead_of_pinging_plaintext() {
+        let err = RedisStore::ping_probe("rediss://user:secret@redis.internal:6380/0")
+            .expect_err("TLS must be refused");
+        assert!(
+            err.contains("TLS") || err.contains("rediss"),
+            "the refusal names TLS: {err}"
+        );
+    }
+
+    /// The unix-socket form probes over the socket with the same RESP
+    /// handshake (no TCP involved).
+    #[test]
+    fn probe_speaks_ping_over_unix_sockets() {
+        let path = std::env::temp_dir().join(format!("kiwi-probe-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let unix_url = format!("unix://{}", path.display());
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("unix binds");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_clone = std::sync::Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let Ok(n) = std::io::Read::read(&mut stream, &mut buf) else {
+                    return;
+                };
+                let cmd = String::from_utf8_lossy(&buf[..n]).to_string();
+                let word = cmd.split("\r\n").nth(2).unwrap_or("").to_string();
+                seen_clone.lock().expect("seen lock").push(word.clone());
+                let _ = std::io::Write::write_all(&mut stream, b"+PONG\r\n");
+            }
+        });
+        RedisStore::ping_probe(&unix_url).expect("the unix-socket probe completes the handshake");
+        let _ = server.join();
+        assert_eq!(
+            seen.lock().expect("seen lock").clone(),
+            vec!["PING".to_string()],
+            "the unix probe speaks RESP over the socket"
+        );
+    }
+
     fn redis_url() -> Option<String> {
         for name in ["TEST_REDIS_URL", "RISK_REDIS_URL"] {
             if let Ok(url) = std::env::var(name) {

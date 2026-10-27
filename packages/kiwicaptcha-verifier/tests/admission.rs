@@ -1193,8 +1193,17 @@ fn boot_seed_counts_records_that_never_touched_the_index() {
         "the legacy writer genuinely leaves the index blind"
     );
 
-    // Generation 2: a fresh boot on the same keyspace seeds the indexes
-    // from the records already on the server.
+    // Generation 2: the explicit migration reconciles the legacy
+    // writes and stamps the readiness marker — startup itself never
+    // scans the keyspace.
+    let (live_indexed, pending_indexed) =
+        kiwicaptcha_verifier::store::RedisStore::migrate_admission_index(&url, &prefix)
+            .expect("the migration runs");
+    assert_eq!(live_indexed, 2, "both legacy records are indexed");
+    assert_eq!(pending_indexed, 2, "both are still pending");
+
+    // A capped boot now passes the readiness check and sees the seeded
+    // totals through the shared indexes.
     let fresh = kiwicaptcha_verifier::store::RedisStore::connect(
         &url,
         &prefix,
@@ -1203,17 +1212,17 @@ fn boot_seed_counts_records_that_never_touched_the_index() {
             max_live: 2,
         },
     )
-    .expect("fresh connects");
+    .expect("the capped connect accepts a bootstrapped index");
     let (pending, live) = fresh.live_counts(unix_now());
     assert_eq!(
         (pending, live),
         (2, 2),
-        "the boot seed counts the legacy records into both ceilings"
+        "the migrated index counts the legacy records into both ceilings"
     );
 
     // The ceiling then holds against the seeded total: a third
     // admission at limits (2, 2) is refused, not admitted around the
-    // records the seed just discovered.
+    // records the migration just discovered.
     let template = match fresh.peek(&nonce1, unix_now()) {
         kiwicaptcha_verifier::PeekOutcome::Pending(record) => (*record).clone(),
         other => panic!("pending after issue: {other:?}"),
@@ -1243,6 +1252,7 @@ fn boot_seed_counts_records_that_never_touched_the_index() {
         let keys = [
             format!("{prefix}admission:pending"),
             format!("{prefix}admission:live"),
+            format!("{prefix}admission:ready"),
             format!("{prefix}{nonce1}"),
             format!("{prefix}{nonce1}:smeta"),
             format!("{prefix}{nonce2}"),
@@ -1301,6 +1311,17 @@ fn capped_redis_admission_requires_the_authoritative_fleet_assertion() {
         stderr.contains("--admission-index-authoritative"),
         "the refusal names the flag: {stderr}"
     );
+
+    // The readiness marker for the default epoch domain (the explicit
+    // migration's product; a capped boot refuses without it).
+    {
+        let conn_client = redis::Client::open(store_url.as_str()).expect("url parses");
+        let mut conn = conn_client.get_connection().expect("connection");
+        let _: redis::RedisResult<()> = redis::cmd("SET")
+            .arg("kiwi:verifier:i1:admission:ready")
+            .arg("epoch=i1 at test")
+            .query(&mut conn);
+    }
 
     // With the assertion: the fence passes (child is killed immediately
     // after its socket answers).
