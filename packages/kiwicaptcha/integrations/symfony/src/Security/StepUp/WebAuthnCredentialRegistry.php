@@ -182,17 +182,21 @@ LUA;
         }
         if ($dualRead) {
             $list = $this->readIndexFor($principalPseudonym);
-            if ($list !== []) {
-                // Found keys are always trustworthy (they exist); no
-                // walk is needed to prove a non-empty set.
-                return $list;
-            }
+            // Inside the window this caller also tries the fleet cadence
+            // when the index is empty (unknown → walk or UNKNOWN) AND
+            // when it is non-empty (a partial index from a pre-index
+            // write of a SECOND key must still heal). One walk per lock
+            // TTL fleet-wide either way; losers of a non-empty lookup
+            // still serve the index — found keys are always trustworthy
+            // for the strongest-factor floor, and the gap closes on the
+            // next winning claim.
             if ($this->claimReconcileLock()) {
-                // This caller owns the cadence: one bounded walk, then
-                // the answer is as fresh as a backfill's.
                 $this->reconcileIndexes();
 
                 return $this->readIndexFor($principalPseudonym);
+            }
+            if ($list !== []) {
+                return $list;
             }
             // The index says empty but another reader is reconciling:
             // a pre-index write may exist. UNKNOWN, never [].

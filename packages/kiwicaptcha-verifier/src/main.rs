@@ -692,7 +692,12 @@ fn main() -> ExitCode {
     let store_label = match &store_config {
         kiwicaptcha_verifier::StoreConfig::Memory => "memory (volatile)".to_string(),
         kiwicaptcha_verifier::StoreConfig::File(path) => format!("file ({})", path.display()),
-        kiwicaptcha_verifier::StoreConfig::Redis(url) => format!("redis ({url})"),
+        kiwicaptcha_verifier::StoreConfig::Redis(url) => {
+            format!(
+                "redis ({})",
+                kiwicaptcha_verifier::config::redact_store_url(url)
+            )
+        }
     };
     let binding_label = match binding {
         BindingConfig::Bound if allow_no_remoteip => "bound (loopback dev fallback)",

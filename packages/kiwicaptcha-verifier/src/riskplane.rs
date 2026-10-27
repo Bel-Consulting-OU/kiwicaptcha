@@ -250,6 +250,13 @@ impl RiskPlane {
 /// Wire the plane over the production Redis state store (the binary's
 /// `--risk` path). The namespace isolates the keyspace; the master
 /// secret derives the risk identity keys.
+///
+/// The URL is validated the same way the challenge store validates
+/// `--store`: `rediss://` is refused (this build carries no Redis TLS
+/// backend), the meta-plane-style `protocol=resp2` is forced so the
+/// risk pool's setup has no unbounded HELLO round trip, and the shared
+/// bounded liveness probe runs first so a silent TCP acceptor cannot
+/// park the first risk command forever.
 pub fn connect_redis_plane(
     url: &str,
     namespace: &str,
@@ -257,8 +264,27 @@ pub fn connect_redis_plane(
     master_secret: &str,
 ) -> Result<RiskPlane, String> {
     use kiwicaptcha_risk::redis::RedisRiskStateStore;
-    let client = redis::Client::open(url.to_string())
-        .map_err(|e| format!("cannot parse the risk Redis url {url}: {e}"))?;
+    if url.starts_with("rediss://") {
+        return Err(
+            "risk redis rediss:// (TLS) is not supported by this build: terminate TLS in front of Redis (stunnel, service mesh, or the platform's local proxy) and pass redis:// — optionally with ACL credentials"
+                .to_string(),
+        );
+    }
+    let effective = if url.starts_with("unix://") || url.contains("protocol=") {
+        url.to_string()
+    } else if url.contains('?') {
+        format!("{url}&protocol=resp2")
+    } else {
+        format!("{url}?protocol=resp2")
+    };
+    kiwicaptcha::redis_verify::bounded_redis_probe(&effective)
+        .map_err(|e| format!("risk redis probe: {e}"))?;
+    let client = redis::Client::open(effective).map_err(|e| {
+        format!(
+            "cannot parse the risk Redis url {}: {e}",
+            crate::config::redact_store_url(url)
+        )
+    })?;
     let store = RedisRiskStateStore::new(client, namespace);
     RiskPlane::new(
         Arc::new(store) as Arc<dyn RiskStateStore + Send + Sync>,

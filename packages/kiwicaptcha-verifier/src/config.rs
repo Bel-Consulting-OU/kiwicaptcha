@@ -331,8 +331,51 @@ pub fn parse_store(raw: Option<&str>) -> Result<StoreConfig, String> {
         return Ok(StoreConfig::Redis(raw.to_string()));
     }
     Err(format!(
-        "unknown store \"{raw}\" (want memory, file=DIR, redis:// with optional ACL credentials, or unix://)"
+        "unknown store \"{}\" (want memory, file=DIR, redis:// with optional ACL credentials, or unix://)",
+        redact_store_url(raw)
     ))
+}
+
+/// The store/risk URL as it may be printed in logs, startup lines and
+/// operator-facing errors: the userinfo component (`user:password@`)
+/// becomes `***@` so an ACL credential never lands in stdout, a journal
+/// or a crash report. Wire address, database and query stay visible.
+/// Works on well-formed `scheme://` URLs and on single-slash typos
+/// (`rediss:/user:pass@host`) so a malformed scheme cannot leak either.
+pub fn redact_store_url(raw: &str) -> String {
+    // Prefer the structured authority after `://`; fall back to the
+    // first `:/` so `rediss:/user:pass@host` redacts too.
+    let (scheme_end, sep) = if let Some(i) = raw.find("://") {
+        (i, 3)
+    } else if let Some(i) = raw.find(":/") {
+        (i, 2)
+    } else {
+        return redact_bare_userinfo(raw);
+    };
+    let (scheme, rest) = raw.split_at(scheme_end + sep);
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rfind('@') {
+        Some(at) => format!("{scheme}***@{}{tail}", &authority[at + 1..]),
+        None => redact_bare_userinfo(raw),
+    }
+}
+
+/// Last-resort pass for strings with no scheme separator at all: drop
+/// `anything:password@` userinfo wherever it appears.
+fn redact_bare_userinfo(raw: &str) -> String {
+    match raw.find('@') {
+        None => raw.to_string(),
+        Some(at) => {
+            let head = &raw[..at];
+            match head.rfind([':', '/']) {
+                Some(i) if head[i..].contains(':') && !head[i + 1..].contains('/') => {
+                    format!("{}***@{}", &raw[..i + 1], &raw[at + 1..])
+                }
+                _ => raw.to_string(),
+            }
+        }
+    }
 }
 
 /// The IP binding posture. `Bound` (the default, the core's issuance
@@ -557,6 +600,49 @@ mod tests {
         // ACL-credentialed and unix forms stay first-class.
         assert!(parse_store(Some("redis://appuser:secret@redis.internal:6379/0")).is_ok());
         assert!(parse_store(Some("unix:///var/run/kiwi-redis.sock")).is_ok());
+        // A mistyped scheme with credentials must not echo the password.
+        let leak = parse_store(Some("rediss:/user:secret@redis.internal:6380"))
+            .expect_err("malformed scheme is refused");
+        assert!(
+            !leak.to_string().contains("secret"),
+            "the refusal redacts userinfo: {leak}"
+        );
+        assert!(
+            leak.to_string().contains("***@"),
+            "the redaction marker is visible: {leak}"
+        );
+        let leak2 = parse_store(Some("REdis://user:secret@redis.internal:6379"))
+            .expect_err("case-typo scheme is refused");
+        assert!(
+            !leak2.to_string().contains("secret"),
+            "the case-typo refusal redacts userinfo: {leak2}"
+        );
+    }
+
+    #[test]
+    fn store_url_redaction_keeps_wire_shape_and_drops_password() {
+        assert_eq!(
+            redact_store_url("redis://appuser:secret@redis.internal:6379/0"),
+            "redis://***@redis.internal:6379/0"
+        );
+        assert_eq!(
+            redact_store_url("redis://:only-password@[2001:db8::1]:6379/2?protocol=resp2"),
+            "redis://***@[2001:db8::1]:6379/2?protocol=resp2"
+        );
+        assert_eq!(
+            redact_store_url("redis://cache.example.com:6379"),
+            "redis://cache.example.com:6379"
+        );
+        assert_eq!(
+            redact_store_url("unix:///var/run/kiwi-redis.sock"),
+            "unix:///var/run/kiwi-redis.sock"
+        );
+        // A bare host:port with no scheme is left alone.
+        assert_eq!(redact_store_url("127.0.0.1:6379"), "127.0.0.1:6379");
+        // Single-slash scheme typo still redacts.
+        let typo = redact_store_url("rediss:/user:secret@redis.internal:6380");
+        assert!(!typo.contains("secret"), "typo form redacts: {typo}");
+        assert!(typo.contains("***@"), "typo form marks redaction: {typo}");
     }
 
     #[test]
