@@ -1014,10 +1014,12 @@ impl RedisStore {
                 }
                 // A marker from another epoch (manual SET, restored
                 // snapshot, future bump) is not this authority domain's
-                // readiness proof.
-                Some(value) if !value.contains(&expected) => {
+                // readiness proof. The match is a token boundary, not a
+                // substring: `epoch=i1` must not accept `epoch=i10`.
+                Some(value) if !epoch_marker_matches(&value, &expected) => {
                     return Err(format!(
-                        "capped Redis admission at prefix {prefix} carries a readiness marker for a different epoch ({value}, want {expected}): re-run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={})",
+                        "capped Redis admission at prefix {prefix} carries a readiness marker for a different epoch ({}, want {expected}): re-run `kiwicaptcha-verifier migrate-admission-index` (KIWI_STORE={})",
+                        crate::config::redact_store_url(&value),
                         crate::config::redact_store_url(url)
                     ));
                 }
@@ -1361,6 +1363,17 @@ pub const ADMISSION_INDEX_EPOCH_PREFIX: &str = "kiwi:verifier:i1:";
 /// Marker written by `migrate-admission-index` after a complete seed.
 #[cfg(feature = "redis-store")]
 pub const ADMISSION_READY_MARKER: &str = "admission:ready";
+
+/// Whether a readiness marker's value is the expected epoch token at a
+/// word boundary: `epoch=i1` matches `epoch=i1` and `epoch=i1 at …`
+/// but NOT `epoch=i10 …` (substring would false-accept a longer id).
+#[cfg(feature = "redis-store")]
+fn epoch_marker_matches(value: &str, expected: &str) -> bool {
+    match value.strip_prefix(expected) {
+        None => false,
+        Some(rest) => rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()),
+    }
+}
 
 /// One server-side admission transaction, shared by every node on the
 /// keyspace: prune both capacity indexes by expiry score, compare the
@@ -2280,6 +2293,24 @@ mod redis_store_tests {
         let client = redis::Client::open(url.as_str()).expect("url parses");
         let mut conn = client.get_connection().expect("connection");
         let _: i64 = redis::cmd("DEL").arg(&marker).query(&mut conn).unwrap_or(0);
+    }
+
+    /// `epoch=i1` must not accept `epoch=i10` (or vice versa): the
+    /// readiness check is a token boundary, not a substring.
+    #[test]
+    fn epoch_marker_match_is_a_token_boundary() {
+        assert!(epoch_marker_matches("epoch=i1", "epoch=i1"));
+        assert!(epoch_marker_matches("epoch=i1 at 1793144294", "epoch=i1"));
+        assert!(
+            !epoch_marker_matches("epoch=i10 at 1793144294", "epoch=i1"),
+            "i10 must not satisfy an i1 marker"
+        );
+        assert!(
+            !epoch_marker_matches("epoch=i2 at 1", "epoch=i1"),
+            "a different epoch never matches"
+        );
+        assert!(!epoch_marker_matches("epoch=i", "epoch=i1"));
+        assert!(!epoch_marker_matches("noise epoch=i1", "epoch=i1"));
     }
 
     /// The unix-socket form probes over the socket with the same RESP

@@ -359,15 +359,22 @@ pub fn redact_store_url(raw: &str) -> String {
     } else if let Some(i) = without_query_secrets.find(":/") {
         (i, 2)
     } else {
-        return redact_bare_userinfo(&without_query_secrets);
+        return strip_log_controls(&redact_bare_userinfo(&without_query_secrets));
     };
     let (scheme, rest) = without_query_secrets.split_at(scheme_end + sep);
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
-    match authority.rfind('@') {
+    let redacted = match authority.rfind('@') {
         Some(at) => format!("{scheme}***@{}{tail}", &authority[at + 1..]),
         None => redact_bare_userinfo(&without_query_secrets),
-    }
+    };
+    strip_log_controls(&redacted)
+}
+
+/// Drop C0 controls (and DEL) so a DSN/path printed on the startup
+/// line or in an error cannot inject fake log lines or terminal escapes.
+pub fn strip_log_controls(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect::<String>()
 }
 
 /// Query parameters that carry credentials (redis-rs reads `user`/`pass`
@@ -704,6 +711,17 @@ mod tests {
             !pw.contains("TopSecret99"),
             "password= query redacted: {pw}"
         );
+        // Control characters never survive into a log line.
+        let injected = redact_store_url("redis://user:secret@host:6379/0\nFAKE ok=true\r");
+        assert!(
+            !injected.contains('\n') && !injected.contains('\r'),
+            "newline injection stripped: {injected:?}"
+        );
+        assert!(
+            !injected.contains("secret"),
+            "password still redacted: {injected}"
+        );
+        assert_eq!(strip_log_controls("a\nb\r\nc\u{7}"), "abc");
     }
 
     #[test]
