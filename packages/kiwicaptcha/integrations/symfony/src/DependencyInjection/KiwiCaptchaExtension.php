@@ -4083,17 +4083,25 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * Redact the userinfo component of a Redis DSN: everything between
-     * the scheme separator and the host (a username and/or password) is
-     * replaced with `***`. A credential-bearing DSN can therefore be
-     * quoted in a violation message without leaking the secret into
-     * build output, exception pages or logs. The scheme, host, port,
-     * path and query survive (they are the actionable part of the
-     * message).
+     * Redact credentials in a Redis DSN before it is quoted in a
+     * violation message: the userinfo component (`user:password@`,
+     * including single-slash scheme typos) and query secrets
+     * (`pass=`/`password=`/`token=` — the shape Predis and redis-rs
+     * both honor) become `***`. Scheme, host, port, path and
+     * non-secret query survive (they are the actionable part of the
+     * message). The message crosses into container-build output,
+     * exception pages and logs, so no credential may travel with it.
      */
     private static function redactDsn(string $dsn): string
     {
-        $redacted = (string) preg_replace('#^(redis|rediss)://[^/@?]+@#i', '$1://***@', $dsn);
+        // Query secrets first (unix-style and any query-credential form).
+        $redacted = (string) preg_replace_callback(
+            '/([?&](?:pass|password|auth|token)=)[^&#]*/i',
+            static fn (array $m): string => $m[1].'***',
+            $dsn,
+        );
+        // Userinfo after `://` or a single-slash typo (`redis:/user:pass@…`).
+        $redacted = (string) preg_replace('#^(rediss?):/{1,2}([^/@?]+)@#i', '$1://***@', $redacted);
 
         return $redacted;
     }
