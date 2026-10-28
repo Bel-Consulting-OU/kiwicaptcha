@@ -724,6 +724,15 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
             return StepUpResult::failed(StepUpResult::FAIL_EXPIRED, $challenge->id);
         }
         $sessionId = $boundSessionId !== '' ? $boundSessionId : StepUpSessionBinding::sessionId($request);
+        // Session binding before any registry lookup: a stolen ticket
+        // presented under the wrong session burns on the binding check
+        // (terminal) and never reaches — nor learns — the migration
+        // state of the credential index.
+        if (!StepUpSessionBinding::matches($request, $challenge)) {
+            $this->store->consume($challenge->id);
+
+            return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
+        }
         $enrolledNow = $this->registry->registeredCredentialsOf($challenge->principalPseudonym);
         if ($enrolledNow === null) {
             // The completion re-derives the strongest-factor floor: an
@@ -739,15 +748,15 @@ final class WebAuthnStepUpHandler implements StepUpHandlerInterface
         // The grant is single-use and was consumed at enrollBegin: the
         // completion reads the flag the begin recorded on the challenge
         // (never re-consults the gate). A session proof also satisfies
-        // this check. The binding is enforced like every other
-        // challenge: the completing session must be the one that began
-        // it (or the stateless client-secret path).
-        if (!StepUpSessionBinding::matches($request, $challenge)) {
-            $this->store->consume($challenge->id);
-
-            return StepUpResult::failed(StepUpResult::FAIL_SESSION_MISMATCH, $challenge->id);
-        }
+        // this check.
         $bootstrapOk = $challenge->bootstrapAuthorized;
+        if ($bootstrapOk && $enrolledNow !== []) {
+            // A key appeared between enrollBegin and completion: the
+            // first-key grant no longer applies to a principal that now
+            // holds a credential. Drop the recorded authorization so
+            // the strongest-factor floor below is enforced.
+            $bootstrapOk = false;
+        }
         if (!$bootstrapOk
             && !$this->store->recentSessionStepUpSuccess($sessionId, $challenge->principalPseudonym, $minFactor, self::ENROLLMENT_LOOKBACK_SECS, $now)) {
             $this->store->consume($challenge->id);

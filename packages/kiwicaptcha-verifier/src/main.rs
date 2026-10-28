@@ -703,7 +703,10 @@ fn main() -> ExitCode {
     let state = Arc::new(SidecarState::build(config));
     let store_label = match &store_config {
         kiwicaptcha_verifier::StoreConfig::Memory => "memory (volatile)".to_string(),
-        kiwicaptcha_verifier::StoreConfig::File(path) => format!("file ({})", path.display()),
+        kiwicaptcha_verifier::StoreConfig::File(path) => format!(
+            "file ({})",
+            kiwicaptcha_verifier::config::strip_log_controls(&path.display().to_string())
+        ),
         kiwicaptcha_verifier::StoreConfig::Redis(url) => {
             format!(
                 "redis ({})",

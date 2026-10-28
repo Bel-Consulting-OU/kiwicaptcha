@@ -136,10 +136,10 @@ pub mod store;
 
 pub use config::{
     parse_binding, parse_rung, parse_scopes, parse_store, parse_timeout_ms, parse_workers,
-    redact_store_url, validate_rsw_trapdoor, validate_secret, BindingConfig, Rung, ScopePlan,
-    StoreConfig, CHALLENGE_TTL_SECS, DEFAULT_LISTEN, DEFAULT_PROFILE, DEFAULT_TIMEOUT_MS,
-    DEFAULT_WORKERS, EXAMPLE_SECRET, EXAMPLE_SECRETS, MAX_BODY_BYTES, MAX_HEAD_BYTES,
-    MIN_SECRET_BYTES,
+    redact_store_url, strip_log_controls, validate_rsw_trapdoor, validate_secret, BindingConfig,
+    Rung, ScopePlan, StoreConfig, CHALLENGE_TTL_SECS, DEFAULT_LISTEN, DEFAULT_PROFILE,
+    DEFAULT_TIMEOUT_MS, DEFAULT_WORKERS, EXAMPLE_SECRET, EXAMPLE_SECRETS, MAX_BODY_BYTES,
+    MAX_HEAD_BYTES, MIN_SECRET_BYTES,
 };
 pub use riskplane::{compose_rung, scope_id, RiskPlane};
 pub use server::{

@@ -250,6 +250,108 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         );
     }
 
+    /**
+     * Session binding is enforced BEFORE the registry lookup: a stolen
+     * enrollment ticket presented under another session burns on the
+     * binding check (terminal) and never reaches — nor learns — whether
+     * the credential index is UNKNOWN during a migration.
+     */
+    public function testCrossSessionEnrollmentIsSessionMismatchEvenWhileTheIndexIsUnknown(): void
+    {
+        $handler = $this->handler();
+        $redis = $this->fakeRedis();
+        $this->store->markSessionStepUpSuccess(self::SESSION, self::PRINCIPAL, 'email_otp', 900, $this->now);
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+        $ticket = (string) $document['challenge'];
+
+        // Index goes UNKNOWN before the completion attempt.
+        $redis->setex(
+            'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
+            604800,
+            (string) \time(),
+        );
+        $redis->locks['tests:webauthn:credential:reconcile-lock'] = '1';
+
+        $stolen = $handler->enrollComplete($this->completeRequest($ticket, '', 'attacker-session-000000000000001'));
+        self::assertSame(
+            StepUpResult::FAIL_SESSION_MISMATCH,
+            $stolen->failureCode,
+            'binding fires before any registry answer: '.$stolen->failureCode
+        );
+        self::assertNotSame(
+            'step_up_credential_lookup_retry',
+            $stolen->failureCode,
+            'the migration state must not be observable from a wrong session'
+        );
+        self::assertNull(
+            $stolen->challengeId === null ? null : $this->store->read($stolen->challengeId),
+            'a cross-session completion burns the challenge (terminal, not retryable)'
+        );
+    }
+
+    /**
+     * The bootstrap grant recorded at enrollBegin is re-validated at
+     * completion: if a key appeared in the meantime, the first-key
+     * grant no longer applies and the strongest-factor floor is
+     * enforced (webauthn session proof), never the weaker fallback.
+     */
+    public function testARecordedBootstrapGrantFallsBackToTheStrongestFactorWhenAKeyExists(): void
+    {
+        $handler = $this->handler();
+        $this->store->markSessionStepUpSuccess(self::SESSION, self::PRINCIPAL, 'email_otp', 900, $this->now);
+        // Empty index: enrollBegin mints the creation challenge with a
+        // real codeHash (bootstrap gate is absent, so the recorded flag
+        // is false — we promote it below to the grant shape).
+        $begin = $handler->enrollBegin($this->beginRequest(), $this->context(StepUpContext::MODE_JSON));
+        $document = $this->documentOf($begin);
+        $ticket = (string) $document['challenge'];
+
+        // A key appears before completion (another session enrolled, or
+        // a pre-index write landed): the principal is no longer
+        // credential-less.
+        $this->registry->saveCredentialSource($this->record('cred-RACE', self::PRINCIPAL, 0));
+
+        // Promote the stored record to the first-key grant shape (the
+        // flag enrollBegin records only when a bootstrap gate is wired).
+        $ref = new \ReflectionProperty(\BelConsulting\KiwiCaptchaBundle\Security\StepUp\ArrayStepUpChallengeStore::class, 'challenges');
+        $all = $ref->getValue($this->store);
+        // The ticket string is not the id; resolve the id by scanning
+        // the store for this principal's creation challenge.
+        $id = null;
+        foreach ($all as $key => $entry) {
+            if (($entry['record'] ?? null) instanceof \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge
+                && $entry['record']->ceremony === 'creation'
+                && $entry['record']->principalPseudonym === self::PRINCIPAL) {
+                $id = $key;
+                break;
+            }
+        }
+        self::assertNotNull($id, 'the enrollment challenge is in the store');
+        $record = $all[$id]['record'];
+        $data = $record->toArray();
+        $data['bootstrap'] = 1;
+        $all[$id]['record'] = \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpChallenge::fromJson((string) json_encode($data, JSON_UNESCAPED_SLASHES));
+        $ref->setValue($this->store, $all);
+        self::assertTrue($ref->getValue($this->store)[$id]['record']->bootstrapAuthorized, 'the record now carries the first-key grant');
+
+        // Only a WEAKER session step-up exists — not webauthn. The
+        // grant must be dropped because a key now exists, so the
+        // completion must demand the strongest-factor session proof.
+        $attestation = $this->attestation((string) ($document['public_key']['challenge'] ?? ''), 'cred-RACE');
+        $result = $handler->enrollComplete($this->completeRequest($ticket, $attestation));
+        self::assertSame(
+            'step_up_enrollment_requires_session_step_up',
+            $result->failureCode,
+            'the recorded grant is void once a key exists: '.$result->failureCode
+        );
+        self::assertNotNull($result->challengeId, 'the refusal names the challenge');
+        self::assertNull(
+            $this->store->read($result->challengeId),
+            'a denied completion burns the single-use challenge'
+        );
+    }
+
     public function testTheEnrollmentEntryPointCompletesAndEnrolls(): void
     {
         $handler = $this->handler();
@@ -918,7 +1020,7 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         }
     }
 
-    private function handler(bool $libPresent = true, int $maxAttempts = 5): WebAuthnStepUpHandler
+    private function handler(bool $libPresent = true, int $maxAttempts = 5, ?\BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpBootstrapGate $bootstrapGate = null): WebAuthnStepUpHandler
     {
         return new WebAuthnStepUpHandler(
             $this->store,
@@ -934,6 +1036,9 @@ final class WebAuthnStepUpHandlerTest extends TestCase
             $libPresent,
             self::HOST,
             ['https://'.self::HOST],
+            null,
+            null,
+            $bootstrapGate,
         );
     }
 
@@ -992,12 +1097,12 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         return $this->withSession(Request::create('https://'.self::HOST.'/kiwi/step-up/begin'));
     }
 
-    private function completeRequest(string $ticket, string $credentialJson): Request
+    private function completeRequest(string $ticket, string $credentialJson, ?string $sessionId = null): Request
     {
         $request = $this->withSession(Request::create('https://'.self::HOST.'/kiwi/step-up/complete', 'POST', [
             WebAuthnStepUpHandler::TICKET_FIELD => $ticket,
             WebAuthnStepUpHandler::CREDENTIAL_FIELD => $credentialJson,
-        ]));
+        ]), $sessionId);
         // The controller binds the re-resolved principal before the
         // handler runs; direct handler calls bind it the same way.
         \BelConsulting\KiwiCaptchaBundle\Security\StepUp\StepUpSessionBinding::bind($request, self::PRINCIPAL);
@@ -1005,11 +1110,11 @@ final class WebAuthnStepUpHandlerTest extends TestCase
         return $request;
     }
 
-    /** A request carrying a started session with the test session id. */
-    private function withSession(Request $request): Request
+    /** A request carrying a started session with the given id (default: the test session). */
+    private function withSession(Request $request, ?string $sessionId = null): Request
     {
         $storage = new \Symfony\Component\HttpFoundation\Session\Storage\MockArraySessionStorage();
-        $storage->setId(self::SESSION);
+        $storage->setId($sessionId ?? self::SESSION);
         $session = new \Symfony\Component\HttpFoundation\Session\Session($storage);
         $session->start();
         $request->setSession($session);
