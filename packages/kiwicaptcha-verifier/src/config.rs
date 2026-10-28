@@ -319,7 +319,7 @@ pub fn parse_store(raw: Option<&str>) -> Result<StoreConfig, String> {
         }
         return Ok(StoreConfig::File(PathBuf::from(path)));
     }
-    if raw.starts_with("rediss://") {
+    if raw.starts_with("rediss://") || raw.starts_with("REDISS://") {
         // Honest rejection instead of pretended support: this build's
         // redis crate carries no TLS feature, and the bounded liveness
         // probe cannot speak TLS. Managed-Redis deployments terminate
@@ -327,7 +327,13 @@ pub fn parse_store(raw: Option<&str>) -> Result<StoreConfig, String> {
         // sidecar a redis:// URL, including ACL credentials.
         return Err("store rediss:// (TLS Redis) is not supported by this build: terminate TLS in front of Redis (stunnel, service mesh, or the platform's local proxy) and pass redis:// — optionally with ACL credentials — or rebuild with a Redis TLS backend before advertising rediss://".to_string());
     }
-    if raw.starts_with("redis://") || raw.starts_with("unix://") {
+    // Schemes compare case-insensitively (url/redis-rs lowercase them
+    // too); the stored string keeps the operator's spelling.
+    let lower = raw.to_ascii_lowercase();
+    if lower.starts_with("redis://")
+        || lower.starts_with("unix://")
+        || lower.starts_with("redis+unix://")
+    {
         return Ok(StoreConfig::Redis(raw.to_string()));
     }
     Err(format!(
@@ -339,26 +345,58 @@ pub fn parse_store(raw: Option<&str>) -> Result<StoreConfig, String> {
 /// The store/risk URL as it may be printed in logs, startup lines and
 /// operator-facing errors: the userinfo component (`user:password@`)
 /// becomes `***@` so an ACL credential never lands in stdout, a journal
-/// or a crash report. Wire address, database and query stay visible.
+/// or a crash report. Query credentials (`pass=`, `password=`, … — the
+/// unix:// form redis-rs actually honors) are stripped to `***` too.
+/// Wire address, database and non-secret query stay visible.
 /// Works on well-formed `scheme://` URLs and on single-slash typos
 /// (`rediss:/user:pass@host`) so a malformed scheme cannot leak either.
 pub fn redact_store_url(raw: &str) -> String {
+    let without_query_secrets = redact_query_secrets(raw);
     // Prefer the structured authority after `://`; fall back to the
     // first `:/` so `rediss:/user:pass@host` redacts too.
-    let (scheme_end, sep) = if let Some(i) = raw.find("://") {
+    let (scheme_end, sep) = if let Some(i) = without_query_secrets.find("://") {
         (i, 3)
-    } else if let Some(i) = raw.find(":/") {
+    } else if let Some(i) = without_query_secrets.find(":/") {
         (i, 2)
     } else {
-        return redact_bare_userinfo(raw);
+        return redact_bare_userinfo(&without_query_secrets);
     };
-    let (scheme, rest) = raw.split_at(scheme_end + sep);
+    let (scheme, rest) = without_query_secrets.split_at(scheme_end + sep);
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
     match authority.rfind('@') {
         Some(at) => format!("{scheme}***@{}{tail}", &authority[at + 1..]),
-        None => redact_bare_userinfo(raw),
+        None => redact_bare_userinfo(&without_query_secrets),
     }
+}
+
+/// Query parameters that carry credentials (redis-rs reads `user`/`pass`
+/// from the query on `unix://` URLs) become `***` so a socket DSN with
+/// `?pass=secret` cannot leak through the userinfo-only redaction.
+fn redact_query_secrets(raw: &str) -> String {
+    let Some(q) = raw.find('?') else {
+        return raw.to_string();
+    };
+    let (head, query) = raw.split_at(q);
+    let mut parts = Vec::new();
+    for part in query[1..].split_inclusive('&') {
+        let bare = part.trim_end_matches('&');
+        let key = bare.split('=').next().unwrap_or("");
+        if key.eq_ignore_ascii_case("pass")
+            || key.eq_ignore_ascii_case("password")
+            || key.eq_ignore_ascii_case("auth")
+            || key.eq_ignore_ascii_case("token")
+        {
+            parts.push(if part.ends_with('&') {
+                format!("{key}=***&")
+            } else {
+                format!("{key}=***")
+            });
+        } else {
+            parts.push(part.to_string());
+        }
+    }
+    format!("{head}?{}", parts.concat())
 }
 
 /// Last-resort pass for strings with no scheme separator at all: drop
@@ -600,6 +638,18 @@ mod tests {
         // ACL-credentialed and unix forms stay first-class.
         assert!(parse_store(Some("redis://appuser:secret@redis.internal:6379/0")).is_ok());
         assert!(parse_store(Some("unix:///var/run/kiwi-redis.sock")).is_ok());
+        // Schemes compare case-insensitively (url/redis-rs lowercase
+        // them); upper-case rediss is still refused as TLS.
+        assert_eq!(
+            parse_store(Some("REDIS://127.0.0.1:6379")),
+            Ok(StoreConfig::Redis("REDIS://127.0.0.1:6379".to_string()))
+        );
+        let tls_case = parse_store(Some("REDISS://user:secret@redis.internal:6380/0"))
+            .expect_err("upper-case rediss:// must be refused");
+        assert!(
+            tls_case.to_string().contains("not supported"),
+            "the refusal names the unsupported scheme: {tls_case}"
+        );
         // A mistyped scheme with credentials must not echo the password.
         let leak = parse_store(Some("rediss:/user:secret@redis.internal:6380"))
             .expect_err("malformed scheme is refused");
@@ -611,11 +661,11 @@ mod tests {
             leak.to_string().contains("***@"),
             "the redaction marker is visible: {leak}"
         );
-        let leak2 = parse_store(Some("REdis://user:secret@redis.internal:6379"))
-            .expect_err("case-typo scheme is refused");
+        let leak2 = parse_store(Some("http://user:secret@redis.internal:6379"))
+            .expect_err("foreign scheme is refused");
         assert!(
             !leak2.to_string().contains("secret"),
-            "the case-typo refusal redacts userinfo: {leak2}"
+            "the foreign-scheme refusal redacts userinfo: {leak2}"
         );
     }
 
@@ -643,6 +693,22 @@ mod tests {
         let typo = redact_store_url("rediss:/user:secret@redis.internal:6380");
         assert!(!typo.contains("secret"), "typo form redacts: {typo}");
         assert!(typo.contains("***@"), "typo form marks redaction: {typo}");
+        // Query credentials (the unix:// form redis-rs honors) never leak.
+        let sock = redact_store_url("unix:///var/run/kiwi.sock?user=app&pass=TopSecret99&db=2");
+        assert!(!sock.contains("TopSecret99"), "query pass redacted: {sock}");
+        assert!(sock.contains("pass=***"), "query pass marked: {sock}");
+        assert!(sock.contains("db=2"), "non-secret query kept: {sock}");
+        assert!(sock.contains("user=app"), "username kept: {sock}");
+        let pw = redact_store_url("redis://cache:6379/0?password=TopSecret99");
+        assert!(
+            !pw.contains("TopSecret99"),
+            "password= query redacted: {pw}"
+        );
+    }
+
+    #[test]
+    fn parse_store_accepts_the_redis_plus_unix_alias() {
+        assert!(parse_store(Some("redis+unix:///var/run/kiwi.sock")).is_ok());
     }
 
     #[test]

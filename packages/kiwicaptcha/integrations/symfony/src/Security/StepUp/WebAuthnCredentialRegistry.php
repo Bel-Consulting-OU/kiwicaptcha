@@ -183,8 +183,18 @@ LUA;
             // walk cannot complete, the exception becomes UNKNOWN above
             // and the marker is never stamped.
             $this->backfillIndexes();
+            $list = $this->readIndexFor($principalPseudonym);
+            if ($list === []) {
+                // A SCAN pass can miss a key a pre-index node wrote
+                // mid-iteration. An empty answer after a walk gets one
+                // confirmation pass before it may count as known-empty
+                // (which is what authorizes first-key bootstrap).
+                $this->reconcileIndexes();
 
-            return $this->readIndexFor($principalPseudonym);
+                return $this->readIndexFor($principalPseudonym);
+            }
+
+            return $list;
         }
         $dualRead = false;
         $raw = (string) $marker;
@@ -227,8 +237,17 @@ LUA;
                     }
                     throw $walkFailure;
                 }
+                $list = $this->readIndexFor($principalPseudonym);
+                if ($list === []) {
+                    // Confirmation pass: SCAN may have missed a key a
+                    // pre-index node wrote during the first walk.
+                    // Empty after two passes may count as known-empty.
+                    $this->reconcileIndexes();
 
-                return $this->readIndexFor($principalPseudonym);
+                    return $this->readIndexFor($principalPseudonym);
+                }
+
+                return $list;
             }
             if ($list !== []) {
                 return $list;

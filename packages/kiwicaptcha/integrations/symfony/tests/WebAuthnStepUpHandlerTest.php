@@ -164,6 +164,52 @@ final class WebAuthnStepUpHandlerTest extends TestCase
     }
 
     /**
+     * SCAN can miss a key a pre-index node wrote mid-iteration. An
+     * empty answer after the claimed-lock walk must get a confirmation
+     * pass before it may count as known-empty — otherwise a mid-walk
+     * miss would authorize first-key bootstrap while the key exists.
+     */
+    public function testAnEmptyAnswerAfterTheClaimedWalkGetsAConfirmationPass(): void
+    {
+        $registry = $this->registry();
+        $redis = $this->fakeRedis();
+        // A credential exists as a record but is not yet indexed (the
+        // pre-index writer's shape).
+        $redis->setex($this->credentialKey('cred-MIDWALK'), 31536000, (string) json_encode([
+            'publicKeyCredentialId' => base64_encode('cred-MIDWALK'),
+            'type' => 'public-key',
+            'transports' => [],
+            'attestationType' => 'none',
+            'trustPath' => [],
+            'aaguid' => '00000000-0000-0000-0000-000000000000',
+            'credentialPublicKey' => base64_encode('key-material'),
+            'userHandle' => base64_encode(self::PRINCIPAL),
+            'counter' => 1,
+        ]));
+        $redis->setex(
+            'tests:webauthn:'.WebAuthnCredentialRegistry::BACKFILL_MARKER,
+            604800,
+            (string) \time(),
+        );
+        // First walk of the lock winner answers empty (mid-iteration
+        // miss); the confirmation pass sees the real keyspace.
+        $redis->scanEmptyPasses = 1;
+
+        $redis->commands = [];
+        $found = $registry->registeredCredentialsOf(self::PRINCIPAL);
+        self::assertCount(
+            1,
+            $found,
+            'the confirmation pass recovers the key the first walk missed: '.json_encode($redis->commands)
+        );
+        self::assertSame(
+            2,
+            \count(array_filter($redis->commands, static fn ($c) => $c === 'SCAN')),
+            'exactly two walks: the claimed one plus the empty-answer confirmation: '.json_encode($redis->commands)
+        );
+    }
+
+    /**
      * A retryable lookup miss on completion must leave the challenge
      * alive: the client is told to retry, so spending single-use would
      * make the next attempt unknown_challenge instead.
@@ -1195,6 +1241,10 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
      * walk must never be treated as a complete empty keyspace). */
     public bool $scanMalformed = false;
 
+    /** Leading SCAN calls that answer as if the keyspace were empty
+     * (a mid-iteration miss); the confirmation pass then sees keys. */
+    public int $scanEmptyPasses = 0;
+
     public function setex($key, $ttl, $value)
     {
         $this->values[(string) $key] = (string) $value;
@@ -1264,6 +1314,11 @@ final class FakeWebAuthnRedis implements \Predis\ClientInterface
         $this->commands[] = 'SCAN';
         if ($this->scanMalformed) {
             throw new \RuntimeException('fixture: SCAN backend failure');
+        }
+        if ($this->scanEmptyPasses > 0) {
+            --$this->scanEmptyPasses;
+
+            return ['0', []];
         }
         $pattern = (string) ($options['MATCH'] ?? '*');
         $regex = '/^'.strtr(preg_quote($pattern, '/'), ['\\*' => '.*', '\\?' => '.']).'$/';

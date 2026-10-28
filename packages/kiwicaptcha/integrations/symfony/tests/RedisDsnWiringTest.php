@@ -200,6 +200,27 @@ final class RedisDsnWiringTest extends TestCase
             self::assertStringNotContainsString('user:', $e->getMessage());
             self::assertStringContainsString('rediss://***@', $e->getMessage());
         }
+
+        // A single-slash scheme typo still quotes the credential
+        // redacted (the same class of leak the sidecar's redact_store_url
+        // closed).
+        try {
+            $this->load([['secret_key' => self::SECRET, 'redis_dsn' => 'redis:/user:typoSecret@redis.internal:6379']]);
+            self::fail('a single-slash typo DSN must fail closed at container build');
+        } catch (\LogicException $e) {
+            self::assertStringNotContainsString('typoSecret', $e->getMessage(), 'a typo-form userinfo must still be redacted: '.$e->getMessage());
+            self::assertStringContainsString('***@', $e->getMessage(), 'the redaction marker is visible: '.$e->getMessage());
+        }
+
+        // Query credentials (the Predis/redis-rs `?password=` form) are
+        // stripped before the DSN is quoted.
+        try {
+            $this->load([['secret_key' => self::SECRET, 'redis_dsn' => 'redis:///0?password=querySecret']]);
+            self::fail('a query-password DSN with no host must fail closed at container build');
+        } catch (\LogicException $e) {
+            self::assertStringNotContainsString('querySecret', $e->getMessage(), 'query password must never appear in the violation: '.$e->getMessage());
+            self::assertStringContainsString('password=***', $e->getMessage(), 'the query secret is marked redacted: '.$e->getMessage());
+        }
     }
 
     public function testAMalformedCredentialBearingDsnIsRedactedInTheRuntimeRefusal(): void

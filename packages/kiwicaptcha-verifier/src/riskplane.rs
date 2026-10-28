@@ -264,18 +264,17 @@ pub fn connect_redis_plane(
     master_secret: &str,
 ) -> Result<RiskPlane, String> {
     use kiwicaptcha_risk::redis::RedisRiskStateStore;
-    if url.starts_with("rediss://") {
+    if url.to_ascii_lowercase().starts_with("rediss://") {
         return Err(
             "risk redis rediss:// (TLS) is not supported by this build: terminate TLS in front of Redis (stunnel, service mesh, or the platform's local proxy) and pass redis:// — optionally with ACL credentials"
                 .to_string(),
         );
     }
-    let effective = if url.starts_with("unix://") {
-        url.to_string()
-    } else {
-        // Always force RESP2: an operator `protocol=resp3` would put an
-        // unbounded HELLO inside the risk pool's connect(). Strip any
-        // existing protocol= first so resp3 cannot slip through.
+    let effective = {
+        // Always force RESP2 on TCP *and* unix: an operator
+        // `protocol=resp3` would put an unbounded HELLO inside the
+        // risk pool's connect() (redis-rs reads protocol= from the
+        // query on unix sockets too). Strip any existing protocol=.
         let stripped = match url.find('?') {
             Some(q) => {
                 let (head, query) = url.split_at(q);

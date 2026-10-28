@@ -1059,13 +1059,9 @@ impl RedisStore {
     /// Every command the meta plane issues (GET/SET/ZADD/ZREM/EVAL/
     /// SCAN/PTTL/SADD/…) is RESP2-safe.
     fn meta_url(url: &str) -> String {
-        // unix:// sockets carry a path, not a query — leave them alone
-        // (the liveness probe bounds them before any client connect).
-        if url.starts_with("unix://") {
-            return url.to_string();
-        }
-        // Drop any operator `protocol=` so resp3 cannot slip through,
-        // then append the forced resp2.
+        // Strip any operator `protocol=` (TCP and unix alike) so resp3
+        // cannot reintroduce an unbounded HELLO, then append resp2.
+        // redis-rs reads protocol= from the query on unix sockets too.
         let stripped = match url.find('?') {
             Some(q) => {
                 let (head, query) = url.split_at(q);
@@ -2229,10 +2225,16 @@ mod redis_store_tests {
             kept.contains("db=2") && kept.ends_with("protocol=resp2") && !kept.contains("resp3"),
             "other query params survive, protocol is forced: {kept}"
         );
-        // unix sockets are left alone (path, not query).
+        // unix sockets force resp2 too (redis-rs reads protocol= from
+        // the query on unix URLs; resp3 would reintroduce HELLO).
         assert_eq!(
             RedisStore::meta_url("unix:///var/run/kiwi.sock"),
-            "unix:///var/run/kiwi.sock"
+            "unix:///var/run/kiwi.sock?protocol=resp2"
+        );
+        let unix_forced = RedisStore::meta_url("unix:///var/run/kiwi.sock?protocol=resp3");
+        assert!(
+            unix_forced.ends_with("protocol=resp2") && !unix_forced.contains("resp3"),
+            "unix resp3 is overridden: {unix_forced}"
         );
     }
 
