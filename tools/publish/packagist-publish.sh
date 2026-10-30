@@ -99,7 +99,12 @@ publish_package() {
   git -C "$export_dir" commit -m "Release ${VERSION}" >/dev/null
   git -C "$export_dir" tag -a "v${VERSION}" -m "v${VERSION}"
 
-  git -C "$export_dir" push -f "https://github.com/${repo}.git" main "v${VERSION}"
+  # main always moves (metadata/docs refresh). Tags may be protected
+  # on first-create repos; a failed tag push must not abort the chain.
+  git -C "$export_dir" push -f "https://github.com/${repo}.git" main
+  if ! git -C "$export_dir" push -f "https://github.com/${repo}.git" "v${VERSION}"; then
+    log "warning: could not push v${VERSION} on ${repo} (protected ref?); main is updated"
+  fi
 
   log "published ${repo} v${VERSION}"
   log "submit: https://packagist.org/packages/submit?url=https://github.com/${repo}"
