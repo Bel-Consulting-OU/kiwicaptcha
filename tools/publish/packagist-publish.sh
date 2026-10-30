@@ -55,9 +55,9 @@ ensure_license() {
 
 # Export one package: archive from HEAD, sanitize, init git, tag, push.
 publish_package() {
-  local prefix="$2"
-  local repo_name="$3"
-  local description="$4"
+  local prefix="$1"
+  local repo_name="$2"
+  local description="$3"
   local repo="${ORG}/${repo_name}"
   local export_dir="$WORK/$repo_name"
 
