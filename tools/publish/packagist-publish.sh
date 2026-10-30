@@ -34,13 +34,16 @@ log() { printf '==> %s\n' "$*"; }
 
 # Strip monorepo path repositories and force stable minimum-stability
 # for the published composer.json (path repos are local-dev only per
-# release-checklist.md).
+# release-checklist.md). support.source is pinned to the package repo
+# being published so Packagist and GitHub agree on the VCS of record.
 sanitize_composer() {
   local file="$1"
-  jq '
+  local source_url="$2"
+  jq --arg src "$source_url" '
     del(.repositories)
     | .["minimum-stability"] = "stable"
     | del(.["prefer-stable"])
+    | .support.source = $src
   ' "$file" > "${file}.tmp"
   mv "${file}.tmp" "$file"
 }
@@ -65,7 +68,7 @@ publish_package() {
 
   mkdir -p "$export_dir"
   git -C "$ROOT" archive "HEAD:${prefix}" | tar -x -C "$export_dir"
-  sanitize_composer "$export_dir/composer.json"
+  sanitize_composer "$export_dir/composer.json" "https://github.com/${repo}"
   ensure_license "$export_dir"
 
   # Fail closed: the published root must be a valid composer package.

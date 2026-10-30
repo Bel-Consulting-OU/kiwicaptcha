@@ -21,7 +21,7 @@
   ],
   "support": {
     "issues": "https://github.com/Bel-Consulting-OU/kiwicaptcha/issues",
-    "source": "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+    "source": "https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony"
   },
   "require": {
     "php": ">=8.1",

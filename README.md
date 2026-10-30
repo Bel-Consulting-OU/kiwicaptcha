@@ -122,13 +122,22 @@ Every host integration is first-class. The Rust core (`packages/kiwicaptcha`) de
 
 ## Five-minute installation (Symfony)
 
-> **Installation status.** The bundle `bel-consulting/kiwicaptcha-symfony`
-> has not yet been published on Packagist, and the Flex recipe for it
-> (recipes-contrib PR #2038) has not yet been merged. The one-command
-> install below is the intended target state; it becomes consumable once
-> both land. Until then, install manually: require the bundle from this
-> repository, and configure it by following the bundle's
+> **Installation status.** The three Composer packages have dedicated
+> public source repositories tagged
+> [`v1.0.0`](https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony/releases/tag/v1.0.0)
+> —
+> [kiwicaptcha-php](https://github.com/Bel-Consulting-OU/kiwicaptcha-php),
+> [kiwicaptcha-risk-php](https://github.com/Bel-Consulting-OU/kiwicaptcha-risk-php),
+> and
+> [kiwicaptcha-symfony](https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony).
+> They are **not yet registered on Packagist**
+> ([bel-consulting/kiwicaptcha-symfony](https://packagist.org/packages/bel-consulting/kiwicaptcha-symfony)),
+> so the one-command `composer require bel-consulting/kiwicaptcha-symfony`
+> below does not resolve from Packagist until that one-time submit lands.
+> Until then install the bundle from its package repository (VCS) and
+> configure it by following the bundle's
 > [getting-started guide](packages/kiwicaptcha/integrations/symfony/docs/getting-started.md).
+> The Flex recipe (recipes-contrib PR #2038) is also still open.
 
 The single Symfony integration is the standalone bundle `bel-consulting/kiwicaptcha-symfony` (in `packages/kiwicaptcha/integrations/symfony`), which depends on the framework-neutral PHP core via Composer:
 

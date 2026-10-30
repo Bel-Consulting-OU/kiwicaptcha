@@ -1,6 +1,11 @@
 # KiwiCaptcha PHP SDK
 
-Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal, for PHP 8.1+. There are no third-party services, requests, or tracking, and no iframes. The widget is an inline script that solves a SHA-256 (or memory-hard Argon2id) proof-of-work via an embedded WASM solver with a pure-JS fallback. This package is the framework-neutral core. The Symfony integration lives in the separate [`bel-consulting/kiwicaptcha-symfony`](packages/kiwicaptcha/integrations/symfony/README.md) bundle.
+Privacy-preserving proof-of-work anti-abuse protection with first-party behavioral heuristics as a supplementary signal, for PHP 8.1+. There are no third-party services, requests, or tracking, and no iframes. The widget is an inline script that solves a SHA-256 (or memory-hard Argon2id) proof-of-work via an embedded WASM solver with a pure-JS fallback. This package is the framework-neutral core. The Symfony integration lives in the separate [`bel-consulting/kiwicaptcha-symfony`](https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony) bundle.
+
+**Distribution.** This repository is the package source of record for Composer. The monorepo that develops it is
+[Bel-Consulting-OU/kiwicaptcha](https://github.com/Bel-Consulting-OU/kiwicaptcha). Once the package is registered on Packagist
+([kiwicaptcha/kiwicaptcha-php](https://packagist.org/packages/kiwicaptcha/kiwicaptcha-php)), Composer resolves
+`kiwicaptcha/kiwicaptcha-php` from Packagist metadata and this repository's tagged releases (dist zipballs from GitHub).
 
 KiwiCaptcha is not a reliable human-vs-bot discriminator. A human never solves the challenge; their CPU does, and a bot's CPU can do the same work. The core value is economic: every signup/login/reset/scraping attempt carries a real, tunable computational cost, making mass abuse uneconomical. Browser behavioral telemetry is a supplementary, client-controlled signal and is forgeable.
 
@@ -9,7 +14,7 @@ This package is fully self-contained. It implements the entire KiwiCaptcha proto
 ## Protocol compatibility
 
 Byte-for-byte compatible with the reference implementation in
-[KiwiCaptcha (Rust)](https://github.com/bel-consulting/kiwicaptcha):
+[KiwiCaptcha (Rust)](https://github.com/Bel-Consulting-OU/kiwicaptcha):
 
 **Protocol v2** (current issuance, `protocol_version` 2):
 
@@ -168,7 +173,7 @@ BelConsulting\KiwiCaptchaBundle\KiwiCaptchaBundle::class => ['all' => true],
 and provides the Twig widget (`kiwi_captcha_widget`), the `KiwiCaptchaType`
 form field, the `KiwiCaptcha` validator constraint, and the
 `POST /kiwi-captcha/challenge` endpoint. See the
-[bundle documentation](packages/kiwicaptcha/integrations/symfony/README.md)
+[bundle documentation](https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony)
 for configuration. Without Symfony, use the core directly:
 
 ```php
