@@ -65,12 +65,14 @@ AA evidence, scope and limitations in
 
 ## Quick start
 
-> **Package installation status.** This package has not yet been published on
-> Packagist, and the Flex recipe PR #2038 in recipes-contrib has not yet
-> been merged. The one-command install stays the target; until both
-> land, use the manual path in
-> [docs/getting-started.md](docs/getting-started.md): require the bundle
-> from this repository, then configure it by hand.
+> **Package installation status.** This bundle has a dedicated public
+> source repository tagged [`v1.0.0`](https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony/releases/tag/v1.0.0)
+> ([Bel-Consulting-OU/kiwicaptcha-symfony](https://github.com/Bel-Consulting-OU/kiwicaptcha-symfony)).
+> It is **not yet registered on Packagist** ([bel-consulting/kiwicaptcha-symfony](https://packagist.org/packages/bel-consulting/kiwicaptcha-symfony)),
+> so `composer require bel-consulting/kiwicaptcha-symfony` will not resolve from Packagist until that one-time
+> submit lands. Until then install from the package repository (VCS), then follow
+> [docs/getting-started.md](docs/getting-started.md). The Flex recipe
+> (recipes-contrib PR #2038) is also still open.
 
 Install, register, and configure in five minutes:
 **[docs/getting-started.md](docs/getting-started.md)** (profile-first:
