@@ -1,6 +1,6 @@
 {
   "name": "bel-consulting/kiwicaptcha-symfony",
-  "description": "Self-contained Symfony bundle for KiwiCaptcha proof-of-work CAPTCHA. No external services, no tracking \u2014 challenges are issued and verified locally via the kiwicaptcha/kiwicaptcha-php core.",
+  "description": "Self-contained Symfony bundle for KiwiCaptcha proof-of-work CAPTCHA. No external services, no tracking — challenges are issued and verified locally via the kiwicaptcha/kiwicaptcha-php core.",
   "type": "symfony-bundle",
   "license": "MIT",
   "keywords": [
@@ -12,12 +12,17 @@
     "security",
     "privacy"
   ],
+  "homepage": "https://github.com/Bel-Consulting-OU/kiwicaptcha",
   "authors": [
     {
-      "name": "Bel Consulting O\u00dc",
+      "name": "Bel Consulting OÜ",
       "email": "hello@bel.ee"
     }
   ],
+  "support": {
+    "issues": "https://github.com/Bel-Consulting-OU/kiwicaptcha/issues",
+    "source": "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+  },
   "require": {
     "php": ">=8.1",
     "ext-json": "*",
@@ -91,6 +96,9 @@
     "branch-alias": {
       "dev-main": "1.0.x-dev"
     }
+  },
+  "archive": {
+    "exclude": ["/tests", "/docs", "/bin", "/phpunit.xml.dist", "/.gitignore", "/var"]
   },
   "minimum-stability": "dev",
   "prefer-stable": true,

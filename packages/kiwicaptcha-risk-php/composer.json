@@ -4,6 +4,17 @@
     "type": "library",
     "license": "MIT",
     "keywords": ["captcha", "risk", "proof-of-work", "sha256", "argon2", "security", "privacy", "adaptive"],
+    "homepage": "https://github.com/Bel-Consulting-OU/kiwicaptcha",
+    "authors": [
+        {
+            "name": "Bel Consulting OÜ",
+            "email": "hello@bel.ee"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/Bel-Consulting-OU/kiwicaptcha/issues",
+        "source": "https://github.com/Bel-Consulting-OU/kiwicaptcha"
+    },
     "require": {
         "php": ">=8.1",
         "ext-json": "*",
@@ -51,5 +62,9 @@
             "dev-main": "1.0.x-dev"
         }
     },
-    "minimum-stability": "dev"
+    "archive": {
+        "exclude": ["/tests", "/phpunit.xml.dist", "/.gitignore"]
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
 }
