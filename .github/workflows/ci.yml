@@ -1247,6 +1247,29 @@ jobs:
       - name: run browser tests
         working-directory: tests/browser
         run: npx playwright test
+      - name: widget-system renderer tests (edition 6)
+        # The pure renderers and copy inventories of the widget system
+        # are node --test units; this is the CI lane the feature
+        # inventory maps packages/kiwicaptcha-widget-system to.
+        working-directory: packages/kiwicaptcha-widget-system
+        run: node --test spec/
+      - name: widget-system release-layout matrix (headless Chromium)
+        # Every state x locale x width x theme x text-size x family case
+        # through the production renderers: no overflow, no clipped
+        # text, copy renders verbatim (the matrix this package's README
+        # documents — it must be executed, not just referenced).
+        run: node tools/ci/website-layout-matrix.mjs
+      - name: widget-system pixel verification against the design PDF
+        # Screenshots the 16 edition-6 specimens through the production
+        # renderers and compares them with the design PDF's own
+        # specimen pages (solid-color probes + normalized raster
+        # budget). poppler renders the PDF pages; python3-pil is the
+        # comparison library.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils python3-pil
+          node tools/ci/website-pixel-shots.mjs
+          python3 tools/ci/website-pixel-verify.py
       - name: adversarial measurement-freeze corpus
         # The client-performance experiment is frozen
         # at startup (immutable snapshot of every benchmark-defining

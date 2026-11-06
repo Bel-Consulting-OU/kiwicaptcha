@@ -2948,8 +2948,26 @@ fn unreachable_store_maps_find_error_to_storage_unavailable() {
     );
 }
 
-#[test]
-fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
+/// One challenge on a hermetic [`FakeEndpoint`]: `(endpoint, verifier,
+/// nonce, counter, issued_at_ns, key)`. The key is the endpoint's
+/// stored key so a test can assert the EXACT nonce state at each
+/// transport barrier. The pool is sized to 1 on purpose: r2d2 eagerly
+/// fills idle connections up to `max_size`, and a barrier that seals
+/// only the peek connection must not leave a second warm socket for
+/// the consume checkout to reuse — with one slot, sealing that
+/// connection IS sealing the transport.
+fn barrier_stack(
+    label: &str,
+) -> (
+    Arc<FakeEndpoint>,
+    ProductionVerifier,
+    String,
+    u64,
+    u64,
+    String,
+) {
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix(label);
     let issued = issue_challenge(
         &sha_config(4),
         "login",
@@ -2961,64 +2979,164 @@ fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
     )
     .unwrap();
     let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
-    // The stored value always carries the runtime envelope the store
-    // writes; a bare record with no state marker is corrupt state and
-    // fails closed before the consume.
-    let mut stored = serde_json::to_value(&issued.record).unwrap();
-    stored["state"] = serde_json::json!("pending");
-    stored["consumed_result"] = serde_json::Value::Null;
-    stored["operation_identity"] = serde_json::Value::Null;
-    let record_json = serde_json::to_string(&stored).unwrap();
-    let nonce = issued.record.nonce.clone();
-    let issued_at_ns = issued.record.issued_at_ns;
+    endpoint.seed(&prefix, &issued.record);
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let store =
+        RedisChallengeStore::with_pool_size(redis::Client::open(url).unwrap(), prefix.clone(), 1);
+    let verifier = ProductionVerifier::new(store, SECRET);
+    (
+        endpoint,
+        verifier,
+        issued.record.nonce.clone(),
+        counter,
+        issued.record.issued_at_ns,
+        key,
+    )
+}
 
-    // A miniature Redis-protocol server: answers the peek (GET) with the
-    // stored record's JSON so the verifier's cheap phase succeeds, and then
-    // never replies to the consume transition script — the client's read
-    // timeout fires and consume() must map to ConsumeIndeterminate.
-    // Hermetic: no Redis URL needed.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        let (mut stream, _) = listener.accept().expect("store connects");
-        let mut buf = Vec::new();
-        let mut tmp = [0u8; 4096];
-        loop {
-            match stream.read(&mut tmp) {
-                Ok(0) => return,
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    while let Some((args, consumed)) = parse_resp_command(&buf) {
-                        buf.drain(..consumed);
-                        match args[0].as_str() {
-                            // Hold the connection open without a reply: the
-                            // client hits its 1 s read timeout. (The redis
-                            // crate invokes scripts by sha.)
-                            "EVAL" | "EVALSHA" => loop {
-                                std::thread::sleep(std::time::Duration::from_secs(1));
-                            },
-                            "GET" => {
-                                let reply =
-                                    format!("${}\r\n{}\r\n", record_json.len(), record_json);
-                                stream.write_all(reply.as_bytes()).unwrap();
-                            }
-                            _ => {
-                                stream.write_all(b"+OK\r\n").unwrap();
-                            }
-                        }
-                    }
-                }
-                Err(_) => return,
-            }
-        }
-    });
+/// KC02 barrier 1 — failure BEFORE the consume command is submitted.
+///
+/// The endpoint serves the peek GET, then closes that connection and
+/// refuses every new one: the consume checkout fails before any consume
+/// command reaches the transport. The semantics demand the retryable
+/// [`VerifyError::StorageUnavailable`] (the challenge is presumed
+/// intact — nothing uncertain ever left the client), the nonce must
+/// still be `pending`, and after the transport recovers the SAME token
+/// must verify: an intact challenge is never burned by a pre-submission
+/// failure.
+#[test]
+fn transport_barrier_before_submission_is_storage_unavailable_and_keeps_the_nonce_pending() {
+    let (endpoint, verifier, nonce, counter, issued_at_ns, key) = barrier_stack("barrier-pre");
 
-    let verifier = verifier_for(&format!("redis://127.0.0.1:{port}/"), &prefix("hung"));
+    endpoint.arm_before_submission_barrier();
+    let outcome = verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns);
     assert_eq!(
-        verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns),
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        "a failure before the consume is submitted must be the retryable StorageUnavailable, got {outcome:?}"
+    );
+
+    // Exact nonce state: the consume was never submitted, so the stored
+    // record is untouched — still pending, never consumed.
+    let stored = endpoint.raw_record(&key).expect("the nonce stays stored");
+    assert!(
+        stored.contains("\"state\":\"pending\""),
+        "the nonce must stay pending after a pre-submission failure: {stored}"
+    );
+    // Exact submission evidence: no consume script ever reached the endpoint.
+    assert!(
+        !endpoint
+            .commands()
+            .iter()
+            .any(|(_, args)| args[0] == "EVALSHA" || args[0] == "EVAL"),
+        "no consume command may be submitted before the barrier fires: {:?}",
+        endpoint.commands()
+    );
+
+    // Replay verdict after the transport recovers: the intact nonce
+    // verifies — the failure consumed nothing.
+    endpoint.restore_transport();
+    let replay = verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns);
+    assert!(
+        matches!(replay, VerifyOutcome::Valid { .. }),
+        "after recovery the intact nonce must verify: {replay:?}"
+    );
+}
+
+/// KC02 barrier 2 — failure AFTER Redis can execute GETDEL (the hung
+/// GETDEL case): the consume command reaches the endpoint — Redis could
+/// execute it — but no reply ever comes and this controlled barrier
+/// never executes the transition. From the client's side the outcome is
+/// genuinely uncertain, so the verifier must answer
+/// [`VerifyError::ConsumeIndeterminate`] (never `RecordNotFound`, never
+/// a fabricated absence). The stored state proves the transition did
+/// not land here, and once the transport recovers the untouched pending
+/// nonce verifies: the uncertainty was honest, not a burn.
+#[test]
+fn hung_getdel_maps_consume_error_to_consume_indeterminate() {
+    let (endpoint, verifier, nonce, counter, issued_at_ns, key) = barrier_stack("hung");
+
+    endpoint.arm_fault(evalsha_with_argc(5), FaultReply::Hang);
+    let outcome = verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns);
+    assert_eq!(
+        outcome,
         VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
         "an uncertain GETDEL failure must map to ConsumeIndeterminate, never RecordNotFound"
+    );
+
+    // Exact submission evidence: the consume WAS submitted (the endpoint
+    // received it — Redis could execute GETDEL).
+    assert!(
+        endpoint
+            .commands()
+            .iter()
+            .any(|(_, args)| args[0] == "EVALSHA" && args.len() == 5),
+        "the consume command must reach the endpoint before the reply is lost: {:?}",
+        endpoint.commands()
+    );
+    // Exact nonce state at this barrier: the transition never executed —
+    // still pending, no committed result.
+    let stored = endpoint.raw_record(&key).expect("the nonce stays stored");
+    assert!(
+        stored.contains("\"state\":\"pending\""),
+        "the nonce must stay pending when the reply is lost before execution: {stored}"
+    );
+    assert!(
+        stored.contains("\"consumed_result\":null"),
+        "no result may be committed without a transition: {stored}"
+    );
+
+    // Replay verdict after the transport recovers: the pending nonce
+    // verifies — nothing was consumed, so the token is still good.
+    endpoint.clear_fault();
+    let replay = verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns);
+    assert!(
+        matches!(replay, VerifyOutcome::Valid { .. }),
+        "after recovery the never-consumed nonce must verify: {replay:?}"
+    );
+}
+
+/// KC02 barrier 3 — lost reply AFTER consume: Redis executes the
+/// pending→consumed transition and the reply is lost on the way back.
+/// The client cannot know the transition landed, so the outcome is the
+/// same uncertain [`VerifyError::ConsumeIndeterminate`] — but the
+/// stored state differs decisively: `consumed` with NO committed
+/// result (the winner never derived, never committed). The replay
+/// verdict follows that state: the resultless consumed record resolves
+/// to `ConsumeIndeterminate` again — never `Valid`, never
+/// `RecordNotFound`, never a second acceptance.
+#[test]
+fn lost_reply_after_consume_is_consume_indeterminate_and_replays_indeterminate() {
+    let (endpoint, verifier, nonce, counter, issued_at_ns, key) = barrier_stack("lost-reply");
+
+    endpoint.arm_fault(evalsha_with_argc(5), FaultReply::ServeThenHang);
+    let outcome = verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns);
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "a lost reply after Redis executed the consume must be ConsumeIndeterminate, got {outcome:?}"
+    );
+
+    // Exact nonce state: the transition DID land — consumed, resultless
+    // (the commit never ran because the client never got the reply).
+    let stored = endpoint.raw_record(&key).expect("the nonce stays stored");
+    assert!(
+        stored.contains("\"state\":\"consumed\""),
+        "the executed transition must persist the consumed marker: {stored}"
+    );
+    assert!(
+        stored.contains("\"consumed_result\":null"),
+        "no outcome may be committed when the reply was lost before derivation: {stored}"
+    );
+
+    // Exact replay verdict from that state: the identity-gated
+    // resolution of a resultless consumed record is ConsumeIndeterminate.
+    endpoint.clear_fault();
+    let replay = verify_at(&verifier, &encode_token(&nonce, counter), issued_at_ns);
+    assert_eq!(
+        replay,
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "a resultless consumed record must replay as ConsumeIndeterminate, got {replay:?}"
     );
 }
 

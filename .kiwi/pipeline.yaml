@@ -673,6 +673,28 @@ jobs:
         npx playwright test
 
         '
+    - name: widget-system-edition-6
+      run: 'set -eu
+
+        export DEBIAN_FRONTEND=noninteractive
+
+        apt-get update -qq
+
+        apt-get install -y -qq poppler-utils python3-pil
+
+        cd packages/kiwicaptcha-widget-system
+
+        node --test spec/
+
+        cd ../..
+
+        node tools/ci/website-layout-matrix.mjs
+
+        node tools/ci/website-pixel-shots.mjs
+
+        python3 tools/ci/website-pixel-verify.py
+
+        '
     - name: browser-a11y-three-engines
       run: 'set -eu
 

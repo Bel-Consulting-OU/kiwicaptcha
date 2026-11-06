@@ -14,11 +14,24 @@ import sys
 
 
 def gate_refuses(needs_json: str) -> bool:
-    """True when the gate must fail (refuse), false when it passes."""
-    needs = json.loads(needs_json)
-    if not needs:
+    """True when the gate must fail (refuse), false when it passes.
+
+    An unreadable or malformed needs map is never a pass: a missing,
+    empty or garbled input refuses with the same verdict as an empty
+    map instead of crashing with a traceback (a gate that throws on
+    bad input would still exit non-zero, but with no typed verdict for
+    the log or the next reader).
+    """
+    try:
+        needs = json.loads(needs_json)
+    except (json.JSONDecodeError, TypeError):
         return True
-    return any(data.get("result") != "success" for data in needs.values())
+    if not isinstance(needs, dict) or not needs:
+        return True
+    return any(
+        not isinstance(data, dict) or data.get("result") != "success"
+        for data in needs.values()
+    )
 
 
 CASES = [
@@ -27,19 +40,31 @@ CASES = [
     ("one skipped", {"rust": {"result": "success"}, "php": {"result": "skipped"}}, True),
     ("one cancelled", {"rust": {"result": "success"}, "php": {"result": "cancelled"}}, True),
     ("empty needs map", {}, True),
+    ("null needs map", None, True),
+    ("unreadable entry", {"rust": "boom"}, True),
 ]
 
 def assert_live() -> int:
     """The ci.yml entry point: refuse (exit 1) when the live needs map
-    carries any non-success result, or when it is empty."""
+    carries any non-success result, when it is empty, or when it cannot
+    be read at all."""
     needs_json = os.environ.get("NEEDS_JSON", "")
     if gate_refuses(needs_json):
         try:
-            needs = json.loads(needs_json) if needs_json else {}
+            needs = json.loads(needs_json)
         except json.JSONDecodeError:
-            needs = {}
-        bad = {k: v.get("result") for k, v in needs.items() if v.get("result") != "success"}
-        print("promotion-gate refused:", bad or "empty needs map", file=sys.stderr)
+            needs = None
+        if not isinstance(needs, dict):
+            print("promotion-gate refused: unreadable needs map", file=sys.stderr)
+        elif not needs:
+            print("promotion-gate refused: empty needs map", file=sys.stderr)
+        else:
+            bad = {
+                k: (v.get("result") if isinstance(v, dict) else "unreadable")
+                for k, v in needs.items()
+                if not isinstance(v, dict) or v.get("result") != "success"
+            }
+            print("promotion-gate refused:", bad, file=sys.stderr)
         return 1
     print("promotion-gate: every dependency reported success")
     return 0

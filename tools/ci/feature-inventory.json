@@ -329,6 +329,31 @@
           ]
         }
       ]
+    },
+    {
+      "path": "packages/kiwicaptcha-widget-system",
+      "capability": "the edition-6 widget system: the shared skin, the pure status and factor renderers and the copy inventories the website gallery, the release-layout matrix and the design-PDF pixel verification all drive from one source",
+      "test": "node --test spec/ (working-directory packages/kiwicaptcha-widget-system)",
+      "ci_job": "browser",
+      "markers": [
+        "package.json",
+        "spec"
+      ],
+      "kiwi_job": "browser",
+      "capabilities": [
+        {
+          "kind": "files",
+          "comment": "the renderers, skin and renderer test suite the matrix and the gallery consume",
+          "files": [
+            "widget-view.js",
+            "factor-view.js",
+            "widget-system.css",
+            "widget-states.json",
+            "widget-copy-v5.json",
+            "spec/render.test.mjs"
+          ]
+        }
+      ]
     }
   ],
   "surfaces": [

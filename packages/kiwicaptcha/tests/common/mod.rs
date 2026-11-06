@@ -13,7 +13,7 @@
 //! the crate and serde_json for the record seeding).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -52,6 +52,17 @@ pub enum FaultReply {
     /// Answer a generic Redis error reply, so the client observes a
     /// server-side command error.
     Error,
+    /// Transport barrier (failure AFTER submission): the command bytes
+    /// reach the endpoint — Redis could execute them — but the endpoint
+    /// never acts on the command and never replies. The client's read
+    /// times out with the stored state untouched.
+    Hang,
+    /// Transport barrier (lost reply AFTER execution): the endpoint
+    /// EXECUTES the command (the transition lands in the store) and
+    /// then discards the reply, hanging the connection. The client's
+    /// read times out with the state mutated — the classic "Redis did
+    /// the work and the reply was lost" case.
+    ServeThenHang,
 }
 
 /// A predicate over the parsed command arguments of one command.
@@ -83,6 +94,15 @@ pub struct FakeEndpoint {
     /// Per-barrier acknowledgement overrides; the first value serves
     /// the next WAIT, and `wait_ack` applies once the queue is empty.
     wait_ack_queue: Mutex<VecDeque<i64>>,
+    /// Transport barrier 1 (failure BEFORE submission): once set, every
+    /// newly accepted connection is refused, so a pool checkout fails
+    /// before any command is submitted. Armed together with
+    /// [`Self::seal_after_get`] by [`Self::arm_before_submission_barrier`].
+    down: AtomicBool,
+    /// One-shot: close the connection right after the next GET reply is
+    /// written (the peek), then flip [`Self::down`]. This seals the
+    /// pooled peek connection so the consume checkout cannot reuse it.
+    seal_after_get: AtomicBool,
 }
 
 impl FakeEndpoint {
@@ -99,12 +119,22 @@ impl FakeEndpoint {
             fault: Mutex::new(None),
             wait_ack: AtomicI64::new(0),
             wait_ack_queue: Mutex::new(VecDeque::new()),
+            down: AtomicBool::new(false),
+            seal_after_get: AtomicBool::new(false),
         });
         let server = Arc::clone(&endpoint);
         thread::spawn(move || {
             use std::io::{Read, Write};
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                // Transport barrier 1: once the endpoint is down, every
+                // new connection is refused (accepted then closed), so a
+                // pool checkout / liveness probe fails BEFORE any command
+                // is submitted.
+                if server.down.load(Ordering::SeqCst) {
+                    drop(stream);
+                    continue;
+                }
                 let server = Arc::clone(&server);
                 let conn_id = server.connections.fetch_add(1, Ordering::SeqCst);
                 thread::spawn(move || {
@@ -137,6 +167,61 @@ impl FakeEndpoint {
                                                     return;
                                                 }
                                             }
+                                            // Failure AFTER submission,
+                                            // execution never happens: the
+                                            // command reached the transport
+                                            // but the endpoint acts on
+                                            // nothing and replies with
+                                            // nothing. The command IS
+                                            // recorded (it was submitted),
+                                            // then the connection is parked
+                                            // open so the client hits its
+                                            // read timeout (not a
+                                            // connection-reset error).
+                                            FaultReply::Hang => {
+                                                server
+                                                    .commands
+                                                    .lock()
+                                                    .unwrap()
+                                                    .push((conn_id, args.clone()));
+                                                loop {
+                                                    thread::sleep(std::time::Duration::from_secs(
+                                                        1,
+                                                    ));
+                                                }
+                                            }
+                                            // Lost reply AFTER execution:
+                                            // the first invocation of an
+                                            // unloaded script is served
+                                            // NOSCRIPT (exactly like a real
+                                            // server); the retry after the
+                                            // client's SCRIPT LOAD executes
+                                            // the transition, its reply is
+                                            // discarded, and the connection
+                                            // is parked open for the read
+                                            // timeout.
+                                            FaultReply::ServeThenHang => {
+                                                if server.script_loaded.load(Ordering::SeqCst) == 0
+                                                {
+                                                    if let Some(reply) =
+                                                        server.handle(conn_id, &args)
+                                                    {
+                                                        if stream
+                                                            .write_all(reply.as_bytes())
+                                                            .is_err()
+                                                        {
+                                                            return;
+                                                        }
+                                                    }
+                                                    continue;
+                                                }
+                                                let _ = server.handle(conn_id, &args);
+                                                loop {
+                                                    thread::sleep(std::time::Duration::from_secs(
+                                                        1,
+                                                    ));
+                                                }
+                                            }
                                         }
                                         continue;
                                     }
@@ -144,6 +229,17 @@ impl FakeEndpoint {
                                         if stream.write_all(reply.as_bytes()).is_err() {
                                             return;
                                         }
+                                    }
+                                    // Barrier 1 seal: after the peek GET's
+                                    // reply is written, close this
+                                    // connection and refuse every new one,
+                                    // so the next pool checkout fails
+                                    // before submitting anything.
+                                    if args[0] == "GET"
+                                        && server.seal_after_get.swap(false, Ordering::SeqCst)
+                                    {
+                                        server.down.store(true, Ordering::SeqCst);
+                                        return;
                                     }
                                 }
                             }
@@ -220,6 +316,24 @@ impl FakeEndpoint {
     /// Clears the armed fault; every command is served again.
     pub fn clear_fault(&self) {
         *self.fault.lock().unwrap() = None;
+    }
+
+    /// Arms transport barrier 1 (failure BEFORE submission): the reply
+    /// to the next GET (the verify flow's peek) is followed by a
+    /// connection close, and every new connection is refused from then
+    /// on. The consume checkout therefore fails before a consume command
+    /// is ever submitted — the outcome taxonomy must report the
+    /// retryable `StorageUnavailable` with the nonce untouched.
+    pub fn arm_before_submission_barrier(&self) {
+        self.seal_after_get.store(true, Ordering::SeqCst);
+        self.down.store(false, Ordering::SeqCst);
+    }
+
+    /// Restores the transport after a barrier (the replay-after-recovery
+    /// assertion): connections are served again and no seal is pending.
+    pub fn restore_transport(&self) {
+        self.seal_after_get.store(false, Ordering::SeqCst);
+        self.down.store(false, Ordering::SeqCst);
     }
 
     /// Sets the acknowledged-replica count of every WAIT (0 = the
